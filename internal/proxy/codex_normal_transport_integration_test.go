@@ -1533,11 +1533,7 @@ func TestNormalProxyTransportHTTPAdmittedQuotaFailureRetriesWithinRequest(t *tes
 			if status != http.StatusOK || bytes.Contains(body, []byte("usage_limit_reached")) || !bytes.Contains(body, []byte(`"type":"response.completed"`)) {
 				t.Fatalf("same-turn quota recovery = %d %q, want automatic B/200", status, body)
 			}
-			nextState := ""
-			if turnState != "" {
-				nextState = "state-validation-upstream-b"
-			}
-			status, body = normalTransportGateHTTPCall(t, harness, encoded, http.Header{"X-Codex-Turn-State": {nextState}})
+			status, body = normalTransportGateHTTPCall(t, harness, encoded, http.Header{"X-Codex-Turn-State": {turnState}})
 			if status != http.StatusOK {
 				t.Fatalf("continuation after recovery = %d %q", status, body)
 			}
@@ -1547,6 +1543,9 @@ func TestNormalProxyTransportHTTPAdmittedQuotaFailureRetriesWithinRequest(t *tes
 			}
 			if receipts[1].turnState != turnState || receipts[2].turnState != "" {
 				t.Fatalf("retry turn state = %q -> %q, want %q -> empty", receipts[1].turnState, receipts[2].turnState, turnState)
+			}
+			if receipts[3].turnState != "" {
+				t.Fatalf("later request forwarded displaced turn state %q", receipts[3].turnState)
 			}
 			harness.backend.assertNoFailure(t)
 		})
@@ -3481,7 +3480,7 @@ func TestNormalProxyTransportHTTPReserveWithoutAlternativeCanBeDisabled(t *testi
 	harness.backend.assertNoFailure(t)
 }
 
-func TestNormalProxyTransportHTTPReservePreservesTurnState(t *testing.T) {
+func TestNormalProxyTransportHTTPReserveRebindsFullRequest(t *testing.T) {
 	harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateHTTPSuccess)
 	harness.backend.httpTurnState = true
 	metadata := CodexTurnMetadata{SessionID: "reserve-state-session", ThreadID: "reserve-state-thread", TurnID: "reserve-state-turn", RequestKind: CodexRequestTurn}
@@ -3495,12 +3494,34 @@ func TestNormalProxyTransportHTTPReservePreservesTurnState(t *testing.T) {
 	if _, err := harness.reserve.Control("set", "7d", 2); err != nil {
 		t.Fatal(err)
 	}
-	status, body = normalTransportGateHTTPCall(t, harness, encoded, http.Header{"X-Codex-Turn-State": {"state-validation-upstream-a"}})
-	if status != http.StatusTooManyRequests {
-		t.Fatalf("stateful reserve = %d %q, want 429 without changing accounts", status, body)
+	var request map[string]any
+	if err := json.Unmarshal(encoded, &request); err != nil {
+		t.Fatal(err)
 	}
-	if receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http"); len(receipts) != 1 {
-		t.Fatalf("reserve rejection dispatched to another account: %#v", receipts)
+	request["input"] = append(request["input"].([]any), map[string]any{
+		"type": "compaction", "encrypted_content": "opaque-compaction-state",
+	})
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body = normalTransportGateHTTPCall(t, harness, encoded, http.Header{"X-Codex-Turn-State": {"state-validation-upstream-a"}})
+	if status != http.StatusOK || bytes.Contains(body, []byte("usage_limit_reached")) {
+		t.Fatalf("stateful reserve = %d %q, want transparent B/200", status, body)
+	}
+	receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+	if len(receipts) != 2 || receipts[0].accountID != "validation-upstream-a" ||
+		receipts[1].accountID != "validation-upstream-b" || receipts[1].turnState != "" ||
+		receipts[1].payload != string(encoded) {
+		t.Fatalf("reserve failover receipts = %#v, want full encrypted request on B without A turn state", receipts)
+	}
+	status, body = normalTransportGateHTTPCall(t, harness, encoded, http.Header{"X-Codex-Turn-State": {"state-validation-upstream-a"}})
+	if status != http.StatusOK {
+		t.Fatalf("continuation with client-latched A state = %d %q, want B/200", status, body)
+	}
+	receipts = normalTransportGateReceipts(harness.backend.snapshot(), "http")
+	if len(receipts) != 3 || receipts[2].accountID != "validation-upstream-b" || receipts[2].turnState != "" {
+		t.Fatalf("continuation receipts = %#v, want B without stale A state", receipts)
 	}
 	harness.backend.assertNoFailure(t)
 }
