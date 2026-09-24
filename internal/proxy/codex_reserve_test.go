@@ -192,6 +192,52 @@ func TestCodexReserveRefreshRunsBeforeFreshnessDeadline(t *testing.T) {
 	}
 }
 
+func TestCodexReserveRetriesFailedRefreshBeforeStale(t *testing.T) {
+	now := time.Unix(1800000000, 0)
+	resetAt := now.Add(7 * 24 * time.Hour).Unix()
+	windows := map[quota.WindowName]quota.Window{"7d": {RemainingPct: 59, ResetAtUnix: resetAt}}
+	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	reserve, err := OpenCodexReserve(fsutil.NewMemFS(), "/state/reserve.json", ledger, &reserveInventory{active: "system"}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ledger.Reserve = reserve
+	ledger.ObserveQuotaSnapshot("system", QuotaSnapshot{FetchedAt: now, Result: quota.Result{Windows: windows}})
+	if _, err := reserve.Control("set", "7d", 5); err != nil {
+		t.Fatal(err)
+	}
+	reader := &codexRoutingUsageReaderStub{
+		results: map[codex.AccountKey]codex.UsageObservation{"system": {Result: quota.Result{Status: quota.StatusOK, Windows: windows}}},
+		errors:  make(map[codex.AccountKey]error),
+		calls:   make(map[codex.AccountKey]int),
+	}
+	refresher := &CodexRoutingCapacityRefresher{
+		Usage: reader, Capacity: ledger, Now: func() time.Time { return now },
+		IntervalForAccount: reserve.RefreshInterval,
+	}
+	if !refresher.Refresh(context.Background(), []codex.AccountKey{"system"}) {
+		t.Fatal("initial refresh failed")
+	}
+	now = now.Add(55 * time.Second)
+	reader.mu.Lock()
+	reader.errors["system"] = errors.New("temporary usage failure")
+	reader.mu.Unlock()
+	if refresher.Refresh(context.Background(), []codex.AccountKey{"system"}) {
+		t.Fatal("failed refresh published capacity")
+	}
+	now = now.Add(6 * time.Second)
+	reader.mu.Lock()
+	delete(reader.errors, "system")
+	reader.mu.Unlock()
+	if !refresher.Refresh(context.Background(), []codex.AccountKey{"system"}) {
+		t.Fatal("reserved account did not retry before evidence expired")
+	}
+	now = now.Add(10 * time.Second)
+	if status := reserve.Status(); status.Blocked {
+		t.Fatalf("healthy reserve became stale after transient failure: %+v", status)
+	}
+}
+
 func TestCodexReserveNormalisesWindowsAndKeepsIdentityOnError(t *testing.T) {
 	now := time.Unix(1800000000, 0)
 	ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)

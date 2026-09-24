@@ -115,7 +115,13 @@ func (r *CodexRoutingCapacityRefresher) Refresh(ctx context.Context, accounts []
 		if r.Now != nil {
 			completedAt = r.Now()
 		}
-		retryAt := completedAt.Add(defaultCodexRoutingCapacityRetryInterval)
+		retryInterval := defaultCodexRoutingCapacityRetryInterval
+		if r.Capacity.Reserve != nil {
+			if reservedRetry := r.Capacity.Reserve.FailureRetryInterval(outcome.account); reservedRetry > 0 {
+				retryInterval = min(retryInterval, reservedRetry)
+			}
+		}
+		retryAt := completedAt.Add(retryInterval)
 		var httpError *CodexUsageHTTPError
 		if errors.As(outcome.err, &httpError) && httpError.RetryAt.After(retryAt) {
 			retryAt = httpError.RetryAt

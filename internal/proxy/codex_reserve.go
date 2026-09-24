@@ -372,3 +372,14 @@ func (r *CodexReserve) RefreshInterval(account codex.AccountKey, windows map[quo
 	// last observation crosses the reserve's freshness deadline.
 	return max(5*time.Second, reserveRefreshInterval(windowRemaining(w), r.document.Percent)-10*time.Second)
 }
+
+// FailureRetryInterval leaves room for another usage read before reserve
+// evidence expires after a transient failure.
+func (r *CodexReserve) FailureRetryInterval(account codex.AccountKey) time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.document.Window != "" && r.lastSystem == account {
+		return 5 * time.Second
+	}
+	return 0
+}
