@@ -1,10 +1,14 @@
 package main
 
 import (
-	"github.com/charmbracelet/x/ansi"
+	"crypto/sha256"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // terminalFixtureRegistration records the independent authored contract, including
@@ -20,5 +24,115 @@ func assertTerminalFixture(t *testing.T, relative string, got string) {
 	}
 	if ansi.Strip(got) != string(want) {
 		t.Fatalf("terminal fixture %s differs\nwant:\n%s\ngot:\n%s", relative, want, ansi.Strip(got))
+	}
+}
+
+func TestTerminalCatalogueManifestCoverage(t *testing.T) {
+	base := filepath.Join("..", "..")
+	var manifest struct {
+		Commands []json.RawMessage `json:"commands"`
+		Groups   struct {
+			Task  string
+			Paths []string
+		} `json:"groups"`
+		Fixtures []struct{ Command, Scenario, Stream, File, Task string }
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(base, "docs", "superpowers", "plans", "terminal-presentation-coverage.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	var index struct {
+		HelpPages int `json:"help_pages"`
+		Fixtures  []struct {
+			Command, Scenario, Stream, File, SHA256 string
+		}
+	}
+	examples := filepath.Join(base, "specs", "cli-v2", "presentation", "examples")
+	indexBytes, err := os.ReadFile(filepath.Join(examples, "index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(indexBytes, &index); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Commands) != 89 || manifest.Groups.Task != "T03" || len(manifest.Groups.Paths) != 38 || index.HelpPages != 127 || len(index.Fixtures) != 522 || len(manifest.Fixtures) != len(index.Fixtures) {
+		t.Fatalf("catalogue size changed: commands=%d groups-and-root=%d helps=%d fixtures=%d assigned=%d", len(manifest.Commands), len(manifest.Groups.Paths), index.HelpPages, len(index.Fixtures), len(manifest.Fixtures))
+	}
+	registered := make(map[string]terminalFixtureRegistration, len(index.Fixtures))
+	add := func(f terminalFixtureRegistration) {
+		if _, exists := registered[f.File]; exists {
+			t.Errorf("fixture registered twice: %s", f.File)
+		}
+		registered[f.File] = f
+	}
+	for _, f := range terminalAccountsFixtures {
+		add(f)
+	}
+	for _, f := range terminalResetsFixtures {
+		if f.Command != "cq codex reset" { // Group syntax is owned by T03.
+			add(f)
+		}
+	}
+	for _, f := range terminalModelsFixtures {
+		add(f)
+	}
+	for _, f := range terminalRoutingFixtures {
+		add(f.terminalFixtureRegistration)
+	}
+	for _, f := range terminalValidationFixtures {
+		add(f)
+	}
+	for _, f := range terminalEndpointFixtures {
+		add(f)
+	}
+	for _, f := range terminalServiceFixtures {
+		add(f)
+	}
+	for _, f := range terminalCheckFixtures {
+		add(f)
+	}
+	for _, f := range terminalCandidateFixtures {
+		add(f)
+	}
+	for _, f := range terminalProtocolFixtures {
+		add(f)
+	}
+	assigned := make(map[string]terminalFixtureRegistration, len(manifest.Fixtures))
+	for _, row := range manifest.Fixtures {
+		f := terminalFixtureRegistration{row.Command, row.Scenario, row.Stream, row.File}
+		if _, exists := assigned[row.File]; exists {
+			t.Errorf("fixture assigned twice: %s", row.File)
+		}
+		assigned[row.File] = f
+		// T03 tests every help, parse-error, version and completion fixture.
+		// T10's runtime test walks every owned row and fails on unknown files.
+		if row.Task == "T03" || row.Task == "T10" {
+			add(f)
+		}
+	}
+	if len(registered) != len(index.Fixtures) {
+		t.Errorf("registered %d of %d fixtures", len(registered), len(index.Fixtures))
+	}
+	indexed := make(map[string]bool, len(index.Fixtures))
+	for _, row := range index.Fixtures {
+		if indexed[row.File] {
+			t.Errorf("indexed twice: %s", row.File)
+		}
+		indexed[row.File] = true
+		f := terminalFixtureRegistration{row.Command, row.Scenario, row.Stream, row.File}
+		if registered[row.File] != f || assigned[row.File] != f {
+			t.Errorf("registration mismatch: %s", row.File)
+		}
+		data, err := os.ReadFile(filepath.Join(examples, row.File))
+		if err != nil {
+			t.Errorf("read fixture %s: %v", row.File, err)
+			continue
+		}
+		if got := fmt.Sprintf("%x", sha256.Sum256(data)); got != row.SHA256 {
+			t.Errorf("fixture hash changed: %s", row.File)
+		}
 	}
 }
