@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -44,6 +45,7 @@ type darwinServicePlatform struct {
 	uid             int
 	executable      string
 	run             func(context.Context, ...string) ([]byte, error)
+	waitProcessExit func(context.Context, int) error
 	inspectProxy    func(context.Context, string) componentStatus
 	initialiseProxy func() error
 }
@@ -340,11 +342,33 @@ func (platform *darwinServicePlatform) reconcile(ctx context.Context, definition
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return fmt.Errorf("read existing LaunchAgent: %w", readErr)
 	}
+	oldPID := 0
+	if definition.Label == proxyAgentLabel {
+		loaded, output, err := platform.printJob(ctx, definition.Label)
+		if err != nil {
+			return err
+		}
+		if loaded && bytes.Contains(output, []byte("\tstate = running\n")) {
+			oldPID, err = parseInstalledHTTPValidationLaunchctlPID(output, platform.target(definition.Label))
+			if err != nil {
+				return fmt.Errorf("inspect old proxy process: %w", err)
+			}
+		}
+	}
 	oldLoaded := false
 	if _, err := platform.run(ctx, "bootout", platform.target(definition.Label)); err == nil {
 		oldLoaded = true
 	} else if !isDarwinLaunchctlNotLoaded(err) {
 		return fmt.Errorf("boot out %s: %w", definition.Label, err)
+	}
+	if oldLoaded && oldPID != 0 {
+		wait := platform.waitProcessExit
+		if wait == nil {
+			wait = waitDarwinProcessExit
+		}
+		if err := wait(ctx, oldPID); err != nil {
+			return fmt.Errorf("wait for old proxy process: %w", err)
+		}
 	}
 
 	if err := atomicWriteDarwinLaunchAgent(path, data); err != nil {
@@ -357,6 +381,28 @@ func (platform *darwinServicePlatform) reconcile(ctx context.Context, definition
 		return errors.Join(err, platform.restore(ctx, definition.Label, path, oldData, oldExists, oldLoaded))
 	}
 	return nil
+}
+
+func waitDarwinProcessExit(ctx context.Context, pid int) error {
+	if pid <= 1 {
+		return errors.New("invalid proxy process ID")
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		if err != nil && !errors.Is(err, syscall.EPERM) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (platform *darwinServicePlatform) restore(ctx context.Context, label, path string, data []byte, exists, loaded bool) error {

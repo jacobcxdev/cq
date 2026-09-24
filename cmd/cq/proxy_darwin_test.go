@@ -38,19 +38,22 @@ func TestInstallProxyAgentWritesPlist(t *testing.T) {
 		}
 	})
 
-	if len(calls) != 3 {
-		t.Fatalf("launchctl calls = %d, want 3", len(calls))
+	if len(calls) != 4 {
+		t.Fatalf("launchctl calls = %d, want 4", len(calls))
 	}
 	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), proxyAgentLabel)
 	expectedPlistPath := filepath.Join(dir, "Library", "LaunchAgents", proxyAgentLabel+".plist")
-	if got, want := strings.Join(calls[0], "|"), strings.Join([]string{"bootout", target}, "|"); got != want {
-		t.Fatalf("first launchctl call = %v, want bootout", calls[0])
+	if got, want := strings.Join(calls[0], "|"), strings.Join([]string{"print", target}, "|"); got != want {
+		t.Fatalf("first launchctl call = %v, want print", calls[0])
 	}
-	if got, want := strings.Join(calls[1], "|"), strings.Join([]string{"bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), expectedPlistPath}, "|"); got != want {
-		t.Fatalf("second launchctl call = %v, want bootstrap", calls[1])
+	if got, want := strings.Join(calls[1], "|"), strings.Join([]string{"bootout", target}, "|"); got != want {
+		t.Fatalf("second launchctl call = %v, want bootout", calls[1])
 	}
-	if got, want := strings.Join(calls[2], "|"), strings.Join([]string{"kickstart", "-k", target}, "|"); got != want {
-		t.Fatalf("third launchctl call = %v, want kickstart", calls[2])
+	if got, want := strings.Join(calls[2], "|"), strings.Join([]string{"bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), expectedPlistPath}, "|"); got != want {
+		t.Fatalf("third launchctl call = %v, want bootstrap", calls[2])
+	}
+	if got, want := strings.Join(calls[3], "|"), strings.Join([]string{"kickstart", "-k", target}, "|"); got != want {
+		t.Fatalf("fourth launchctl call = %v, want kickstart", calls[3])
 	}
 
 	plistPath, err := proxyAgentPlistPath()
