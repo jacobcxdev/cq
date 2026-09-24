@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/jacobcxdev/cq/internal/cli"
 )
 
@@ -21,12 +22,19 @@ func terminalService(data v2ServiceData, exit int, o cli.TerminalOptions) string
 		return ""
 	}
 	var out strings.Builder
-	out.WriteString(cli.TerminalLine(o, 0, cli.Span{Text: "CQ services", Role: cli.Heading}, cli.Span{Text: " · " + string(data.Action)}, func() cli.Span {
-		if exit != 0 && data.Rollback == "failed" {
-			return cli.Span{Text: " · incomplete", Role: cli.Attention}
-		}
-		return cli.Span{}
-	}(), cli.Span{Text: "    "}, cli.Span{Text: string(data.Component), Role: cli.Identity}))
+	heading := "CQ services · " + string(data.Action)
+	headingSpans := []cli.Span{{Text: "CQ services", Role: cli.Heading}, {Text: " · " + string(data.Action)}}
+	if exit != 0 && data.Rollback == "failed" {
+		heading += " · incomplete"
+		headingSpans = append(headingSpans, cli.Span{Text: " · incomplete", Role: cli.Attention})
+	}
+	selection := string(data.Component)
+	if o.Width > 0 && ansi.StringWidth(heading+"    "+selection) > min(o.Width, 100) {
+		out.WriteString(cli.TerminalLine(o, 0, headingSpans...))
+		out.WriteString(cli.TerminalLine(o, 2, cli.Span{Text: "Selection  "}, cli.Span{Text: selection, Role: cli.Identity}))
+	} else {
+		out.WriteString(cli.TerminalLine(o, 0, append(headingSpans, cli.Span{Text: "    "}, cli.Span{Text: selection, Role: cli.Identity})...))
+	}
 	out.WriteByte('\n')
 	rows := make([][]cli.Span, 0, len(components))
 	for _, c := range components {
@@ -134,7 +142,7 @@ func terminalServiceOwner(c v2ServiceComponent) cli.Span {
 
 func terminalServicePID(c v2ServiceComponent) cli.Span {
 	if c.PID != nil {
-		return cli.Span{Text: fmt.Sprint(*c.PID), Role: cli.Quantity}
+		return cli.Span{Text: fmt.Sprint(*c.PID), Role: cli.Identity}
 	}
 	if c.State == "indeterminate" {
 		return cli.Span{Text: "unknown", Role: cli.Attention}

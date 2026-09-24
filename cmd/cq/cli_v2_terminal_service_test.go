@@ -199,7 +199,7 @@ func TestTerminalServiceSemanticRolesAndNoColour(t *testing.T) {
 	data.Components[1].State = "failed"
 	data.Components[1].Healthy = serviceBool(false)
 	got := terminalService(data, 8, o)
-	for _, want := range []string{"\x1b[1mCQ services", "\x1b[1;34m4217", "\x1b[35m0s ago", "\x1b[32myes", "\x1b[31mfailed"} {
+	for _, want := range []string{"\x1b[1mCQ services", "\x1b[36m4217", "\x1b[35m0s ago", "\x1b[32myes", "\x1b[31mfailed"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing semantic role %q", want)
 		}
@@ -207,6 +207,26 @@ func TestTerminalServiceSemanticRolesAndNoColour(t *testing.T) {
 	o.Colour = false
 	if strings.Contains(terminalService(data, 8, o), "\x1b[") {
 		t.Fatal("NO_COLOR output contains ANSI")
+	}
+}
+
+func TestTerminalServiceNarrowSelectionAndPID(t *testing.T) {
+	o := terminalFixtureOptions(40)
+	data := v2ServiceData{Action: serviceInstall, Component: serviceAll, Rollback: "failed", Components: []v2ServiceComponent{terminalServiceFixtureComponent(serviceProxy, o.Now)}}
+	pid := 1234567
+	data.Components[0].PID = &pid
+	got := terminalService(data, 8, o)
+	plain := ansi.Strip(got)
+	if !strings.Contains(plain, "CQ services · install · incomplete\n  Selection  all\n") || strings.Contains(plain, "\nall\n") {
+		t.Fatalf("narrow selection lost its label: %q", plain)
+	}
+	if !strings.Contains(got, "\x1b[36m1234567\x1b[0m") || strings.Contains(plain, "1,234,567") {
+		t.Fatalf("PID is an exact identifier: %q", got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if ansi.StringWidth(line) > 40 {
+			t.Fatalf("line exceeds 40 cells: %q", line)
+		}
 	}
 }
 
