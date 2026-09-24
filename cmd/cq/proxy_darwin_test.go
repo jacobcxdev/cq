@@ -5,15 +5,83 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+func TestDarwinProxyStartWiresTerminationHandling(t *testing.T) {
+	if reflect.ValueOf(runProxyOwnedRuntimeFn).Pointer() != reflect.ValueOf(runDarwinProxyOwnedRuntime).Pointer() {
+		t.Fatal("macOS owned runtime bypasses termination handling")
+	}
+	if reflect.ValueOf(runProxyAdoptedRuntimeFn).Pointer() != reflect.ValueOf(runDarwinProxyAdoptedRuntime).Pointer() {
+		t.Fatal("macOS adopted runtime bypasses termination handling")
+	}
+}
+
+func TestDarwinOwnedRuntimeCancelsOnTermination(t *testing.T) {
+	original := runDarwinUnixProxyOwnedRuntime
+	started := make(chan struct{})
+	runDarwinUnixProxyOwnedRuntime = func(ctx context.Context, _ int, _ func(context.Context, net.Listener, http.Handler) error) (bool, error) {
+		close(started)
+		<-ctx.Done()
+		return true, ctx.Err()
+	}
+	t.Cleanup(func() { runDarwinUnixProxyOwnedRuntime = original })
+	done := make(chan error, 1)
+	go func() {
+		_, err := runDarwinProxyOwnedRuntime(context.Background(), 0, nil)
+		done <- err
+	}()
+	<-started
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("terminated macOS runtime = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("macOS runtime ignored termination")
+	}
+}
+
+func TestDarwinAdoptedRuntimeCancelsOnTermination(t *testing.T) {
+	original := runDarwinUnixProxyAdoptedRuntime
+	started := make(chan struct{})
+	runDarwinUnixProxyAdoptedRuntime = func(ctx context.Context, _ net.Listener, _ func(context.Context, net.Listener, http.Handler) error) error {
+		close(started)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	t.Cleanup(func() { runDarwinUnixProxyAdoptedRuntime = original })
+	done := make(chan error, 1)
+	go func() { done <- runDarwinProxyAdoptedRuntime(context.Background(), nil, nil) }()
+	<-started
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("terminated adopted macOS runtime = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("adopted macOS runtime ignored termination")
+	}
+}
 
 func TestInstallProxyAgentWritesPlist(t *testing.T) {
 	dir := t.TempDir()
