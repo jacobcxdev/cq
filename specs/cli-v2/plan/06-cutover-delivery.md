@@ -15,7 +15,7 @@
 - “Every intermediate group prints help on bare invocation, exits 0 and reads no state.”
 - “No mutation silently chooses Codex because the user happens to use Codex most often.”
 - “They never grant consent.” JSON/nonterminal input must not authorise a mutation.
-- “Remove aliases no earlier than 2.0.0.” Target CQ1.0.0, CLI/envelope schema2.
+- “Remove aliases no earlier than 2.0.0.” Target CQ0.34.0, CLI/envelope schema2.
 - One total operation budget includes cleanup; terminal consent waiting alone is excluded.
 - Every Go test uses `-race`; preserve exact resource schemas, messages, human templates, machine protocols and frozen algorithms.
 - All [coordinator constraints and interfaces](../plan.md#shared-interfaces-fixed-before-parallel-work) apply. Source paths below are relative to the T00 implementation baseline; proposed files are explicitly marked Create.
@@ -79,7 +79,7 @@ go test -race -count=1 ./...
 
 - [ ] Change 4: Add hermetic consumer tests using fake PATH tools and synthetic envelopes, covering malformed JSON, ok=false, missing mode, changed PID/mode and forbidden publish calls. Do not run the real release script during local testing; it writes GitHub status and performs live operations.
 
-- [ ] Change 5: Update examples/docs/completion installation instructions and CLI/envelope version1.0.0/schema2 release notes. Include old-to-new examples for reserve/policy/fallback/accounts/services, alias retention until2.0.0 and all four unavailable candidate commands.
+- [ ] Change 5: Update examples/docs/completion installation instructions and CLI/envelope version0.34.0/schema2 release notes. Include old-to-new examples for reserve/policy/fallback/accounts/services, alias retention until2.0.0 and all four unavailable candidate commands.
 
 - [ ] Change 6: Run full catalogue/alias/environment/output acceptance, every invalid option before IO, all127 help goldens and89 leaf registrations. Run required build/vet/full-race once on the integrated tree; preserve Linux native no-skip gates and Windows/macOS package/lifecycle jobs. Re-run only affected checks after new fixes.
 
@@ -90,7 +90,7 @@ go test -race -count=1 ./...
 2. Replace public dispatch in one change.
 3. Migrate all repository-owned command invocations to canonical spellings except frozen launch/installer ABI.
 4. Add hermetic consumer tests using fake PATH tools and synthetic envelopes, covering malformed JSON, ok=false, missing mode, changed PID/mode and forbidden publish calls.
-5. Update examples/docs/completion installation instructions and CLI/envelope version1.0.0/schema2 release notes.
+5. Update examples/docs/completion installation instructions and CLI/envelope version0.34.0/schema2 release notes.
 6. Run full catalogue/alias/environment/output acceptance, every invalid option before IO, all127 help goldens and89 leaf registrations.
 ```
 
@@ -106,7 +106,7 @@ T27 is complete only when all supported command contracts pass and reserved4 fai
 
 **Files:** Create `specs/cli-v2/release-evidence.md` during implementation with immutable SHA/artifact hashes and gate table. Update release/package test configuration only where needed in `.github/workflows/ci.yml`, `.github/workflows/.goreleaser.yml`, `packaging/windows/cq.wxs`, `packaging/winget/jacobcxdev.cq.installer.yaml.tmpl`, `internal/installer/` and `cmd/cq-install/main_test.go`. Do not generate a release tag, upload assets or run real release automation under this planning request.
 
-**Interfaces:** Consumes integrated CLI and native adapters; produces local1.0.0 release-candidate artifacts, digest manifest and evidence per OS/architecture. Later rollout requires explicit scope/host/version authority. Machine ABI and schema2 consumer checks apply to the packaged binary, not only go run.
+**Interfaces:** Consumes integrated CLI and native adapters; produces local0.34.0 release-candidate artifacts, digest manifest and evidence per OS/architecture. Later rollout requires explicit scope/host/version authority. Machine ABI and schema2 consumer checks apply to the packaged binary, not only go run.
 
 **Normative command ownership:**
 
@@ -131,7 +131,7 @@ python3 specs/cli-v2/plan/check.py
 python3 specs/cli-v2/generate.py --check
 ```
 
-- [ ] Change 1: Build local release candidates for each existing supported release OS/architecture using current package tooling; record version1.0.0, source revision, dirty provenance, artifact SHA-256 and embedded127-help/command-schema check. Adapt patch-derived CI test-version logic deliberately for1.0.0 rather than accidentally minting0.32.x.
+- [ ] Change 1: Build local release candidates for each existing supported release OS/architecture using current package tooling; record version0.34.0, source revision, dirty provenance, artifact SHA-256 and embedded127-help/command-schema check. Adapt patch-derived CI test-version logic deliberately for0.34.0 rather than accidentally minting0.32.x.
 
 - [ ] Change 2: Keep native macOS launchd/quarantine/cask, Linux namespace/Landlock/descendant-cancellation and Windows scheduler/WiX/credential ownership gates. Cross-compilation proves build only. Mark unavailable native runners unverified and block a claim of platform runtime acceptance; do not relabel skipped tests as passes.
 
@@ -144,7 +144,7 @@ python3 specs/cli-v2/generate.py --check
 **Implementation sequence:**
 
 ```text
-1. Build local release candidates for each existing supported release OS/architecture using current package tooling; record version1.0.0, source revision, dirty provenance, artifact SHA-256 and embedded127-help/command-schema check.
+1. Build local release candidates for each existing supported release OS/architecture using current package tooling; record version0.34.0, source revision, dirty provenance, artifact SHA-256 and embedded127-help/command-schema check.
 2. Keep native macOS launchd/quarantine/cask, Linux namespace/Landlock/descendant-cancellation and Windows scheduler/WiX/credential ownership gates.
 3. In explicitly authorised isolated native environments, execute lifecycle sequence and selected-component matrix below, including package upgrade failure rollback.
 4. Prepare exact rollout/rollback commands and target artifact before requesting any missing live/publication authority.

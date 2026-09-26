@@ -1,6 +1,6 @@
 # CQ CLI v2: canonical implementation specification
 
-Status: proposed implementation contract, 10 September 2026. This package specifies the whole public CLI and preserves the installed machine interfaces explicitly. It does not implement the redesign. Target release: **1.0.0**, because output, parsing, exit codes and some ambiguous legacy commands deliberately change. “CLI v2” names this contract and JSON envelope version; it is not the release number.
+Status: implemented canonical contract; production-readiness review updated 26 September 2026. This package specifies the whole public CLI and preserves installed machine interfaces explicitly. Planned feature release: **0.34.0**, retaining the requested 0.x release line. “CLI v2” names this contract and JSON envelope version; it is not the release number. Release publication and installed acceptance remain separate gates.
 
 ## Read this package
 
@@ -151,7 +151,7 @@ Common parser failures use the following exact messages. Specific command error 
 
 ## Compatibility and capability boundaries
 
-Version 1.0.0 preserves documented old command spellings for one major release as deprecated aliases, except explicit retirements. Remove aliases no earlier than 2.0.0. No aliases appear in primary group help or completion; migration documentation lists them. Alias help resolves canonical help. A deprecated command path suppresses redundant option warnings for that invocation. On an unchanged path, each distinct deprecated option emits one warning in argv order. A deprecated spelling emits one `deprecated_alias` warning with `Deprecated syntax; use cq {canonical_path}.` An unchanged path receives no path warning; an old option on that path still receives `deprecated_option` with `Deprecated option {old}; use {new}.` Canonical bare `cq` is never deprecated. Frozen internal ABIs are not subject to this expiry.
+CLI v2 preserves documented old command spellings as deprecated aliases, except explicit retirements. Remove aliases no earlier than 2.0.0. No aliases appear in primary group help or completion; migration documentation lists them. Alias help resolves canonical help. A deprecated command path suppresses redundant option warnings for that invocation. On an unchanged path, each distinct deprecated option emits one warning in argv order. A deprecated spelling emits one `deprecated_alias` warning with `Deprecated syntax; use cq {canonical_path}.` An unchanged path receives no path warning; an old option on that path still receives `deprecated_option` with `Deprecated option {old}; use {new}.` Canonical bare `cq` is never deprecated. Frozen internal ABIs are not subject to this expiry.
 
 Aliases preserve operation intent and parameter values, **not** old JSON shapes, ignored options, output-scope changes or old exit-code bugs. Unknown tails reject before effects. Provider ambiguity never selects Codex. Bare old `proxy pin` is retired with a usage error directing users to the two provider-specific show commands. `operation recover` is unavailable because its old implementation only inspected state; it must not claim recovery. `proxy status --port` translates to health, while canonical proxy status always reports the same broader scope in human and JSON formats. See every exact translation in migration.json.
 

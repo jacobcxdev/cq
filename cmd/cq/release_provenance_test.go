@@ -463,8 +463,8 @@ func TestCICoversSupportedNativePlatforms(t *testing.T) {
 			t.Errorf("CI uses forbidden platform bypass %q", forbidden)
 		}
 	}
-	if !strings.Contains(text, `current_version="1.0.0-ci"`) || strings.Contains(text, "patch + 1") {
-		t.Error("CI must deliberately target the CLI v2 prerelease line")
+	if !strings.Contains(text, "CQ_CANDIDATE_VERSION: 0.34.0") || !strings.Contains(text, `current_version="${CQ_CANDIDATE_VERSION}-ci"`) || strings.Contains(text, "1.0.0") {
+		t.Error("CI must keep both candidate paths on the planned 0.x release line")
 	}
 	if !strings.Contains(text, "go test -race -count=1 ./internal/userdirs ./internal/fsutil") {
 		t.Error("CI missing native Windows root and filesystem race gates")

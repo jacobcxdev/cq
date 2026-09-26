@@ -118,7 +118,7 @@ cq models --help
 cq operation --help
 ```
 
-## CLI 1.0.0 migration
+## CLI v2 migration
 
 The public CLI uses one canonical grammar and JSON envelope schema 2. Supported deprecated spellings remain until 2.0.0 and warn on stderr; they do not retain old JSON or exit-code contracts. Help and version are pure, and invalid input is rejected before IO.
 
@@ -199,7 +199,7 @@ cq codex account list --json
 cq service status --json
 ```
 
-CLI 1.0.0 emits schema 2 envelopes with `schema_version`, canonical `command`, `ok`, `data`, `errors` and `warnings`. Inspect `ok` and the process exit code before reading `data`; error messages do not expose credentials. Service components are in `data.components`, keyed by `id` (`proxy` or `token-refresh`). The trace stream and Codex Stop hook have their documented output exceptions. Public spelling aliases return the same schema 2 contract.
+CLI v2 emits schema 2 envelopes with `schema_version`, canonical `command`, `ok`, `data`, `errors` and `warnings`. Inspect `ok` and the process exit code before reading `data`; error messages do not expose credentials. Service components are in `data.components`, keyed by `id` (`proxy` or `token-refresh`). The trace stream and Codex Stop hook have their documented output exceptions. Public spelling aliases return the same schema 2 contract.
 
 ## Accounts and authentication
 

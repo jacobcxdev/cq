@@ -12,6 +12,10 @@ on:
 permissions:
   contents: read
 
+# Planned feature candidate only; publication remains a separate release action.
+env:
+  CQ_CANDIDATE_VERSION: 0.34.0
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -64,8 +68,8 @@ jobs:
             --jq '.[0].tagName')"
           test -n "$previous_tag"
           previous_version="${previous_tag#v}"
-          # CLI v2 is the 1.0.0 line; retain the isolated CI prerelease suffix.
-          current_version="1.0.0-ci"
+          # Retain the 0.x release line and isolated CI prerelease suffix.
+          current_version="${CQ_CANDIDATE_VERSION}-ci"
           git tag "v$current_version"
           {
             echo "PREVIOUS_TAG=$previous_tag"
@@ -309,7 +313,7 @@ jobs:
           version: "~> v2"
           install-only: true
 
-      - name: Prepare fixed-version candidate configuration
+      - name: Prepare planned-version candidate configuration
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
@@ -317,10 +321,10 @@ jobs:
           cp .goreleaser.yml "$RUNNER_TEMP/candidate.yml"
           cat >> "$RUNNER_TEMP/candidate.yml" <<'CONFIG'
           snapshot:
-            version_template: '1.0.0'
+            version_template: '{{ .Env.CQ_CANDIDATE_VERSION }}'
           CONFIG
           printf 'dist: "%s/candidate-build"\n' "$RUNNER_TEMP" >> "$RUNNER_TEMP/candidate.yml"
-          echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go 1.0.0 ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)" >> "$GITHUB_ENV"
+          echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go "$CQ_CANDIDATE_VERSION" ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)" >> "$GITHUB_ENV"
 
       - name: Build all six targets with release provider configuration
         env:
@@ -366,11 +370,11 @@ jobs:
                   binaries.append({"path": str(destination.relative_to(output)), "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(), "build": settings})
           version = json.loads(subprocess.check_output([str(output / "linux_arm64/cq"), "version", "--json"], text=True))
           assert version["schema_version"] == 2 and version["ok"] is True
-          assert version["data"]["version"] == "1.0.0"
+          assert version["data"]["version"] == os.environ["CQ_CANDIDATE_VERSION"]
           assert version["data"]["cli_schema_version"] == 2
           metadata = {
               "kind": "candidate-build-only",
-              "version": "1.0.0",
+              "version": os.environ["CQ_CANDIDATE_VERSION"],
               "cli_schema_version": 2,
               "source_commit": os.environ["GITHUB_SHA"],
               "source_tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),

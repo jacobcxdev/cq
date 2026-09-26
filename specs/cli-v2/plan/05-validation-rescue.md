@@ -15,7 +15,7 @@
 - “Every intermediate group prints help on bare invocation, exits 0 and reads no state.”
 - “No mutation silently chooses Codex because the user happens to use Codex most often.”
 - “They never grant consent.” JSON/nonterminal input must not authorise a mutation.
-- “Remove aliases no earlier than 2.0.0.” Target CQ1.0.0, CLI/envelope schema2.
+- “Remove aliases no earlier than 2.0.0.” Target CQ0.34.0, CLI/envelope schema2.
 - One total operation budget includes cleanup; terminal consent waiting alone is excluded.
 - Every Go test uses `-race`; preserve exact resource schemas, messages, human templates, machine protocols and frozen algorithms.
 - All [coordinator constraints and interfaces](../plan.md#shared-interfaces-fixed-before-parallel-work) apply. Source paths below are relative to the T00 implementation baseline; proposed files are explicitly marked Create.

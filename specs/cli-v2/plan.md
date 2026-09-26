@@ -17,7 +17,7 @@
 - “Where `--timeout` exists it bounds elapsed operational work: local preparation, locks, requests, verification and cleanup. Time spent waiting for an interactive confirmation is excluded.”
 - “They never grant consent.” This applies to JSON and non-terminal stdin; preserve `--yes` and distinct semantic confirmation flags.
 - “Aliases preserve operation intent and parameter values, **not** old JSON shapes, ignored options, output-scope changes or old exit-code bugs.”
-- “Remove aliases no earlier than 2.0.0.” Target this contract at CQ 1.0.0, CLI/envelope schema 2.
+- “Remove aliases no earlier than 2.0.0.” Target this contract at CQ 0.34.0, CLI/envelope schema 2.
 - JSON envelope: `schema_version`, `command`, `ok`, `data`, `errors`, `warnings`; normal output is one document plus LF. Preserve explicit help, completion, hook and JSONL exceptions.
 - Exit set: `0, 1, 2, 3, 4, 5, 6, 7, 8, 130`, with exact meanings/messages from the specification.
 - Protect only the current Codex system account with reserve. Never consume a reset credit automatically. Preserve continuity, external credential ownership and persistent consumption idempotency.
