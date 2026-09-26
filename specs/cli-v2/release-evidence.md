@@ -1,6 +1,8 @@
-# CLI v2 local release evidence — 1.0.0
+# Historical CLI v2 release evidence — 23 September 2026
 
-## Current qualified candidate — 23 September 2026, 14:27 UTC
+**Superseded for current readiness.** See [the 26 September production-readiness handoff](production-readiness.md) for current source, checks and limits. The records below preserve earlier evidence only; their `1.0.0` version, installed state, delivery instructions and authorisations do not apply to the current branch or installation. The planned release remains on the 0.x line. No current deployment or replacement is authorised.
+
+## Historical qualified candidate — 23 September 2026, 14:27 UTC
 
 **Six provider-complete candidate binaries are built and checked from signed source `244678521f4fab55ce423427d32600034a93d860`. The qualified Darwin/arm64 binary is now installed and verified on the existing Mac; the earlier incomplete build and rollback remain historical below.**
 

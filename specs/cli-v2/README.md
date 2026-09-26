@@ -4,6 +4,8 @@ Status: implemented canonical contract; production-readiness review updated 26 S
 
 ## Read this package
 
+- [Production-readiness handoff](production-readiness.md): current source, independent review, executable checks and remaining release-only gates.
+
 - [Implementation plan](plan.md): 29 sequenced tasks across six workstreams, with command/parameter ownership, file targets, regression cases and delivery gates.
 - [Command reference](COMMANDS.md): every command, argument, option, constraint, effect, output, error, example and naming rationale.
 - [Machine-readable catalogue](commands.json): authoritative public command definitions and global options.
