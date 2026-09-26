@@ -760,6 +760,10 @@ func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRe
 		if old.HasEncryptedState && !input.HasEncryptedState {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: encrypted-state authority was cleared", ErrCodexLeaseInvalidMutation)
 		}
+		if old.PreviousTurnStateHash != input.PreviousTurnStateHash &&
+			!(bindingReassignment && old.PreviousTurnStateHash == "" && input.PreviousTurnStateHash == old.TurnStateHash) {
+			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: previous turn-state authority changed", ErrCodexLeaseInvalidMutation)
+		}
 		if old.HasTurnState && !input.HasTurnState && !bindingReassignment {
 			return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: turn-state authority was cleared", ErrCodexLeaseInvalidMutation)
 		}
@@ -1772,6 +1776,7 @@ func sameCodexLeaseSemantics(left, right CodexJournalRecordV2) bool {
 	return left.AccountHash == right.AccountHash &&
 		left.CorrelationHash == right.CorrelationHash &&
 		left.TurnStateHash == right.TurnStateHash &&
+		left.PreviousTurnStateHash == right.PreviousTurnStateHash &&
 		left.State == right.State &&
 		left.RequestKind == right.RequestKind &&
 		left.CompactionPhase == right.CompactionPhase &&

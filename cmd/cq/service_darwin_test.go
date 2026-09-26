@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -38,7 +39,7 @@ func TestDarwinServiceInstallsExactProxyAndRefreshLaunchAgents(t *testing.T) {
 	}
 
 	proxyDefinition := readDarwinDefinition(t, platform.plistPath(proxyAgentLabel))
-	if proxyDefinition.Label != proxyAgentLabel || !reflect.DeepEqual(proxyDefinition.ProgramArguments, []string{executable, "proxy", "start"}) || !proxyDefinition.RunAtLoad || !proxyDefinition.KeepAlive {
+	if proxyDefinition.Label != proxyAgentLabel || !reflect.DeepEqual(proxyDefinition.ProgramArguments, []string{executable, "proxy", "start"}) || !proxyDefinition.RunAtLoad || !proxyDefinition.KeepAlive || proxyDefinition.ExitTimeOut != darwinProxyExitTimeout {
 		t.Fatalf("proxy definition = %#v", proxyDefinition)
 	}
 	if proxyDefinition.StandardErrorPath != filepath.Join(platform.roots.Logs, "proxy.log") {
@@ -56,6 +57,7 @@ func TestDarwinServiceInstallsExactProxyAndRefreshLaunchAgents(t *testing.T) {
 		{"print", "gui/501/" + homebrewProxyAgentLabel},
 		{"print", "gui/501/" + proxyAgentLabel},
 		{"print", "gui/501/" + agentLabel},
+		{"print", "gui/501/" + proxyAgentLabel},
 		{"bootout", "gui/501/" + proxyAgentLabel},
 		{"bootstrap", "gui/501", platform.plistPath(proxyAgentLabel)},
 		{"kickstart", "-k", "gui/501/" + proxyAgentLabel},
@@ -67,6 +69,52 @@ func TestDarwinServiceInstallsExactProxyAndRefreshLaunchAgents(t *testing.T) {
 		t.Fatalf("launchctl calls = %#v\nwant = %#v", runner.calls, wantCalls)
 	}
 	assertNoDarwinTemporaryFiles(t, filepath.Dir(platform.plistPath(proxyAgentLabel)))
+}
+
+func TestDarwinServiceWaitsForOldProxyBeforeBootstrap(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	runner.loaded[proxyAgentLabel] = true
+	platform.waitProcessExit = func(_ context.Context, pid int) error {
+		runner.calls = append(runner.calls, []string{"wait", strconv.Itoa(pid)})
+		return nil
+	}
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	var bootout, wait, bootstrap int
+	for index, call := range runner.calls {
+		switch call[0] {
+		case "bootout":
+			bootout = index
+		case "wait":
+			wait = index
+		case "bootstrap":
+			bootstrap = index
+		}
+	}
+	if bootout == 0 || wait <= bootout || bootstrap <= wait {
+		t.Fatalf("handover order = %v", runner.calls)
+	}
+	if !reflect.DeepEqual(runner.calls[wait], []string{"wait", "4312"}) {
+		t.Fatalf("waited for wrong process: %v", runner.calls[wait])
+	}
+}
+
+func TestDarwinServiceDoesNotBootstrapBeforeOldProxyExits(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	runner.loaded[proxyAgentLabel] = true
+	platform.waitProcessExit = func(context.Context, int) error {
+		return errors.New("old proxy still draining")
+	}
+	err := platform.InstallProxy(context.Background(), platform.executable)
+	if err == nil || !strings.Contains(err.Error(), "old proxy still draining") {
+		t.Fatalf("InstallProxy() error = %v", err)
+	}
+	for _, call := range runner.calls {
+		if call[0] == "bootstrap" {
+			t.Fatalf("bootstrapped before old proxy exited: %v", runner.calls)
+		}
+	}
 }
 
 func TestDarwinServiceEscapesLaunchAgentValues(t *testing.T) {
@@ -272,12 +320,13 @@ func newDarwinServiceHarness(t *testing.T) (*darwinServicePlatform, *fakeDarwinL
 		failOnce: map[string]error{},
 	}
 	platform := &darwinServicePlatform{
-		home:         home,
-		roots:        roots,
-		uid:          501,
-		executable:   executable,
-		run:          runner.Run,
-		processAlive: func(int) bool { return false },
+		home:            home,
+		roots:           roots,
+		uid:             501,
+		executable:      executable,
+		run:             runner.Run,
+		waitProcessExit: func(context.Context, int) error { return nil },
+		processAlive:    func(int) bool { return false },
 		inspectSelectedProxy: func(context.Context, string, userdirs.Roots, int) componentStatus {
 			return componentStatus{Healthy: true, LiveExecutable: executable, Listener: "127.0.0.1:19280"}
 		},

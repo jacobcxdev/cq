@@ -28,8 +28,9 @@ import (
 )
 
 const (
-	darwinRefreshInterval = 1800
-	maxDarwinPlistBytes   = 64 << 10
+	darwinRefreshInterval  = 1800
+	darwinProxyExitTimeout = 41 * 60
+	maxDarwinPlistBytes    = 64 << 10
 )
 
 type darwinLaunchAgentDefinition struct {
@@ -38,6 +39,7 @@ type darwinLaunchAgentDefinition struct {
 	RunAtLoad            bool
 	KeepAlive            bool
 	StartInterval        int
+	ExitTimeOut          int
 	StandardErrorPath    string
 	EnvironmentVariables map[string]string
 }
@@ -48,6 +50,7 @@ type darwinServicePlatform struct {
 	uid                  int
 	executable           string
 	run                  func(context.Context, ...string) ([]byte, error)
+	waitProcessExit      func(context.Context, int) error
 	inspectProxy         func(context.Context, string) componentStatus
 	initialiseProxy      func() error
 	runRefreshOnce       func(context.Context, darwinLaunchAgentDefinition) error
@@ -230,6 +233,7 @@ func (platform *darwinServicePlatform) InstallProxy(ctx context.Context, executa
 		ProgramArguments:  []string{executable, "proxy", "start"},
 		RunAtLoad:         true,
 		KeepAlive:         true,
+		ExitTimeOut:       darwinProxyExitTimeout,
 		StandardErrorPath: filepath.Join(platform.roots.Logs, "proxy.log"),
 	}
 	// Package installers use the frozen machine argv too; every new definition
@@ -393,9 +397,31 @@ func (platform *darwinServicePlatform) reconcile(ctx context.Context, definition
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
 		return fmt.Errorf("read existing LaunchAgent: %w", readErr)
 	}
+	oldPID := 0
+	if definition.Label == proxyAgentLabel {
+		loaded, output, err := platform.printJob(ctx, definition.Label)
+		if err != nil {
+			return err
+		}
+		if loaded && bytes.Contains(output, []byte("\tstate = running\n")) {
+			oldPID, err = parseInstalledHTTPValidationLaunchctlPID(output, platform.target(definition.Label))
+			if err != nil {
+				return fmt.Errorf("inspect old proxy process: %w", err)
+			}
+		}
+	}
 	oldLoaded, err := platform.bootoutAndWait(ctx, definition.Label)
 	if err != nil {
 		return fmt.Errorf("boot out %s: %w", definition.Label, err)
+	}
+	if oldLoaded && oldPID != 0 {
+		wait := platform.waitProcessExit
+		if wait == nil {
+			wait = waitDarwinProcessExit
+		}
+		if err := wait(ctx, oldPID); err != nil {
+			return fmt.Errorf("wait for old proxy process: %w", err)
+		}
 	}
 
 	if selectedServiceContext(ctx) && ctx.Err() != nil {
@@ -423,6 +449,28 @@ func (platform *darwinServicePlatform) reconcile(ctx context.Context, definition
 		return errors.Join(err, rollback())
 	}
 	return nil
+}
+
+func waitDarwinProcessExit(ctx context.Context, pid int) error {
+	if pid <= 1 {
+		return errors.New("invalid proxy process ID")
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		err := syscall.Kill(pid, 0)
+		if errors.Is(err, syscall.ESRCH) {
+			return nil
+		}
+		if err != nil && !errors.Is(err, syscall.EPERM) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (platform *darwinServicePlatform) restore(ctx context.Context, label, path string, data []byte, exists, loaded bool) error {
@@ -563,6 +611,11 @@ func renderDarwinLaunchAgent(definition darwinLaunchAgentDefinition) ([]byte, er
 	if definition.StartInterval > 0 {
 		output.WriteString("\t<key>StartInterval</key>\n\t<integer>")
 		output.WriteString(strconv.Itoa(definition.StartInterval))
+		output.WriteString("</integer>\n")
+	}
+	if definition.ExitTimeOut > 0 {
+		output.WriteString("\t<key>ExitTimeOut</key>\n\t<integer>")
+		output.WriteString(strconv.Itoa(definition.ExitTimeOut))
 		output.WriteString("</integer>\n")
 	}
 	writeDarwinBool(&output, "RunAtLoad", definition.RunAtLoad)
@@ -730,6 +783,7 @@ func darwinDefinitionFromValues(values map[string]any) (darwinLaunchAgentDefinit
 	definition.RunAtLoad, _ = values["RunAtLoad"].(bool)
 	definition.KeepAlive, _ = values["KeepAlive"].(bool)
 	definition.StartInterval, _ = values["StartInterval"].(int)
+	definition.ExitTimeOut, _ = values["ExitTimeOut"].(int)
 	definition.StandardErrorPath, _ = values["StandardErrorPath"].(string)
 	if env, exists := values["EnvironmentVariables"]; exists {
 		items, ok := env.(map[string]any)

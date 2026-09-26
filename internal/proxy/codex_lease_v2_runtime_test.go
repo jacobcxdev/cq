@@ -2245,6 +2245,85 @@ func TestCodexLeaseRuntimeAccountUnavailableRebindsAdmittedPortableRequest(t *te
 	}
 }
 
+func TestCodexLeaseRuntimeReboundTurnStateSurvivesRestart(t *testing.T) {
+	coordinator, fsys, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	initial := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "a", Kind: CodexAttemptSlotDirect}})
+	initial.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	handle, err := runtimeLease.BeginRequest(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: "state-a", HasTurnState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.Drain()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	bound := initial
+	bound.Evidence = CodexLeaseRequestEvidence{TurnState: "state-a", HasTurnState: true}
+	handle, err = runtimeLease.BeginRequest(bound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordQuotaExhaustedContext(context.Background(), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rebound := initial
+	rebound.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "b", Kind: CodexAttemptSlotDirect}}
+	handle, err = runtimeLease.BeginRequest(rebound)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: "state-b", HasTurnState: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.ProviderCompleted(CodexHTTPCompletionEvidence{EndTurn: false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = handle.Drain(); err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	coordinator = reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+	runtimeLease = newCodexLeaseRuntimeTest(t, coordinator)
+	stale, err := runtimeLease.reboundTurnState(context.Background(), initial.Key, initial.Authority, "state-a")
+	if err != nil || !stale {
+		t.Fatalf("reopened old state = %t, %v", stale, err)
+	}
+	stale, err = runtimeLease.reboundTurnState(context.Background(), initial.Key, initial.Authority, "state-b")
+	if err != nil || stale {
+		t.Fatalf("reopened current state = %t, %v", stale, err)
+	}
+	if bytes.Contains(coordinator.store.journalBytes, []byte("state-a")) || bytes.Contains(coordinator.store.journalBytes, []byte("state-b")) {
+		t.Fatal("raw turn state persisted")
+	}
+}
+
 func TestCodexLeaseRuntimeQuotaRetryRebindsStatefulAdmittedTurn(t *testing.T) {
 	t.Parallel()
 	coordinator, _, _, _, adoption := prepareCodexPrewarmAdoptionTest(t)

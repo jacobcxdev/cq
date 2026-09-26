@@ -27,6 +27,89 @@ type codexWSReserveDialerStub struct {
 	checks     int
 }
 
+func TestCodexTerminatingWSBrokerDrainClosesIdleSocket(t *testing.T) {
+	drain := make(chan struct{})
+	downstream := newCodexWSBrokerBlockingConn()
+	dialer := &codexWSBrokerDialerStub{}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans: &codexWSBrokerPlannerStub{}, Upstream: dialer,
+		UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 1, Drain: drain,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- broker.Serve(context.Background(), downstream) }()
+	<-downstream.started
+	close(drain)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("idle socket drain = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("idle socket held the worker after drain")
+	}
+	if len(dialer.accounts) != 0 {
+		t.Fatalf("idle socket dispatched a turn: %v", dialer.accounts)
+	}
+}
+
+func TestCodexTerminatingWSBrokerDrainFinishesActiveTurn(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{runtime: newCodexLeaseRuntimeTest(t, coordinator), slots: []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}}}
+	drain := make(chan struct{})
+	downstream := &codexWSBrokerConnStub{
+		reads:         []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexTerminatingWSFrame("turn-a", "")}},
+		readGateAfter: 1, readGate: make(chan struct{}),
+	}
+	completed := []byte(`{"type":"response.completed","response":{"id":"response-a","end_turn":true}}`)
+	upstream := &codexWSBrokerConnStub{
+		reads: []codexWSBrokerRead{
+			{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-a"}}`)},
+			{messageType: websocket.TextMessage, payload: completed},
+		},
+		readGateAfter: 1, readGate: make(chan struct{}),
+	}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 1, Drain: drain,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- broker.Serve(context.Background(), downstream) }()
+	deadline := time.After(time.Second)
+	for len(downstream.writtenPayloads()) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("active turn never started")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	close(drain)
+	select {
+	case err := <-done:
+		t.Fatalf("active turn stopped before completion: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	upstream.mu.Lock()
+	upstream.releaseReadGateLocked()
+	upstream.mu.Unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("active turn drain = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("completed turn held worker after drain")
+	}
+	if payloads := downstream.writtenPayloads(); len(payloads) != 2 || !bytes.Equal(payloads[1], completed) {
+		t.Fatalf("active turn lost completion: %q", payloads)
+	}
+}
+
 func (dialer *codexWSReserveDialerStub) reserveDispatchError(account codex.AccountKey) error {
 	dialer.checks++
 	if account == dialer.blocked && (!dialer.allowFirst || dialer.checks > 1) {
@@ -2178,7 +2261,27 @@ func TestServerCodexWebSocketEnforceRejectsMissingBrokerBeforeUpgrade(t *testing
 }
 
 type codexWebSocketRoutingHandlerStub struct {
-	header http.Header
+	header     http.Header
+	drainCalls int
+}
+
+func (handler *codexWebSocketRoutingHandlerStub) BeginDrain() { handler.drainCalls++ }
+
+func TestRuntimeHandlerPropagatesWebSocketDrain(t *testing.T) {
+	broker := &codexWebSocketRoutingHandlerStub{}
+	server := &Server{Config: &Config{ClaudeUpstream: "https://example.test"}, CodexWebSocketBroker: broker}
+	handler, err := server.RuntimeHandler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainer, ok := handler.(interface{ BeginDrain() })
+	if !ok {
+		t.Fatal("runtime handler lost drain control")
+	}
+	drainer.BeginDrain()
+	if broker.drainCalls != 1 {
+		t.Fatalf("broker drain calls = %d, want 1", broker.drainCalls)
+	}
 }
 
 type codexWebSocketFailingHandlerStub struct {
@@ -3299,7 +3402,7 @@ func TestCodexWSDownstreamReaderSerializesBurstFrames(t *testing.T) {
 	conn.waitForRead(t, 1)
 	conn.waitForRead(t, 2)
 	conn.assertReadBlocked(t, 3)
-	messageType, payload, err := reader.read(context.Background(), ctx)
+	messageType, payload, err := reader.read(context.Background(), ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3308,7 +3411,7 @@ func TestCodexWSDownstreamReaderSerializesBurstFrames(t *testing.T) {
 	}
 	conn.waitForRead(t, 3)
 	for index, want := range [][]byte{second, third} {
-		messageType, payload, err = reader.read(context.Background(), ctx)
+		messageType, payload, err = reader.read(context.Background(), ctx, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

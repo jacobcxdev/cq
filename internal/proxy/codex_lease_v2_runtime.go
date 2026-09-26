@@ -410,6 +410,32 @@ func (runtime *CodexLeaseRuntime) observeRequestIngressContinuityContext(ctx con
 	}, nil
 }
 
+// reboundTurnState reports whether this exact token belongs to the account
+// displaced earlier in the current turn. Only full-history HTTP creates may
+// omit it; the lease keeps the client-facing digest across process restarts.
+func (runtime *CodexLeaseRuntime) reboundTurnState(ctx context.Context, key LeaseKey, authority CodexLeaseAuthorityPolicy, state string) (bool, error) {
+	if runtime == nil || runtime.store == nil || ctx == nil {
+		return false, ErrCodexLeaseWriterUnavailable
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	restored, err := runtime.store.loadLaneForIngress(key, authority)
+	if err != nil {
+		return false, err
+	}
+	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current.IsZero() {
+		return false, nil
+	}
+	current, found := runtime.restoredRecord(restored, restored.Fence.Current)
+	if !found || !current.Record.EverAdmitted || current.Record.PreviousTurnStateHash == "" {
+		return false, nil
+	}
+	digest := runtime.store.hash("turn-state", state)
+	return constantTimeCodexLeaseDigestEqual(current.Record.PreviousTurnStateHash, digest) &&
+		!constantTimeCodexLeaseDigestEqual(current.Record.TurnStateHash, digest), nil
+}
+
 func (rotations *codexLeaseTurnStateRotationStore) matches(identity CodexJournalRecordIdentity, record CodexJournalRecordV2, incomingHash string) bool {
 	if rotations == nil || incomingHash == "" {
 		return false
@@ -1491,6 +1517,11 @@ func (handle *CodexLeaseRequestHandle) applyAccountUnavailableRebind(desired *Co
 		return ErrCodexLeaseTransition
 	}
 	desired.AccountHash = accountHash
+	// Codex latches the first turn state for the whole turn. Keep its hash so
+	// later full-history requests can drop the old account's state on ingress.
+	if desired.PreviousTurnStateHash == "" && handle.record.HasTurnState {
+		desired.PreviousTurnStateHash = handle.record.TurnStateHash
+	}
 	// The previous account's response ID cannot authorise this account.
 	desired.CorrelationHash = ""
 	desired.HasResponseAnchor = false

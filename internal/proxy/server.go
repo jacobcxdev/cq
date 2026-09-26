@@ -25,7 +25,7 @@ import (
 
 const maxRequestBody = 10 << 20 // 10 MiB
 
-const defaultServerShutdownGracePeriod = 5 * time.Second
+const defaultServerShutdownGracePeriod = 20 * time.Minute
 
 const (
 	codexResponsesPath              = "/v1/responses"
@@ -436,7 +436,22 @@ func (s *Server) handler() (http.Handler, error) {
 // RuntimeHandler returns this process's complete normal proxy semantics for
 // execution by a private runtime worker.
 func (s *Server) RuntimeHandler() (http.Handler, error) {
-	return s.handler()
+	handler, err := s.handler()
+	if err != nil {
+		return nil, err
+	}
+	return runtimeDrainHandler{Handler: handler, server: s}, nil
+}
+
+type runtimeDrainHandler struct {
+	http.Handler
+	server *Server
+}
+
+func (handler runtimeDrainHandler) BeginDrain() {
+	if drainer, ok := handler.server.CodexWebSocketBroker.(interface{ BeginDrain() }); ok {
+		drainer.BeginDrain()
+	}
 }
 
 func bearerToken(r *http.Request) string {

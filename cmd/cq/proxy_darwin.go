@@ -6,12 +6,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/proxy"
@@ -23,13 +26,28 @@ const (
 	homebrewProxyAgentLabel = "homebrew.mxcl.cq"
 )
 
+var runDarwinUnixProxyOwnedRuntime = runUnixProxyOwnedRuntime
+var runDarwinUnixProxyAdoptedRuntime = runUnixProxyAdoptedRuntime
+
 func init() {
 	defaultProxyInspectionTarget = darwinProxyInspectionTarget
 	proxyInspectionTargetForRoot = darwinProxyInspectionTargetForRoot
 	adoptProxyListenerFn = adoptUnixProxyListener
 	newProxyRuntimeWorkerLauncherFn = newUnixProxyRuntimeWorkerLauncher
-	runProxyAdoptedRuntimeFn = runUnixProxyAdoptedRuntime
-	runProxyOwnedRuntimeFn = runUnixProxyOwnedRuntime
+	runProxyAdoptedRuntimeFn = runDarwinProxyAdoptedRuntime
+	runProxyOwnedRuntimeFn = runDarwinProxyOwnedRuntime
+}
+
+func runDarwinProxyOwnedRuntime(ctx context.Context, port int, serve func(context.Context, net.Listener, http.Handler) error) (bool, error) {
+	terminationCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runDarwinUnixProxyOwnedRuntime(terminationCtx, port, serve)
+}
+
+func runDarwinProxyAdoptedRuntime(ctx context.Context, listener net.Listener, serve func(context.Context, net.Listener, http.Handler) error) error {
+	terminationCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return runDarwinUnixProxyAdoptedRuntime(terminationCtx, listener, serve)
 }
 
 func runtimeDescriptorRoot() string { return "/dev/fd" }

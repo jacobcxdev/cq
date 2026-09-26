@@ -469,7 +469,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		emitCodexTrace(ctx, CodexTraceEvent{Phase: "request_inspection", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
 	}
-	defer inspection.Release()
+	defer func() { inspection.Release() }()
 
 	protocol, err := inspection.Protocol()
 	if factory.TransportKind == "http" {
@@ -505,6 +505,32 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, err)
 	}
 	defer releasePlanning()
+	// Recheck after acquiring the lane gate: an earlier request may have moved
+	// this turn to another account while this request waited for planning.
+	if factory.TransportKind == "http" && protocol.Metadata.Found && protocol.Metadata.Strong && protocol.HasTurnState && protocol.PreviousResponseID == "" {
+		if resolver, ok := factory.Runtime.(interface {
+			reboundTurnState(context.Context, LeaseKey, CodexLeaseAuthorityPolicy, string) (bool, error)
+		}); ok {
+			stale, resolveErr := resolver.reboundTurnState(ctx, key, factory.Authority, protocol.TurnState)
+			if resolveErr != nil {
+				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, resolveErr)
+			}
+			if stale {
+				inspection.Release()
+				withoutState := input.Headers.Clone()
+				deleteCodexTurnStateHeader(withoutState)
+				inspection, err = factory.inspect(ctx, input.Encoded, withoutState)
+				if err != nil {
+					return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+				}
+				protocol, err = inspection.Protocol()
+				if err != nil {
+					return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+				}
+				ingressContinuity = nil
+			}
+		}
+	}
 	snapshot, err := factory.Routes.LoadRouteSnapshot(ctx, key, accounts, factory.Authority)
 	if err != nil || snapshot.JournalGeneration == 0 {
 		emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_snapshot", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
@@ -1376,6 +1402,14 @@ func (factory *CodexHTTPRequestPlanFactory) inspect(ctx context.Context, encoded
 		return factory.operations.inspect(ctx, encoded, headers)
 	}
 	return InspectCodexNativeRequest(ctx, encoded, headers)
+}
+
+func deleteCodexTurnStateHeader(headers http.Header) {
+	for name := range headers {
+		if strings.EqualFold(name, "X-Codex-Turn-State") {
+			delete(headers, name)
+		}
+	}
 }
 
 func (factory *CodexHTTPRequestPlanFactory) acquireRequestPlanning(ctx context.Context, key LeaseKey, accounts []codex.AccountKey) (func(), error) {
