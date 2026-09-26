@@ -95,10 +95,11 @@ func terminalProxyState(data v2ProxyState, incomplete bool, o cli.TerminalOption
 	if data.Created {
 		state = cli.Span{Text: "created", Role: cli.Confirmed}
 	}
-	text := cli.TerminalLine(o, 0, cli.Span{Text: "Proxy state", Role: cli.Heading}, cli.Span{Text: " · "}, state)
+	heading := []cli.Span{{Text: "Proxy state", Role: cli.Heading}, {Text: " · "}, state}
 	if incomplete {
-		text = strings.TrimSuffix(text, "\n") + cli.TerminalLine(o, 0, cli.Span{Text: " · incomplete", Role: cli.Attention})
+		heading = append(heading, cli.Span{Text: " · incomplete", Role: cli.Attention})
 	}
+	text := cli.TerminalLine(o, 0, heading...)
 	restart := runtimeBool(data.RestartRequired)
 	if data.RestartRequired {
 		restart.Role = cli.Attention

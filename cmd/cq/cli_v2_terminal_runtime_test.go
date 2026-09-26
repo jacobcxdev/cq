@@ -368,3 +368,18 @@ func TestTerminalProxyServeStreamsAtLifecyclePoints(t *testing.T) {
 		t.Fatal("normal stopped block styled as failure")
 	}
 }
+
+func TestTerminalProxyExistingPartialStateWidth(t *testing.T) {
+	for _, width := range []int{20, 40, 80, 120} {
+		for _, colour := range []bool{false, true} {
+			options := terminalFixtureOptions(width)
+			options.Colour = colour
+			got := terminalProxyState(v2ProxyState{StateDir: "/state", Created: false, RestartRequired: true}, true, options)
+			for _, line := range strings.Split(got, "\n") {
+				if cells := ansi.StringWidth(line); cells > width {
+					t.Fatalf("width=%d colour=%t: %d cells in %q", width, colour, cells, line)
+				}
+			}
+		}
+	}
+}

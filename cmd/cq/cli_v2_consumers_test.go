@@ -29,7 +29,7 @@ func TestCLIV2ReleaseConsumerHermetic(t *testing.T) {
 	if strings.Contains(string(source), "/usr/bin/") || strings.Contains(string(source), "/opt/") {
 		t.Fatal("release script acquired absolute tool escape; review fixture isolation")
 	}
-	for _, mode := range []string{"normal", "rescue_draining", "rescue", "recovering", "blocked", "malformed", "error", "missing", "unknown", "command-failed", "changed-pid", "changed-mode"} {
+	for _, mode := range []string{"normal", "rescue_draining", "rescue", "recovering", "blocked", "malformed", "error", "missing", "unknown", "command-failed", "build-failed", "changed-pid", "changed-mode"} {
 		t.Run(mode, func(t *testing.T) {
 			root := t.TempDir()
 			bin := filepath.Join(root, "bin")
@@ -73,7 +73,8 @@ esac
 count=$((count+1));printf '%s\n' "$count" >"$TEST_ROOT/lsof-count"
 if [ "$TEST_MODE" = changed-pid ] && [ "$count" -gt 1 ];then printf '222\n';else printf '111\n';fi
 `)
-			write("cq", `[ "$*" = 'proxy rescue status --json' ] || { printf 'forbidden cq %s\n' "$*" >>"$TEST_LOG";exit 98; }
+			write("cq", `printf 'forbidden installed cq %s\n' "$*" >>"$TEST_LOG";exit 98`)
+			write("candidate", `[ "$*" = 'proxy rescue status --json' ] || { printf 'forbidden cq %s\n' "$*" >>"$TEST_LOG";exit 98; }
 count=0;if [ -f "$TEST_ROOT/cq-count" ];then read -r count <"$TEST_ROOT/cq-count";fi
 count=$((count+1));printf '%s\n' "$count" >"$TEST_ROOT/cq-count"
 mode=$TEST_MODE
@@ -89,7 +90,17 @@ printf '{"schema_version":2,"ok":true,"command":"proxy rescue status","data":{"m
 `)
 			write("go", `case "$1" in
  run) printf 'synthetic-provenance\n';;
- build) :;;
+ build)
+ target=
+ while [ "$#" -gt 0 ];do
+  if [ "$1" = -o ];then shift;target=$1;break;fi
+  shift
+ done
+ [ -n "$target" ] || exit 98
+ printf 'build %s\n' "$target" >>"$TEST_LOG"
+ [ "$TEST_MODE" != build-failed ] || exit 1
+ cat "$TEST_ROOT/bin/candidate" >"$target"
+ chmod 700 "$target";;
  test)
  [ "$2" = -race ] || exit 98
  for name in TestCodexInstalledNormalPassesThroughLiveUpstream TestCodexInstalledNormalContinuesAfterLiveToolCall TestCodexInstalledRescuePassesThroughLiveUpstream TestCodexInstalledLiveRescueTaskResumesInNormal TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover TestCodexExactExecutableNormalPassesThroughLiveUpstream TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream TestCodexLiveProxyLatencyMatchesDirect;do printf -- '--- PASS: %s (0.00s)\n' "$name";done;;
@@ -114,6 +125,13 @@ esac
 			command.Env = []string{"PATH=" + bin, "HOME=" + root, "XDG_CONFIG_HOME=" + filepath.Join(root, "config"), "XDG_CACHE_HOME=" + filepath.Join(root, "cache"), "XDG_STATE_HOME=" + filepath.Join(root, "state"), "TEST_ROOT=" + root, "TEST_LOG=" + log, "TEST_MODE=" + mode, "CQ_CODEX_LIVE_AUTH_FILE=" + auth, "CQ_CODEX_RELEASE_NORMAL_CLIENT_AUTH_FILE=" + auth, "CQ_CODEXBAR_LIVE_ROOT=" + root, "CQ_CODEX_ACCEPTANCE_EXECUTABLE=" + filepath.Join(bin, "codex"), "CQ_RELEASE_VALIDATION_VERSION=1.0.0"}
 			output, runErr := command.CombinedOutput()
 			calls, _ := os.ReadFile(log)
+			for _, line := range strings.Split(string(calls), "\n") {
+				if buildPath, ok := strings.CutPrefix(line, "build "); ok {
+					if _, err := os.Stat(filepath.Dir(buildPath)); !os.IsNotExist(err) {
+						t.Fatalf("validation directory remained after %s: %v", mode, err)
+					}
+				}
+			}
 			good := mode == "normal" || mode == "rescue_draining" || mode == "rescue" || mode == "recovering" || mode == "blocked"
 			if (runErr == nil) != good || strings.Contains(string(calls), "forbidden") || (!good && strings.Contains(string(calls), "state=success")) {
 				t.Fatalf("mode=%s err=%v output=%s calls=%s", mode, runErr, output, calls)

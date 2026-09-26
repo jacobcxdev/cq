@@ -13,7 +13,7 @@ fail() {
 
 [ "$(uname -s)" = Darwin ] || fail "macOS is required"
 
-for command in gh git go lsof cq jq; do
+for command in gh git go lsof jq; do
 	command -v "$command" >/dev/null 2>&1 || fail "$command is required"
 done
 
@@ -57,7 +57,7 @@ production_snapshot() {
 	pid=$(lsof -nP -tiTCP:"$production_port" -sTCP:LISTEN 2>/dev/null || true)
 	mode=
 	if [ -n "$pid" ]; then
-        snapshot_json=$(cq proxy rescue status --json 2>/dev/null) || fail "cannot read production proxy mode"
+        snapshot_json=$("$validation_binary" proxy rescue status --json 2>/dev/null) || fail "cannot read production proxy mode"
         mode=$(printf '%s' "$snapshot_json" |
             jq -er 'select(.schema_version == 2 and .ok == true) | .data.mode | select(. == "normal" or . == "rescue_draining" or . == "rescue" or . == "recovering" or . == "blocked")') || fail "cannot decode production proxy mode"
 		[ -n "$mode" ] || fail "cannot decode production proxy mode"
@@ -65,7 +65,6 @@ production_snapshot() {
 	printf '%s\n%s\n' "$pid" "$mode"
 }
 
-production_before=$(production_snapshot)
 status_finished=false
 cleanup_validation_root() {
 	[ -n "$validation_root" ] || return 0
@@ -88,12 +87,8 @@ publish_failure() {
 	fi
 	exit "$rc"
 }
-trap publish_failure EXIT HUP INT TERM
-
-gh api --method POST "repos/$repo/statuses/$sha" \
-	-f state=pending \
-	-f context="$status_context" \
-	-f description='Live Codex routing validation running' >/dev/null
+# Build and inspect before publishing a pending status. Early failures only clean up.
+trap cleanup_validation_root EXIT HUP INT TERM
 
 increment_release_version=true
 if [ -n "${CQ_RELEASE_VALIDATION_VERSION:-}" ]; then
@@ -136,6 +131,16 @@ CGO_ENABLED=0 go build \
 	-ldflags "-s -w -X main.version=$build_version -X github.com/jacobcxdev/cq/internal/proxy.codexStage11CorpusBuildProvenanceSHA256=$stage11_provenance" \
 	-o "$validation_binary" \
 	./cmd/cq
+
+# The candidate understands the current CLI schema and can inspect the released
+# proxy without replacing the installed executable.
+production_before=$(production_snapshot)
+trap publish_failure EXIT HUP INT TERM
+
+gh api --method POST "repos/$repo/statuses/$sha" \
+	-f state=pending \
+	-f context="$status_context" \
+	-f description='Live Codex routing validation running' >/dev/null
 
 release_tests='
 TestCodexInstalledNormalPassesThroughLiveUpstream
