@@ -232,6 +232,7 @@ Session selectors:
 
 Control durable rescue mode on the loopback proxy. Requests require the local
 proxy token and never send it upstream.
+With no --port, enter restores the CQ service if the listener is missing.
 `,
 	"proxy leases": `Usage: cq proxy leases <command>
 

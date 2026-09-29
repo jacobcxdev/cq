@@ -26,6 +26,26 @@ MOCK
 cat > "$root/launchctl" <<'MOCK'
 #!/bin/bash
 printf '%s\n' "$*" >> "$CQ_HOOK_TEST_ROOT/launchctl.log"
+if [[ "${1:-}" == print ]]; then
+  remaining=0
+  if [[ -f "$CQ_HOOK_TEST_ROOT/pending-bootout" ]]; then
+    remaining=$(cat "$CQ_HOOK_TEST_ROOT/pending-bootout")
+  fi
+  if (( remaining > 0 )); then
+    printf '%s\n' "$((remaining - 1))" > "$CQ_HOOK_TEST_ROOT/pending-bootout"
+    exit 0
+  fi
+  if [[ "${2:-}" == */dev.jacobcx.cq.proxy && -f "$CQ_HOOK_TEST_ROOT/flap" ]]; then
+    phase=$(cat "$CQ_HOOK_TEST_ROOT/flap")
+    if [[ "$phase" == 2 ]]; then
+      printf '1\n' > "$CQ_HOOK_TEST_ROOT/flap"
+      exit 113
+    fi
+    rm "$CQ_HOOK_TEST_ROOT/flap"
+    exit 0
+  fi
+  exit 113
+fi
 MOCK
 cat > "$root/staged/cq" <<'MOCK'
 #!/bin/bash
@@ -45,6 +65,12 @@ run_hook install
 run_hook install
 run_hook uninstall
 [[ $(wc -l < "$root/service.log") -eq 3 ]] || exit 1
+printf '3\n' > "$root/pending-bootout"
+printf '2\n' > "$root/flap"
+run_hook install
+[[ $(cat "$root/pending-bootout") == 0 && ! -e "$root/flap" ]] || exit 1
+run_hook uninstall
+[[ $(wc -l < "$root/service.log") -eq 5 ]] || exit 1
 rm "$target"
 printf foreign > "$target"
 expect_failure install
@@ -69,5 +95,5 @@ rm "$root/staged/cq"
 touch "$root/home/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist" "$root/home/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"
 run_hook uninstall
 [[ ! -e "$root/home/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist" && ! -e "$root/home/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist" ]] || exit 1
-[[ $(wc -l < "$root/launchctl.log") -eq 4 ]] || exit 1
+[[ $(grep -c '^bootout ' "$root/launchctl.log") -eq 2 ]] || exit 1
 echo "Homebrew lifecycle ownership, quarantine, rollback, and missing-binary tests passed"
