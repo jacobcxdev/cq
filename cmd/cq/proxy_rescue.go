@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
@@ -84,6 +85,9 @@ func runProxyRescueWithDependencies(ctx context.Context, args []string, output i
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
 	response, err := doer.Do(request)
 	if err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return fmt.Errorf("proxy rescue requires a running listener; run cq proxy restart first: %w", err)
+		}
 		return err
 	}
 	if response == nil || response.Body == nil {
