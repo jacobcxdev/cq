@@ -3,14 +3,23 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+type refusedRescueDoer struct{}
+
+func (refusedRescueDoer) Do(*http.Request) (*http.Response, error) {
+	return nil, syscall.ECONNREFUSED
+}
 
 func TestProxyRescueControlUsesAuthenticatedLoopback(t *testing.T) {
 	var gotMethod, gotPath, gotAuthorization string
@@ -49,5 +58,14 @@ func TestProxyRescueControlRejectsInvalidArgumentsBeforeRequest(t *testing.T) {
 	}, http.DefaultClient)
 	if err == nil || called {
 		t.Fatalf("error=%v load-called=%v", err, called)
+	}
+}
+
+func TestProxyRescueControlExplainsMissingListener(t *testing.T) {
+	err := runProxyRescueWithDependencies(context.Background(), []string{"enter"}, &bytes.Buffer{}, func() (*proxy.Config, error) {
+		return &proxy.Config{Port: 19280, LocalToken: "local-token"}, nil
+	}, refusedRescueDoer{})
+	if !errors.Is(err, syscall.ECONNREFUSED) || !strings.Contains(err.Error(), "cq proxy restart") {
+		t.Fatalf("error = %v, want restart guidance with original cause", err)
 	}
 }

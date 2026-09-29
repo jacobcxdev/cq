@@ -212,6 +212,7 @@ var runProxyLaunchctl = func(args ...string) error {
 }
 
 var currentExecutable = os.Executable
+var installMissingProxyService = runService
 
 func installProxyAgent() error {
 	if err := rejectHomebrewProxyServiceMutation("start"); err != nil {
@@ -254,11 +255,26 @@ func initialiseDarwinRuntimeLifecycle() error {
 
 func restartProxyAgent() error {
 	uid := os.Getuid()
-	if executable, executableErr := currentExecutable(); executableErr == nil && isHomebrewFormulaExecutable(executable) {
-		if err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, homebrewProxyAgentLabel)); err != nil {
-			return fmt.Errorf("launchctl kickstart Homebrew service: %w", err)
+	if executable, executableErr := currentExecutable(); executableErr == nil {
+		if isHomebrewFormulaExecutable(executable) {
+			if err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, homebrewProxyAgentLabel)); err != nil {
+				return fmt.Errorf("launchctl kickstart Homebrew service: %w", err)
+			}
+			return nil
 		}
-		return nil
+		if stable, cask := homebrewCaskExecutable(executable); cask {
+			err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, proxyAgentLabel))
+			if err == nil {
+				return nil
+			}
+			if exitErr, ok := err.(interface{ ExitCode() int }); !ok || exitErr.ExitCode() != 113 {
+				return fmt.Errorf("launchctl kickstart: %w", err)
+			}
+			if err := installMissingProxyService([]string{"install", "--owner=homebrew", "--service-executable=" + stable}); err != nil {
+				return fmt.Errorf("restore missing Homebrew CQ service: %w", err)
+			}
+			return nil
+		}
 	}
 	err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, proxyAgentLabel))
 	if err == nil {
@@ -268,6 +284,9 @@ func restartProxyAgent() error {
 		return fmt.Errorf("launchctl kickstart: %w", err)
 	}
 	if err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, homebrewProxyAgentLabel)); err != nil {
+		if exitErr, ok := err.(interface{ ExitCode() int }); ok && exitErr.ExitCode() == 113 {
+			return fmt.Errorf("CQ service is not registered; run cq service install: %w", err)
+		}
 		return fmt.Errorf("launchctl kickstart Homebrew service: %w", err)
 	}
 	return nil
@@ -325,4 +344,20 @@ func isHomebrewFormulaExecutable(executable string) bool {
 		}
 	}
 	return false
+}
+
+func homebrewCaskExecutable(executable string) (string, bool) {
+	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+		executable = resolved
+	}
+	if !filepath.IsAbs(executable) || filepath.Base(executable) != "cq" {
+		return "", false
+	}
+	version := filepath.Dir(executable)
+	packageDir := filepath.Dir(version)
+	caskroom := filepath.Dir(packageDir)
+	if filepath.Base(packageDir) != "cq" || filepath.Base(caskroom) != "Caskroom" {
+		return "", false
+	}
+	return filepath.Join(filepath.Dir(caskroom), "bin", "cq"), true
 }

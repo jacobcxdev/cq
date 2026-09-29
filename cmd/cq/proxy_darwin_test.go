@@ -275,6 +275,105 @@ func TestRestartProxyAgentTargetsHomebrewLabelWhenManagedByHomebrew(t *testing.T
 	}
 }
 
+func TestRestartProxyAgentRestoresMissingHomebrewCaskService(t *testing.T) {
+	oldExecutable := currentExecutable
+	oldRunner := runProxyLaunchctl
+	oldInstall := installMissingProxyService
+	t.Cleanup(func() {
+		currentExecutable = oldExecutable
+		runProxyLaunchctl = oldRunner
+		installMissingProxyService = oldInstall
+	})
+	currentExecutable = func() (string, error) {
+		return "/opt/homebrew/Caskroom/cq/0.33.7/cq", nil
+	}
+	var calls int
+	runProxyLaunchctl = func(...string) error {
+		calls++
+		return launchctlTestExitError(113)
+	}
+	var installArgs []string
+	installMissingProxyService = func(args []string) error {
+		installArgs = args
+		return nil
+	}
+
+	if err := restartProxyAgent(); err != nil {
+		t.Fatalf("restartProxyAgent: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("launchctl calls = %d, want 1", calls)
+	}
+	want := []string{"install", "--owner=homebrew", "--service-executable=/opt/homebrew/bin/cq"}
+	if !reflect.DeepEqual(installArgs, want) {
+		t.Fatalf("service install args = %v, want %v", installArgs, want)
+	}
+}
+
+func TestRestartProxyAgentTargetsHomebrewCaskLabel(t *testing.T) {
+	oldExecutable := currentExecutable
+	oldRunner := runProxyLaunchctl
+	oldInstall := installMissingProxyService
+	t.Cleanup(func() {
+		currentExecutable = oldExecutable
+		runProxyLaunchctl = oldRunner
+		installMissingProxyService = oldInstall
+	})
+	currentExecutable = func() (string, error) { return "/opt/homebrew/Caskroom/cq/0.33.7/cq", nil }
+	var calls [][]string
+	runProxyLaunchctl = func(args ...string) error {
+		calls = append(calls, args)
+		return nil
+	}
+	installMissingProxyService = func([]string) error {
+		t.Fatal("service install called when cask service exists")
+		return nil
+	}
+
+	if err := restartProxyAgent(); err != nil {
+		t.Fatal(err)
+	}
+	want := [][]string{{"kickstart", "-k", fmt.Sprintf("gui/%d/%s", os.Getuid(), proxyAgentLabel)}}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("launchctl calls = %v, want %v", calls, want)
+	}
+}
+
+func TestRestartProxyAgentReportsCaskRestoreFailure(t *testing.T) {
+	oldExecutable := currentExecutable
+	oldRunner := runProxyLaunchctl
+	oldInstall := installMissingProxyService
+	t.Cleanup(func() {
+		currentExecutable = oldExecutable
+		runProxyLaunchctl = oldRunner
+		installMissingProxyService = oldInstall
+	})
+	currentExecutable = func() (string, error) { return "/opt/homebrew/Caskroom/cq/0.33.7/cq", nil }
+	runProxyLaunchctl = func(...string) error { return launchctlTestExitError(113) }
+	installMissingProxyService = func([]string) error { return errors.New("install failed") }
+
+	err := restartProxyAgent()
+	if err == nil || !strings.Contains(err.Error(), "restore missing Homebrew CQ service: install failed") {
+		t.Fatalf("restartProxyAgent error = %v, want restore failure", err)
+	}
+}
+
+func TestRestartProxyAgentReportsMissingManualService(t *testing.T) {
+	oldExecutable := currentExecutable
+	oldRunner := runProxyLaunchctl
+	t.Cleanup(func() {
+		currentExecutable = oldExecutable
+		runProxyLaunchctl = oldRunner
+	})
+	currentExecutable = func() (string, error) { return "/tmp/cq", nil }
+	runProxyLaunchctl = func(...string) error { return launchctlTestExitError(113) }
+
+	err := restartProxyAgent()
+	if err == nil || !strings.Contains(err.Error(), "run cq service install") {
+		t.Fatalf("restartProxyAgent error = %v, want install guidance", err)
+	}
+}
+
 func TestDarwinProxyInspectionBoundaryHasNoLiveCollectorsInCU1(t *testing.T) {
 	target := darwinProxyInspectionTarget()
 	if target.Inspector == nil || target.Desired == nil || target.Service == nil || target.Listener == nil || target.Process == nil || target.Runtime == nil || target.DataPlane == nil {
