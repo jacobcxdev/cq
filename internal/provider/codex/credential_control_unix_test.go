@@ -11,11 +11,71 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
 )
+
+type failingOnceCredentialListener struct {
+	net.Listener
+	failure error
+	calls   atomic.Int32
+}
+
+func (listener *failingOnceCredentialListener) Accept() (net.Conn, error) {
+	if listener.calls.Add(1) == 1 {
+		return nil, listener.failure
+	}
+	return listener.Listener.Accept()
+}
+
+func TestCredentialEndpointAcceptRecoversFromFileDescriptorExhaustion(t *testing.T) {
+	for _, failure := range []error{syscall.EMFILE, syscall.ENFILE} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			listener, err := net.Listen("unix", shortControlPath(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			flaky := &failingOnceCredentialListener{Listener: listener, failure: failure}
+			accepted := make(chan error, 1)
+			go func() {
+				conn, acceptErr := acceptCredentialConnection(flaky)
+				if conn != nil {
+					_ = conn.Close()
+				}
+				accepted <- acceptErr
+			}()
+			client, err := net.DialTimeout("unix", listener.Addr().String(), time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			select {
+			case err := <-accepted:
+				if err != nil || flaky.calls.Load() != 2 {
+					t.Fatalf("accept after %v = %v, calls=%d", failure, err, flaky.calls.Load())
+				}
+			case <-time.After(time.Second):
+				t.Fatal("credential listener stopped accepting after temporary failure")
+			}
+		})
+	}
+}
+
+func TestCredentialEndpointAcceptStopsOnPermanentError(t *testing.T) {
+	for _, failure := range []error{net.ErrClosed, syscall.EPERM} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			listener := &failingOnceCredentialListener{failure: failure}
+			conn, err := acceptCredentialConnection(listener)
+			if conn != nil || !errors.Is(err, failure) || listener.calls.Load() != 1 {
+				t.Fatalf("permanent accept failure = %v, %v, calls=%d", conn, err, listener.calls.Load())
+			}
+		})
+	}
+}
 
 func TestCredentialControlPreparedInitializesBeforeAccept(t *testing.T) {
 	coordinator, _ := testCoordinator(t)

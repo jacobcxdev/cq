@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/rpc"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -174,7 +175,7 @@ func openCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryObserv
 		defer close(done)
 		defer func() { _ = recover() }()
 		for {
-			conn, acceptErr := listener.Accept()
+			conn, acceptErr := acceptCredentialConnection(listener)
 			if acceptErr != nil {
 				return
 			}
@@ -196,6 +197,20 @@ func openCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryObserv
 		}
 	}()
 	return control, nil
+}
+
+func acceptCredentialConnection(listener net.Listener) (net.Conn, error) {
+	for {
+		conn, err := listener.Accept()
+		if err == nil {
+			return conn, nil
+		}
+		var netErr net.Error
+		if !errors.Is(err, syscall.EMFILE) && !errors.Is(err, syscall.ENFILE) && (!errors.As(err, &netErr) || !netErr.Temporary()) {
+			return nil, err
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 func dialCredentialOwner(path string, timeout time.Duration) (*rpc.Client, error) {
