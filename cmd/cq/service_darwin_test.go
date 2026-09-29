@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/userdirs"
@@ -231,7 +232,13 @@ func TestDarwinServiceRestartsAndRemovesBothJobs(t *testing.T) {
 		{"kickstart", "-k", "gui/501/" + agentLabel},
 		{"kickstart", "-k", "gui/501/" + proxyAgentLabel},
 		{"bootout", "gui/501/" + agentLabel},
-		{"bootout", "gui/501/" + proxyAgentLabel},
+	}
+	for range 10 {
+		want = append(want, []string{"print", "gui/501/" + agentLabel})
+	}
+	want = append(want, []string{"bootout", "gui/501/" + proxyAgentLabel})
+	for range 10 {
+		want = append(want, []string{"print", "gui/501/" + proxyAgentLabel})
 	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("launchctl calls = %#v, want %#v", runner.calls, want)
@@ -240,6 +247,36 @@ func TestDarwinServiceRestartsAndRemovesBothJobs(t *testing.T) {
 		if _, err := os.Stat(platform.plistPath(label)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("plist %s remains: %v", label, err)
 		}
+	}
+}
+
+func TestDarwinServiceWaitsForBootoutBeforeRemovingDefinition(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	runner.pendingBootout = map[string]int{proxyAgentLabel: 3}
+	if err := platform.RemoveProxy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.Preflight(context.Background(), platform.executable); err != nil {
+		t.Fatalf("upgrade preflight after delayed bootout: %v", err)
+	}
+}
+
+func TestDarwinServiceKeepsDefinitionWhenBootoutDoesNotFinish(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	runner.pendingBootout = map[string]int{proxyAgentLabel: 1000}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := platform.RemoveProxy(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RemoveProxy() error = %v, want deadline", err)
+	}
+	if _, err := os.Stat(platform.plistPath(proxyAgentLabel)); err != nil {
+		t.Fatalf("managed definition was removed before bootout finished: %v", err)
 	}
 }
 
@@ -337,10 +374,11 @@ func newDarwinServiceHarness(t *testing.T) (*darwinServicePlatform, *fakeDarwinL
 }
 
 type fakeDarwinLaunchctl struct {
-	calls    [][]string
-	loaded   map[string]bool
-	runs     map[string]int
-	failOnce map[string]error
+	calls          [][]string
+	loaded         map[string]bool
+	pendingBootout map[string]int
+	runs           map[string]int
+	failOnce       map[string]error
 }
 
 func (runner *fakeDarwinLaunchctl) Run(_ context.Context, args ...string) ([]byte, error) {
@@ -353,7 +391,11 @@ func (runner *fakeDarwinLaunchctl) Run(_ context.Context, args ...string) ([]byt
 	switch args[0] {
 	case "print":
 		label := filepath.Base(args[1])
-		if !runner.loaded[label] {
+		loaded := runner.loaded[label] || runner.pendingBootout[label] > 0
+		if runner.pendingBootout[label] > 0 {
+			runner.pendingBootout[label]--
+		}
+		if !loaded {
 			return nil, darwinLaunchctlExitError(113)
 		}
 		if label == agentLabel {

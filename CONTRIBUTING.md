@@ -97,9 +97,9 @@ Direct `cq proxy install|restart|uninstall` LaunchAgent commands remain
 available for focused development and repair work, but they are not a complete
 Homebrew installation path.
 
-The release lifecycle gate uses the unchanged previous release executable with
-the corrected installer artifacts. It verifies install, upgrade, transport and
-uninstall, but does not claim to reproduce every legacy stored-hook migration.
+The release lifecycle gate uses the published previous Cask and executable.
+It verifies the actual previous uninstall hook against the candidate install
+hook, followed by transport and uninstall checks.
 
 For local development rollouts, never overwrite the running executable in place
 with `cp`, `install`, or shell redirection. macOS can kill the mapped process with

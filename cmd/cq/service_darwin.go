@@ -428,10 +428,13 @@ func (platform *darwinServicePlatform) restore(ctx context.Context, label, path 
 }
 
 func (platform *darwinServicePlatform) remove(ctx context.Context, label string) error {
-	var result error
 	if _, err := platform.run(ctx, "bootout", platform.target(label)); err != nil && !isDarwinLaunchctlNotLoaded(err) {
-		result = errors.Join(result, fmt.Errorf("boot out %s: %w", label, err))
+		return fmt.Errorf("boot out %s: %w", label, err)
 	}
+	if err := platform.waitJobUnloaded(ctx, label); err != nil {
+		return fmt.Errorf("wait for %s to unload: %w", label, err)
+	}
+	var result error
 	path := platform.plistPath(label)
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		result = errors.Join(result, fmt.Errorf("remove %s definition: %w", label, err))
@@ -441,6 +444,33 @@ func (platform *darwinServicePlatform) remove(ctx context.Context, label string)
 		}
 	}
 	return result
+}
+
+func (platform *darwinServicePlatform) waitJobUnloaded(ctx context.Context, label string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	quiet := 0
+	for {
+		loaded, _, err := platform.printJob(ctx, label)
+		if err != nil {
+			return err
+		}
+		if !loaded {
+			quiet++
+			if quiet == 10 {
+				return nil
+			}
+		} else {
+			quiet = 0
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (platform *darwinServicePlatform) kickstart(ctx context.Context, label string) error {

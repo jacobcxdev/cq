@@ -37,10 +37,10 @@ func runProxyRescueContext(ctx context.Context, args []string, output io.Writer)
 		}
 		return &proxy.Config{Port: bootstrap.Port, LocalToken: bootstrap.LocalToken}, nil
 	}
-	return runProxyRescueWithDependencies(ctx, args, output, load, client)
+	return runProxyRescueWithDependencies(ctx, args, output, load, client, restartProxyAgent)
 }
 
-func runProxyRescueWithDependencies(ctx context.Context, args []string, output io.Writer, load func() (*proxy.Config, error), doer httputil.Doer) error {
+func runProxyRescueWithDependencies(ctx context.Context, args []string, output io.Writer, load func() (*proxy.Config, error), doer httputil.Doer, restart func() error) error {
 	if ctx == nil || output == nil || load == nil || doer == nil || len(args) == 0 {
 		return errors.New("usage: cq proxy rescue <enter|exit|status> [--port PORT]")
 	}
@@ -84,6 +84,21 @@ func runProxyRescueWithDependencies(ctx context.Context, args []string, output i
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
 	response, err := doer.Do(request)
+	if errors.Is(err, syscall.ECONNREFUSED) && args[0] == "enter" && len(args) == 1 && restart != nil {
+		if restartErr := restart(); restartErr != nil {
+			return fmt.Errorf("restore CQ service for rescue: %w", restartErr)
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		for errors.Is(err, syscall.ECONNREFUSED) {
+			select {
+			case <-waitCtx.Done():
+				return fmt.Errorf("proxy rescue listener did not start after service recovery: %w", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			response, err = doer.Do(request)
+		}
+	}
 	if err != nil {
 		if errors.Is(err, syscall.ECONNREFUSED) {
 			return fmt.Errorf("proxy rescue requires a running listener; run cq proxy restart first: %w", err)
