@@ -513,3 +513,37 @@ func (b *blockStubSource) Fetch(ctx context.Context) (SourceResult, error) {
 	b.mu.Unlock()
 	return b.inner.Fetch(ctx)
 }
+
+func TestRefresherKeepsClientVersionWithSuccessfulCodexSnapshot(t *testing.T) {
+	catalog := NewCatalog(Snapshot{CodexClientVersion: "0.158.0", Entries: []Entry{{ID: "gpt-6-sol", Provider: ProviderCodex}}})
+	entered, proceed := make(chan struct{}), make(chan struct{})
+	r := &Refresher{Catalog: catalog,
+		Anthropic: &stubSource{result: SourceResult{Entries: []Entry{{ID: "claude", Provider: ProviderAnthropic}}}},
+		Codex: SourceFunc(func(context.Context) (SourceResult, error) {
+			close(entered)
+			<-proceed
+			return SourceResult{}, errors.New("unavailable")
+		}),
+	}
+	done := make(chan error, 1)
+	go func() { _, err := r.Refresh(context.Background()); done <- err }()
+	<-entered
+	if got := catalog.Snapshot().CodexClientVersion; got != "0.158.0" {
+		t.Errorf("in-flight version=%s", got)
+	}
+	close(proceed)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := catalog.Snapshot().CodexClientVersion; got != "0.158.0" {
+		t.Fatalf("failed fetch relabelled cache: %s", got)
+	}
+	r.Codex = &stubSource{result: SourceResult{CodexClientVersion: "0.159.0", Entries: []Entry{{ID: "gpt-6.1-sol", Provider: ProviderCodex}}}}
+	if _, err := r.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snap := catalog.Snapshot()
+	if snap.CodexClientVersion != "0.159.0" {
+		t.Fatalf("successful version=%s", snap.CodexClientVersion)
+	}
+}

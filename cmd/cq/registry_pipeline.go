@@ -18,13 +18,13 @@ import (
 )
 
 type registryPipeline struct {
-	Catalog           *modelregistry.Catalog
-	Refresher         *modelregistry.Refresher
-	Publish           func()
-	StartReconciler   func(context.Context)
-	claudeCodePath    string
-	publishMu         sync.Mutex
-	reconcilerStartMu sync.Mutex
+	Catalog         *modelregistry.Catalog
+	Refresher       *modelregistry.Refresher
+	Publish         func()
+	StartReconciler func(context.Context) <-chan struct{}
+	claudeCodePath  string
+	publishMu       sync.Mutex
+	reconcilerStart sync.Once
 }
 
 // tokenIsFresh reports whether a token with the given expiresAt (Unix ms) is
@@ -137,19 +137,21 @@ func firstClaudeAccessTokenFromAccounts(accounts []keyring.ClaudeOAuth) func() (
 }
 
 type registryPipelineOptions struct {
-	FS                   fsutil.FileSystem
-	HomeDir              string
-	Roots                userdirs.Roots
-	ClaudeUpstream       string
-	CodexUpstream        string
-	HTTPClient           httputil.Doer
-	CodexClientVersion   string
-	ClaudeToken          func() (string, error)
-	CodexToken           func() (string, error)
-	CodexTokenContext    func(context.Context) (string, error)
-	CodexAuthenticatedDo func(context.Context, *http.Request) (*http.Response, error)
-	Env                  func(string) string
-	Stderr               io.Writer
+	FS                        fsutil.FileSystem
+	HomeDir                   string
+	Roots                     userdirs.Roots
+	ClaudeUpstream            string
+	CodexUpstream             string
+	HTTPClient                httputil.Doer
+	CodexClientVersion        string
+	ResolveCodexClientVersion func() string
+	RefreshInterval           time.Duration
+	ClaudeToken               func() (string, error)
+	CodexToken                func() (string, error)
+	CodexTokenContext         func(context.Context) (string, error)
+	CodexAuthenticatedDo      func(context.Context, *http.Request) (*http.Response, error)
+	Env                       func(string) string
+	Stderr                    io.Writer
 }
 
 func snapshotHasProvider(snap modelregistry.Snapshot, provider modelregistry.Provider) bool {
@@ -205,8 +207,12 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		opts.Stderr = io.Discard
 	}
 
+	if opts.RefreshInterval <= 0 {
+		opts.RefreshInterval = 5 * time.Minute
+	}
 	seedEntries := cachedRegistryEntries(opts)
-	seedSnap := modelregistry.Snapshot{Entries: seedEntries}
+	seedVersion := modelregistry.DiscoverCodexClientVersion(opts.FS, codexModelCachePath(modelsDeps{HomeDir: opts.HomeDir, Env: opts.Env}))
+	seedSnap := modelregistry.Snapshot{Entries: seedEntries, CodexClientVersion: seedVersion}
 	catalog := modelregistry.NewCatalog(seedSnap)
 	refresher := &modelregistry.Refresher{
 		Catalog: catalog,
@@ -226,8 +232,9 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 				}
 				return opts.CodexToken()
 			},
-			AuthenticatedDo: opts.CodexAuthenticatedDo,
-			ClientVersion:   opts.CodexClientVersion,
+			AuthenticatedDo:      opts.CodexAuthenticatedDo,
+			ClientVersion:        opts.CodexClientVersion,
+			ResolveClientVersion: opts.ResolveCodexClientVersion,
 		},
 		Overlays: modelregistry.FileOverlayStore{
 			FS:   opts.FS,
@@ -258,33 +265,56 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		if codexHome == "" {
 			codexHome = filepath.Join(opts.HomeDir, ".codex")
 		}
-		if err := modelregistry.PublishCodexCache(opts.FS, filepath.Join(codexHome, "models_cache.json"), snap, now, opts.CodexClientVersion); err != nil {
+		if err := modelregistry.PublishCodexCache(opts.FS, filepath.Join(codexHome, "models_cache.json"), snap, now, snap.CodexClientVersion); err != nil {
 			fmt.Fprintf(opts.Stderr, "cq: registry: publish Codex cache: %v\n", err)
 		}
 	}
-	p.StartReconciler = func(ctx context.Context) {
-		p.reconcilerStartMu.Lock()
-		defer p.reconcilerStartMu.Unlock()
-		go func() {
-			ticker := time.NewTicker(time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					snap := catalog.Snapshot()
-					need, err := modelregistry.ClaudeCodeOptionsNeedPublish(opts.FS, p.claudeCodePath, snap)
-					if err != nil {
-						fmt.Fprintf(opts.Stderr, "cq: registry: check Claude Code options: %v\n", err)
-						continue
+	done := make(chan struct{})
+	p.StartReconciler = func(ctx context.Context) <-chan struct{} {
+		p.reconcilerStart.Do(func() {
+			go func() {
+				defer close(done)
+				defer func() {
+					if recover() != nil {
+						fmt.Fprintln(opts.Stderr, "cq: registry: background refresh stopped after panic")
 					}
-					if need {
-						p.Publish()
+				}()
+				refreshTicker := time.NewTicker(opts.RefreshInterval)
+				defer refreshTicker.Stop()
+				ticker := time.NewTicker(time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-refreshTicker.C:
+						refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+						diag, err := p.Refresher.Refresh(refreshCtx)
+						cancel()
+						if ctx.Err() != nil {
+							return
+						}
+						writeRegistrySourceDiagnostics(opts.Stderr, diag)
+						if err != nil {
+							fmt.Fprintf(opts.Stderr, "cq: registry: background refresh: %v\n", err)
+						} else {
+							p.Publish()
+						}
+					case <-ticker.C:
+						snap := catalog.Snapshot()
+						need, err := modelregistry.ClaudeCodeOptionsNeedPublish(opts.FS, p.claudeCodePath, snap)
+						if err != nil {
+							fmt.Fprintf(opts.Stderr, "cq: registry: check Claude Code options: %v\n", err)
+							continue
+						}
+						if need {
+							p.Publish()
+						}
 					}
 				}
-			}
-		}()
+			}()
+		})
+		return done
 	}
 
 	return p, nil

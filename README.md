@@ -476,6 +476,8 @@ cq models overlay remove --provider codex --id gpt-5.5
 cq models overlay prune
 ```
 
+The running proxy refreshes upstream models every five minutes. Each Codex fetch resolves the current installed client version, so Desktop upgrades take effect without restarting CQ. Failed fetches retain the last usable models. Use `cq models refresh` for an immediate refresh.
+
 Registry refresh merges provider sources with local overlays, validates entries, and publishes:
 
 - Codex model cache at `$CODEX_HOME/models_cache.json` or `~/.codex/models_cache.json`;

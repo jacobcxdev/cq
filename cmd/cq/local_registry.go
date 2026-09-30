@@ -50,7 +50,7 @@ func buildLocalRegistry(cfg *proxy.Config, versionStr string, roots userdirs.Roo
 	}
 
 	httpClient := newHTTPClientFn(30*time.Second, versionStr)
-	codexClientVersion := defaultCodexClientVersion()
+	codexClientVersion := defaultCodexRoutingClientBuild()
 	credentialControl, err := codexprov.OpenDefaultCredentialRefreshControl(context.Background(), fsys, httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("Codex credential coordinator: %w", err)

@@ -42,6 +42,8 @@ type CodexSource struct {
 	AuthenticatedDo func(ctx context.Context, req *http.Request) (*http.Response, error)
 	// ClientVersion is sent as the client_version query parameter.
 	ClientVersion string
+	// ResolveClientVersion overrides ClientVersion on each fetch after client upgrades.
+	ResolveClientVersion func() string
 }
 
 // Fetch implements NativeSource.
@@ -61,8 +63,12 @@ func (s *CodexSource) Fetch(ctx context.Context) (SourceResult, error) {
 	}
 
 	url := baseURL + "/models"
-	if s.ClientVersion != "" {
-		url += "?client_version=" + s.ClientVersion
+	clientVersion := s.ClientVersion
+	if s.ResolveClientVersion != nil {
+		clientVersion = s.ResolveClientVersion()
+	}
+	if clientVersion != "" {
+		url += "?client_version=" + clientVersion
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -127,9 +133,10 @@ func (s *CodexSource) Fetch(ctx context.Context) (SourceResult, error) {
 	}
 
 	return SourceResult{
-		Entries:          entries,
-		CodexRawByID:     rawByID,
-		FetchedAt:        time.Now(),
-		MalformedEntries: malformed,
+		Entries:            entries,
+		CodexClientVersion: clientVersion,
+		CodexRawByID:       rawByID,
+		FetchedAt:          time.Now(),
+		MalformedEntries:   malformed,
 	}, nil
 }
