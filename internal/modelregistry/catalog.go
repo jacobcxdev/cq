@@ -8,10 +8,11 @@ import (
 
 // Snapshot is an immutable point-in-time view of the registry.
 type Snapshot struct {
-	Entries          []Entry
-	CodexRawByID     map[string]json.RawMessage
-	AnthropicRawByID map[string]json.RawMessage
-	FetchedAt        time.Time
+	Entries            []Entry
+	CodexRawByID       map[string]json.RawMessage
+	AnthropicRawByID   map[string]json.RawMessage
+	FetchedAt          time.Time
+	CodexClientVersion string
 }
 
 // Catalog is a concurrency-safe store for the current registry Snapshot.
@@ -50,10 +51,11 @@ func (c *Catalog) Snapshot() Snapshot {
 // slices, maps, and json.RawMessage byte slices.
 func deepCopySnapshot(s Snapshot) Snapshot {
 	return Snapshot{
-		Entries:          copyEntries(s.Entries),
-		CodexRawByID:     copyRawMap(s.CodexRawByID),
-		AnthropicRawByID: copyRawMap(s.AnthropicRawByID),
-		FetchedAt:        s.FetchedAt,
+		Entries:            copyEntries(s.Entries),
+		CodexRawByID:       copyRawMap(s.CodexRawByID),
+		AnthropicRawByID:   copyRawMap(s.AnthropicRawByID),
+		FetchedAt:          s.FetchedAt,
+		CodexClientVersion: s.CodexClientVersion,
 	}
 }
 

@@ -299,3 +299,28 @@ func TestCodexSource_PreservesRawJSON(t *testing.T) {
 		t.Errorf("shell_type = %v, want default", decoded["shell_type"])
 	}
 }
+
+func TestCodexSourceResolvesClientVersionOnEveryFetch(t *testing.T) {
+	version := "0.158.0"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("client_version") == "0.159.0" {
+			_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-6.1-sol"}]}`))
+		} else {
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		}
+	}))
+	defer srv.Close()
+	src := &CodexSource{Client: srv.Client(), BaseURL: srv.URL,
+		Token:         func(context.Context) (string, error) { return "token", nil },
+		ClientVersion: "0.124.0", ResolveClientVersion: func() string { return version },
+	}
+	first, err := src.Fetch(context.Background())
+	if err != nil || len(first.Entries) != 0 {
+		t.Fatalf("before upgrade: %+v, %v", first.Entries, err)
+	}
+	version = "0.159.0"
+	second, err := src.Fetch(context.Background())
+	if err != nil || len(second.Entries) != 1 || second.Entries[0].ID != "gpt-6.1-sol" {
+		t.Fatalf("after upgrade: %+v, %v", second.Entries, err)
+	}
+}

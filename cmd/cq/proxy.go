@@ -494,15 +494,16 @@ type proxyCommandOptions struct {
 }
 
 type proxyRegistryDependencies struct {
-	FS                  fsutil.FileSystem
-	HomeDir             string
-	Roots               userdirs.Roots
-	HTTPClient          httputil.Doer
-	CodexClientVersion  string
-	ClaudeToken         func() (string, error)
-	CredentialAuthority codexRegistryCredentialAuthority
-	Env                 func(string) string
-	Stderr              io.Writer
+	FS                        fsutil.FileSystem
+	HomeDir                   string
+	Roots                     userdirs.Roots
+	HTTPClient                httputil.Doer
+	CodexClientVersion        string
+	ResolveCodexClientVersion func() string
+	ClaudeToken               func() (string, error)
+	CredentialAuthority       codexRegistryCredentialAuthority
+	Env                       func(string) string
+	Stderr                    io.Writer
 }
 
 func newProxyRegistryPipeline(cfg *proxy.Config, deps proxyRegistryDependencies) (*registryPipeline, error) {
@@ -510,16 +511,17 @@ func newProxyRegistryPipeline(cfg *proxy.Config, deps proxyRegistryDependencies)
 		return nil, fmt.Errorf("registry pipeline: missing proxy config")
 	}
 	return newRegistryPipelineWithCodexAuthority(registryPipelineOptions{
-		FS:                 deps.FS,
-		HomeDir:            deps.HomeDir,
-		Roots:              deps.Roots,
-		ClaudeUpstream:     cfg.ClaudeUpstream,
-		CodexUpstream:      cfg.CodexUpstream,
-		HTTPClient:         deps.HTTPClient,
-		CodexClientVersion: deps.CodexClientVersion,
-		ClaudeToken:        deps.ClaudeToken,
-		Env:                deps.Env,
-		Stderr:             deps.Stderr,
+		FS:                        deps.FS,
+		HomeDir:                   deps.HomeDir,
+		Roots:                     deps.Roots,
+		ClaudeUpstream:            cfg.ClaudeUpstream,
+		CodexUpstream:             cfg.CodexUpstream,
+		HTTPClient:                deps.HTTPClient,
+		CodexClientVersion:        deps.CodexClientVersion,
+		ResolveCodexClientVersion: deps.ResolveCodexClientVersion,
+		ClaudeToken:               deps.ClaudeToken,
+		Env:                       deps.Env,
+		Stderr:                    deps.Stderr,
 	}, deps.CredentialAuthority)
 }
 
@@ -1020,15 +1022,16 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	var pipeline *registryPipeline
 	if homeErr == nil {
 		pipeline, err = newProxyRegistryPipeline(cfg, proxyRegistryDependencies{
-			FS:                  fsys,
-			HomeDir:             homeDir,
-			Roots:               roots,
-			HTTPClient:          refreshClient,
-			CodexClientVersion:  codexClientBuild,
-			ClaudeToken:         firstClaudeAccessToken,
-			CredentialAuthority: newCodexRegistryControlAdapter(credentialControl),
-			Env:                 os.Getenv,
-			Stderr:              os.Stderr,
+			FS:                        fsys,
+			HomeDir:                   homeDir,
+			Roots:                     roots,
+			HTTPClient:                refreshClient,
+			CodexClientVersion:        codexClientBuild,
+			ResolveCodexClientVersion: defaultCodexRoutingClientBuild,
+			ClaudeToken:               firstClaudeAccessToken,
+			CredentialAuthority:       newCodexRegistryControlAdapter(credentialControl),
+			Env:                       os.Getenv,
+			Stderr:                    os.Stderr,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: registry: configure: %v (registry disabled)\n", err)
@@ -1064,7 +1067,8 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		}
 		initialRefreshCancel()
 		if pipeline.StartReconciler != nil {
-			pipeline.StartReconciler(context.Background())
+			registryDone := pipeline.StartReconciler(proxyCtx)
+			defer func() { proxyCancel(); <-registryDone }()
 		}
 	}
 
