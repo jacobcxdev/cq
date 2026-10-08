@@ -840,3 +840,30 @@ func (writer *codexNativeHTTPOrderWriter) Write(body []byte) (int, error) {
 }
 
 func (writer *codexNativeHTTPOrderWriter) Flush() {}
+
+func TestCodexNativeHTTPPolicyConflictIsInvalidRequestAndPrivate(t *testing.T) {
+	const private = "private-account-and-policy-detail"
+	for _, cause := range []error{
+		fmt.Errorf("%w: %s", ErrSessionPolicyContinuity, private),
+		newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, fmt.Errorf("%w: %s", ErrSessionPolicyContinuity, private)),
+	} {
+		planner := &codexNativeHTTPPlannerStub{err: cause}
+		handler, err := NewCodexNativeHTTPHandler(planner, &CodexHTTPRequestSession{}, "https://codex.example")
+		if err != nil {
+			t.Fatal(err)
+		}
+		request, err := http.NewRequest(http.MethodPost, "http://localhost/responses", strings.NewReader(`{"input":"private"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		writer := newCodexNativeHTTPOrderWriter(new([]string))
+		handled, _ := handler.TryServe(writer, request, false)
+		if !handled || planner.calls != 1 || writer.status != http.StatusBadRequest {
+			t.Fatalf("policy conflict handled=%v calls=%d status=%d, want true/1/400", handled, planner.calls, writer.status)
+		}
+		body := writer.body.String()
+		if !strings.Contains(body, "invalid_request_error") || !strings.Contains(body, "session continuity conflicts with access policy") || strings.Contains(body, private) {
+			t.Fatalf("unsafe or misleading policy error: %q", body)
+		}
+	}
+}
