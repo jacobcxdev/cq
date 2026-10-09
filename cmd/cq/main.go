@@ -229,6 +229,13 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if len(os.Args) >= 3 && os.Args[1] == "proxy" && os.Args[2] == "runtime-check" {
+		if err := runProxyRuntimeCheck(os.Args[3:], os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, "cq: runtime preflight failed")
+			os.Exit(1)
+		}
+		return
+	}
 	if isLinuxAcceptanceHelperCommand(os.Args[1:]) {
 		if err := runLinuxAcceptanceHelper(context.Background()); err != nil {
 			fmt.Fprintln(os.Stderr, "cq: Linux acceptance helper failed")
