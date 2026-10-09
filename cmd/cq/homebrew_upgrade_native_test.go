@@ -126,6 +126,16 @@ func TestNativeHomebrewUpgradeAcceptance(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(fixture.roots.State, "runtime-artifacts")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("retained artifacts survived uninstall: %v", err)
 	}
+	for _, path := range []string{filepath.Join(fixture.root, "caskroom/cq/0.34.1"), filepath.Join(fixture.root, "caskroom/cq/.metadata/0.34.1"), (proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: fixture.roots}).Path()} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("uninstall retained package or journal: %s %v", path, err)
+		}
+	}
+	for _, path := range []string{filepath.Join(fixture.roots.Config, "config.toml"), filepath.Join(fixture.home, ".codex/accounts/fixture.auth.json"), filepath.Join(fixture.roots.Logs, "proxy.log")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("uninstall removed preserved user state: %s %v", path, err)
+		}
+	}
 	fixture.evidence.Outcomes = append(fixture.evidence.Outcomes, "same-version-reinstall", "true-uninstall")
 	if nativeProductionSnapshot(t, productionPaths) != production {
 		t.Fatal("production state changed after package operations")
@@ -784,7 +794,7 @@ end
 def installer(cask,**kwargs);Cask::Installer.new(cask,command:CQFixtureCommand,**kwargs);end
 action=CQFixtureInputs.fetch("CQ_FIXTURE_ACTION")
 if action=="uninstall"
- old=installed(version);installer(old).uninstall_artifacts
+ old=installed(version);installer(old).uninstall
 else
  old=nil
  if action!="install"
