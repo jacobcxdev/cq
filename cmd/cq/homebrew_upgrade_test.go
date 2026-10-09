@@ -20,6 +20,10 @@ func runGeneratedCQHomebrewArtifacts(t *testing.T, prelude string, wantFailure b
 }
 
 func runGeneratedCQHomebrewArtifactsWithMetadata(t *testing.T, prelude string, wantFailure, metadata bool) string {
+	return runGeneratedCQHomebrewArtifactsWithFormatting(t, prelude, wantFailure, metadata, false)
+}
+
+func runGeneratedCQHomebrewArtifactsWithFormatting(t *testing.T, prelude string, wantFailure, metadata, format bool) string {
 	t.Helper()
 	if runtime.GOOS != "darwin" {
 		t.Skip("native Homebrew test")
@@ -41,6 +45,26 @@ func runGeneratedCQHomebrewArtifactsWithMetadata(t *testing.T, prelude string, w
 		lines = append(lines, strings.TrimPrefix(line, "      "))
 	}
 	block = strings.ReplaceAll(strings.Join(lines, "\n"), "{{ .Version }}", "0.34.0")
+	caskContent := `cask "cq" do
+  version "0.34.0"
+  sha256 :no_check
+  url "https://example.invalid/cq.zip"
+` + block + "\nend\n"
+	if format {
+		path := filepath.Join(t.TempDir(), "cq.rb")
+		if err := os.WriteFile(path, []byte(caskContent), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		output, err := exec.Command("/bin/bash", "../../.github/scripts/format-homebrew-cask.sh", path).CombinedOutput()
+		if err != nil {
+			t.Fatalf("Homebrew formatter failed: %v\n%s", err, output)
+		}
+		formatted, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		caskContent = string(formatted)
+	}
 	metadataRoot := filepath.Join(t.TempDir(), "caskroom")
 	metadataSetup := ""
 	metadataProbe := ""
@@ -70,13 +94,7 @@ end
 CQCommandRecorder.calls = []
 ` + metadataSetup + prelude + `
 cask = Cask::CaskLoader::FromContentLoader.new(<<~'CASK').load(config: nil)
-cask "cq" do
-  version "0.34.0"
-  sha256 :no_check
-  url "https://example.invalid/cq.zip"
-` + block + `
-end
-CASK
+` + caskContent + `CASK
 ` + metadataProbe + `
 artifact = cask.artifacts.find { |a| a.is_a?(Cask::Artifact::Uninstall) }
 successor = Cask::Cask.new("cq") { version "0.34.1" }
@@ -120,4 +138,8 @@ end`, true)
 
 func TestHomebrewInstalledMetadataRetainsSuccessorCallback(t *testing.T) {
 	runGeneratedCQHomebrewArtifactsWithMetadata(t, "", false, true)
+}
+
+func TestHomebrewFormattedMetadataRetainsSuccessorCallback(t *testing.T) {
+	runGeneratedCQHomebrewArtifactsWithFormatting(t, "", false, true, true)
 }

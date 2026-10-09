@@ -128,12 +128,13 @@ homebrew_casks:
         raise "CQ upgrade requires a supported Homebrew uninstall callback"
       end
       cq_uninstall.singleton_class.prepend(Module.new do
-        def uninstall_phase(command:, successor: nil, reinstall: false, **kwargs)
+        define_method(:uninstall_phase) do |command:, successor: nil, reinstall: false, **kwargs|
           return if successor && successor.token == cask.token
           if reinstall
             raise "CQ reinstall requires a same-token Homebrew successor"
           end
 
-          super(command: command, successor: successor, reinstall: reinstall, **kwargs)
+          # define_method requires explicit argument forwarding to super.
+          super(command: command, successor: successor, reinstall: reinstall, **kwargs) # rubocop:disable Style/SuperArguments
         end
       end)

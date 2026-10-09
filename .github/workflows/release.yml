@@ -26,6 +26,7 @@ jobs:
         run: |
           .github/scripts/test-homebrew-lifecycle.sh
           .github/scripts/test-homebrew-install-status.sh
+          go test -race -count=1 ./cmd/cq -run '^TestHomebrew.*(Callback|Successor)'
 
       - name: Install current Codex client
         run: |
