@@ -80,6 +80,12 @@ func (controller *RuntimeUpgradeController) Begin(ctx context.Context, request R
 	if request.SchemaVersion != 1 || !runtimeUpgradeTransactionPattern.MatchString(request.TransactionID) || request.WaitTimeoutSeconds < 0 || request.WaitTimeoutSeconds > 30 || request.Candidate.Validate() != nil {
 		return RuntimeUpgradeReceiptV1{}, ErrRuntimeUpgradeReceipt
 	}
+	artifacts := installer.RuntimeArtifactStore{FS: controller.options.Store.FS, Roots: controller.options.Store.Roots}
+	artifactLock, err := artifacts.Lock()
+	if err != nil {
+		return RuntimeUpgradeReceiptV1{}, err
+	}
+	defer artifactLock.Close()
 	previous, err := controller.options.Store.Load()
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return previous, err

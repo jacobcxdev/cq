@@ -66,6 +66,11 @@ func (store RuntimeArtifactStore) Stage(ctx context.Context, source string) (Run
 	if store.FS == nil || !filepath.IsAbs(store.Roots.State) {
 		return RuntimeArtifact{}, ErrRuntimeArtifact
 	}
+	lock, err := store.Lock()
+	if err != nil {
+		return RuntimeArtifact{}, err
+	}
+	defer lock.Close()
 	// Package directories are public. Bind the regular source inode before reading.
 	before, err := os.Lstat(source)
 	if err != nil {

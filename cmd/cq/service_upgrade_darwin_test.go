@@ -52,6 +52,72 @@ func TestDarwinRuntimeStageUsesStablePackageLink(t *testing.T) {
 	}
 }
 
+func TestDarwinRuntimePruningWaitsForOwnershipAndPreservesJobReferences(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	roots := userdirs.Roots{State: filepath.Join(root, "state")}
+	artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: roots}
+	var copies []installer.RuntimeArtifact
+	for _, digit := range []string{"a", "b", "c", "d", "e"} {
+		digest := strings.Repeat(digit, 64)
+		path := filepath.Join(roots.State, "runtime-artifacts", digest, "cq")
+		if err := fsutil.EnsureSecureDirectory(artifacts.FS, filepath.Dir(path)); err != nil {
+			t.Fatal(err)
+		}
+		copies = append(copies, installer.RuntimeArtifact{Path: path, SHA256: digest, Version: "0.34.0", ProtocolVersion: 1})
+	}
+	platform := &darwinServicePlatform{home: root, roots: roots}
+	if err := os.MkdirAll(filepath.Dir(platform.plistPath(proxyAgentLabel)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, definition := range []darwinLaunchAgentDefinition{
+		{Label: proxyAgentLabel, ProgramArguments: []string{copies[0].Path, "proxy", "start"}, StandardErrorPath: filepath.Join(root, "proxy.log")},
+		{Label: agentLabel, ProgramArguments: []string{copies[1].Path, "refresh"}, StandardErrorPath: filepath.Join(root, "refresh.log")},
+	} {
+		data, err := renderDarwinLaunchAgent(definition)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(platform.plistPath(definition.Label), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ownership := installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}
+	record := installstate.Record{SchemaVersion: 1, Owner: installstate.OwnerHomebrew, Version: "0.34.0", Executable: filepath.Join(root, "package-cq"), BinaryDigest: copies[2].SHA256, Services: []string{proxyAgentLabel, agentLabel}}
+	if err := ownership.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	receipts := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: roots}
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "prune", Generation: 1, Phase: "prepared", Previous: copies[2], Candidate: copies[3], ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
+	for _, phase := range []string{"prepared", "waiting", "handoff", "verifying", "committed"} {
+		receipt.Phase = phase
+		if err := receipts.Save(receipt); err != nil {
+			t.Fatal(err)
+		}
+		if err := pruneDarwinServiceRuntime(ctx, platform, ownership, artifacts, receipts); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Dir(copies[4].Path)); err != nil {
+			t.Fatalf("pruned before runtime and ownership agreed: %s %v", phase, err)
+		}
+	}
+	record.BinaryDigest = copies[3].SHA256
+	if err := ownership.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneDarwinServiceRuntime(ctx, platform, ownership, artifacts, receipts); err != nil {
+		t.Fatal(err)
+	}
+	for _, artifact := range copies[:4] {
+		if _, err := os.Stat(filepath.Dir(artifact.Path)); err != nil {
+			t.Fatalf("job or transaction reference lost: %s %v", artifact.Path, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Dir(copies[4].Path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("obsolete directory retained: %v", err)
+	}
+}
+
 type upgradeBrokenResponseBody struct{}
 
 func (upgradeBrokenResponseBody) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }

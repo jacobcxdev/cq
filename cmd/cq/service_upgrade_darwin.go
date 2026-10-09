@@ -104,6 +104,59 @@ func configureDarwinServiceUpgrades(lifecycle *serviceLifecycle, platform *darwi
 		return platform.restore(ctx, agentLabel, platform.plistPath(agentLabel), component.Definition, component.Exists, component.Running)
 	}
 	lifecycle.RuntimeCleanup = func(ctx context.Context) error { return cleanupDarwinServiceRuntime(ctx, platform, receipts) }
+	lifecycle.RuntimePrune = func(ctx context.Context) error {
+		return pruneDarwinServiceRuntime(ctx, platform, lifecycle.Store, artifacts, receipts)
+	}
+}
+
+func pruneDarwinServiceRuntime(ctx context.Context, platform *darwinServicePlatform, ownership serviceStateStore, artifacts installer.RuntimeArtifactStore, receipts proxy.RuntimeUpgradeStore) error {
+	err := artifacts.Prune(ctx, func() ([]string, error) {
+		record, err := ownership.Load()
+		if err != nil {
+			return nil, err
+		}
+		if record.Owner != installstate.OwnerHomebrew || !sameServiceIDs(record.Services, []string{proxyAgentLabel, agentLabel}) {
+			return nil, installstate.ErrOwnershipConflict
+		}
+		paths := []string{filepath.Join(artifacts.Roots.State, "runtime-artifacts", record.BinaryDigest, "cq")}
+		receipt, err := receipts.Load()
+		if err == nil {
+			selected := receipt.Previous
+			switch receipt.Phase {
+			case "committed":
+				selected = receipt.Candidate
+			case "deferred", "rolled_back":
+			default:
+				return nil, proxy.ErrRuntimeUpgradeBusy
+			}
+			if selected.SHA256 != record.BinaryDigest {
+				return nil, proxy.ErrRuntimeUpgradeBusy
+			}
+			paths = append(paths, receipt.Previous.Path, receipt.Candidate.Path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		for _, check := range []struct {
+			label string
+			args  []string
+		}{{proxyAgentLabel, []string{"proxy", "start"}}, {agentLabel, []string{"refresh"}}} {
+			definition, exists, err := platform.readDefinition(check.label)
+			if err != nil {
+				return nil, err
+			}
+			if !exists || definition.Label != check.label || len(definition.ProgramArguments) != len(check.args)+1 || !equalStrings(definition.ProgramArguments[1:], check.args) {
+				return nil, installstate.ErrOwnershipConflict
+			}
+			paths = append(paths, definition.ProgramArguments[0])
+		}
+		return paths, nil
+	})
+	// An unfinished handoff or package reconciliation retains everything until
+	// a later upgrade attempt can prove the complete reference set.
+	if errors.Is(err, proxy.ErrRuntimeUpgradeBusy) {
+		return nil
+	}
+	return err
 }
 
 func darwinExistingRuntimeArtifact(ctx context.Context, artifacts installer.RuntimeArtifactStore, path string) (installer.RuntimeArtifact, error) {

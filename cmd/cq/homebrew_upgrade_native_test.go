@@ -99,7 +99,17 @@ func TestNativeHomebrewUpgradeAcceptance(t *testing.T) {
 	pid := fixture.pid()
 	fixture.traffic("before")
 	fixture.managementChecks("0.34.0")
+	artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: fixture.roots}
+	obsolete, err := artifacts.Stage(context.Background(), fixture.binaries["0.34.2"])
+	if err != nil {
+		t.Fatal(err)
+	}
 	fixture.compatibleTrafficUpgrade()
+	if _, err := os.Stat(filepath.Dir(obsolete.Path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unreferenced staged runtime survived upgrade: %v", err)
+	}
+	fixture.assertRetainedRuntimes()
+	fixture.evidence.Outcomes = append(fixture.evidence.Outcomes, "unreferenced-runtime-pruned")
 	fixture.traffic("after")
 	fixture.managementChecks("0.34.1")
 	if got := fixture.pid(); got != pid {
@@ -117,9 +127,11 @@ func TestNativeHomebrewUpgradeAcceptance(t *testing.T) {
 	fixture.evidence.ListenerIdentity = receipt.ListenerIdentity
 	fixture.evidence.Outcomes = append(fixture.evidence.Outcomes, "compatible-upgrade-committed")
 	fixture.packageOperation("reinstall", "0.34.1", "0.34.1", false)
+	fixture.assertRetainedRuntimes()
 	fixture.traffic("reinstall")
 	fixture.failedUpgrades()
 	fixture.deadlineDeferral()
+	fixture.assertRetainedRuntimes()
 	fixture.snapshotRestore()
 	fixture.packageOperation("uninstall", "0.34.1", "", false)
 	for _, label := range []string{fixture.label, fixture.refresh} {
@@ -1036,8 +1048,34 @@ func (f *nativeUpgradeFixture) failedUpgrades() {
 	for _, version := range []string{"0.34.2", "0.34.3", "0.34.4", "0.34.5"} {
 		f.packageOperation("upgrade", version, "0.34.1", true)
 		f.assertPreviousRuntime()
+		f.assertRetainedRuntimes()
 		f.traffic("rollback-" + version)
 		f.evidence.Outcomes = append(f.evidence.Outcomes, "rolled-back-"+version)
+	}
+}
+
+func (f *nativeUpgradeFixture) assertRetainedRuntimes() {
+	f.t.Helper()
+	receipt, err := (proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: f.roots}).Load()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	keep := map[string]bool{f.evidence.Fixtures["0.34.0"]: true, receipt.Previous.SHA256: true, receipt.Candidate.SHA256: true}
+	root := filepath.Join(f.roots.State, "runtime-artifacts")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	if len(entries) != len(keep) {
+		f.t.Fatalf("retained runtime count: got %d want %d", len(entries), len(keep))
+	}
+	for _, entry := range entries {
+		if !keep[entry.Name()] {
+			f.t.Fatalf("obsolete runtime retained: %s", entry.Name())
+		}
+		if _, err := os.Stat(filepath.Join(root, entry.Name(), "cq")); err != nil {
+			f.t.Fatalf("bootstrap or transaction executable lost: %v", err)
+		}
 	}
 }
 func (f *nativeUpgradeFixture) deadlineDeferral() {

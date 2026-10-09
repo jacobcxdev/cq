@@ -15,9 +15,42 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 )
+
+func TestRuntimeUpgradePreparationExcludesArtifactPruning(t *testing.T) {
+	controller, _, _, request := upgradeControllerFixture(t)
+	artifacts := installer.RuntimeArtifactStore{FS: controller.options.Store.FS, Roots: controller.options.Store.Roots}
+	lock, err := artifacts.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Begin(context.Background(), request); !errors.Is(err, fsutil.ErrExclusiveLockHeld) {
+		t.Fatalf("preparation bypassed artifact lock: %v", err)
+	}
+	lock.Close()
+	controller.options.Artifacts = upgradePruneCheckingArtifacts{store: artifacts}
+	if _, err := controller.Begin(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	upgradeWaitTerminal(t, controller, request.TransactionID)
+}
+
+type upgradePruneCheckingArtifacts struct {
+	store installer.RuntimeArtifactStore
+}
+
+func (artifacts upgradePruneCheckingArtifacts) Verify(ctx context.Context, _ installer.RuntimeArtifact) error {
+	err := artifacts.store.Prune(ctx, func() ([]string, error) {
+		return nil, errors.New("pruning entered during verification")
+	})
+	if !errors.Is(err, fsutil.ErrExclusiveLockHeld) {
+		return fmt.Errorf("candidate verification did not exclude pruning: %w", err)
+	}
+	return nil
+}
 
 type upgradeTestWorker struct {
 	mu      sync.Mutex

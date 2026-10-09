@@ -113,6 +113,7 @@ type serviceLifecycle struct {
 	RuntimeInitialise     func(context.Context) error
 	RuntimeRestoreRefresh func(context.Context, servicePlatformSnapshot) error
 	RuntimeCleanup        func(context.Context) error
+	RuntimePrune          func(context.Context) error
 	RuntimeReceipt        func() (proxy.RuntimeUpgradeReceiptV1, error)
 	RuntimeExecutable     string
 }

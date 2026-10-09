@@ -15,6 +15,13 @@ removes both jobs, retained runtimes and the upgrade journal after verifying
 that all runtime owners released their lifecycle lock. Credentials, caches,
 configuration and logs remain available.
 
+After each upgrade attempt, CQ prunes unreferenced retained executables once
+runtime selection and package ownership agree. Both LaunchAgent executables
+and the latest transaction's previous/candidate pair remain available for
+startup and rollback. Pruning shares a lock with staging and transaction
+preparation. Unfinished handoffs, unknown files and unsafe paths retain their
+contents. Cleanup errors emit a warning without reverting a completed upgrade.
+
 `cq service status` shows active and pending runtime versions. The JSON form
 adds `active_runtime_version`, `pending_runtime_version` and `upgrade_phase`.
 A busy runtime defers the upgrade and keeps its predecessor active. The package

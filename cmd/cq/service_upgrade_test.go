@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -101,6 +102,32 @@ func TestHomebrewUpgradeKeepsJobsAndUsesRetainedRuntime(t *testing.T) {
 	record, err := store.Load()
 	if err != nil || record.Executable != lifecycle.Executable || record.BinaryDigest != candidate.SHA256 || record.Version != candidate.Version {
 		t.Fatalf("ownership selection: %+v %v", record, err)
+	}
+}
+
+func TestHomebrewUpgradePrunesAfterOwnershipSettles(t *testing.T) {
+	for _, rollback := range []bool{false, true} {
+		t.Run(fmt.Sprint(rollback), func(t *testing.T) {
+			lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+			expected := candidate
+			if rollback {
+				platform.installRefreshErr = errors.New("refresh failed")
+				expected = previous
+			}
+			pruned := false
+			lifecycle.RuntimePrune = func(context.Context) error {
+				pruned = true
+				record, err := store.Load()
+				if err != nil || record.BinaryDigest != expected.SHA256 || platform.live != expected.Path || platform.refresh != expected.Path {
+					t.Fatalf("pruned before selection settled: %+v %v", record, err)
+				}
+				return errors.New("cleanup failed")
+			}
+			_, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, candidate.Path)
+			if !pruned || (err != nil) != rollback {
+				t.Fatalf("cleanup failure changed upgrade outcome: pruned=%v err=%v", pruned, err)
+			}
+		})
 	}
 }
 func TestHomebrewRevertSelectsPreviousArtifact(t *testing.T) {

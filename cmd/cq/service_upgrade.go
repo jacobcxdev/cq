@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/installer"
@@ -37,6 +38,15 @@ func (lifecycle *serviceLifecycle) Upgrade(ctx context.Context, owner installsta
 	}
 	if err := lifecycle.RuntimePreflight(ctx, record); err != nil {
 		return proxy.RuntimeUpgradeReceiptV1{}, err
+	}
+	if lifecycle.RuntimePrune != nil {
+		defer func() {
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+			if err := lifecycle.RuntimePrune(cleanup); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: prune unused runtimes: %v\n", err)
+			}
+		}()
 	}
 	candidate, err := lifecycle.RuntimeArtifacts.Stage(ctx, candidatePath)
 	if err != nil {

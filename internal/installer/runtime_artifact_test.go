@@ -2,6 +2,7 @@ package installer
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,92 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
+
+func TestRuntimeArtifactPruningRetainsReferences(t *testing.T) {
+	store := upgradeArtifactStore(t)
+	ctx := context.Background()
+	var artifacts []RuntimeArtifact
+	for _, version := range []string{"0.34.0", "0.34.1", "0.34.2", "0.34.3"} {
+		artifact, err := store.Stage(ctx, buildUpgradeArtifact(t, version))
+		if err != nil {
+			t.Fatal(err)
+		}
+		artifacts = append(artifacts, artifact)
+	}
+	retained := func() ([]string, error) {
+		return []string{artifacts[0].Path, artifacts[2].Path, artifacts[3].Path}, nil
+	}
+	lock, err := store.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Prune(ctx, retained); !errors.Is(err, fsutil.ErrExclusiveLockHeld) {
+		t.Fatalf("pruning bypassed transaction lock: %v", err)
+	}
+	lock.Close()
+	if err := store.Prune(ctx, func() ([]string, error) { return nil, errors.New("references unavailable") }); err == nil {
+		t.Fatal("missing references accepted")
+	}
+	if err := store.Verify(ctx, artifacts[1]); err != nil {
+		t.Fatalf("failed reference lookup removed artifact: %v", err)
+	}
+	if err := store.Prune(ctx, retained); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Dir(artifacts[1].Path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unreferenced runtime directory retained: %v", err)
+	}
+	for _, i := range []int{0, 2, 3} {
+		if err := store.Verify(ctx, artifacts[i]); err != nil {
+			t.Fatalf("referenced runtime removed: %v", err)
+		}
+	}
+	if err := store.Prune(ctx, retained); err != nil {
+		t.Fatalf("repeat pruning: %v", err)
+	}
+}
+
+func TestRuntimeArtifactPruningRejectsUnsafeReferencesAndSkipsUnknownEntries(t *testing.T) {
+	store := upgradeArtifactStore(t)
+	ctx := context.Background()
+	artifact, err := store.Stage(ctx, buildUpgradeArtifact(t, "0.34.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"relative", "/foreign/cq", filepath.Join(store.Roots.State, "runtime-artifacts", strings.Repeat("A", 64), "cq")} {
+		if err := store.Prune(ctx, func() ([]string, error) { return []string{path}, nil }); err == nil {
+			t.Fatalf("unsafe reference accepted: %s", path)
+		}
+	}
+	root := filepath.Dir(filepath.Dir(artifact.Path))
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "cq")
+	if err := os.WriteFile(outsideFile, []byte("keep"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, strings.Repeat("b", 64))); err != nil {
+		t.Fatal(err)
+	}
+	unknown := filepath.Join(root, "notes")
+	if err := os.WriteFile(unknown, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalid := filepath.Join(root, strings.Repeat("c", 64))
+	if err := os.Mkdir(invalid, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(invalid, "cq"), []byte("foreign"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Prune(ctx, func() ([]string, error) { return []string{artifact.Path}, nil }); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{artifact.Path, outsideFile, unknown, filepath.Join(invalid, "cq")} {
+		if _, err := os.Lstat(path); err != nil {
+			t.Fatalf("pruning removed unknown or referenced entry: %s %v", path, err)
+		}
+	}
+}
 
 func buildUpgradeArtifact(t *testing.T, version string) string {
 	t.Helper()
