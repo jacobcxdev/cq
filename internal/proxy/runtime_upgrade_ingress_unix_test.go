@@ -31,8 +31,8 @@ func TestRuntimeUpgradeListenerBacklogSaturation(t *testing.T) {
 		t.Fatal(err)
 	}
 	connected, timedOut, reset := 0, 0, 0
-	for range 12 {
-		conn, err := net.DialTimeout("tcp", listener.Addr().String(), 30*time.Millisecond)
+	for range 256 {
+		conn, err := net.DialTimeout("tcp", listener.Addr().String(), 10*time.Millisecond)
 		if err != nil {
 			if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
 				timedOut++
@@ -44,7 +44,17 @@ func TestRuntimeUpgradeListenerBacklogSaturation(t *testing.T) {
 			continue
 		}
 		defer conn.Close()
-		connected++
+		// Some kernels acknowledge connect before resetting an overflowed queue.
+		conn.SetReadDeadline(time.Now().Add(2*time.Millisecond))
+		var byte [1]byte
+		_, err = conn.Read(byte[:])
+		if errors.Is(err, unix.ECONNRESET) {
+			reset++
+		} else if timeout, ok := err.(net.Error); ok && timeout.Timeout() {
+			connected++
+		} else {
+			t.Fatalf("unexpected queued connection result: %v", err)
+		}
 	}
 	if connected == 0 || timedOut+reset == 0 {
 		t.Fatalf("expected retained connections and bounded saturation: connected=%d timed_out=%d reset=%d", connected, timedOut, reset)
