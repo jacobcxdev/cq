@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -112,10 +113,27 @@ func TestDarwinRuntimeUpgradeExecHelperProcess(t *testing.T) {
 	if mode == "" {
 		return
 	}
-	listenerFile := os.NewFile(3, "listener")
-	lifecycle := os.NewFile(4, "lifecycle")
-	control := os.NewFile(5, "control")
-	secret := os.NewFile(6, "secret")
+	resumed := false
+	fds := []uintptr{3, 4, 5, 6}
+	for index, arg := range os.Args {
+		if arg == "resume-record" {
+			resumed = true
+			if len(os.Args)-index != 5 {
+				t.Fatal("exec did not pass private inherited descriptor numbers")
+			}
+			for n := range fds {
+				fd, err := strconv.Atoi(os.Args[index+n+1])
+				if err != nil || fd < 100 {
+					t.Fatal("exec overwrote runtime descriptor range")
+				}
+				fds[n] = uintptr(fd)
+			}
+		}
+	}
+	listenerFile := os.NewFile(fds[0], "listener")
+	lifecycle := os.NewFile(fds[1], "lifecycle")
+	control := os.NewFile(fds[2], "control")
+	secret := os.NewFile(fds[3], "secret")
 	listener, err := net.FileListener(listenerFile)
 	if err != nil {
 		t.Fatal(err)
@@ -125,12 +143,6 @@ func TestDarwinRuntimeUpgradeExecHelperProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	evidence := darwinUpgradeExecEvidence{PID: os.Getpid(), Listener: listener.Addr().String(), Lifecycle: digest}
-	resumed := false
-	for _, arg := range os.Args {
-		if arg == "resume-record" {
-			resumed = true
-		}
-	}
 	if !resumed {
 		if err := json.NewEncoder(os.Stdout).Encode(evidence); err != nil {
 			t.Fatal(err)
@@ -211,4 +223,13 @@ func TestDarwinRuntimeUpgradeRejectsWrongDescriptorIdentity(t *testing.T) {
 func proxyUpgradeArtifactFixture(t *testing.T) installer.RuntimeArtifact {
 	t.Helper()
 	return installer.RuntimeArtifact{Path: filepath.Join(t.TempDir(), "cq"), Version: "native-test", SHA256: strings.Repeat("a", 64), ProtocolVersion: 1}
+}
+
+func TestDarwinRuntimeUpgradeRejectsInvalidInheritedNumbers(t *testing.T) {
+	for _, args := range [][]string{{"--runtime-upgrade-resume"}, {"--runtime-upgrade-resume", "3", "4", "5", "6"}, {"--runtime-upgrade-resume", "100", "100", "102", "103"}, {"--runtime-upgrade-resume", "100", "101", "102", "1048577"}, {"--runtime-upgrade-resume", "100", "101", "102", "x"}} {
+		handled, err := runDarwinRuntimeUpgradeEntry(args)
+		if !handled || !errors.Is(err, proxy.ErrRuntimeUpgradeReceipt) {
+			t.Fatalf("invalid inherited descriptors accepted: %v %v", args, err)
+		}
+	}
 }

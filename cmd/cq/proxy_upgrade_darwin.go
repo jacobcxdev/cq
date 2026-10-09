@@ -248,13 +248,34 @@ func runDarwinRuntimeUpgradeEntry(args []string) (bool, error) {
 		defer cancel()
 		return true, proxy.RunRuntimeUpgradeGuard(ctx, listener, receipt)
 	}
-	if len(args) == 1 && args[0] == "--runtime-upgrade-resume" {
-		files := []*os.File{os.NewFile(3, "upgrade-listener"), os.NewFile(4, "upgrade-lifecycle"), os.NewFile(5, "upgrade-control"), os.NewFile(6, "upgrade-secret")}
-		for _, file := range files {
-			defer file.Close()
+	if len(args) > 0 && args[0] == "--runtime-upgrade-resume" {
+		if len(args) != 5 {
+			return true, proxy.ErrRuntimeUpgradeReceipt
+		}
+		fds := make([]int, 4)
+		seen := make(map[int]bool, 4)
+		for index, value := range args[1:] {
+			fd, err := strconv.Atoi(value)
+			if err != nil || fd < 100 || fd > 1<<20 || seen[fd] {
+				return true, proxy.ErrRuntimeUpgradeReceipt
+			}
+			seen[fd] = true
+			fds[index] = fd
+		}
+		files := make([]*os.File, 4)
+		for index, fd := range fds {
+			if _, err := unix.FcntlInt(uintptr(fd), unix.F_SETFD, unix.FD_CLOEXEC); err != nil {
+				return true, err
+			}
+			files[index] = os.NewFile(uintptr(fd), "upgrade-inherited")
+			if files[index] == nil {
+				return true, proxy.ErrRuntimeUpgradeReceipt
+			}
+			defer files[index].Close()
 		}
 		return true, runDarwinRuntimeUpgradeResume(files[0], files[1], files[2], files[3])
 	}
+
 	// Only launchd's regular startup selects a committed retained runtime. CLI,
 	// worker roles and read-only runtime-check must not consume recovery state.
 	if len(args) != 2 || args[0] != "proxy" || args[1] != "start" {

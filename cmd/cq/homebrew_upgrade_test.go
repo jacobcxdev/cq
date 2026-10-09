@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -15,6 +16,10 @@ func loadGeneratedCQHomebrewArtifacts(t *testing.T) string {
 }
 
 func runGeneratedCQHomebrewArtifacts(t *testing.T, prelude string, wantFailure bool) string {
+	return runGeneratedCQHomebrewArtifactsWithMetadata(t, prelude, wantFailure, false)
+}
+
+func runGeneratedCQHomebrewArtifactsWithMetadata(t *testing.T, prelude string, wantFailure, metadata bool) string {
 	t.Helper()
 	if runtime.GOOS != "darwin" {
 		t.Skip("native Homebrew test")
@@ -36,6 +41,21 @@ func runGeneratedCQHomebrewArtifacts(t *testing.T, prelude string, wantFailure b
 		lines = append(lines, strings.TrimPrefix(line, "      "))
 	}
 	block = strings.ReplaceAll(strings.Join(lines, "\n"), "{{ .Version }}", "0.34.0")
+	metadataRoot := filepath.Join(t.TempDir(), "caskroom")
+	metadataSetup := ""
+	metadataProbe := ""
+	if metadata {
+		metadataSetup = `require "cask/installer"
+Cask::Caskroom.singleton_class.define_method(:path) { Pathname(` + strconv.Quote(metadataRoot) + `) }
+`
+		metadataProbe = `
+installer = Cask::Installer.new(cask)
+installer.save_caskfile
+files = cask.metadata_versioned_path.glob("**/cq.*")
+raise "saved metadata missing" unless files.length == 1
+cask = Cask::CaskLoader.load_from_installed_caskfile(files.first, api_fallback: false)
+`
+	}
 	script := `require "cask/cask_loader"
 require "json"
 class CQCommandRecorder
@@ -48,7 +68,7 @@ class CQCommandRecorder
   end
 end
 CQCommandRecorder.calls = []
-` + prelude + `
+` + metadataSetup + prelude + `
 cask = Cask::CaskLoader::FromContentLoader.new(<<~'CASK').load(config: nil)
 cask "cq" do
   version "0.34.0"
@@ -57,6 +77,7 @@ cask "cq" do
 ` + block + `
 end
 CASK
+` + metadataProbe + `
 artifact = cask.artifacts.find { |a| a.is_a?(Cask::Artifact::Uninstall) }
 successor = Cask::Cask.new("cq") { version "0.34.1" }
 artifact.uninstall_phase(command: CQCommandRecorder, successor: successor, upgrade: true)
@@ -95,4 +116,8 @@ func TestHomebrewUnsupportedCallbackFailsBeforeMutation(t *testing.T) {
 	runGeneratedCQHomebrewArtifacts(t, `class Cask::Artifact::Uninstall
   def uninstall_phase(command:); raise "unexpected removal mutation"; end
 end`, true)
+}
+
+func TestHomebrewInstalledMetadataRetainsSuccessorCallback(t *testing.T) {
+	runGeneratedCQHomebrewArtifactsWithMetadata(t, "", false, true)
 }

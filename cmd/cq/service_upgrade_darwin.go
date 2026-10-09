@@ -24,6 +24,16 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+type darwinServiceRuntimeArtifacts struct{ installer.RuntimeArtifactStore }
+
+func (store darwinServiceRuntimeArtifacts) Stage(ctx context.Context, path string) (installer.RuntimeArtifact, error) {
+	source, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return installer.RuntimeArtifact{}, err
+	}
+	return store.RuntimeArtifactStore.Stage(ctx, source)
+}
+
 func configureDarwinServiceUpgrades(lifecycle *serviceLifecycle, platform *darwinServicePlatform) {
 	artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: platform.roots}
 	receipts := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: platform.roots}
@@ -32,7 +42,7 @@ func configureDarwinServiceUpgrades(lifecycle *serviceLifecycle, platform *darwi
 			lifecycle.RuntimeExecutable = selected.Path
 		}
 	}
-	lifecycle.RuntimeArtifacts = artifacts
+	lifecycle.RuntimeArtifacts = darwinServiceRuntimeArtifacts{RuntimeArtifactStore: artifacts}
 	lifecycle.RuntimeReceipt = receipts.Load
 	lifecycle.RuntimeApply = func(ctx context.Context, candidate installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
 		return applyDarwinServiceRuntimeUpgrade(ctx, artifacts, receipts, candidate)

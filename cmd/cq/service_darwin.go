@@ -817,7 +817,7 @@ func parseDarwinLaunchctlStatus(output []byte) (state string, runs int, lastExit
 
 func inspectDarwinProxyRuntime(ctx context.Context, executable string) componentStatus {
 	status := componentStatus{ID: proxyAgentLabel, Manager: "launchd", Registered: true, ConfiguredExecutable: executable}
-	facts := collectDarwinProxyInspectionFacts(ctx, "")
+	facts := collectDarwinProxyInspectionFactsForExecutable(ctx, "", executable)
 	if facts.service.Status == proxy.FactKnown && facts.service.Value != nil {
 		status.Running = facts.service.Value.State == "running"
 		status.PID = facts.service.Value.PID

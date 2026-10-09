@@ -85,6 +85,10 @@ func darwinProxyInspectionTargetForRoot(instanceRoot string) ProxyInspectionTarg
 }
 
 func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string) darwinProxyInspectionFacts {
+	return collectDarwinProxyInspectionFactsForExecutable(ctx, instanceRoot, "")
+}
+
+func collectDarwinProxyInspectionFactsForExecutable(ctx context.Context, instanceRoot, expectedExecutable string) darwinProxyInspectionFacts {
 	facts := darwinProxyInspectionFacts{
 		inspector: proxy.UnavailableFact[proxy.InspectorIdentity]("inspector_unavailable"),
 		desired:   proxy.UnavailableFact[proxy.DesiredProxyState]("config_unavailable"),
@@ -121,7 +125,7 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 	}
 	var binding installedHTTPValidationServiceBinding
 	for _, label := range []string{proxyAgentLabel, homebrewProxyAgentLabel} {
-		candidate, candidateErr := resolveInstalledHTTPValidationService(label)
+		candidate, candidateErr := resolveInstalledHTTPValidationServiceExecutable(label, expectedExecutable)
 		if candidateErr == nil {
 			if binding.label != "" {
 				facts.service = proxy.InvalidFact[proxy.ServiceState]("service_ambiguous")

@@ -152,8 +152,17 @@ func restartInstalledHTTPValidationCandidate(label string) error {
 func cleanupInstalledHTTPValidationCandidate() error { return nil }
 
 func resolveInstalledHTTPValidationService(expectedLabel string) (installedHTTPValidationServiceBinding, error) {
+	return resolveInstalledHTTPValidationServiceExecutable(expectedLabel, "")
+}
+
+func resolveInstalledHTTPValidationServiceExecutable(expectedLabel, expectedExecutable string) (installedHTTPValidationServiceBinding, error) {
 	return resolveInstalledHTTPValidationServiceWithOperations(expectedLabel, installedHTTPValidationServiceOperations{
-		executable: os.Executable,
+		executable: func() (string, error) {
+			if expectedExecutable != "" {
+				return expectedExecutable, nil
+			}
+			return os.Executable()
+		},
 		plistPath: func(label string) (string, error) {
 			switch label {
 			case proxyAgentLabel:
