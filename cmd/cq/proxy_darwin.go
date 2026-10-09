@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
@@ -139,7 +140,7 @@ func collectDarwinProxyInspectionFactsForExecutable(ctx context.Context, instanc
 		return facts
 	}
 	manager := "launchagent"
-	if binding.label == homebrewProxyAgentLabel {
+	if binding.label == homebrewProxyAgentLabel || binding.runtimeExecutable != "" {
 		manager = "homebrew"
 	}
 	listenerPort := darwinProxyInspectionListenerPort(port, binding.port)
@@ -167,6 +168,13 @@ func collectDarwinProxyInspectionFactsForExecutable(ctx context.Context, instanc
 	if err != nil {
 		facts.service = proxy.InvalidFact[proxy.ServiceState]("process_executable_unavailable")
 		return facts
+	}
+	if binding.runtimeExecutable != "" {
+		digest, digestErr := installstate.DigestFile(liveExecutable)
+		if digestErr != nil || liveExecutable != binding.runtimeExecutable || digest != binding.executableSHA256 {
+			facts.service = proxy.InvalidFact[proxy.ServiceState]("process_executable_mismatch")
+			return facts
+		}
 	}
 	lsofOutput, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-a", fmt.Sprintf("-iTCP:%d", listenerPort), "-sTCP:LISTEN", "-Fp").Output()
 	if err != nil || requireInstalledHTTPValidationListenerPID(lsofOutput, pid) != nil {

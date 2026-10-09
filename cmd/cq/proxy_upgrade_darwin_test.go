@@ -225,6 +225,14 @@ func proxyUpgradeArtifactFixture(t *testing.T) installer.RuntimeArtifact {
 	return installer.RuntimeArtifact{Path: filepath.Join(t.TempDir(), "cq"), Version: "native-test", SHA256: strings.Repeat("a", 64), ProtocolVersion: 1}
 }
 
+func TestDarwinRuntimeUpgradeSetupFailureKeepsRollbackProof(t *testing.T) {
+	resume := proxy.RuntimeUpgradeResumeV1{Release: proxy.RuntimeWorkerReleaseV1{ProcessIdentityDigest: "previous", ProcessTreeAbsenceProofDigest: "absent", HolderReleaseProofDigest: "released"}, WorkerSequence: 7, PreviousCheckpointDigest: strings.Repeat("a", 64)}
+	release, sequence, checkpoint, err := darwinRuntimeUpgradeRollbackState(nil, resume)
+	if err != nil || release != resume.Release || sequence != resume.WorkerSequence || checkpoint != resume.PreviousCheckpointDigest {
+		t.Fatalf("setup failure discarded proven predecessor release: %+v %d %q %v", release, sequence, checkpoint, err)
+	}
+}
+
 func TestDarwinRuntimeUpgradeRejectsInvalidInheritedNumbers(t *testing.T) {
 	for _, args := range [][]string{{"--runtime-upgrade-resume"}, {"--runtime-upgrade-resume", "3", "4", "5", "6"}, {"--runtime-upgrade-resume", "100", "100", "102", "103"}, {"--runtime-upgrade-resume", "100", "101", "102", "1048577"}, {"--runtime-upgrade-resume", "100", "101", "102", "x"}} {
 		handled, err := runDarwinRuntimeUpgradeEntry(args)

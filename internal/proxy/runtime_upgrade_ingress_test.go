@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -177,4 +179,103 @@ func TestRuntimeUpgradeTracksAcceptedSlowHeaders(t *testing.T) {
 		t.Fatal(err)
 	}
 	listener.Resume()
+}
+
+func TestRuntimeUpgradePauseDrainsAcceptedBoundaryBeforeHandoff(t *testing.T) {
+	tcp, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener := NewRuntimeUpgradeListener(tcp)
+	connections := NewRuntimeUpgradeConnections()
+	listener.SetConnectionTracker(connections)
+	accepted := make(chan struct{})
+	releaseAccept := make(chan struct{})
+	var once sync.Once
+	listener.acceptTCP = func() (net.Conn, error) {
+		conn, err := tcp.Accept()
+		if conn != nil {
+			once.Do(func() { close(accepted); <-releaseAccept })
+		}
+		return conn, err
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "previous") }), ConnState: connections.ConnState}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	defer func() { listener.Resume(); server.Close(); <-done }()
+	client, err := net.Dial("tcp", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := client.Write([]byte("GET / HTTP/1.1\r\nHost:")); err != nil {
+		t.Fatal(err)
+	}
+	<-accepted
+	paused := make(chan error, 1)
+	go func() { paused <- listener.Pause(context.Background()) }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		listener.mu.Lock()
+		isPaused := listener.paused
+		listener.mu.Unlock()
+		if isPaused {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pause did not begin")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(releaseAccept)
+	if err := <-paused; err != nil {
+		t.Fatal(err)
+	}
+	if connections.Admission.quiescent() {
+		t.Fatal("pause acknowledged an untracked kernel-accepted connection")
+	}
+	if _, err := client.Write([]byte(" localhost\r\nConnection: close\r\n\r\n")); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(client), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil || string(body) != "previous" {
+		t.Fatalf("accepted turn lost before handoff: %q %v", body, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := connections.Admission.AwaitQuiescence(ctx); err != nil {
+		t.Fatal(err)
+	}
+	file, err := listener.File()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	successor, err := net.FileListener(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer successor.Close()
+	listener.Close()
+	nextServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, "successor") })}
+	nextDone := make(chan error, 1)
+	go func() { nextDone <- nextServer.Serve(successor) }()
+	defer func() { nextServer.Close(); <-nextDone }()
+	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true}
+	defer transport.CloseIdleConnections()
+	next, err := (&http.Client{Transport: transport, Timeout: time.Second}).Get("http://" + successor.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextBody, err := io.ReadAll(next.Body)
+	next.Body.Close()
+	if err != nil || string(nextBody) != "successor" {
+		t.Fatalf("retained handoff failed: %q %v", nextBody, err)
+	}
 }

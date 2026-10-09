@@ -3,8 +3,11 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/jacobcxdev/cq/internal/installer"
 	"os"
 	"path/filepath"
 	"testing"
@@ -236,6 +239,42 @@ func TestResolveInstalledHTTPValidationServiceRejectsNonProxyStartPlist(t *testi
 
 	if _, err := resolveInstalledHTTPValidationServiceWithOperations(proxyAgentLabel, ops); err == nil {
 		t.Fatal("non-proxy-start plist error = nil")
+	}
+}
+
+func TestResolveInstalledHTTPValidationRetainedRuntimeBindsSelected(t *testing.T) {
+	dir := t.TempDir()
+	dir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packagePath, bootstrapPath, selectedPath := filepath.Join(dir, "package"), filepath.Join(dir, "bootstrap"), filepath.Join(dir, "selected")
+	for _, path := range []string{packagePath, bootstrapPath, selectedPath} {
+		if err := os.WriteFile(path, []byte(path), 0o500); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sum := sha256.Sum256([]byte(selectedPath))
+	selected := installer.RuntimeArtifact{Path: selectedPath, SHA256: hex.EncodeToString(sum[:]), Version: "0.34.1", ProtocolVersion: 1}
+	plist := filepath.Join(dir, "proxy.plist")
+	writeInstalledHTTPValidationPlist(t, plist, proxyAgentLabel, bootstrapPath, "/tmp/proxy.log")
+	ops := installedHTTPValidationServiceOperations{executable: func() (string, error) { return packagePath, nil }, plistPath: func(string) (string, error) { return plist, nil }, launchctlPrint: func(string) error { return nil }, retainedRuntime: func(current, configured string) (installer.RuntimeArtifact, error) {
+		if current != packagePath || configured != bootstrapPath {
+			return installer.RuntimeArtifact{}, errors.New("binding mismatch")
+		}
+		return selected, nil
+	}}
+	binding, err := resolveInstalledHTTPValidationServiceWithOperations(proxyAgentLabel, ops)
+	if err != nil || binding.executableSHA256 != selected.SHA256 {
+		t.Fatalf("package CLI cannot bind selected retained runtime: %+v %v", binding, err)
+	}
+	selected.Version = "0.34.2"
+	selected.Path = packagePath
+	other := sha256.Sum256([]byte(packagePath))
+	selected.SHA256 = hex.EncodeToString(other[:])
+	next, err := resolveInstalledHTTPValidationServiceWithOperations(proxyAgentLabel, ops)
+	if err != nil || next.executableSHA256 != selected.SHA256 || next.serviceSHA256 == binding.serviceSHA256 {
+		t.Fatalf("binding ignored compatible selection: %+v %v", next, err)
 	}
 }
 

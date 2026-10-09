@@ -120,6 +120,68 @@ func TestHomebrewRevertSelectsPreviousArtifact(t *testing.T) {
 		}
 	}
 }
+
+type failCandidateOwnershipStore struct {
+	serviceStateStore
+	candidate string
+	failed    bool
+}
+
+func (store *failCandidateOwnershipStore) Save(record installstate.Record) error {
+	if record.BinaryDigest == store.candidate && !store.failed {
+		store.failed = true
+		return errors.New("transient ownership write failure")
+	}
+	return store.serviceStateStore.Save(record)
+}
+
+func TestHomebrewOwnershipSaveFailureRestoresPreviousRecord(t *testing.T) {
+	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+	lifecycle.Store = &failCandidateOwnershipStore{serviceStateStore: store, candidate: candidate.SHA256}
+	if _, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, candidate.Path); err == nil {
+		t.Fatal("ownership save failure was hidden")
+	}
+	record, err := store.Load()
+	if err != nil || record.BinaryDigest != previous.SHA256 || record.Version != previous.Version || platform.live != previous.Path || platform.refresh != previous.Path {
+		t.Fatalf("rollback ownership disagrees with previous runtime: %+v %v", record, err)
+	}
+}
+
+type strictRetainedSnapshotPlatform struct{ *retainedServicePlatform }
+
+func (*strictRetainedSnapshotPlatform) Preflight(context.Context, string) error {
+	return installstate.ErrOwnershipConflict
+}
+
+func TestHomebrewSnapshotUsesRetainedOwnershipAndRestores(t *testing.T) {
+	lifecycle, platform, store, _, candidate := homebrewUpgradeServiceFixture(t)
+	if _, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, candidate.Path); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle.Platform = &strictRetainedSnapshotPlatform{platform}
+	checked := false
+	lifecycle.RuntimePreflight = func(_ context.Context, record installstate.Record) error {
+		checked = record.BinaryDigest == candidate.SHA256 && record.Executable == lifecycle.Executable
+		if !checked {
+			return installstate.ErrOwnershipConflict
+		}
+		return nil
+	}
+	path := filepath.Join(t.TempDir(), "private", "snapshot.json")
+	if err := lifecycle.Snapshot(context.Background(), installstate.OwnerHomebrew, path); err != nil {
+		t.Fatal(err)
+	}
+	if !checked {
+		t.Fatal("snapshot skipped retained ownership preflight")
+	}
+	if err := lifecycle.Restore(context.Background(), installstate.OwnerHomebrew, path); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Load()
+	if err != nil || record.BinaryDigest != candidate.SHA256 {
+		t.Fatalf("snapshot restore changed selected ownership: %+v %v", record, err)
+	}
+}
 func TestHomebrewTrueUninstallRemovesJobsAndState(t *testing.T) {
 	lifecycle, platform, store, _, _ := homebrewUpgradeServiceFixture(t)
 	if err := lifecycle.Uninstall(context.Background(), installstate.OwnerHomebrew); err != nil {

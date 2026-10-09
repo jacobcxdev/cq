@@ -110,12 +110,14 @@ func (controller *RuntimeUpgradeController) Begin(ctx context.Context, request R
 	if err != nil {
 		return previous, err
 	}
-    // Package ownership commits after refresh reconciliation. A failed refresh
-    // may need to return to the recorded predecessor while the selected runtime
-    // already matches the verified committed candidate.
-    matchesSelected:=ownership.BinaryDigest==controller.options.Previous.SHA256
-    pendingPackageCommit:=err==nil&&previous.Phase=="committed"&&previous.Candidate==controller.options.Previous&&ownership.BinaryDigest==previous.Previous.SHA256
-    if ownership.Validate()!=nil||ownership.Owner!=installstate.OwnerHomebrew||(!matchesSelected&&!pendingPackageCommit){return previous,installstate.ErrOwnershipConflict}
+	// Package ownership commits after refresh reconciliation. A failed refresh
+	// may need to return to the recorded predecessor while the selected runtime
+	// already matches the verified committed candidate.
+	matchesSelected := ownership.BinaryDigest == controller.options.Previous.SHA256
+	pendingPackageCommit := err == nil && previous.Phase == "committed" && previous.Candidate == controller.options.Previous && ownership.BinaryDigest == previous.Previous.SHA256
+	if ownership.Validate() != nil || ownership.Owner != installstate.OwnerHomebrew || (!matchesSelected && !pendingPackageCommit) {
+		return previous, installstate.ErrOwnershipConflict
+	}
 	supervisor := controller.supervisor
 	supervisor.mu.Lock()
 	if supervisor.upgradeBusy || !supervisor.admissionReady || supervisor.trafficMode != TrafficModeNormal || supervisor.upgradeListener == nil || supervisor.upgradeConnections == nil || supervisor.workerManifest.WorkerArtifactDigest != controller.options.Previous.SHA256 {
@@ -132,10 +134,11 @@ func (controller *RuntimeUpgradeController) Begin(ctx context.Context, request R
 		supervisor.mu.Unlock()
 		return previous, err
 	}
+	controller.done = make(chan struct{})
+	supervisor.upgradeDone = controller.done
 	supervisor.upgradeBusy = true
 	selected := supervisor.worker
 	supervisor.mu.Unlock()
-	controller.done = make(chan struct{})
 	controller.lastErr = nil
 	wait := controller.quietTimeout
 	if request.WaitTimeoutSeconds > 0 {

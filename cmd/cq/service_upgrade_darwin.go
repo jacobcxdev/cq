@@ -21,6 +21,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 	"golang.org/x/sys/unix"
 )
 
@@ -118,6 +119,48 @@ func darwinExistingRuntimeArtifact(ctx context.Context, artifacts installer.Runt
 	return artifacts.Stage(ctx, clean)
 }
 
+func resolveDarwinRetainedServiceRuntime(ctx context.Context, roots userdirs.Roots, current, configured string) (installer.RuntimeArtifact, error) {
+	if filepath.Dir(filepath.Dir(configured)) != filepath.Join(roots.State, "runtime-artifacts") {
+		return installer.RuntimeArtifact{}, nil
+	}
+	record, err := (installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}).Load()
+	if err != nil {
+		return installer.RuntimeArtifact{}, err
+	}
+	if record.Owner != installstate.OwnerHomebrew || !sameServiceIDs(record.Services, []string{proxyAgentLabel, agentLabel}) {
+		return installer.RuntimeArtifact{}, installstate.ErrOwnershipConflict
+	}
+	artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: roots}
+	if pinned, err := darwinExistingRuntimeArtifact(ctx, artifacts, configured); err != nil || pinned.Path != configured {
+		return installer.RuntimeArtifact{}, errors.Join(installstate.ErrOwnershipConflict, err)
+	}
+	receipts := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: roots}
+	selected, err := darwinSelectedRuntimeArtifact(ctx, artifacts, receipts, record)
+	if err != nil {
+		return selected, err
+	}
+	if current == configured || current == selected.Path {
+		return selected, nil
+	}
+	packagePath, err := filepath.EvalSymlinks(record.Executable)
+	if err != nil || current != packagePath {
+		return installer.RuntimeArtifact{}, installstate.ErrOwnershipConflict
+	}
+	digest, err := installstate.DigestFile(packagePath)
+	if err != nil {
+		return installer.RuntimeArtifact{}, err
+	}
+	if digest == selected.SHA256 || digest == record.BinaryDigest {
+		return selected, nil
+	}
+	if receipt, err := receipts.Load(); err == nil && digest == receipt.Candidate.SHA256 {
+		if err := artifacts.Verify(ctx, receipt.Candidate); err == nil {
+			return selected, nil
+		}
+	}
+	return installer.RuntimeArtifact{}, installstate.ErrOwnershipConflict
+}
+
 func darwinSelectedRuntimeArtifact(ctx context.Context, artifacts installer.RuntimeArtifactStore, receipts proxy.RuntimeUpgradeStore, record installstate.Record) (installer.RuntimeArtifact, error) {
 	receipt, err := receipts.Load()
 	if err == nil {
@@ -177,42 +220,51 @@ func applyDarwinServiceRuntimeUpgrade(ctx context.Context, artifacts installer.R
 	request.Close = true
 	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext}
 	defer transport.CloseIdleConnections()
-	response, err := (&http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
-	if err != nil {
-		return previous, err
-	}
-	body, readErr := httputil.ReadBody(response.Body)
-	response.Body.Close()
-	if readErr != nil {
-		return previous, readErr
-	}
-	if response.StatusCode != http.StatusAccepted {
-		return previous, fmt.Errorf("runtime upgrade request rejected: HTTP %d", response.StatusCode)
-	}
+	client := &http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return submitDarwinServiceRuntimeUpgrade(ctx, store, candidate, id, previous, request, client)
+}
+
+func submitDarwinServiceRuntimeUpgrade(ctx context.Context, store proxy.RuntimeUpgradeStore, candidate installer.RuntimeArtifact, id string, previous proxy.RuntimeUpgradeReceiptV1, request *http.Request, client httputil.Doer) (proxy.RuntimeUpgradeReceiptV1, error) {
+	response, err := client.Do(request)
 	var prepared proxy.RuntimeUpgradeReceiptV1
-	if err := proxy.DecodeRuntimeUpgradePayload(body, &prepared); err != nil {
-		return previous, err
+	submissionErr := err
+	if response != nil {
+		body, readErr := httputil.ReadBody(response.Body)
+		response.Body.Close()
+		if err == nil && response.StatusCode != http.StatusAccepted {
+			return previous, fmt.Errorf("runtime upgrade request rejected: HTTP %d", response.StatusCode)
+		}
+		submissionErr = errors.Join(submissionErr, readErr)
+		if submissionErr == nil {
+			submissionErr = proxy.DecodeRuntimeUpgradePayload(body, &prepared)
+			if submissionErr == nil && (prepared.TransactionID != id || prepared.Candidate != candidate) {
+				submissionErr = proxy.ErrRuntimeUpgradeReceipt
+			}
+		}
 	}
-	if prepared.TransactionID != id || prepared.Candidate != candidate {
-		return previous, proxy.ErrRuntimeUpgradeReceipt
-	}
+	// Begin persists before acknowledging. Even an unreadable or lost response
+	// must reconcile this known transaction before Homebrew can revert package.
 	wait, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
 	defer cancel()
 	for {
 		receipt, err := store.Load()
-		if err != nil {
-			return prepared, err
-		}
-		if receipt.TransactionID != id {
-			return receipt, proxy.ErrRuntimeUpgradeGeneration
-		}
-		switch receipt.Phase {
-		case "committed", "deferred", "rolled_back", "failed":
-			return receipt, nil
+		if err == nil {
+			if receipt.TransactionID == id {
+				prepared = receipt
+				if receipt.Candidate != candidate {
+					return receipt, proxy.ErrRuntimeUpgradeReceipt
+				}
+				switch receipt.Phase {
+				case "committed", "deferred", "rolled_back", "failed":
+					return receipt, nil
+				}
+			} else if receipt.Generation > previous.Generation {
+				return receipt, proxy.ErrRuntimeUpgradeGeneration
+			}
 		}
 		select {
 		case <-wait.Done():
-			return receipt, fmt.Errorf("runtime selection unverified: %w", wait.Err())
+			return prepared, errors.Join(submissionErr, err, fmt.Errorf("runtime selection unverified: %w", wait.Err()))
 		case <-time.After(20 * time.Millisecond):
 		}
 	}

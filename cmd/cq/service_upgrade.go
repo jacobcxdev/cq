@@ -83,9 +83,10 @@ func (lifecycle *serviceLifecycle) Upgrade(ctx context.Context, owner installsta
 	if _, err := lifecycle.waitHealthy(ctx); err != nil {
 		return rollback(err)
 	}
-	record.Version = candidate.Version
-	record.BinaryDigest = candidate.SHA256
-	if err := lifecycle.Store.Save(record); err != nil {
+	candidateRecord := record
+	candidateRecord.Version = candidate.Version
+	candidateRecord.BinaryDigest = candidate.SHA256
+	if err := lifecycle.Store.Save(candidateRecord); err != nil {
 		return rollback(fmt.Errorf("save upgraded ownership: %w", err))
 	}
 	return receipt, nil

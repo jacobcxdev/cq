@@ -178,6 +178,7 @@ func (writer *runtimeUpgradeResponseWriter) Hijack() (net.Conn, *bufio.ReadWrite
 // Connections arriving during handoff remain bounded by the kernel backlog.
 type RuntimeUpgradeListener struct {
 	tcp         *net.TCPListener
+	acceptTCP   func() (net.Conn, error)
 	mu          sync.Mutex
 	paused      bool
 	closed      bool
@@ -187,7 +188,7 @@ type RuntimeUpgradeListener struct {
 }
 
 func NewRuntimeUpgradeListener(tcp *net.TCPListener) *RuntimeUpgradeListener {
-	return &RuntimeUpgradeListener{tcp: tcp, changed: make(chan struct{})}
+	return &RuntimeUpgradeListener{tcp: tcp, acceptTCP: tcp.Accept, changed: make(chan struct{})}
 }
 func (listener *RuntimeUpgradeListener) notify() {
 	close(listener.changed)
@@ -217,20 +218,14 @@ func (listener *RuntimeUpgradeListener) Accept() (net.Conn, error) {
 		}
 		listener.accepting = true
 		listener.mu.Unlock()
-		conn, err := listener.tcp.Accept()
+		conn, err := listener.acceptTCP()
 		listener.mu.Lock()
 		listener.accepting = false
 		listener.notify()
 		paused, closed := listener.paused, listener.closed
 		if conn != nil {
-			// Pause raced a successful accept. Retain this connection until resume;
-			// never deliver it to the predecessor after pause acknowledgement.
-			for listener.paused && !listener.closed {
-				changed := listener.changed
-				listener.mu.Unlock()
-				<-changed
-				listener.mu.Lock()
-			}
+			// A successful kernel accept cannot be returned to the backlog. Track
+			// and deliver it before Pause can acknowledge, then drain it normally.
 			if listener.closed {
 				listener.mu.Unlock()
 				conn.Close()

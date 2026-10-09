@@ -44,15 +44,18 @@ func runUnixProxyAdoptedRuntime(ctx context.Context, listener net.Listener, serv
 		return fmt.Errorf("open supervisor runtime lifecycle: %w", err)
 	}
 	defer file.Close()
-	return runUnixProxyAdoptedRuntimeWithLifecycle(ctx, listener, serve, file, holder, nil)
+	return runUnixProxyAdoptedRuntimeWithLifecycle(ctx, listener, serve, file, holder, nil, nil)
 }
 
-func runUnixProxyAdoptedRuntimeWithLifecycle(ctx context.Context, listener net.Listener, serve func(context.Context, net.Listener, http.Handler) error, file *os.File, holder proxy.LifecycleHolderProof, resume *proxy.RuntimeUpgradeResumeV1) error {
+func runUnixProxyAdoptedRuntimeWithLifecycle(ctx context.Context, listener net.Listener, serve func(context.Context, net.Listener, http.Handler) error, file *os.File, holder proxy.LifecycleHolderProof, resume *proxy.RuntimeUpgradeResumeV1, observe func(*proxy.RuntimeSupervisor)) error {
 	path, err := proxy.DefaultRuntimeLifecyclePath()
 	if err != nil {
 		return err
 	}
 	configure := func(supervisor *proxy.RuntimeSupervisor) error {
+		if observe != nil {
+			observe(supervisor)
+		}
 		if resume != nil {
 			if err := supervisor.ResumeRuntimeUpgradeOwnership(*resume); err != nil {
 				return err

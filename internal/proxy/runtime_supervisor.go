@@ -276,6 +276,7 @@ type RuntimeSupervisor struct {
 	upgradeKeepAlive   func(bool)
 	upgradeController  *RuntimeUpgradeController
 	upgradeBusy        bool
+	upgradeDone        <-chan struct{}
 	upgradeBootRelease RuntimeWorkerReleaseV1
 }
 
@@ -1094,14 +1095,35 @@ func (supervisor *RuntimeSupervisor) monitorWorkerLocked(worker RuntimeWorkerPro
 	}
 	lifetime := supervisor.lifetimeCtx
 	go func() {
+		defer func() {
+			if recover() != nil {
+				fmt.Fprintf(os.Stderr, "cq: runtime worker recovery panic\n")
+			}
+		}()
 		select {
 		case <-exited.Exited():
 		case <-lifetime.Done():
 			return
 		}
-		replaceCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, _ = supervisor.replaceFailedWorker(replaceCtx, manifest, worker)
+		for {
+			replaceCtx, cancel := context.WithTimeout(lifetime, 10*time.Second)
+			_, err := supervisor.replaceFailedWorker(replaceCtx, manifest, worker)
+			cancel()
+			if !errors.Is(err, ErrRuntimeUpgradeBusy) {
+				return
+			}
+			supervisor.mu.RLock()
+			done, busy := supervisor.upgradeDone, supervisor.upgradeBusy
+			supervisor.mu.RUnlock()
+			if !busy {
+				continue
+			}
+			select {
+			case <-done:
+			case <-lifetime.Done():
+				return
+			}
+		}
 	}()
 }
 
@@ -1173,7 +1195,10 @@ func (supervisor *RuntimeSupervisor) replaceFailedWorker(ctx context.Context, ma
 	}
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
-	if ctx == nil || supervisor.worker == nil || !supervisor.admissionReady || supervisor.upgradeBusy ||
+	if supervisor.upgradeBusy {
+		return RuntimeBootAckV1{}, ErrRuntimeUpgradeBusy
+	}
+	if ctx == nil || supervisor.worker == nil || !supervisor.admissionReady ||
 		(supervisor.trafficMode != TrafficModeNormal && supervisor.trafficMode != TrafficModeRescueExitDraining) ||
 		(expected != nil && supervisor.worker != expected) {
 		return RuntimeBootAckV1{}, ErrRuntimeSupervisorUnavailable
@@ -1199,6 +1224,11 @@ func (supervisor *RuntimeSupervisor) replaceFailedWorker(ctx context.Context, ma
 	} else {
 		supervisor.recoveryPending = false
 		supervisor.pendingRelease = RuntimeWorkerReleaseV1{}
+		if supervisor.upgradeListener != nil {
+			supervisor.upgradeRequests.Resume()
+			supervisor.upgradeKeepAlive(true)
+			supervisor.upgradeListener.Resume()
+		}
 	}
 	return ack, err
 }
@@ -1286,8 +1316,14 @@ func (supervisor *RuntimeSupervisor) RuntimeUpgradeBootReady(digest string) bool
 func (supervisor *RuntimeSupervisor) RuntimeUpgradeRollbackSnapshot() (RuntimeWorkerReleaseV1, uint64, string, error) {
 	supervisor.mu.RLock()
 	defer supervisor.mu.RUnlock()
-	if supervisor.worker != nil || supervisor.admissionReady || !supervisor.pendingRelease.valid() {
+	if supervisor.worker != nil || supervisor.admissionReady {
 		return RuntimeWorkerReleaseV1{}, 0, "", ErrRuntimeOwnerReleaseUnproven
 	}
-	return supervisor.pendingRelease, supervisor.sequence, supervisor.checkpointDigest, nil
+	if supervisor.pendingRelease.valid() {
+		return supervisor.pendingRelease, supervisor.sequence, supervisor.checkpointDigest, nil
+	}
+	if supervisor.upgradeBootRelease.valid() {
+		return supervisor.upgradeBootRelease, supervisor.sequence, supervisor.checkpointDigest, nil
+	}
+	return RuntimeWorkerReleaseV1{}, 0, "", ErrRuntimeOwnerReleaseUnproven
 }

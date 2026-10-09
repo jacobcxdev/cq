@@ -5,10 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
-"os"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -190,6 +191,111 @@ func TestRuntimeUpgradeDefersWithoutStoppingOldWorker(t *testing.T) {
 		t.Fatal("deferral did not restore admissions")
 	} else {
 		next()
+	}
+}
+
+type crashingUpgradeWorker struct {
+	*upgradeTestWorker
+	exited     chan struct{}
+	waiting    chan struct{}
+	pausedCase bool
+	awaits     int
+}
+
+func (worker *crashingUpgradeWorker) Exited() <-chan struct{} { return worker.exited }
+func (worker *crashingUpgradeWorker) PrepareUpgrade(ctx context.Context) error {
+	if err := worker.upgradeTestWorker.PrepareUpgrade(ctx); err != nil {
+		return err
+	}
+	close(worker.waiting)
+	return nil
+}
+func (worker *crashingUpgradeWorker) AwaitUpgradeQuiescence(ctx context.Context) error {
+	worker.awaits++
+	if worker.pausedCase && worker.awaits == 1 {
+		return nil
+	}
+	if !worker.pausedCase {
+		close(worker.waiting)
+	}
+	select {
+	case <-worker.exited:
+		return ErrRuntimeSupervisorUnavailable
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (worker *crashingUpgradeWorker) ResumeUpgrade(context.Context) error {
+	return ErrRuntimeSupervisorUnavailable
+}
+
+func TestRuntimeUpgradeRecoversWorkerDeathDuringWaitingAndPausedDrain(t *testing.T) {
+	for _, paused := range []bool{false, true} {
+		t.Run(fmt.Sprint("paused=", paused), func(t *testing.T) {
+			controller, supervisor, worker, request := upgradeControllerFixture(t)
+			controller.quietTimeout = time.Second
+			crashed := &crashingUpgradeWorker{upgradeTestWorker: worker, exited: make(chan struct{}), waiting: make(chan struct{}), pausedCase: paused}
+			supervisor.mu.Lock()
+			supervisor.worker = crashed
+			supervisor.monitorWorkerLocked(crashed, supervisor.workerManifest)
+			supervisor.mu.Unlock()
+			if _, err := controller.Begin(context.Background(), request); err != nil {
+				t.Fatal(err)
+			}
+			<-crashed.waiting
+			close(crashed.exited)
+			upgradeWaitTerminal(t, controller, request.TransactionID)
+			deadline := time.Now().Add(time.Second)
+			for {
+				supervisor.mu.RLock()
+				ready := supervisor.admissionReady && supervisor.worker != nil && supervisor.worker != crashed
+				supervisor.mu.RUnlock()
+				if ready {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("worker crash recovery was lost during upgrade")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			supervisor.upgradeListener.mu.Lock()
+			stillPaused := supervisor.upgradeListener.paused
+			supervisor.upgradeListener.mu.Unlock()
+			if stillPaused {
+				t.Fatal("recovered worker retained paused ingress")
+			}
+			if err := supervisor.SetCallerClassifier(NewNormalCallerBranchClassifier(nil)); err != nil {
+				t.Fatal(err)
+			}
+			fresh := httptest.NewRequest(http.MethodPost, "/normal", strings.NewReader("fresh"))
+			fresh.Header.Set("Authorization", "Bearer local-token")
+			response := httptest.NewRecorder()
+			supervisor.ServeHTTP(response, fresh)
+			if response.Code != http.StatusOK {
+				t.Fatalf("recovered worker did not serve fresh traffic: %d", response.Code)
+			}
+			worker.owners.mu.Lock()
+			defer worker.owners.mu.Unlock()
+			if worker.owners.active != 1 || worker.owners.maximum != 1 {
+				t.Fatalf("worker recovery overlapped owners: %+v", worker.owners)
+			}
+		})
+	}
+}
+
+func TestRuntimeUpgradeRollbackBeforeWorkerLaunch(t *testing.T) {
+	events := []string{}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), &runtimeTestLauncher{events: &events}, &RuntimeHashCheckpointStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resume := RuntimeUpgradeResumeV1{Release: RuntimeWorkerReleaseV1{ProcessIdentityDigest: "previous", ProcessTreeAbsenceProofDigest: "absent", HolderReleaseProofDigest: "released"}, WorkerSequence: 7, PreviousCheckpointDigest: strings.Repeat("a", 64)}
+	if err := supervisor.ResumeRuntimeUpgradeOwnership(resume); err != nil {
+		t.Fatal(err)
+	}
+	release, sequence, checkpoint, err := supervisor.RuntimeUpgradeRollbackSnapshot()
+	if err != nil || release != resume.Release || sequence != 8 || checkpoint != resume.PreviousCheckpointDigest {
+		t.Fatalf("pre-boot setup failure discarded proven release: %+v %d %q %v", release, sequence, checkpoint, err)
 	}
 }
 func TestRuntimeUpgradeNeverOverlapsCoordinatorOwners(t *testing.T) {

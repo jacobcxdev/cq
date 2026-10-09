@@ -226,7 +226,15 @@ func (lifecycle *serviceLifecycle) Snapshot(ctx context.Context, owner installst
 	if err := lifecycle.Store.CheckClaim(owner, lifecycle.Executable); err != nil {
 		return err
 	}
-	if err := lifecycle.Platform.Preflight(ctx, lifecycle.Executable); err != nil {
+	if owner == installstate.OwnerHomebrew && lifecycle.RuntimePreflight != nil {
+		record, err := lifecycle.Store.Load()
+		if err != nil {
+			return err
+		}
+		if err := lifecycle.RuntimePreflight(ctx, record); err != nil {
+			return fmt.Errorf("service snapshot preflight: %w", err)
+		}
+	} else if err := lifecycle.Platform.Preflight(ctx, lifecycle.Executable); err != nil {
 		return fmt.Errorf("service snapshot preflight: %w", err)
 	}
 	platformSnapshot, err := lifecycle.Platform.Snapshot(ctx)

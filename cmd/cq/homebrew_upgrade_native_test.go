@@ -82,7 +82,7 @@ func TestNativeHomebrewUpgradeAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	productionPaths := []string{filepath.Join(productionRoots.Config, "config.toml"), filepath.Join(productionHome, "Library/LaunchAgents/dev.jacobcx.cq.proxy.plist"), filepath.Join(productionHome, "Library/LaunchAgents/dev.jacobcx.cq.refresh.plist")}
+	productionPaths := []string{proxy.PathsForRoots(productionRoots).ConfigFile, filepath.Join(productionRoots.Config, "config.toml"), filepath.Join(productionHome, "Library/LaunchAgents/dev.jacobcx.cq.proxy.plist"), filepath.Join(productionHome, "Library/LaunchAgents/dev.jacobcx.cq.refresh.plist")}
 	production := nativeProductionSnapshot(t, productionPaths)
 	t.Cleanup(func() {
 		if got := nativeProductionSnapshot(t, productionPaths); got != production {
@@ -97,8 +97,10 @@ func TestNativeHomebrewUpgradeAcceptance(t *testing.T) {
 	fixture.bootstrapAdoption()
 	pid := fixture.pid()
 	fixture.traffic("before")
+	fixture.managementChecks("0.34.0")
 	fixture.compatibleTrafficUpgrade()
 	fixture.traffic("after")
+	fixture.managementChecks("0.34.1")
 	if got := fixture.pid(); got != pid {
 		t.Fatalf("managed PID changed: %d -> %d", pid, got)
 	}
@@ -117,6 +119,7 @@ func TestNativeHomebrewUpgradeAcceptance(t *testing.T) {
 	fixture.traffic("reinstall")
 	fixture.failedUpgrades()
 	fixture.deadlineDeferral()
+	fixture.snapshotRestore()
 	fixture.packageOperation("uninstall", "0.34.1", "", false)
 	for _, label := range []string{fixture.label, fixture.refresh} {
 		if out, err := exec.Command("launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), label)).CombinedOutput(); err == nil {
@@ -131,7 +134,7 @@ func TestNativeHomebrewUpgradeAcceptance(t *testing.T) {
 			t.Fatalf("uninstall retained package or journal: %s %v", path, err)
 		}
 	}
-	for _, path := range []string{filepath.Join(fixture.roots.Config, "config.toml"), filepath.Join(fixture.home, ".codex/accounts/fixture.auth.json"), filepath.Join(fixture.roots.Logs, "proxy.log")} {
+	for _, path := range []string{proxy.PathsForRoots(fixture.roots).ConfigFile, filepath.Join(fixture.home, ".codex/accounts/fixture.auth.json"), filepath.Join(fixture.roots.Logs, "proxy.log")} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("uninstall removed preserved user state: %s %v", path, err)
 		}
@@ -365,7 +368,7 @@ func (f *nativeUpgradeFixture) build() {
 		}
 	}
 	f.isolateSource(legacySource)
-	for _, spec := range []struct{ version, failure, source string }{{"0.33.11", "", legacySource}, {"0.34.0", "", f.source}, {"0.34.1", "", f.source}, {"0.34.2", "boot", f.source}, {"0.34.3", "crash", f.source}, {"0.34.4", "refresh", f.source}} {
+	for _, spec := range []struct{ version, failure, source string }{{"0.33.11", "", legacySource}, {"0.34.0", "", f.source}, {"0.34.1", "", f.source}, {"0.34.2", "boot", f.source}, {"0.34.3", "crash", f.source}, {"0.34.4", "refresh", f.source}, {"0.34.5", "setup", f.source}} {
 		binary := filepath.Join(f.root, "cq-"+spec.version)
 		command := exec.Command("go", "build", "-ldflags", fmt.Sprintf("-X main.version=%s -X main.nativeFixtureFailure=%s", spec.version, spec.failure), "-o", binary, "./cmd/cq")
 		command.Dir = spec.source
@@ -398,6 +401,32 @@ func init(){
 	fixtureSource = strings.Replace(fixtureSource, `"strings"`, `"strings";"net/url"`, 1)
 	if err := os.WriteFile(filepath.Join(source, "cmd/cq/native_upgrade_fixture.go"), []byte(fixtureSource), 0o600); err != nil {
 		f.t.Fatal(err)
+	}
+	if source == f.source {
+		path := filepath.Join(source, "cmd/cq/proxy_unix.go")
+		data, err := os.ReadFile(path)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		marker := "observe func(*proxy.RuntimeSupervisor)) error {"
+		if !bytes.Contains(data, []byte(marker)) {
+			f.t.Fatal("setup failure injection boundary missing")
+		}
+		data = bytes.Replace(data, []byte(marker), []byte(marker+`
+ if nativeFixtureFailure=="setup" && resume!=nil && !resume.Recovery { return fmt.Errorf("fixture setup failed") }`), 1)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			f.t.Fatal(err)
+		}
+		bindingSource := `package main
+import("os";"encoding/json";"fmt")
+func init(){ if len(os.Args)>1 && os.Args[1]=="--fixture-service-binding" {
+ b,err:=resolveInstalledHTTPValidationService(proxyAgentLabel);if err!=nil{fmt.Fprintln(os.Stderr,err);os.Exit(1)}
+ json.NewEncoder(os.Stdout).Encode(map[string]string{"runtime":b.runtimeExecutable,"digest":b.executableSHA256});os.Exit(0)
+}}
+`
+		if err := os.WriteFile(filepath.Join(source, "cmd/cq/zz_native_binding_fixture.go"), []byte(bindingSource), 0o600); err != nil {
+			f.t.Fatal(err)
+		}
 	}
 	path := filepath.Join(source, "internal/keyring/keyring.go")
 	data, err := os.ReadFile(path)
@@ -763,6 +792,52 @@ func (f *nativeUpgradeFixture) pid() int {
 	return 0
 }
 
+func (f *nativeUpgradeFixture) managementChecks(version string) {
+	f.t.Helper()
+	binary := filepath.Join(f.root, "prefix/bin/cq")
+	out, err := exec.Command(binary, "proxy", "status", "--json").CombinedOutput()
+	os.WriteFile(filepath.Join(f.output, "status-"+version+".json"), out, 0o600)
+	if err != nil {
+		f.t.Fatalf("retained package status: %v %s", err, out)
+	}
+	var status proxy.ProxySnapshot
+	if err := json.Unmarshal(out, &status); err != nil {
+		f.t.Fatal(err)
+	}
+	if string(status.Verdict) != "healthy" {
+		f.t.Fatalf("retained status unhealthy: %s", out)
+	}
+	out, err = exec.Command(binary, "--fixture-service-binding").CombinedOutput()
+	if err != nil {
+		f.t.Fatalf("retained validation binding: %v %s", err, out)
+	}
+	var binding map[string]string
+	if err := json.Unmarshal(out, &binding); err != nil {
+		f.t.Fatal(err)
+	}
+	if binding["digest"] != f.evidence.Fixtures[version] || binding["runtime"] == "" {
+		f.t.Fatalf("retained selected runtime binding: %s", out)
+	}
+	f.evidence.Outcomes = append(f.evidence.Outcomes, "management-"+version)
+}
+
+func (f *nativeUpgradeFixture) snapshotRestore() {
+	f.t.Helper()
+	path := filepath.Join(f.root, "management/snapshot.json")
+	binary := filepath.Join(f.root, "prefix/bin/cq")
+	for _, action := range []string{"snapshot", "restore"} {
+		out, err := exec.Command(binary, "service", action, "--owner=homebrew", "--installer-lock-held", "--snapshot-file="+path).CombinedOutput()
+		os.WriteFile(filepath.Join(f.output, action+".log"), out, 0o600)
+		if err != nil {
+			f.t.Fatalf("retained %s: %v %s", action, err, out)
+		}
+	}
+	f.assertPreviousRuntime()
+	f.traffic("snapshot-restore")
+	f.managementChecks("0.34.1")
+	f.evidence.Outcomes = append(f.evidence.Outcomes, "snapshot-restore")
+}
+
 func (f *nativeUpgradeFixture) packageOperation(action, version, previous string, wantFailure bool) {
 	f.t.Helper()
 	// Each invocation reloads installed metadata through Homebrew's own loader.
@@ -925,7 +1000,7 @@ func (f *nativeUpgradeFixture) assertPreviousRuntime() {
 	}
 }
 func (f *nativeUpgradeFixture) failedUpgrades() {
-	for _, version := range []string{"0.34.2", "0.34.3", "0.34.4"} {
+	for _, version := range []string{"0.34.2", "0.34.3", "0.34.4", "0.34.5"} {
 		f.packageOperation("upgrade", version, "0.34.1", true)
 		f.assertPreviousRuntime()
 		f.traffic("rollback-" + version)

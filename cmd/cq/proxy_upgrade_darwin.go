@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -480,7 +481,7 @@ func runDarwinRuntimeUpgradeResume(listener, lifecycle, controlFile, secretFile 
 			reapDarwinUpgradeGuard(receipt.GuardPID)
 		}
 		return serveRuntimeSupervisor(serveCtx, active, supervisor)
-	}, lifecycle, resume.SupervisorHolder, &resume)
+	}, lifecycle, resume.SupervisorHolder, &resume, func(supervisor *proxy.RuntimeSupervisor) { candidateSupervisor = supervisor })
 	if committed {
 		return err
 	}
@@ -494,7 +495,7 @@ func runDarwinRuntimeUpgradeResume(listener, lifecycle, controlFile, secretFile 
 	if saveErr := store.Save(receipt); saveErr != nil {
 		return errors.Join(err, saveErr)
 	}
-	if resume.Recovery || candidateSupervisor == nil || errors.Is(err, proxy.ErrRuntimeOwnerReleaseUnproven) {
+	if resume.Recovery || errors.Is(err, proxy.ErrRuntimeOwnerReleaseUnproven) {
 		receipt.Phase = "failed"
 		receipt.ErrorCode = "recovery_boot_failed"
 		if errors.Is(err, proxy.ErrRuntimeOwnerReleaseUnproven) {
@@ -505,7 +506,7 @@ func runDarwinRuntimeUpgradeResume(listener, lifecycle, controlFile, secretFile 
 		}
 		return errors.Join(err, store.Save(receipt))
 	}
-	release, workerSequence, checkpoint, snapshotErr := candidateSupervisor.RuntimeUpgradeRollbackSnapshot()
+	release, workerSequence, checkpoint, snapshotErr := darwinRuntimeUpgradeRollbackState(candidateSupervisor, resume)
 	if snapshotErr != nil {
 		receipt.Phase = "failed"
 		receipt.ErrorCode = "candidate_release_unproven"
@@ -532,6 +533,19 @@ func runDarwinRuntimeUpgradeResume(listener, lifecycle, controlFile, secretFile 
 		return errors.Join(err, verifyErr)
 	}
 	return errors.Join(err, darwinUpgradeExecFiles(recovery, receipt.Previous.Path, []*os.File{listener, lifecycle, controlFile, secretFile}, []string{receipt.Previous.Path, "--runtime-upgrade-resume"}))
+}
+
+func darwinRuntimeUpgradeRollbackState(supervisor *proxy.RuntimeSupervisor, resume proxy.RuntimeUpgradeResumeV1) (proxy.RuntimeWorkerReleaseV1, uint64, string, error) {
+	if supervisor == nil {
+		// Setup returned before constructing any candidate owner. The incoming
+		// authenticated predecessor proof and checkpoint remain authoritative.
+		checkpoint, err := hex.DecodeString(resume.PreviousCheckpointDigest)
+		if err != nil || len(checkpoint) != 32 || resume.WorkerSequence == 0 || resume.Release.ProcessIdentityDigest == "" || resume.Release.ProcessTreeAbsenceProofDigest == "" || resume.Release.HolderReleaseProofDigest == "" {
+			return proxy.RuntimeWorkerReleaseV1{}, 0, "", proxy.ErrRuntimeOwnerReleaseUnproven
+		}
+		return resume.Release, resume.WorkerSequence, resume.PreviousCheckpointDigest, nil
+	}
+	return supervisor.RuntimeUpgradeRollbackSnapshot()
 }
 
 func reapDarwinUpgradeGuard(pid int) {
