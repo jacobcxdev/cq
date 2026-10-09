@@ -314,12 +314,17 @@ func (lifecycle *serviceLifecycle) Uninstall(ctx context.Context, owner installs
 		return fmt.Errorf("%w: recorded service identifiers differ", installstate.ErrOwnershipConflict)
 	}
 
+	restore, err := lifecycle.Platform.PrepareRollback(ctx)
+	if err != nil {
+		return fmt.Errorf("snapshot services before uninstall: %w", err)
+	}
+
 	removeErr := errors.Join(
 		wrapServiceError("remove refresh service", lifecycle.Platform.RemoveRefresh(ctx)),
 		wrapServiceError("remove proxy service", lifecycle.Platform.RemoveProxy(ctx)),
 	)
 	if removeErr != nil {
-		return removeErr
+		return lifecycle.rollbackNew(ctx, restore, removeErr)
 	}
 	status, err = lifecycle.Platform.Inspect(ctx)
 	if err != nil {
@@ -468,7 +473,9 @@ func (lifecycle *serviceLifecycle) rollbackNew(ctx context.Context, restore serv
 	if restore == nil {
 		return errors.Join(cause, fmt.Errorf("service rollback is unavailable"))
 	}
-	return errors.Join(cause, wrapServiceError("restore previous services", restore(ctx)))
+	recovery, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	return errors.Join(cause, wrapServiceError("restore previous services", restore(recovery)))
 }
 
 func (lifecycle *serviceLifecycle) validate(owner installstate.Owner) error {

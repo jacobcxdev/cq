@@ -144,3 +144,19 @@ homebrew_casks:
           "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq",
         ],
       }
+      # Scope the compatibility bridge to this cask artifact instance.
+      cq_uninstall = cask.artifacts.find { |artifact| artifact.is_a?(::Cask::Artifact::Uninstall) }
+      cq_parameters = cq_uninstall.method(:uninstall_phase).parameters.map(&:last)
+      unless %i[command successor reinstall].all? { |parameter| cq_parameters.include?(parameter) }
+        raise "CQ upgrade requires a supported Homebrew uninstall callback"
+      end
+      cq_uninstall.singleton_class.prepend(Module.new do
+        def uninstall_phase(command:, successor: nil, reinstall: false, **kwargs)
+          return if successor && successor.token == cask.token
+          if reinstall
+            raise "CQ reinstall requires a same-token Homebrew successor"
+          end
+
+          super(command: command, successor: successor, reinstall: reinstall, **kwargs)
+        end
+      end)

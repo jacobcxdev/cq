@@ -410,6 +410,9 @@ func (platform *darwinServicePlatform) restore(ctx context.Context, label, path 
 	if _, err := platform.run(ctx, "bootout", platform.target(label)); err != nil && !isDarwinLaunchctlNotLoaded(err) {
 		restoreErr = errors.Join(restoreErr, fmt.Errorf("boot out failed candidate: %w", err))
 	}
+	if err := platform.waitJobUnloaded(ctx, label); err != nil {
+		return errors.Join(restoreErr, fmt.Errorf("wait for failed candidate to unload: %w", err))
+	}
 	if exists {
 		if err := atomicWriteDarwinLaunchAgent(path, data); err != nil {
 			return errors.Join(restoreErr, fmt.Errorf("restore previous definition: %w", err))

@@ -252,7 +252,7 @@ func TestServiceUninstallRemovesRefreshBeforeProxyAndState(t *testing.T) {
 	if err := lifecycle.Uninstall(context.Background(), installstate.OwnerGo); err != nil {
 		t.Fatalf("Uninstall() error = %v", err)
 	}
-	want := []string{"preflight", "inspect", "remove-refresh", "remove-proxy", "inspect"}
+	want := []string{"preflight", "inspect", "snapshot", "remove-refresh", "remove-proxy", "inspect"}
 	if !reflect.DeepEqual(platform.calls, want) {
 		t.Fatalf("platform calls = %v, want %v", platform.calls, want)
 	}
@@ -277,7 +277,7 @@ func TestServiceUninstallKeepsStateWhenRemovalFails(t *testing.T) {
 	if _, err := store.Load(); err != nil {
 		t.Fatalf("state removed after failed uninstall: %v", err)
 	}
-	want := []string{"preflight", "inspect", "remove-refresh", "remove-proxy"}
+	want := []string{"preflight", "inspect", "snapshot", "remove-refresh", "remove-proxy", "restore"}
 	if !reflect.DeepEqual(platform.calls, want) {
 		t.Fatalf("platform calls = %v, want %v", platform.calls, want)
 	}
@@ -497,6 +497,8 @@ type fakeServicePlatform struct {
 	removeProxyErr    error
 	removeRefreshErr  error
 	inspectErr        error
+	onRemoveProxy     func()
+	restoreContextErr error
 }
 
 func (platform *fakeServicePlatform) PrepareRollback(context.Context) (serviceRestore, error) {
@@ -517,8 +519,12 @@ func (platform *fakeServicePlatform) Snapshot(context.Context) (servicePlatformS
 	}}, nil
 }
 
-func (platform *fakeServicePlatform) Restore(_ context.Context, snapshot servicePlatformSnapshot) error {
+func (platform *fakeServicePlatform) Restore(ctx context.Context, snapshot servicePlatformSnapshot) error {
 	platform.calls = append(platform.calls, "restore")
+	platform.restoreContextErr = ctx.Err()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if snapshot.Manager != "fake" || len(snapshot.Components) != 2 || snapshot.Components[0].ID != "proxy" || snapshot.Components[1].ID != "refresh" {
 		return errors.New("invalid fake snapshot")
 	}
@@ -582,6 +588,9 @@ func (platform *fakeServicePlatform) RestartRefresh(context.Context) error {
 
 func (platform *fakeServicePlatform) RemoveProxy(context.Context) error {
 	platform.calls = append(platform.calls, "remove-proxy")
+	if platform.onRemoveProxy != nil {
+		platform.onRemoveProxy()
+	}
 	if platform.removeProxyErr != nil {
 		return platform.removeProxyErr
 	}
@@ -656,5 +665,46 @@ func TestServiceErrorMessagesDoNotExposeEnvironment(t *testing.T) {
 	err := lifecycle.Install(context.Background(), installstate.OwnerGo)
 	if err == nil || strings.Contains(err.Error(), secret) {
 		t.Fatalf("Install() error = %v", err)
+	}
+}
+
+func TestServiceUninstallRestoresServicesWhenProxyRemovalFails(t *testing.T) {
+	lifecycle, platform, store := newServiceHarness(t)
+	if err := lifecycle.Install(context.Background(), installstate.OwnerGo); err != nil {
+		t.Fatal(err)
+	}
+	platform.removeProxyErr = errors.New("proxy unload timed out")
+	if err := lifecycle.Uninstall(context.Background(), installstate.OwnerGo); !errors.Is(err, platform.removeProxyErr) {
+		t.Fatalf("Uninstall() = %v", err)
+	}
+	if !platform.proxyRunning || !platform.refreshRegistered {
+		t.Fatal("failed uninstall left services unavailable")
+	}
+	if _, err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Cancellation during removal must not cancel recovery of the snapshot.
+func TestServiceUninstallRollbackUsesIndependentContext(t *testing.T) {
+	lifecycle, platform, store := newServiceHarness(t)
+	if err := lifecycle.Install(context.Background(), installstate.OwnerGo); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	platform.onRemoveProxy = cancel
+	platform.removeProxyErr = errors.New("removal interrupted")
+	err := lifecycle.Uninstall(ctx, installstate.OwnerGo)
+	if !errors.Is(err, platform.removeProxyErr) {
+		t.Fatalf("Uninstall() = %v", err)
+	}
+	if platform.restoreContextErr != nil {
+		t.Fatalf("rollback inherited cancellation: %v", platform.restoreContextErr)
+	}
+	if !platform.proxyRunning || !platform.refreshRegistered {
+		t.Fatal("snapshot jobs were not restored")
+	}
+	if _, err := store.Load(); err != nil {
+		t.Fatal(err)
 	}
 }
