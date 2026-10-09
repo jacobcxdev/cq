@@ -29,6 +29,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/installer"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
@@ -828,8 +829,20 @@ func (f *nativeUpgradeFixture) snapshotRestore() {
 	f.t.Helper()
 	path := filepath.Join(f.root, "management/snapshot.json")
 	binary := filepath.Join(f.root, "prefix/bin/cq")
+	lock, err := (installer.FileInstallLocker{FS: fsutil.OSFileSystem{}, StateRoot: f.roots.State}).Acquire()
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer lock.Close()
+	inherited, err := installer.InheritedInstallLockFile(installer.ContextWithInstallLock(context.Background(), lock))
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	defer inherited.Close()
 	for _, action := range []string{"snapshot", "restore"} {
-		out, err := exec.Command(binary, "service", action, "--owner=homebrew", "--installer-lock-held", "--snapshot-file="+path).CombinedOutput()
+		command := exec.Command(binary, "service", action, "--owner=homebrew", "--installer-lock-held", "--snapshot-file="+path, "--service-executable="+binary)
+		command.Stdin = inherited
+		out, err := command.CombinedOutput()
 		os.WriteFile(filepath.Join(f.output, action+".log"), out, 0o600)
 		if err != nil {
 			f.t.Fatalf("retained %s: %v %s", action, err, out)

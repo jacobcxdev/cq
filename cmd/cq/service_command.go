@@ -198,7 +198,7 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 		return serviceCommand{}, fmt.Errorf("service %s: --owner is only valid with a package lifecycle action", command.Action)
 	}
 	if command.ServiceExecutable != "" {
-		if command.Owner != installstate.OwnerHomebrew || (command.Action != "install" && command.Action != "upgrade" && command.Action != "uninstall") {
+		if command.Owner != installstate.OwnerHomebrew || !packageAction {
 			return serviceCommand{}, fmt.Errorf("service %s: service executable is only valid for Homebrew lifecycle hooks", command.Action)
 		}
 		if !filepath.IsAbs(command.ServiceExecutable) || filepath.Clean(command.ServiceExecutable) != command.ServiceExecutable {
