@@ -27,23 +27,6 @@ cat > "$root/launchctl" <<'MOCK'
 #!/bin/bash
 printf '%s\n' "$*" >> "$CQ_HOOK_TEST_ROOT/launchctl.log"
 if [[ "${1:-}" == print ]]; then
-  remaining=0
-  if [[ -f "$CQ_HOOK_TEST_ROOT/pending-bootout" ]]; then
-    remaining=$(cat "$CQ_HOOK_TEST_ROOT/pending-bootout")
-  fi
-  if (( remaining > 0 )); then
-    printf '%s\n' "$((remaining - 1))" > "$CQ_HOOK_TEST_ROOT/pending-bootout"
-    exit 0
-  fi
-  if [[ "${2:-}" == */dev.jacobcx.cq.proxy && -f "$CQ_HOOK_TEST_ROOT/flap" ]]; then
-    phase=$(cat "$CQ_HOOK_TEST_ROOT/flap")
-    if [[ "$phase" == 2 ]]; then
-      printf '1\n' > "$CQ_HOOK_TEST_ROOT/flap"
-      exit 113
-    fi
-    rm "$CQ_HOOK_TEST_ROOT/flap"
-    exit 0
-  fi
   exit 113
 fi
 MOCK
@@ -68,7 +51,7 @@ run_hook uninstall
 printf '3\n' > "$root/pending-bootout"
 printf '2\n' > "$root/flap"
 run_hook install
-[[ $(cat "$root/pending-bootout") == 0 && ! -e "$root/flap" ]] || exit 1
+[[ $(cat "$root/pending-bootout") == 3 && $(cat "$root/flap") == 2 && ! -e "$root/launchctl.log" ]] || exit 1
 run_hook uninstall
 [[ $(wc -l < "$root/service.log") -eq 5 ]] || exit 1
 rm "$target"
@@ -93,7 +76,9 @@ rm "$root/quarantine" "$root/reject-xattr"
 run_hook install
 rm "$root/staged/cq"
 touch "$root/home/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist" "$root/home/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"
-run_hook uninstall
-[[ ! -e "$root/home/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist" && ! -e "$root/home/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist" ]] || exit 1
-[[ $(grep -c '^bootout ' "$root/launchctl.log") -eq 2 ]] || exit 1
+service_calls=$(wc -l < "$root/service.log")
+expect_failure uninstall
+grep -Fq 'CQ removal requires its verified package executable:' "$root/error"
+[[ -L "$target" && -e "$root/home/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist" && -e "$root/home/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist" ]] || exit 1
+[[ $(wc -l < "$root/service.log") -eq "$service_calls" && ! -e "$root/launchctl.log" ]] || exit 1
 echo "Homebrew lifecycle ownership, quarantine, rollback, and missing-binary tests passed"

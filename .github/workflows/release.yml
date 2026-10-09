@@ -23,7 +23,9 @@ jobs:
           go-version-file: go.mod
 
       - name: Verify Homebrew lifecycle ownership and rollback
-        run: .github/scripts/test-homebrew-lifecycle.sh
+        run: |
+          .github/scripts/test-homebrew-lifecycle.sh
+          .github/scripts/test-homebrew-install-status.sh
 
       - name: Install current Codex client
         run: |
