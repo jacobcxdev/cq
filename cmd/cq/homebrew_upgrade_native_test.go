@@ -800,11 +800,13 @@ func (f *nativeUpgradeFixture) managementChecks(version string) {
 	if err != nil {
 		f.t.Fatalf("retained package status: %v %s", err, out)
 	}
-	var status proxy.ProxySnapshot
+	var status struct {
+		Verdict string `json:"verdict"`
+	}
 	if err := json.Unmarshal(out, &status); err != nil {
 		f.t.Fatal(err)
 	}
-	if string(status.Verdict) != "healthy" {
+	if status.Verdict != "healthy" {
 		f.t.Fatalf("retained status unhealthy: %s", out)
 	}
 	out, err = exec.Command(binary, "--fixture-service-binding").CombinedOutput()
