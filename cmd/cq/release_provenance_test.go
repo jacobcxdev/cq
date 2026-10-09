@@ -319,11 +319,14 @@ func TestHomebrewCaskValidationFailsClosed(t *testing.T) {
 		`abort "CQ lifecycle command survived validation isolation"`,
 		`abort "production CQ binary path survived validation isolation"`,
 		`abort "production CQ launchd label survived validation isolation"`,
-		`find "$validation_binary" -depth -delete`,
+		"brew uninstall --cask --force \"$validation_token\"\n[[ ! -e \"$validation_binary\" && ! -L \"$validation_binary\" ]]",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask validation missing fail-closed guard %q", required)
 		}
+	}
+	if strings.Contains(text, `find "$validation_binary" -depth -delete`) {
+		t.Fatal("Homebrew Cask validation deletes verified package before uninstall")
 	}
 }
 
@@ -615,7 +618,11 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 	}
 	homebrewText := string(homebrewInstall)
 	for _, required := range []string{
-		`"$live_executable" -ef "$installed_cq"`,
+		`Digest::SHA256.file(live).hexdigest == package_digest`,
+		`status["active_runtime_version"] == expected_version`,
+		`Digest::SHA256.file(path).hexdigest == digest`,
+		`brew reinstall --cask "$validation_tap/cq"`,
+		`"$($installed_cq service status --json | jq -er '.proxy.pid')" == "$proxy_pid"`,
 		`jq . <<<"$status_json" >&2`,
 		`tail -n 80 "$log" >&2`,
 	} {
