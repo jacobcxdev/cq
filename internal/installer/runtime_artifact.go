@@ -134,7 +134,7 @@ func (store RuntimeArtifactStore) Stage(ctx context.Context, source string) (Run
 		}
 	}
 	artifact.Version = "staging"
-	if err := store.Verify(ctx, artifact); err != nil {
+	if err := store.verifyStored(ctx, artifact); err != nil {
 		return RuntimeArtifact{}, err
 	}
 	check, err := checkRuntimeExecutable(ctx, artifact.Path)
@@ -196,6 +196,17 @@ func checkRuntimeExecutable(ctx context.Context, path string) (RuntimeCheckV1, e
 }
 
 func (store RuntimeArtifactStore) Verify(ctx context.Context, artifact RuntimeArtifact) error {
+	if err := store.verifyStored(ctx, artifact); err != nil {
+		return err
+	}
+	check, err := checkRuntimeExecutable(ctx, artifact.Path)
+	if err != nil || check.Version != artifact.Version || check.ProtocolVersion != artifact.ProtocolVersion {
+		return errors.Join(ErrRuntimeArtifact, err)
+	}
+	return nil
+}
+
+func (store RuntimeArtifactStore) verifyStored(ctx context.Context, artifact RuntimeArtifact) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

@@ -108,3 +108,15 @@ func TestRuntimeArtifactRejectsSymlinkedDestination(t *testing.T) {
 		t.Fatal("symlinked destination accepted")
 	}
 }
+
+func TestRuntimeArtifactRejectsForgedVersion(t *testing.T) {
+	store := upgradeArtifactStore(t)
+	artifact, err := store.Stage(context.Background(), buildUpgradeArtifact(t, "0.34.0"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact.Version = "0.34.99"
+	if err := store.Verify(context.Background(), artifact); err == nil {
+		t.Fatal("client-supplied version disagreed with executable")
+	}
+}

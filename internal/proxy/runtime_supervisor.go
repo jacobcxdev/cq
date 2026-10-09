@@ -269,6 +269,8 @@ type RuntimeSupervisor struct {
 	upgradeListener    *RuntimeUpgradeListener
 	upgradeConnections *RuntimeUpgradeConnections
 	upgradeKeepAlive   func(bool)
+	upgradeController  *RuntimeUpgradeController
+	upgradeBusy        bool
 }
 
 func (supervisor *RuntimeSupervisor) SetCallerAdmissionConsumer(consumer NormalCallerAdmissionConsumer) error {
@@ -421,7 +423,11 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 		http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if request.URL != nil && request.URL.EscapedPath() != "/_cq/runtime/upgrade" && request.URL.EscapedPath() != "/_cq/runtime/upgrade/status" {
+	if request.URL != nil && (request.URL.EscapedPath() == RuntimeUpgradePath || request.URL.EscapedPath() == RuntimeUpgradeStatusPath) {
+		supervisor.serveUpgradeControl(writer, request)
+		return
+	}
+	if request.URL != nil {
 		release, _ := supervisor.upgradeRequests.begin(true)
 		defer release()
 		writer = &runtimeUpgradeResponseWriter{ResponseWriter: writer, release: release, releaseOnHijack: true}
@@ -749,6 +755,10 @@ func (supervisor *RuntimeSupervisor) EnterRescue(ctx context.Context) error {
 		return ErrRuntimeSupervisorUnavailable
 	}
 	supervisor.mu.Lock()
+	if supervisor.upgradeBusy {
+		supervisor.mu.Unlock()
+		return ErrRuntimeUpgradeBusy
+	}
 	if supervisor.modeEvidence == nil || supervisor.rescueHandler == nil {
 		supervisor.mu.Unlock()
 		return ErrRuntimeSupervisorUnavailable
@@ -862,6 +872,10 @@ func (supervisor *RuntimeSupervisor) ExitRescue(ctx context.Context, manifest Wo
 		return ErrRuntimeSupervisorUnavailable
 	}
 	supervisor.mu.Lock()
+	if supervisor.upgradeBusy {
+		supervisor.mu.Unlock()
+		return ErrRuntimeUpgradeBusy
+	}
 	if supervisor.modeEvidence == nil {
 		supervisor.mu.Unlock()
 		return ErrRuntimeSupervisorUnavailable
@@ -1077,7 +1091,7 @@ func (supervisor *RuntimeSupervisor) ReplaceWorker(ctx context.Context, manifest
 	}
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
-	if ctx == nil || supervisor.worker == nil || !supervisor.admissionReady {
+	if ctx == nil || supervisor.worker == nil || !supervisor.admissionReady || supervisor.upgradeBusy {
 		return RuntimeBootAckV1{}, ErrRuntimeSupervisorUnavailable
 	}
 	previous := supervisor.worker
@@ -1139,7 +1153,7 @@ func (supervisor *RuntimeSupervisor) replaceFailedWorker(ctx context.Context, ma
 	}
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
-	if ctx == nil || supervisor.worker == nil || !supervisor.admissionReady ||
+	if ctx == nil || supervisor.worker == nil || !supervisor.admissionReady || supervisor.upgradeBusy ||
 		(supervisor.trafficMode != TrafficModeNormal && supervisor.trafficMode != TrafficModeRescueExitDraining) ||
 		(expected != nil && supervisor.worker != expected) {
 		return RuntimeBootAckV1{}, ErrRuntimeSupervisorUnavailable

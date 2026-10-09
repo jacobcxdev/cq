@@ -680,7 +680,7 @@ func (worker *runtimeProcessWorker) AwaitQuiescence(ctx context.Context, _ uint6
 }
 
 func (worker *runtimeProcessWorker) PrepareUpgrade(ctx context.Context) error {
-	frame, err := worker.exchange(ctx, "prepare_upgrade", nil)
+	frame, err := worker.exchangeUpgrade(ctx, "prepare_upgrade")
 	if err != nil {
 		return err
 	}
@@ -719,7 +719,7 @@ func (worker *runtimeProcessWorker) AwaitUpgradeQuiescence(ctx context.Context) 
 	}
 }
 func (worker *runtimeProcessWorker) ResumeUpgrade(ctx context.Context) error {
-	frame, err := worker.exchange(ctx, "resume_upgrade", nil)
+	frame, err := worker.exchangeUpgrade(ctx, "resume_upgrade")
 	if err != nil {
 		return err
 	}
@@ -727,6 +727,19 @@ func (worker *runtimeProcessWorker) ResumeUpgrade(ctx context.Context) error {
 		return ErrRuntimeUpgradeUnsupported
 	}
 	return nil
+}
+
+func (worker *runtimeProcessWorker) exchangeUpgrade(ctx context.Context, kind string) (RuntimeControlFrameV1, error) {
+	if err := ctx.Err(); err != nil {
+		return RuntimeControlFrameV1{}, err
+	}
+	probe, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	frame, err := worker.exchange(probe, kind, nil)
+	if ctx.Err() != nil {
+		return frame, ctx.Err()
+	}
+	return frame, err
 }
 func (worker *runtimeProcessWorker) HolderProof() LifecycleHolderProof { return worker.holder }
 func (worker *runtimeProcessWorker) Exited() <-chan struct{}           { return worker.waitDone }
