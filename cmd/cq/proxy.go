@@ -112,6 +112,11 @@ func codexCallerBearerExpiry(accessToken string) time.Time {
 }
 
 var runProxyRuntimeRoleFn = runProxyRuntimeRole
+
+var runPlatformRuntimeUpgradeEntry = func([]string) (bool, error) { return false, nil }
+var configurePlatformRuntimeUpgrade = func(context.Context, *proxy.RuntimeSupervisor, *os.File, proxy.LifecycleHolderProof) error {
+	return nil
+}
 var newProxyRuntimeWorkerLauncherFn = func(proxy.RuntimeRoleManifestV1, proxy.LifecycleHolderProof) (proxy.RuntimeWorkerLauncher, error) {
 	return nil, proxy.ErrRuntimeRoleUnavailable
 }

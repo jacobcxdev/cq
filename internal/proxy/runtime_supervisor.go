@@ -115,9 +115,13 @@ func RunAdoptedRuntimeSupervisorConfigured(ctx context.Context, listener net.Lis
 		if supervisor.worker != nil {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_, reapErr := supervisor.worker.StopAndReap(cleanupCtx)
-			returnErr = errors.Join(returnErr, reapErr)
-			supervisor.worker = nil
+			release, reapErr := supervisor.worker.StopAndReap(cleanupCtx)
+			if reapErr != nil || !release.valid() {
+				returnErr = errors.Join(returnErr, ErrRuntimeOwnerReleaseUnproven, reapErr)
+			} else {
+				supervisor.pendingRelease = release
+				supervisor.worker = nil
+			}
 		}
 	}()
 	supervisor.mu.Lock()
@@ -175,6 +179,7 @@ var (
 	ErrRuntimeCrashLoop             = errors.New("runtime worker crash loop")
 	ErrRuntimeGeneration            = errors.New("runtime generation mismatch")
 	ErrRuntimeRecoveryPending       = errors.New("runtime worker recovery pending")
+	ErrRuntimeOwnerReleaseUnproven  = errors.New("runtime owner release unproven")
 )
 
 const (
@@ -271,6 +276,7 @@ type RuntimeSupervisor struct {
 	upgradeKeepAlive   func(bool)
 	upgradeController  *RuntimeUpgradeController
 	upgradeBusy        bool
+	upgradeBootRelease RuntimeWorkerReleaseV1
 }
 
 func (supervisor *RuntimeSupervisor) SetCallerAdmissionConsumer(consumer NormalCallerAdmissionConsumer) error {
@@ -992,6 +998,15 @@ func (supervisor *RuntimeSupervisor) Boot(ctx context.Context, manifest WorkerMa
 	if supervisor.worker != nil || supervisor.admissionReady {
 		return RuntimeBootAckV1{}, ErrRuntimeSupervisorUnavailable
 	}
+	if supervisor.upgradeBootRelease.valid() {
+		bootCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		ack, err := supervisor.bootLocked(bootCtx, manifest, "worker_switch", supervisor.upgradeBootRelease)
+		if err == nil {
+			supervisor.upgradeBootRelease = RuntimeWorkerReleaseV1{}
+		}
+		return ack, err
+	}
 	return supervisor.bootLocked(ctx, manifest, "boot", RuntimeWorkerReleaseV1{})
 }
 
@@ -1012,28 +1027,19 @@ func (supervisor *RuntimeSupervisor) bootLocked(ctx context.Context, manifest Wo
 	}
 	ack, err := worker.Boot(ctx, manifest)
 	if err != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, _ = worker.StopAndReap(cleanupCtx)
-		return RuntimeBootAckV1{}, err
+		return RuntimeBootAckV1{}, supervisor.releaseFailedBoot(worker, err)
 	}
 	workerHolder := worker.HolderProof()
 	if ack.SchemaVersion != 1 || ack.Kind != "runtime_boot_ack_v1" || ack.Holder != workerHolder ||
 		ValidateDistinctLifecycleHolders(supervisor.supervisorHolder, workerHolder) != nil {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, _ = worker.StopAndReap(cleanupCtx)
-		return RuntimeBootAckV1{}, ErrLifecycleHolderConflict
+		return RuntimeBootAckV1{}, supervisor.releaseFailedBoot(worker, ErrLifecycleHolderConflict)
 	}
 	if supervisor.callerAdmissions != nil {
 		authority, authorityErr := NewNormalCallerAuthorityFromIndex(ack.CallerAuthorityKey, ack.CallerIndex, supervisor.callerAdmissions, time.Now, rand.Reader)
 		zeroRuntimeBytes(ack.CallerAuthorityKey)
 		ack.CallerAuthorityKey = nil
 		if authorityErr != nil {
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_, _ = worker.StopAndReap(cleanupCtx)
-			return RuntimeBootAckV1{}, authorityErr
+			return RuntimeBootAckV1{}, supervisor.releaseFailedBoot(worker, authorityErr)
 		}
 		supervisor.callerAuthority = authority
 	}
@@ -1054,10 +1060,7 @@ func (supervisor *RuntimeSupervisor) bootLocked(ctx context.Context, manifest Wo
 	}
 	digest, err := supervisor.checkpoints.Select(ctx, checkpoint)
 	if err != nil || digest == "" {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, _ = worker.StopAndReap(cleanupCtx)
-		return RuntimeBootAckV1{}, errors.Join(ErrRuntimeCheckpointUnavailable, err)
+		return RuntimeBootAckV1{}, supervisor.releaseFailedBoot(worker, errors.Join(ErrRuntimeCheckpointUnavailable, err))
 	}
 	supervisor.worker = worker
 	supervisor.workerManifest = manifest
@@ -1065,6 +1068,23 @@ func (supervisor *RuntimeSupervisor) bootLocked(ctx context.Context, manifest Wo
 	supervisor.admissionReady = true
 	supervisor.monitorWorkerLocked(worker, manifest)
 	return ack, nil
+}
+
+// releaseFailedBoot runs while the supervisor mutex is held. A failed boot
+// must prove owner release before another worker can take the same state.
+func (supervisor *RuntimeSupervisor) releaseFailedBoot(worker RuntimeWorkerProcess, cause error) error {
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	release, err := worker.StopAndReap(cleanupCtx)
+	if err == nil && release.valid() {
+		supervisor.pendingRelease = release
+		return cause
+	}
+	supervisor.worker = worker
+	supervisor.admissionReady = false
+	supervisor.recoveryPending = true
+	supervisor.pendingRelease = RuntimeWorkerReleaseV1{}
+	return errors.Join(ErrRuntimeOwnerReleaseUnproven, cause, err)
 }
 
 func (supervisor *RuntimeSupervisor) monitorWorkerLocked(worker RuntimeWorkerProcess, manifest WorkerManifestV1) {
@@ -1223,4 +1243,51 @@ func (supervisor *RuntimeSupervisor) SetUpgradeIngress(listener *RuntimeUpgradeL
 	supervisor.upgradeConnections = connections
 	supervisor.upgradeKeepAlive = keepAlive
 	return nil
+}
+
+func (supervisor *RuntimeSupervisor) RuntimeUpgradeHandoffSnapshot() (*os.File, uint64, string, error) {
+	supervisor.mu.RLock()
+	defer supervisor.mu.RUnlock()
+	if supervisor.worker != nil || supervisor.admissionReady || !supervisor.upgradeBusy || supervisor.upgradeListener == nil {
+		return nil, 0, "", ErrRuntimeUpgradeBusy
+	}
+	file, err := supervisor.upgradeListener.File()
+	return file, supervisor.sequence, supervisor.checkpointDigest, err
+}
+
+func (supervisor *RuntimeSupervisor) ResumeRuntimeUpgradeOwnership(resume RuntimeUpgradeResumeV1) error {
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	digest, err := hex.DecodeString(resume.PreviousCheckpointDigest)
+	store, ok := supervisor.checkpoints.(*RuntimeHashCheckpointStore)
+	if err != nil || len(digest) != sha256.Size || !resume.Release.valid() || !ok || supervisor.worker != nil || supervisor.admissionReady {
+		return ErrRuntimeCheckpointUnavailable
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.current != "" {
+		return ErrRuntimeCheckpointUnavailable
+	}
+	store.current = resume.PreviousCheckpointDigest
+	supervisor.checkpointDigest = resume.PreviousCheckpointDigest
+	supervisor.sequence = resume.WorkerSequence + 1
+	supervisor.upgradeBootRelease = resume.Release
+	return nil
+}
+
+func (supervisor *RuntimeSupervisor) RuntimeUpgradeBootReady(digest string) bool {
+	supervisor.mu.RLock()
+	defer supervisor.mu.RUnlock()
+	return supervisor.admissionReady && supervisor.worker != nil && supervisor.workerManifest.WorkerArtifactDigest == digest && supervisor.callerAuthority != nil
+}
+
+// RuntimeUpgradeRollbackSnapshot carries the stopped candidate's release and
+// checkpoint chain into the pinned predecessor. No live worker may remain.
+func (supervisor *RuntimeSupervisor) RuntimeUpgradeRollbackSnapshot() (RuntimeWorkerReleaseV1, uint64, string, error) {
+	supervisor.mu.RLock()
+	defer supervisor.mu.RUnlock()
+	if supervisor.worker != nil || supervisor.admissionReady || !supervisor.pendingRelease.valid() {
+		return RuntimeWorkerReleaseV1{}, 0, "", ErrRuntimeOwnerReleaseUnproven
+	}
+	return supervisor.pendingRelease, supervisor.sequence, supervisor.checkpointDigest, nil
 }

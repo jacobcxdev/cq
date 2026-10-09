@@ -19,16 +19,19 @@ var ErrRuntimeUpgradeReceipt = errors.New("invalid runtime upgrade receipt")
 var runtimeUpgradeTransactionPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,128}$`)
 
 type RuntimeUpgradeReceiptV1 struct {
-	SchemaVersion       int                       `json:"schema_version"`
-	TransactionID       string                    `json:"transaction_id"`
-	Generation          uint64                    `json:"generation"`
-	Phase               string                    `json:"phase"`
-	Previous            installer.RuntimeArtifact `json:"previous"`
-	Candidate           installer.RuntimeArtifact `json:"candidate"`
-	ListenerIdentity    string                    `json:"listener_identity"`
-	SupervisorPID       int                       `json:"supervisor_pid"`
-	AdmissionPauseNanos int64                     `json:"admission_pause_nanos"`
-	ErrorCode           string                    `json:"error_code,omitempty"`
+	SchemaVersion          int                       `json:"schema_version"`
+	TransactionID          string                    `json:"transaction_id"`
+	Generation             uint64                    `json:"generation"`
+	Phase                  string                    `json:"phase"`
+	Previous               installer.RuntimeArtifact `json:"previous"`
+	Candidate              installer.RuntimeArtifact `json:"candidate"`
+	ListenerIdentity       string                    `json:"listener_identity"`
+	SupervisorPID          int                       `json:"supervisor_pid"`
+	GuardPID               int                       `json:"guard_pid,omitempty"`
+	RecoveredSupervisorPID int                       `json:"recovered_supervisor_pid,omitempty"`
+	RecoveryAttempts       int                       `json:"recovery_attempts,omitempty"`
+	AdmissionPauseNanos    int64                     `json:"admission_pause_nanos"`
+	ErrorCode              string                    `json:"error_code,omitempty"`
 }
 
 type RuntimeUpgradeStore struct {
@@ -48,7 +51,7 @@ func (receipt RuntimeUpgradeReceiptV1) terminal() bool {
 	return false
 }
 func (receipt RuntimeUpgradeReceiptV1) Validate() error {
-	if receipt.SchemaVersion != 1 || !runtimeUpgradeTransactionPattern.MatchString(receipt.TransactionID) || receipt.Generation == 0 || receipt.SupervisorPID <= 1 || receipt.ListenerIdentity == "" || receipt.AdmissionPauseNanos < 0 {
+	if receipt.SchemaVersion != 1 || !runtimeUpgradeTransactionPattern.MatchString(receipt.TransactionID) || receipt.Generation == 0 || receipt.SupervisorPID <= 1 || receipt.ListenerIdentity == "" || receipt.AdmissionPauseNanos < 0 || receipt.GuardPID < 0 || receipt.GuardPID == 1 || receipt.RecoveryAttempts < 0 || receipt.RecoveryAttempts > 3 || (receipt.RecoveryAttempts == 0 && receipt.RecoveredSupervisorPID != 0) || (receipt.RecoveryAttempts > 0 && receipt.RecoveredSupervisorPID <= 1) {
 		return ErrRuntimeUpgradeReceipt
 	}
 	if err := receipt.Previous.Validate(); err != nil {
@@ -98,6 +101,16 @@ func (store RuntimeUpgradeStore) Save(receipt RuntimeUpgradeReceiptV1) error {
 				return fmt.Errorf("%w: competing transaction", ErrRuntimeUpgradeReceipt)
 			}
 		} else {
+			if previous.GuardPID != receipt.GuardPID && !(previous.GuardPID == 0 && receipt.GuardPID > 1 && receipt.Phase == "handoff") {
+				return ErrRuntimeUpgradeReceipt
+			}
+			if previous.RecoveryAttempts != receipt.RecoveryAttempts {
+				if receipt.RecoveryAttempts != previous.RecoveryAttempts+1 || receipt.Phase != "rolling_back" || (previous.Phase != "handoff" && previous.Phase != "verifying" && previous.Phase != "rolling_back") {
+					return ErrRuntimeUpgradeReceipt
+				}
+			} else if previous.RecoveredSupervisorPID != receipt.RecoveredSupervisorPID {
+				return ErrRuntimeUpgradeReceipt
+			}
 			if previous.Generation != receipt.Generation || previous.Previous != receipt.Previous || previous.Candidate != receipt.Candidate || previous.ListenerIdentity != receipt.ListenerIdentity || previous.SupervisorPID != receipt.SupervisorPID {
 				return ErrRuntimeUpgradeReceipt
 			}

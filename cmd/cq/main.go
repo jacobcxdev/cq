@@ -229,6 +229,13 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if handled, err := runPlatformRuntimeUpgradeEntry(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: runtime upgrade: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if len(os.Args) >= 3 && os.Args[1] == "proxy" && os.Args[2] == "runtime-check" {
 		if err := runProxyRuntimeCheck(os.Args[3:], os.Stdout); err != nil {
 			fmt.Fprintln(os.Stderr, "cq: runtime preflight failed")

@@ -282,3 +282,55 @@ func TestRuntimeUpgradeControlRejectsMalformedBodies(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeUpgradeExecFailurePreservesGuardReceipt(t *testing.T) {
+	controller, _, _, request := upgradeControllerFixture(t)
+	controller.options.Handoff = func(_ context.Context, receipt RuntimeUpgradeReceiptV1, _ RuntimeWorkerReleaseV1) error {
+		receipt.GuardPID = 12345
+		if err := controller.options.Store.Save(receipt); err != nil {
+			return err
+		}
+		return errors.New("exec failed after guard prepared")
+	}
+	if _, err := controller.Begin(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	receipt := upgradeWaitTerminal(t, controller, request.TransactionID)
+	if receipt.Phase != "rolled_back" || receipt.GuardPID != 12345 {
+		t.Fatalf("exec rollback discarded durable guard binding: %+v", receipt)
+	}
+}
+
+type upgradeUnreleasedBootWorker struct{ *runtimeTestWorker }
+
+func (*upgradeUnreleasedBootWorker) StopAndReap(context.Context) (RuntimeWorkerReleaseV1, error) {
+	return RuntimeWorkerReleaseV1{}, errors.New("release not proven")
+}
+
+type upgradeUnreleasedBootLauncher struct{ worker RuntimeWorkerProcess }
+
+func (launcher upgradeUnreleasedBootLauncher) Launch(context.Context, WorkerManifestV1) (RuntimeWorkerProcess, error) {
+	return launcher.worker, nil
+}
+func TestRuntimeUpgradeFailedBootRetainsUnreleasedOwner(t *testing.T) {
+	events := []string{}
+	worker := &upgradeUnreleasedBootWorker{&runtimeTestWorker{holder: runtimeHolder("unreleased"), events: &events}}
+	supervisor, err := NewRuntimeSupervisor(&runtimeTestListener{}, runtimeHolder("supervisor"), upgradeUnreleasedBootLauncher{worker}, &runtimeTestCheckpointStore{events: &events})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Force checkpoint selection to fail after the worker has booted.
+	supervisor.checkpoints = upgradeFailingCheckpoint{}
+	if _, err := supervisor.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"}); !errors.Is(err, ErrRuntimeOwnerReleaseUnproven) {
+		t.Fatalf("failed boot lost owner release failure: %v", err)
+	}
+	if supervisor.worker != worker || supervisor.admissionReady {
+		t.Fatal("unreleased owner was discarded")
+	}
+}
+
+type upgradeFailingCheckpoint struct{}
+
+func (upgradeFailingCheckpoint) Select(context.Context, RuntimeHolderCheckpointV1) (string, error) {
+	return "", errors.New("checkpoint failed")
+}

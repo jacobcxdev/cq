@@ -98,6 +98,8 @@ var commandDispatcherSpecs = []commandDispatcherSpec{
 }
 
 var commandDispatcherCoverageOnly = []commandDispatcherCoverage{
+	{commandDispatcherKey{"proxy_upgrade_darwin.go", "runDarwinRuntimeUpgradeEntry", "args[0]"}, []string{"proxy"}},
+	{commandDispatcherKey{"proxy_upgrade_darwin.go", "runDarwinRuntimeUpgradeEntry", "args[1]"}, []string{"start"}},
 	{commandDispatcherKey{"help.go", "interceptedZeroArgumentUsage", "args[1]"}, []string{"overlay", "prime"}},
 	{commandDispatcherKey{"help.go", "manualHelpInspectionPath", "args[1]"}, []string{"canary", "endpoint", "resets", "validate"}},
 	{commandDispatcherKey{"help.go", "manualHelpInspectionPath", "args[2]"}, []string{"list", "recommend", "use"}},

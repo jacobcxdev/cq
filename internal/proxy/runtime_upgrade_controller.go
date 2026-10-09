@@ -263,6 +263,7 @@ func (controller *RuntimeUpgradeController) run(ctx context.Context, receipt Run
 		return
 	}
 	released = proof
+	receipt.AdmissionPauseNanos = time.Since(pausedAt).Nanoseconds()
 	supervisor.mu.Lock()
 	supervisor.worker = nil
 	supervisor.admissionReady = false
@@ -311,6 +312,9 @@ func (controller *RuntimeUpgradeController) deferUpgrade(ctx context.Context, re
 	controller.save(*receipt)
 }
 func (controller *RuntimeUpgradeController) rollback(ctx context.Context, receipt *RuntimeUpgradeReceiptV1, proof RuntimeWorkerReleaseV1, pausedAt time.Time) {
+	if loaded, err := controller.options.Store.Load(); err == nil && loaded.TransactionID == receipt.TransactionID && loaded.Generation == receipt.Generation {
+		*receipt = loaded
+	}
 	receipt.Phase = "rolling_back"
 	receipt.ErrorCode = "candidate_boot_failed"
 	if err := controller.save(*receipt); err != nil {
