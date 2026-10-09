@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -115,6 +116,68 @@ func TestDarwinRuntimePruningWaitsForOwnershipAndPreservesJobReferences(t *testi
 	}
 	if _, err := os.Stat(filepath.Dir(copies[4].Path)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("obsolete directory retained: %v", err)
+	}
+	// A snapshot made after A -> B must still restore refresh B after the
+	// current job and latest transaction have advanced to C -> D.
+	var components []serviceComponentSnapshot
+	for _, label := range []string{proxyAgentLabel, agentLabel} {
+		data, err := os.ReadFile(platform.plistPath(label))
+		if err != nil {
+			t.Fatal(err)
+		}
+		components = append(components, serviceComponentSnapshot{ID: label, Exists: true, Definition: data})
+	}
+	snapshot := persistedServiceSnapshot{SchemaVersion: serviceSnapshotSchemaVersion, Owner: installstate.OwnerHomebrew, Executable: record.Executable, Platform: servicePlatformSnapshot{Manager: "launchd", Components: components}}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotPath := filepath.Join(root, "snapshots", "old.json")
+	lock, err := artifacts.Lock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeDarwinRuntimeSnapshot(ctx, artifacts, snapshotPath, data); !errors.Is(err, fsutil.ErrExclusiveLockHeld) {
+		t.Fatalf("snapshot publication bypassed artifact lock: %v", err)
+	}
+	lock.Close()
+	if err := writeDarwinRuntimeSnapshot(ctx, artifacts, snapshotPath, data); err != nil {
+		t.Fatal(err)
+	}
+	refresh, err := renderDarwinLaunchAgent(darwinLaunchAgentDefinition{Label: agentLabel, ProgramArguments: []string{copies[3].Path, "refresh"}, StandardErrorPath: filepath.Join(root, "refresh.log")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(platform.plistPath(agentLabel), refresh, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneDarwinServiceRuntime(ctx, platform, ownership, artifacts, receipts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(copies[1].Path)); err != nil {
+		t.Fatalf("saved snapshot lost its refresh executable: %v", err)
+	}
+	if err := os.WriteFile(snapshotPath, []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneDarwinServiceRuntime(ctx, platform, ownership, artifacts, receipts); err == nil {
+		t.Fatal("changed snapshot allowed pruning")
+	}
+	if _, err := os.Stat(filepath.Dir(copies[1].Path)); err != nil {
+		t.Fatalf("changed snapshot lost its retained executable: %v", err)
+	}
+	if err := os.Remove(snapshotPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := pruneDarwinServiceRuntime(ctx, platform, ownership, artifacts, receipts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Dir(copies[1].Path)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted snapshot still pinned old runtime: %v", err)
+	}
+	pins, err := os.ReadDir(filepath.Join(roots.State, "runtime-snapshots"))
+	if err != nil || len(pins) != 0 {
+		t.Fatalf("deleted snapshot left retention pin: %v %v", pins, err)
 	}
 }
 

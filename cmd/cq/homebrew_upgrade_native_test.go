@@ -133,6 +133,10 @@ func TestNativeHomebrewUpgradeAcceptance(t *testing.T) {
 	fixture.deadlineDeferral()
 	fixture.assertRetainedRuntimes()
 	fixture.snapshotRestore()
+	fixture.packageOperation("reinstall", "0.34.1", "0.34.1", false)
+	fixture.assertRetainedRuntimes()
+	fixture.traffic("snapshot-pinned-reinstall")
+	fixture.evidence.Outcomes = append(fixture.evidence.Outcomes, "snapshot-pins-checked-on-reinstall")
 	fixture.packageOperation("uninstall", "0.34.1", "", false)
 	for _, label := range []string{fixture.label, fixture.refresh} {
 		if out, err := exec.Command("launchctl", "print", fmt.Sprintf("gui/%d/%s", os.Getuid(), label)).CombinedOutput(); err == nil {
@@ -141,6 +145,9 @@ func TestNativeHomebrewUpgradeAcceptance(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(fixture.roots.State, "runtime-artifacts")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("retained artifacts survived uninstall: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.roots.State, "runtime-snapshots")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("snapshot pins survived uninstall: %v", err)
 	}
 	for _, path := range []string{filepath.Join(fixture.root, "caskroom/cq/0.34.1"), filepath.Join(fixture.root, "caskroom/cq/.metadata/0.34.1"), (proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: fixture.roots}).Path()} {
 		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {

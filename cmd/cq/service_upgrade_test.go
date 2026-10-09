@@ -209,6 +209,24 @@ func TestHomebrewSnapshotUsesRetainedOwnershipAndRestores(t *testing.T) {
 		t.Fatalf("snapshot restore changed selected ownership: %+v %v", record, err)
 	}
 }
+
+func TestHomebrewSnapshotRestorePreflightsBeforeChangingJobs(t *testing.T) {
+	lifecycle, platform, _, _, _ := homebrewUpgradeServiceFixture(t)
+	path := filepath.Join(t.TempDir(), "private", "snapshot.json")
+	if err := lifecycle.Snapshot(context.Background(), installstate.OwnerHomebrew, path); err != nil {
+		t.Fatal(err)
+	}
+	platform.calls = nil
+	lifecycle.RuntimeSnapshotCheck = func(context.Context, servicePlatformSnapshot) error {
+		return errors.New("snapshot executable unavailable")
+	}
+	if err := lifecycle.Restore(context.Background(), installstate.OwnerHomebrew, path); err == nil {
+		t.Fatal("snapshot with unavailable executable restored")
+	}
+	if len(platform.calls) != 0 {
+		t.Fatalf("rejected snapshot changed jobs: %v", platform.calls)
+	}
+}
 func TestHomebrewTrueUninstallRemovesJobsAndState(t *testing.T) {
 	lifecycle, platform, store, _, _ := homebrewUpgradeServiceFixture(t)
 	if err := lifecycle.Uninstall(context.Background(), installstate.OwnerHomebrew); err != nil {

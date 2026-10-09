@@ -114,6 +114,8 @@ type serviceLifecycle struct {
 	RuntimeRestoreRefresh func(context.Context, servicePlatformSnapshot) error
 	RuntimeCleanup        func(context.Context) error
 	RuntimePrune          func(context.Context) error
+	RuntimeSnapshotWrite  func(context.Context, string, []byte) error
+	RuntimeSnapshotCheck  func(context.Context, servicePlatformSnapshot) error
 	RuntimeReceipt        func() (proxy.RuntimeUpgradeReceiptV1, error)
 	RuntimeExecutable     string
 }
@@ -254,7 +256,11 @@ func (lifecycle *serviceLifecycle) Snapshot(ctx context.Context, owner installst
 	if len(data) > maxServiceSnapshotBytes {
 		return fmt.Errorf("service snapshot exceeds size limit")
 	}
-	if err := fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, path, data); err != nil {
+	write := func() error { return fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, path, data) }
+	if owner == installstate.OwnerHomebrew && lifecycle.RuntimeSnapshotWrite != nil {
+		write = func() error { return lifecycle.RuntimeSnapshotWrite(ctx, path, data) }
+	}
+	if err := write(); err != nil {
 		return fmt.Errorf("write service snapshot: %w", err)
 	}
 	return nil
@@ -282,6 +288,11 @@ func (lifecycle *serviceLifecycle) Restore(ctx context.Context, owner installsta
 	}
 	if snapshot.SchemaVersion != serviceSnapshotSchemaVersion || snapshot.Owner != owner || snapshot.Executable != lifecycle.Executable {
 		return fmt.Errorf("service snapshot identity differs")
+	}
+	if owner == installstate.OwnerHomebrew && lifecycle.RuntimeSnapshotCheck != nil {
+		if err := lifecycle.RuntimeSnapshotCheck(ctx, snapshot.Platform); err != nil {
+			return fmt.Errorf("service snapshot runtime preflight: %w", err)
+		}
 	}
 	if err := lifecycle.Platform.Restore(ctx, snapshot.Platform); err != nil {
 		return fmt.Errorf("restore services: %w", err)

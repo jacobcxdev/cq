@@ -18,7 +18,9 @@ configuration and logs remain available.
 After each upgrade attempt, CQ prunes unreferenced retained executables once
 runtime selection and package ownership agree. Both LaunchAgent executables
 and the latest transaction's previous/candidate pair remain available for
-startup and rollback. Pruning shares a lock with staging and transaction
+startup and rollback. Saved service snapshots pin their executable references
+until the snapshot file is removed; restore verifies those executables before
+changing jobs. Pruning shares a lock with staging, snapshot writes and transaction
 preparation. Unfinished handoffs, unknown files and unsafe paths retain their
 contents. Cleanup errors emit a warning without reverting a completed upgrade.
 

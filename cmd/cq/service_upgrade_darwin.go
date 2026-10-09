@@ -107,6 +107,21 @@ func configureDarwinServiceUpgrades(lifecycle *serviceLifecycle, platform *darwi
 	lifecycle.RuntimePrune = func(ctx context.Context) error {
 		return pruneDarwinServiceRuntime(ctx, platform, lifecycle.Store, artifacts, receipts)
 	}
+	lifecycle.RuntimeSnapshotWrite = func(ctx context.Context, path string, data []byte) error {
+		return writeDarwinRuntimeSnapshot(ctx, artifacts, path, data)
+	}
+	lifecycle.RuntimeSnapshotCheck = func(ctx context.Context, snapshot servicePlatformSnapshot) error {
+		paths, err := darwinRuntimeSnapshotPaths(snapshot)
+		if err != nil {
+			return err
+		}
+		for _, path := range paths {
+			if _, err := darwinExistingRuntimeArtifact(ctx, artifacts, path); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 func pruneDarwinServiceRuntime(ctx context.Context, platform *darwinServicePlatform, ownership serviceStateStore, artifacts installer.RuntimeArtifactStore, receipts proxy.RuntimeUpgradeStore) error {
@@ -149,7 +164,8 @@ func pruneDarwinServiceRuntime(ctx context.Context, platform *darwinServicePlatf
 			}
 			paths = append(paths, definition.ProgramArguments[0])
 		}
-		return paths, nil
+		snapshots, err := darwinRuntimeSnapshotReferences(ctx, artifacts, record.Executable)
+		return append(paths, snapshots...), err
 	})
 	// An unfinished handoff or package reconciliation retains everything until
 	// a later upgrade attempt can prove the complete reference set.
@@ -357,16 +373,18 @@ func cleanupDarwinServiceRuntime(ctx context.Context, platform *darwinServicePla
 			return err
 		}
 	}
-	root := filepath.Join(platform.roots.State, "runtime-artifacts")
-	if _, err := os.Lstat(root); err == nil {
-		if err := fsutil.ValidateSecureDirectory(fsutil.OSFileSystem{}, root); err != nil {
+	for _, name := range []string{"runtime-artifacts", "runtime-snapshots"} {
+		root := filepath.Join(platform.roots.State, name)
+		if _, err := os.Lstat(root); err == nil {
+			if err := fsutil.ValidateSecureDirectory(fsutil.OSFileSystem{}, root); err != nil {
+				return err
+			}
+			if err := os.RemoveAll(root); err != nil {
+				return err
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
-		if err := os.RemoveAll(root); err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
 	}
 	if err := os.Remove(store.Path()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
