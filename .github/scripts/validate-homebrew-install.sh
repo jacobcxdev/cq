@@ -44,6 +44,10 @@ cleanup() {
   trap - EXIT
   set +e
   if [[ "$owns_state" -eq 1 ]]; then
+    if [[ "$result" -ne 0 && -f "$config_root/state/runtime-upgrade.json" ]]; then
+      jq '{phase, error_code, generation, previous_version: .previous.version, candidate_version: .candidate.version}' \
+        "$config_root/state/runtime-upgrade.json" >&2
+    fi
     if [[ -x "$installed_cq" ]]; then
       "$installed_cq" service uninstall --owner=homebrew --service-executable="$installed_cq" >/dev/null 2>&1
     fi

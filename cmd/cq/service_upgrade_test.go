@@ -245,10 +245,10 @@ func TestHomebrewTrueUninstallRemovesJobsAndState(t *testing.T) {
 func TestHomebrewUpgradeDeferralKeepsOwnership(t *testing.T) {
 	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
 	lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
-		return proxy.RuntimeUpgradeReceiptV1{Phase: "deferred", Previous: previous, Candidate: candidate}, nil
+		return proxy.RuntimeUpgradeReceiptV1{Phase: "deferred", Previous: previous, Candidate: candidate, ErrorCode: "worker_not_quiescent"}, nil
 	}
 	receipt, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, candidate.Path)
-	if !errors.Is(err, ErrServiceUpgradeDeferred) || receipt.Phase != "deferred" {
+	if !errors.Is(err, ErrServiceUpgradeDeferred) || receipt.Phase != "deferred" || !strings.Contains(err.Error(), "worker_not_quiescent") {
 		t.Fatalf("deferred reported success: %+v %v", receipt, err)
 	}
 	record, _ := store.Load()
