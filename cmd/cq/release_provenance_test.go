@@ -219,7 +219,7 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 		"- cq",
 		"custom_block: |",
 		"installer script:",
-		"uninstall script:",
+		"uninstall(script:",
 		`executable: "/bin/bash"`,
 		`set -euo pipefail`,
 		`attributes=$(/usr/bin/xattr "$source")`,

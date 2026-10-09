@@ -108,33 +108,33 @@ homebrew_casks:
           "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq",
         ],
       }
-      uninstall script: {
+      uninstall(script: {
         executable: "/bin/bash",
         args: [
           "-c", cq_lifecycle_script, "cq-homebrew-lifecycle", "uninstall",
           "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq",
         ],
-      }
-      # Keep CQ's instance-scoped callback in Homebrew's saved Ruby metadata.
-      # JSON artifact metadata cannot serialise the callback module below.
-      unless cask.method(:uninstall_flight_blocks?).arity == 0
-        raise "CQ upgrade requires supported Homebrew metadata persistence"
-      end
-      cask.define_singleton_method(:uninstall_flight_blocks?) { true }
-      # Scope the compatibility bridge to this cask artifact instance.
-      cq_uninstall = cask.artifacts.find { |artifact| artifact.is_a?(::Cask::Artifact::Uninstall) }
-      cq_parameters = cq_uninstall.method(:uninstall_phase).parameters.map(&:last)
-      unless %i[command successor reinstall].all? { |parameter| cq_parameters.include?(parameter) }
-        raise "CQ upgrade requires a supported Homebrew uninstall callback"
-      end
-      cq_uninstall.singleton_class.prepend(Module.new do
-        define_method(:uninstall_phase) do |command:, successor: nil, reinstall: false, **kwargs|
-          return if successor && successor.token == cask.token
-          if reinstall
-            raise "CQ reinstall requires a same-token Homebrew successor"
-          end
-
-          # define_method requires explicit argument forwarding to super.
-          super(command: command, successor: successor, reinstall: reinstall, **kwargs) # rubocop:disable Style/SuperArguments
+      }).tap do
+        # Keep callback setup attached to its declaration through formatting.
+        # Saved Ruby metadata retains this instance-scoped compatibility bridge.
+        unless cask.method(:uninstall_flight_blocks?).arity == 0
+          raise "CQ upgrade requires supported Homebrew metadata persistence"
         end
-      end)
+        cask.define_singleton_method(:uninstall_flight_blocks?) { true }
+        cq_uninstall = cask.artifacts.find { |artifact| artifact.is_a?(::Cask::Artifact::Uninstall) }
+        cq_parameters = cq_uninstall.method(:uninstall_phase).parameters.map(&:last)
+        unless %i[command successor reinstall].all? { |parameter| cq_parameters.include?(parameter) }
+          raise "CQ upgrade requires a supported Homebrew uninstall callback"
+        end
+        cq_uninstall.singleton_class.prepend(Module.new do
+          define_method(:uninstall_phase) do |command:, successor: nil, reinstall: false, **kwargs|
+            return if successor && successor.token == cask.token
+            if reinstall
+              raise "CQ reinstall requires a same-token Homebrew successor"
+            end
+
+            # define_method requires explicit argument forwarding to super.
+            super(command: command, successor: successor, reinstall: reinstall, **kwargs) # rubocop:disable Style/SuperArguments
+          end
+        end)
+      end
