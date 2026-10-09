@@ -848,6 +848,23 @@ func (f *nativeUpgradeFixture) snapshotRestore() {
 			f.t.Fatalf("retained %s: %v %s", action, err, out)
 		}
 	}
+	// Restore registers launchd definitions; journal selection completes during
+	// startup. Wait for verified live runtime before checking its executable.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		out, err := exec.Command(binary, "proxy", "status", "--json").Output()
+		var status struct {
+			OK    bool   `json:"ok"`
+			State string `json:"state"`
+		}
+		if err == nil && json.Unmarshal(out, &status) == nil && status.OK && status.State == "healthy" {
+			break
+		}
+		if time.Now().After(deadline) {
+			f.t.Fatalf("restored runtime not ready: %v %s", err, out)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	f.assertPreviousRuntime()
 	f.traffic("snapshot-restore")
 	f.managementChecks("0.34.1")
