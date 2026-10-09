@@ -235,36 +235,40 @@ type RuntimeSupervisor struct {
 	mu              sync.RWMutex
 	callerRefreshMu sync.Mutex
 
-	listener         net.Listener
-	listenerIdentity string
-	supervisorHolder LifecycleHolderProof
-	launcher         RuntimeWorkerLauncher
-	checkpoints      RuntimeHolderCheckpointStore
-	worker           RuntimeWorkerProcess
-	workerManifest   WorkerManifestV1
-	checkpointDigest string
-	sequence         uint64
-	admissionReady   bool
-	now              func() time.Time
-	crashStarts      []time.Time
-	crashLoop        bool
-	recoveryPending  bool
-	pendingRelease   RuntimeWorkerReleaseV1
-	callerAuthority  *NormalCallerAuthority
-	callerClassifier NormalCallerBranchClassifier
-	callerAdmissions NormalCallerAdmissionConsumer
-	trafficMode      TrafficMode
-	modeGeneration   uint64
-	modeEvidence     RuntimeModeEvidenceStore
-	rescueHandler    http.Handler
-	normalAdmitted   int
-	rescueAdmitted   int
-	rescueSessions   map[string]int
-	normalZero       chan struct{}
-	rescueZero       chan struct{}
-	lifetimeCtx      context.Context
-	rescueEntryRun   bool
-	rescueExitRun    bool
+	listener           net.Listener
+	listenerIdentity   string
+	supervisorHolder   LifecycleHolderProof
+	launcher           RuntimeWorkerLauncher
+	checkpoints        RuntimeHolderCheckpointStore
+	worker             RuntimeWorkerProcess
+	workerManifest     WorkerManifestV1
+	checkpointDigest   string
+	sequence           uint64
+	admissionReady     bool
+	now                func() time.Time
+	crashStarts        []time.Time
+	crashLoop          bool
+	recoveryPending    bool
+	pendingRelease     RuntimeWorkerReleaseV1
+	callerAuthority    *NormalCallerAuthority
+	callerClassifier   NormalCallerBranchClassifier
+	callerAdmissions   NormalCallerAdmissionConsumer
+	trafficMode        TrafficMode
+	modeGeneration     uint64
+	modeEvidence       RuntimeModeEvidenceStore
+	rescueHandler      http.Handler
+	normalAdmitted     int
+	rescueAdmitted     int
+	rescueSessions     map[string]int
+	normalZero         chan struct{}
+	rescueZero         chan struct{}
+	lifetimeCtx        context.Context
+	rescueEntryRun     bool
+	rescueExitRun      bool
+	upgradeRequests    *RuntimeUpgradeAdmission
+	upgradeListener    *RuntimeUpgradeListener
+	upgradeConnections *RuntimeUpgradeConnections
+	upgradeKeepAlive   func(bool)
 }
 
 func (supervisor *RuntimeSupervisor) SetCallerAdmissionConsumer(consumer NormalCallerAdmissionConsumer) error {
@@ -316,7 +320,7 @@ func NewRuntimeSupervisor(listener net.Listener, supervisorHolder LifecycleHolde
 	return &RuntimeSupervisor{
 		listener: listener, listenerIdentity: listener.Addr().Network() + "|" + listener.Addr().String(),
 		supervisorHolder: supervisorHolder, launcher: launcher, checkpoints: checkpoints, now: time.Now,
-		trafficMode: TrafficModeNormal, normalZero: closedRuntimeWaitChannel(), rescueZero: closedRuntimeWaitChannel(),
+		upgradeRequests: NewRuntimeUpgradeAdmission(), trafficMode: TrafficModeNormal, normalZero: closedRuntimeWaitChannel(), rescueZero: closedRuntimeWaitChannel(),
 		rescueSessions: make(map[string]int), lifetimeCtx: context.Background(),
 	}, nil
 }
@@ -417,6 +421,12 @@ func (supervisor *RuntimeSupervisor) ServeHTTP(writer http.ResponseWriter, reque
 		http.Error(writer, "runtime worker unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	if request.URL != nil && request.URL.EscapedPath() != "/_cq/runtime/upgrade" && request.URL.EscapedPath() != "/_cq/runtime/upgrade/status" {
+		release, _ := supervisor.upgradeRequests.begin(true)
+		defer release()
+		writer = &runtimeUpgradeResponseWriter{ResponseWriter: writer, release: release, releaseOnHijack: true}
+	}
+
 	if request.URL != nil && (request.URL.EscapedPath() == RuntimeRescueEnterPath || request.URL.EscapedPath() == RuntimeRescueExitPath || request.URL.EscapedPath() == RuntimeRescueStatusPath) {
 		supervisor.serveRescueControl(writer, request)
 		return
@@ -1187,4 +1197,16 @@ func (supervisor *RuntimeSupervisor) AwaitQuiescence(ctx context.Context, genera
 		return RuntimeQuiescenceAckV1{}, ErrRuntimeSupervisorUnavailable
 	}
 	return supervisor.worker.AwaitQuiescence(ctx, generation)
+}
+
+func (supervisor *RuntimeSupervisor) SetUpgradeIngress(listener *RuntimeUpgradeListener, connections *RuntimeUpgradeConnections, keepAlive func(bool)) error {
+	if listener == nil || connections == nil || keepAlive == nil {
+		return ErrRuntimeUpgradeUnsupported
+	}
+	supervisor.mu.Lock()
+	defer supervisor.mu.Unlock()
+	supervisor.upgradeListener = listener
+	supervisor.upgradeConnections = connections
+	supervisor.upgradeKeepAlive = keepAlive
+	return nil
 }

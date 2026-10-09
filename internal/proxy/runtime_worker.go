@@ -177,6 +177,14 @@ func RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(ctx context.Contex
 		return ErrRuntimeRoleManifest
 	}
 	drainer, _ := handler.(interface{ BeginDrain() })
+	upgrade, _ := handler.(RuntimeUpgradeWorker)
+	admission := NewRuntimeUpgradeAdmission()
+	if source, ok := handler.(interface {
+		RuntimeUpgradeAdmission() *RuntimeUpgradeAdmission
+	}); ok && source.RuntimeUpgradeAdmission() != nil {
+		admission = source.RuntimeUpgradeAdmission()
+	}
+
 	secret, err := ReadRuntimeSecret(files.Secret)
 	files.Secret = nil
 	if err != nil {
@@ -204,7 +212,7 @@ func RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(ctx context.Contex
 	_ = files.Work.Close()
 	files.Work = nil
 	defer workListener.Close()
-	workServer := &http.Server{Handler: runtimeWorkerIngressHandler(callerKey, callerState, handler), ReadHeaderTimeout: 10 * time.Second}
+	workServer := &http.Server{Handler: RuntimeUpgradeHTTPHandler(runtimeWorkerIngressHandler(callerKey, callerState, handler), admission), ReadHeaderTimeout: 10 * time.Second}
 	workResult := make(chan error, 1)
 	go func() {
 		serveErr := workServer.Serve(workListener)
@@ -266,6 +274,31 @@ func RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(ctx context.Contex
 			kind = "draining"
 		case "await_quiescence":
 			kind = "quiescent"
+		case "prepare_upgrade":
+			if upgrade == nil || upgrade.PrepareUpgrade(ctx) != nil {
+				kind = "upgrade_unsupported"
+			} else {
+				kind = "upgrade_prepared"
+			}
+		case "upgrade_quiescence":
+			if upgrade == nil {
+				kind = "upgrade_unsupported"
+			} else {
+				probe, cancel := context.WithTimeout(ctx, time.Millisecond)
+				quietErr := upgrade.AwaitUpgradeQuiescence(probe)
+				cancel()
+				if quietErr == nil && admission.quiescent() {
+					kind = "upgrade_quiescent"
+				} else {
+					kind = "upgrade_busy"
+				}
+			}
+		case "resume_upgrade":
+			if upgrade == nil || upgrade.ResumeUpgrade(ctx) != nil {
+				kind = "upgrade_unsupported"
+			} else {
+				kind = "upgrade_resumed"
+			}
 		case "shutdown":
 			kind = "stopped"
 		case "http_request":
@@ -644,6 +677,56 @@ func (worker *runtimeProcessWorker) BeginDrain(ctx context.Context, _ TrafficMod
 func (worker *runtimeProcessWorker) AwaitQuiescence(ctx context.Context, _ uint64) (RuntimeQuiescenceAckV1, error) {
 	frame, err := worker.exchange(ctx, "await_quiescence", nil)
 	return RuntimeQuiescenceAckV1{SchemaVersion: 1, Quiescent: err == nil && frame.Kind == "quiescent"}, err
+}
+
+func (worker *runtimeProcessWorker) PrepareUpgrade(ctx context.Context) error {
+	frame, err := worker.exchange(ctx, "prepare_upgrade", nil)
+	if err != nil {
+		return err
+	}
+	if frame.Kind != "upgrade_prepared" {
+		return ErrRuntimeUpgradeUnsupported
+	}
+	return nil
+}
+func (worker *runtimeProcessWorker) AwaitUpgradeQuiescence(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		probe, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		frame, err := worker.exchange(probe, "upgrade_quiescence", nil)
+		cancel()
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if err != nil {
+			return err
+		}
+		if frame.Kind == "upgrade_quiescent" {
+			return nil
+		}
+		if frame.Kind != "upgrade_busy" {
+			return ErrRuntimeUpgradeUnsupported
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+func (worker *runtimeProcessWorker) ResumeUpgrade(ctx context.Context) error {
+	frame, err := worker.exchange(ctx, "resume_upgrade", nil)
+	if err != nil {
+		return err
+	}
+	if frame.Kind != "upgrade_resumed" {
+		return ErrRuntimeUpgradeUnsupported
+	}
+	return nil
 }
 func (worker *runtimeProcessWorker) HolderProof() LifecycleHolderProof { return worker.holder }
 func (worker *runtimeProcessWorker) Exited() <-chan struct{}           { return worker.waitDone }

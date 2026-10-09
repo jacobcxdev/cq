@@ -421,18 +421,45 @@ func (s *Server) RuntimeHandler() (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runtimeDrainHandler{Handler: handler, server: s}, nil
+	gate := NewRuntimeUpgradeAdmission()
+	compatible := false
+	if broker, ok := s.CodexWebSocketBroker.(interface {
+		SetRuntimeUpgradeAdmission(*RuntimeUpgradeAdmission)
+	}); ok {
+		broker.SetRuntimeUpgradeAdmission(gate)
+		compatible = true
+	}
+	return runtimeDrainHandler{Handler: handler, server: s, upgrade: gate, upgradeCompatible: compatible}, nil
 }
 
 type runtimeDrainHandler struct {
 	http.Handler
-	server *Server
+	server            *Server
+	upgrade           *RuntimeUpgradeAdmission
+	upgradeCompatible bool
 }
 
 func (handler runtimeDrainHandler) BeginDrain() {
 	if drainer, ok := handler.server.CodexWebSocketBroker.(interface{ BeginDrain() }); ok {
 		drainer.BeginDrain()
 	}
+}
+
+func (handler runtimeDrainHandler) RuntimeUpgradeAdmission() *RuntimeUpgradeAdmission {
+	return handler.upgrade
+}
+func (handler runtimeDrainHandler) PrepareUpgrade(ctx context.Context) error {
+	if !handler.upgradeCompatible {
+		return ErrRuntimeUpgradeUnsupported
+	}
+	return handler.upgrade.Pause(ctx)
+}
+func (handler runtimeDrainHandler) AwaitUpgradeQuiescence(ctx context.Context) error {
+	return handler.upgrade.AwaitQuiescence(ctx)
+}
+func (handler runtimeDrainHandler) ResumeUpgrade(context.Context) error {
+	handler.upgrade.Resume()
+	return nil
 }
 
 func bearerToken(r *http.Request) string {
@@ -1246,6 +1273,9 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	clientConn.SetReadLimit(codexWebSocketMessageMaxBytes)
 
 	if webSocketEnforcing {
+		if release, ok := r.Context().Value(runtimeUpgradeRequestReleaseKey{}).(func()); ok {
+			release()
+		}
 		brokerContext := withCodexWSFrameObservationSink(r.Context(), func(diagnostics *routeDiagnostics) {
 			s.emitCodexWebSocketFrameObservation(diagnostics)
 		})

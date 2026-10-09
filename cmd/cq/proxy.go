@@ -1296,6 +1296,19 @@ func serveRuntimeSupervisor(ctx context.Context, listener net.Listener, handler 
 		return proxy.ErrRuntimeSupervisorUnavailable
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	if tcp, ok := listener.(*net.TCPListener); ok {
+		paused := proxy.NewRuntimeUpgradeListener(tcp)
+		connections := proxy.NewRuntimeUpgradeConnections()
+		paused.SetConnectionTracker(connections)
+		server.ConnState = connections.ConnState
+		listener = paused
+		if supervisor, ok := handler.(*proxy.RuntimeSupervisor); ok {
+			if err := supervisor.SetUpgradeIngress(paused, connections, server.SetKeepAlivesEnabled); err != nil {
+				return err
+			}
+		}
+	}
+
 	serveResult := make(chan error, 1)
 	go func() {
 		serveResult <- server.Serve(listener)

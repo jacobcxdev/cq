@@ -173,6 +173,7 @@ type codexTerminatingWebSocketHandler struct {
 	generation     atomic.Uint64
 	drainOnce      sync.Once
 	drain          chan struct{}
+	upgrade        *RuntimeUpgradeAdmission
 }
 
 // NewCodexTerminatingWebSocketHandler constructs readiness-gated WebSocket
@@ -202,6 +203,10 @@ func NewCodexTerminatingWebSocketHandler(plans CodexNativeHTTPRequestPlanner, ex
 	}, nil
 }
 
+func (handler *codexTerminatingWebSocketHandler) SetRuntimeUpgradeAdmission(gate *RuntimeUpgradeAdmission) {
+	handler.upgrade = gate
+}
+
 func (handler *codexTerminatingWebSocketHandler) BeginDrain() {
 	if handler != nil && handler.drain != nil {
 		handler.drainOnce.Do(func() { close(handler.drain) })
@@ -227,6 +232,7 @@ func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, down
 		DownstreamGeneration: generation,
 		PrewarmTimeout:       handler.prewarmTimeout,
 		Drain:                handler.drain,
+		UpgradeAdmission:     handler.upgrade,
 	})
 	if err != nil {
 		return err
@@ -268,6 +274,7 @@ func (dialer codexExplicitWSUpstreamDialer) Dial(ctx context.Context, choice Rou
 }
 
 type codexTerminatingWSBrokerConfig struct {
+	UpgradeAdmission     *RuntimeUpgradeAdmission
 	Plans                CodexNativeHTTPRequestPlanner
 	Upstream             codexWSUpstreamDialer
 	Refresher            codex.CredentialReferenceRefresher
@@ -392,6 +399,16 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	var upgrade <-chan struct{}
+	if gate := broker.config.UpgradeAdmission; gate != nil {
+		release, err := gate.beginSession()
+		if err != nil {
+			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy upgrading"), time.Now().Add(time.Second))
+			return nil
+		}
+		defer release()
+		upgrade = gate.PauseSignal()
+	}
 	serveCtx, cancelServe := context.WithCancel(ctx)
 	downstreamReader := startCodexWSDownstreamReader(serveCtx, cancelServe, downstream)
 	defer downstreamReader.close()
@@ -402,12 +419,15 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 	}()
 	for {
 		select {
+		case <-upgrade:
+			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy upgrading"), time.Now().Add(time.Second))
+			return nil
 		case <-broker.config.Drain:
 			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy restarting"), time.Now().Add(time.Second))
 			return nil
 		default:
 		}
-		messageType, encoded, err := downstreamReader.read(ctx, serveCtx, broker.config.Drain)
+		messageType, encoded, err := downstreamReader.read(ctx, serveCtx, broker.config.Drain, upgrade)
 		if errors.Is(err, errCodexWSDraining) {
 			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy restarting"), time.Now().Add(time.Second))
 			return nil
@@ -415,8 +435,19 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		if err != nil {
 			return classifyCodexWSDownstreamReadError(err)
 		}
+		releaseTurn := func() {}
+		if gate := broker.config.UpgradeAdmission; gate != nil {
+			release, err := gate.BeginTurn()
+			if err != nil {
+				clearBytes(encoded)
+				_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy upgrading"), time.Now().Add(time.Second))
+				return nil
+			}
+			releaseTurn = release
+		}
 		pending, err := newCodexWSPendingFrameOwned(messageType, encoded)
 		if err != nil {
+			releaseTurn()
 			return err
 		}
 		frameCtx := withCodexTraceSpan(serveCtx, codexTraceStartFromRouteDiagnostics(pending.diagnostics, "websocket"))
@@ -437,11 +468,14 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		var limit *CachedUsageLimitError
 		if errors.As(err, &limit) {
 			if writeErr := writeCodexWSMessage(serveCtx, downstream, websocket.TextMessage, []byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`)); writeErr != nil {
+				releaseTurn()
 				return writeErr
 			}
+			releaseTurn()
 			continue
 		}
 		if err != nil {
+			releaseTurn()
 			failure := classifyCodexWebSocketFailure(err)
 			closeCode, closeReason := codexTraceWebSocketClose(err)
 			emitCodexTrace(frameCtx, CodexTraceEvent{
@@ -461,6 +495,7 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		} else {
 			emitCodexTrace(frameCtx, CodexTraceEvent{Phase: "terminal", Outcome: "success"})
 		}
+		releaseTurn()
 	}
 }
 
@@ -519,11 +554,13 @@ func startCodexWSDownstreamReader(ctx context.Context, cancel context.CancelFunc
 
 var errCodexWSDraining = errors.New("Codex WebSocket draining")
 
-func (reader *codexWSDownstreamReader) read(parent, ctx context.Context, drain <-chan struct{}) (int, []byte, error) {
+func (reader *codexWSDownstreamReader) read(parent, ctx context.Context, drain, upgrade <-chan struct{}) (int, []byte, error) {
 	if reader == nil {
 		return 0, nil, ErrCodexLeaseWriterUnavailable
 	}
 	select {
+	case <-upgrade:
+		return 0, nil, errCodexWSDraining
 	case <-drain:
 		return 0, nil, errCodexWSDraining
 	case frame, ok := <-reader.frames:
