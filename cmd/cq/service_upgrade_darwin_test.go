@@ -134,9 +134,6 @@ func TestDarwinRetainedInspectionAndValidationAfterUpgrade(t *testing.T) {
 	}
 	ownership := installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}
 	record := installstate.Record{SchemaVersion: 1, Owner: installstate.OwnerHomebrew, Version: retained[0].Version, Executable: link, BinaryDigest: retained[0].SHA256, Services: []string{proxyAgentLabel, agentLabel}}
-	if err := ownership.Save(record); err != nil {
-		t.Fatal(err)
-	}
 	plist := filepath.Join(root, "proxy.plist")
 	writeInstalledHTTPValidationPlist(t, plist, proxyAgentLabel, retained[0].Path, "/tmp/proxy.log")
 	current := link
@@ -145,6 +142,18 @@ func TestDarwinRetainedInspectionAndValidationAfterUpgrade(t *testing.T) {
 	}}
 	resolve := func(string) (installedHTTPValidationServiceBinding, error) {
 		return resolveInstalledHTTPValidationServiceWithOperations(proxyAgentLabel, ops)
+	}
+	current = retained[0].Path
+	bootstrap, err := resolve("")
+	if err != nil || bootstrap.executableSHA256 != retained[0].SHA256 {
+		t.Fatalf("bootstrap inspection before ownership publication: %+v %v", bootstrap, err)
+	}
+	current = link
+	if _, err := resolve(""); err == nil {
+		t.Fatal("unowned package CLI accepted during setup")
+	}
+	if err := ownership.Save(record); err != nil {
+		t.Fatal(err)
 	}
 	initial, err := resolve("")
 	if err != nil || initial.executableSHA256 != retained[0].SHA256 {

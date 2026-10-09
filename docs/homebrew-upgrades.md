@@ -60,13 +60,15 @@ The harness uses the installed Homebrew Ruby APIs, temporary HOME and Caskroom,
 unique launchd jobs, a random loopback port and synthetic credentials.
 It rebuilds the reviewed source and exact `0.33.11` source with mechanical
 isolation changes to job labels, HOME and external I/O. Failure fixtures inject
-boot, post-exec and refresh errors. The supplied executables are hashed as inputs;
+setup, boot, post-exec and refresh errors. The supplied executables are hashed as inputs;
 this run qualifies the source lifecycle, not those exact release bytes or real
 Codex compatibility. Release qualification needs a separately authorised run.
 
 Measurements record completed admitted turns, HTTP `200`, WebSocket `101`,
 continuation mismatches, `503`, refused connections, maximum admission delay,
-managed PID and listener identity. Legacy bootstrap interruption is recorded
+managed PID and listener identity. Package CLI status, selected-runtime validation
+binding, snapshot/restore and full package removal are checked too. Legacy
+bootstrap interruption is recorded
 separately. Coordinator process sampling supplements the lifecycle lock fence;
 sampling alone cannot prove that no transient overlap occurred. Failed assertions
 exit nonzero and preserve the isolated fixture for diagnosis.

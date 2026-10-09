@@ -124,6 +124,11 @@ func resolveDarwinRetainedServiceRuntime(ctx context.Context, roots userdirs.Roo
 		return installer.RuntimeArtifact{}, nil
 	}
 	record, err := (installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}).Load()
+	// Fresh install verifies its exact configured bootstrap before publishing
+	// ownership. Package CLI inspection still requires the ownership record.
+	if errors.Is(err, installstate.ErrNotInstalled) && current == configured {
+		return installer.RuntimeArtifact{}, nil
+	}
 	if err != nil {
 		return installer.RuntimeArtifact{}, err
 	}
