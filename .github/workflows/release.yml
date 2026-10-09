@@ -22,6 +22,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Update Homebrew
+        run: brew update
+
       - name: Verify Homebrew lifecycle ownership and rollback
         run: |
           .github/scripts/test-homebrew-lifecycle.sh
@@ -30,7 +33,6 @@ jobs:
 
       - name: Install current Codex client
         run: |
-          brew update
           brew install --cask codex
           codex --version
 
@@ -138,6 +140,9 @@ jobs:
         with:
           name: release-homebrew-inputs
           path: dist
+
+      - name: Update Homebrew
+        run: brew update
 
       - name: Format draft Homebrew Cask
         run: |
@@ -420,6 +425,9 @@ jobs:
           name: homebrew-cask
           path: ${{ runner.temp }}/homebrew-cask
 
+      - name: Update Homebrew
+        run: brew update
+
       - name: Publish complete release and Homebrew Cask
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -461,7 +469,6 @@ jobs:
       - name: Audit published Homebrew Cask
         run: |
           brew tap jacobcxdev/tap
-          brew update
           brew audit --cask --strict jacobcxdev/tap/cq
 
       - name: Verify published release
