@@ -74,24 +74,6 @@ homebrew_casks:
             echo "cq remains quarantined after installation" >&2
             exit 1
           fi
-          # An older uninstall hook may return before launchd finishes bootout.
-          quiet=0
-          for attempt in {1..300}; do
-            if ! /bin/launchctl print "gui/$UID/dev.jacobcx.cq.proxy" >/dev/null 2>&1 &&
-               ! /bin/launchctl print "gui/$UID/dev.jacobcx.cq.refresh" >/dev/null 2>&1; then
-              quiet=$((quiet + 1))
-              if [[ "$quiet" == 10 ]]; then
-                break
-              fi
-            else
-              quiet=0
-            fi
-            if [[ "$attempt" == 300 ]]; then
-              echo "CQ service remains registered after uninstall; upgrade cannot continue" >&2
-              exit 1
-            fi
-            sleep 0.1
-          done
           linked=0
           if [[ -e "$target" || -L "$target" ]]; then
             if [[ ! -L "$target" || ! "$target" -ef "$source" ]]; then
@@ -109,22 +91,11 @@ homebrew_casks:
             exit 1
           fi
         elif [[ "$action" == uninstall ]]; then
-          uninstalled=0
-          if [[ -x "$source" && "$target" -ef "$source" ]]; then
-            "$source" service uninstall --owner=homebrew "--service-executable=$target"
-            uninstalled=1
-          elif [[ -e "$target" || -L "$target" ]]; then
-            if [[ ! -L "$target" || "$(readlink "$target")" != "$source" ]]; then
-              echo "refusing to uninstall a different CQ executable: $target" >&2
-              exit 1
-            fi
+          if [[ ! -x "$source" || ! "$target" -ef "$source" ]]; then
+            echo "CQ removal requires its verified package executable: $source" >&2
+            exit 1
           fi
-          if [[ "$uninstalled" == 0 ]]; then
-            /bin/launchctl bootout "gui/$UID/dev.jacobcx.cq.proxy" >/dev/null 2>&1 || true
-            /bin/launchctl bootout "gui/$UID/dev.jacobcx.cq.refresh" >/dev/null 2>&1 || true
-            /bin/rm -f "$HOME/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist" \
-                       "$HOME/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"
-          fi
+          "$source" service uninstall --owner=homebrew "--service-executable=$target"
         else
           echo "unknown Homebrew lifecycle action: $action" >&2
           exit 64

@@ -14,14 +14,15 @@ import (
 )
 
 type serviceCommand struct {
-	Action            string
-	Owner             installstate.Owner
-	OwnerSet          bool
-	JSON              bool
-	ServiceExecutable string
-	SnapshotFile      string
-	InstallerLockHeld bool
-	HelpPath          []string
+	Action              string
+	Owner               installstate.Owner
+	OwnerSet            bool
+	JSON                bool
+	ServiceExecutable   string
+	CandidateExecutable string
+	SnapshotFile        string
+	InstallerLockHeld   bool
+	HelpPath            []string
 }
 
 var serviceLifecycleFactory = func(string) (*serviceLifecycle, error) {
@@ -84,6 +85,16 @@ func runServiceWithLifecycleInput(args []string, lifecycle *serviceLifecycle, ou
 	switch command.Action {
 	case "install":
 		return lifecycle.Install(ctx, command.Owner)
+	case "upgrade":
+		receipt, err := lifecycle.Upgrade(ctx, command.Owner, command.CandidateExecutable)
+		if command.JSON {
+			if encodeErr := json.NewEncoder(output).Encode(receipt); encodeErr != nil {
+				return errors.Join(err, encodeErr)
+			}
+		} else {
+			fmt.Fprintf(output, "Runtime upgrade: %s (%s -> %s)\n", receipt.Phase, receipt.Previous.Version, receipt.Candidate.Version)
+		}
+		return err
 	case "restart":
 		return lifecycle.Restart(ctx)
 	case "snapshot":
@@ -125,7 +136,7 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 
 	command := serviceCommand{Action: args[0], Owner: installstate.OwnerManual}
 	switch command.Action {
-	case "install", "restart", "snapshot", "status", "uninstall", "restore":
+	case "install", "upgrade", "restart", "snapshot", "status", "uninstall", "restore":
 	default:
 		return serviceCommand{}, fmt.Errorf("unknown service command: %s", command.Action)
 	}
@@ -160,6 +171,11 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 				return serviceCommand{}, fmt.Errorf("service %s: duplicate service executable", command.Action)
 			}
 			command.ServiceExecutable = strings.TrimPrefix(argument, "--service-executable=")
+		case strings.HasPrefix(argument, "--candidate-executable="):
+			if command.CandidateExecutable != "" {
+				return serviceCommand{}, fmt.Errorf("duplicate candidate executable")
+			}
+			command.CandidateExecutable = strings.TrimPrefix(argument, "--candidate-executable=")
 		case strings.HasPrefix(argument, "--snapshot-file="):
 			if command.SnapshotFile != "" {
 				return serviceCommand{}, fmt.Errorf("service %s: duplicate service snapshot file", command.Action)
@@ -174,20 +190,27 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 			return serviceCommand{}, fmt.Errorf("service %s: unexpected argument %q", command.Action, argument)
 		}
 	}
-	if command.JSON && command.Action != "status" {
-		return serviceCommand{}, fmt.Errorf("service %s: --json is only valid with status", command.Action)
+	if command.JSON && command.Action != "status" && command.Action != "upgrade" {
+		return serviceCommand{}, fmt.Errorf("service %s: --json is only valid with status or upgrade", command.Action)
 	}
-	packageAction := command.Action == "install" || command.Action == "uninstall" || command.Action == "snapshot" || command.Action == "restore"
+	packageAction := command.Action == "install" || command.Action == "upgrade" || command.Action == "uninstall" || command.Action == "snapshot" || command.Action == "restore"
 	if command.OwnerSet && !packageAction {
 		return serviceCommand{}, fmt.Errorf("service %s: --owner is only valid with a package lifecycle action", command.Action)
 	}
 	if command.ServiceExecutable != "" {
-		if command.Owner != installstate.OwnerHomebrew || (command.Action != "install" && command.Action != "uninstall") {
+		if command.Owner != installstate.OwnerHomebrew || (command.Action != "install" && command.Action != "upgrade" && command.Action != "uninstall") {
 			return serviceCommand{}, fmt.Errorf("service %s: service executable is only valid for Homebrew lifecycle hooks", command.Action)
 		}
 		if !filepath.IsAbs(command.ServiceExecutable) || filepath.Clean(command.ServiceExecutable) != command.ServiceExecutable {
 			return serviceCommand{}, fmt.Errorf("service %s: service executable must be a clean absolute path", command.Action)
 		}
+	}
+	if command.Action == "upgrade" {
+		if command.Owner != installstate.OwnerHomebrew || command.CandidateExecutable == "" || !filepath.IsAbs(command.CandidateExecutable) || filepath.Clean(command.CandidateExecutable) != command.CandidateExecutable {
+			return serviceCommand{}, fmt.Errorf("service upgrade requires Homebrew owner and clean absolute candidate executable")
+		}
+	} else if command.CandidateExecutable != "" {
+		return serviceCommand{}, fmt.Errorf("candidate executable is only valid with upgrade")
 	}
 	if command.SnapshotFile != "" {
 		if (command.Action != "snapshot" && command.Action != "restore") || !filepath.IsAbs(command.SnapshotFile) || filepath.Clean(command.SnapshotFile) != command.SnapshotFile {
@@ -262,7 +285,20 @@ func writeServiceStatus(output io.Writer, status serviceStatus) error {
 		componentHealth(status.Refresh),
 		status.Refresh.ID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if status.ActiveRuntimeVersion != "" {
+		if _, err = fmt.Fprintf(output, "Active runtime: %s\n", status.ActiveRuntimeVersion); err != nil {
+			return err
+		}
+	}
+	if status.PendingRuntimeVersion != "" {
+		if _, err = fmt.Fprintf(output, "Pending runtime: %s (%s)\n", status.PendingRuntimeVersion, status.UpgradePhase); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func componentHealth(status componentStatus) string {

@@ -228,14 +228,10 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 		`if [[ ! -L "$target" || ! "$target" -ef "$source" ]]; then`,
 		`"$source" service install --owner=homebrew "--service-executable=$target"`,
 		`if [[ "$linked" == 1 && -L "$target" && "$target" -ef "$source" ]]; then`,
-		`if [[ -x "$source" && "$target" -ef "$source" ]]; then`,
+		`if [[ ! -x "$source" || ! "$target" -ef "$source" ]]; then`,
 		`"$source" service uninstall --owner=homebrew "--service-executable=$target"`,
-		`if [[ ! -L "$target" || "$(readlink "$target")" != "$source" ]]; then`,
 		`"#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq"`,
-		`/bin/launchctl bootout "gui/$UID/dev.jacobcx.cq.proxy"`,
-		`/bin/launchctl bootout "gui/$UID/dev.jacobcx.cq.refresh"`,
-		`"$HOME/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist"`,
-		`"$HOME/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"`,
+		`CQ removal requires its verified package executable`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask missing %q", required)
@@ -247,8 +243,8 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 	if strings.Contains(text, "hooks:") || strings.Contains(text, "generated_script") {
 		t.Fatal("Homebrew Cask uses sandboxed hooks or prematurely evaluates staged paths")
 	}
-	if count := strings.Count(text, "|| true"); count != 2 {
-		t.Fatalf("Homebrew Cask has %d fail-open commands, want two launchd backstops", count)
+	if count := strings.Count(text, "|| true"); count != 0 {
+		t.Fatalf("Homebrew Cask has %d fail-open commands, want none", count)
 	}
 	if strings.Contains(text, "/usr/bin/sudo") {
 		t.Fatal("Homebrew Cask uninstall backstop requires privilege escalation")

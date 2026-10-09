@@ -47,13 +47,10 @@ func configureDarwinRuntimeUpgrade(ctx context.Context, supervisor *proxy.Runtim
 	}
 	ownership := installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}
 	record, err := ownership.Load()
-	if errors.Is(err, installstate.ErrNotInstalled) {
-		return nil
-	}
-	if err != nil {
+	if err != nil && !errors.Is(err, installstate.ErrNotInstalled) {
 		return err
 	}
-	if record.Owner != installstate.OwnerHomebrew {
+	if err == nil && record.Owner != installstate.OwnerHomebrew {
 		return nil
 	}
 	executable, err := currentUnixRuntimeExecutable()
@@ -61,7 +58,10 @@ func configureDarwinRuntimeUpgrade(ctx context.Context, supervisor *proxy.Runtim
 		return err
 	}
 	artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: roots}
-	previous, err := artifacts.Stage(ctx, executable)
+	previous, err := darwinExistingRuntimeArtifact(ctx, artifacts, executable)
+	if errors.Is(err, ErrServiceUpgradeMaintenance) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

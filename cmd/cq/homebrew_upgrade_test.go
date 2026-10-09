@@ -11,6 +11,10 @@ import (
 
 // Run the generated custom block through Homebrew's real artifact classes.
 func loadGeneratedCQHomebrewArtifacts(t *testing.T) string {
+	return runGeneratedCQHomebrewArtifacts(t, "", false)
+}
+
+func runGeneratedCQHomebrewArtifacts(t *testing.T, prelude string, wantFailure bool) string {
 	t.Helper()
 	if runtime.GOOS != "darwin" {
 		t.Skip("native Homebrew test")
@@ -44,6 +48,7 @@ class CQCommandRecorder
   end
 end
 CQCommandRecorder.calls = []
+` + prelude + `
 cask = Cask::CaskLoader::FromContentLoader.new(<<~'CASK').load(config: nil)
 cask "cq" do
   version "0.34.0"
@@ -67,6 +72,12 @@ puts JSON.generate(CQCommandRecorder.calls)
 		t.Fatal(err)
 	}
 	output, err := exec.Command(brew, "ruby", path).CombinedOutput()
+	if wantFailure {
+		if err == nil || !strings.Contains(string(output), "CQ upgrade requires a supported Homebrew uninstall callback") {
+			t.Fatalf("unsupported callback accepted: %v %s", err, output)
+		}
+		return string(output)
+	}
 	if err != nil {
 		t.Fatalf("Homebrew callback failed: %v\n%s", err, output)
 	}
@@ -78,4 +89,10 @@ func TestHomebrewUninstallCallbackReceivesSuccessor(t *testing.T) {
 	if !strings.Contains(output, "cq-homebrew-lifecycle") {
 		t.Fatal("true uninstall script not recorded")
 	}
+}
+
+func TestHomebrewUnsupportedCallbackFailsBeforeMutation(t *testing.T) {
+	runGeneratedCQHomebrewArtifacts(t, `class Cask::Artifact::Uninstall
+  def uninstall_phase(command:); raise "unexpected removal mutation"; end
+end`, true)
 }

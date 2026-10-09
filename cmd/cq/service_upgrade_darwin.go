@@ -1,0 +1,255 @@
+//go:build darwin
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/installer"
+	"github.com/jacobcxdev/cq/internal/installstate"
+	"github.com/jacobcxdev/cq/internal/proxy"
+	"golang.org/x/sys/unix"
+)
+
+func configureDarwinServiceUpgrades(lifecycle *serviceLifecycle, platform *darwinServicePlatform) {
+	artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: platform.roots}
+	receipts := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: platform.roots}
+	if record, err := lifecycle.Store.Load(); err == nil && record.Owner == installstate.OwnerHomebrew {
+		if selected, err := darwinSelectedRuntimeArtifact(context.Background(), artifacts, receipts, record); err == nil {
+			lifecycle.RuntimeExecutable = selected.Path
+		}
+	}
+	lifecycle.RuntimeArtifacts = artifacts
+	lifecycle.RuntimeReceipt = receipts.Load
+	lifecycle.RuntimeApply = func(ctx context.Context, candidate installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
+		return applyDarwinServiceRuntimeUpgrade(ctx, artifacts, receipts, candidate)
+	}
+	lifecycle.RuntimeInitialise = func(ctx context.Context) error {
+		for _, label := range []string{proxyAgentLabel, agentLabel} {
+			loaded, _, err := platform.printJob(ctx, label)
+			if err != nil {
+				return err
+			}
+			if loaded {
+				if err := platform.waitJobUnloaded(ctx, label); err != nil {
+					return fmt.Errorf("maintenance predecessor remains registered: %w", err)
+				}
+			}
+		}
+		return nil
+	}
+	lifecycle.RuntimePreflight = func(ctx context.Context, record installstate.Record) error {
+		if record.Owner != installstate.OwnerHomebrew || record.Executable != lifecycle.Executable || !sameServiceIDs(record.Services, []string{proxyAgentLabel, agentLabel}) {
+			return installstate.ErrOwnershipConflict
+		}
+		selected, err := darwinSelectedRuntimeArtifact(ctx, artifacts, receipts, record)
+		if err != nil {
+			return err
+		}
+		for _, check := range []struct {
+			label string
+			args  []string
+		}{{proxyAgentLabel, []string{"proxy", "start"}}, {agentLabel, []string{"refresh"}}} {
+			definition, exists, err := platform.readDefinition(check.label)
+			if err != nil {
+				return err
+			}
+			if !exists || definition.Label != check.label || len(definition.ProgramArguments) != len(check.args)+1 || !equalStrings(definition.ProgramArguments[1:], check.args) {
+				return installstate.ErrOwnershipConflict
+			}
+			pinned, err := darwinExistingRuntimeArtifact(ctx, artifacts, definition.ProgramArguments[0])
+			if err != nil || pinned.Path != definition.ProgramArguments[0] {
+				return ErrServiceUpgradeMaintenance
+			}
+		}
+		legacy, _, err := platform.printJob(ctx, homebrewProxyAgentLabel)
+		if err != nil {
+			return err
+		}
+		if legacy {
+			return installstate.ErrOwnershipConflict
+		}
+		lifecycle.RuntimeExecutable = selected.Path
+		return nil
+	}
+	lifecycle.RuntimeRestoreRefresh = func(ctx context.Context, snapshot servicePlatformSnapshot) error {
+		if snapshot.Manager != "launchd" || len(snapshot.Components) != 2 || snapshot.Components[1].ID != agentLabel {
+			return fmt.Errorf("invalid refresh snapshot")
+		}
+		component := snapshot.Components[1]
+		return platform.restore(ctx, agentLabel, platform.plistPath(agentLabel), component.Definition, component.Exists, component.Running)
+	}
+	lifecycle.RuntimeCleanup = func(ctx context.Context) error { return cleanupDarwinServiceRuntime(ctx, platform, receipts) }
+}
+
+func darwinExistingRuntimeArtifact(ctx context.Context, artifacts installer.RuntimeArtifactStore, path string) (installer.RuntimeArtifact, error) {
+	clean := filepath.Clean(path)
+	digest := filepath.Base(filepath.Dir(clean))
+	if len(digest) != 64 || clean != filepath.Join(artifacts.Roots.State, "runtime-artifacts", digest, "cq") {
+		return installer.RuntimeArtifact{}, ErrServiceUpgradeMaintenance
+	}
+	decoded, err := hex.DecodeString(digest)
+	if err != nil || len(decoded) != 32 {
+		return installer.RuntimeArtifact{}, ErrServiceUpgradeMaintenance
+	}
+	return artifacts.Stage(ctx, clean)
+}
+
+func darwinSelectedRuntimeArtifact(ctx context.Context, artifacts installer.RuntimeArtifactStore, receipts proxy.RuntimeUpgradeStore, record installstate.Record) (installer.RuntimeArtifact, error) {
+	receipt, err := receipts.Load()
+	if err == nil {
+		selected := receipt.Previous
+		if receipt.Phase == "committed" {
+			selected = receipt.Candidate
+		}
+		if record.BinaryDigest != selected.SHA256 && !(receipt.Phase == "committed" && record.BinaryDigest == receipt.Previous.SHA256) {
+			return selected, installstate.ErrOwnershipConflict
+		}
+		return selected, artifacts.Verify(ctx, selected)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return installer.RuntimeArtifact{}, err
+	}
+	path := filepath.Join(artifacts.Roots.State, "runtime-artifacts", record.BinaryDigest, "cq")
+	artifact, err := darwinExistingRuntimeArtifact(ctx, artifacts, path)
+	if err != nil {
+		return artifact, ErrServiceUpgradeMaintenance
+	}
+	if artifact.SHA256 != record.BinaryDigest || artifact.Path != path {
+		return artifact, installstate.ErrOwnershipConflict
+	}
+	return artifact, nil
+}
+
+func applyDarwinServiceRuntimeUpgrade(ctx context.Context, artifacts installer.RuntimeArtifactStore, store proxy.RuntimeUpgradeStore, candidate installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
+	if err := artifacts.Verify(ctx, candidate); err != nil {
+		return proxy.RuntimeUpgradeReceiptV1{}, err
+	}
+	cfg, err := proxy.LoadExistingConfig()
+	if err != nil {
+		return proxy.RuntimeUpgradeReceiptV1{}, err
+	}
+	generation := uint64(0)
+	previous, err := store.Load()
+	if err == nil {
+		generation = previous.Generation
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return previous, err
+	}
+	transaction := make([]byte, 16)
+	if _, err := rand.Read(transaction); err != nil {
+		return previous, err
+	}
+	id := hex.EncodeToString(transaction)
+	payload, err := json.Marshal(proxy.RuntimeUpgradeRequestV1{SchemaVersion: 1, TransactionID: id, ExpectedGeneration: generation, Candidate: candidate})
+	if err != nil {
+		return previous, err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", cfg.Port, proxy.RuntimeUpgradePath), bytes.NewReader(payload))
+	if err != nil {
+		return previous, err
+	}
+	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
+	request.Header.Set("Content-Type", "application/json")
+	request.Close = true
+	transport := &http.Transport{Proxy: nil, DisableKeepAlives: true, DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext}
+	defer transport.CloseIdleConnections()
+	response, err := (&http.Client{Transport: transport, Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
+	if err != nil {
+		return previous, err
+	}
+	body, readErr := httputil.ReadBody(response.Body)
+	response.Body.Close()
+	if readErr != nil {
+		return previous, readErr
+	}
+	if response.StatusCode != http.StatusAccepted {
+		return previous, fmt.Errorf("runtime upgrade request rejected: HTTP %d", response.StatusCode)
+	}
+	var prepared proxy.RuntimeUpgradeReceiptV1
+	if err := proxy.DecodeRuntimeUpgradePayload(body, &prepared); err != nil {
+		return previous, err
+	}
+	if prepared.TransactionID != id || prepared.Candidate != candidate {
+		return previous, proxy.ErrRuntimeUpgradeReceipt
+	}
+	wait, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
+	defer cancel()
+	for {
+		receipt, err := store.Load()
+		if err != nil {
+			return prepared, err
+		}
+		if receipt.TransactionID != id {
+			return receipt, proxy.ErrRuntimeUpgradeGeneration
+		}
+		switch receipt.Phase {
+		case "committed", "deferred", "rolled_back", "failed":
+			return receipt, nil
+		}
+		select {
+		case <-wait.Done():
+			return receipt, fmt.Errorf("runtime selection unverified: %w", wait.Err())
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func cleanupDarwinServiceRuntime(ctx context.Context, platform *darwinServicePlatform, store proxy.RuntimeUpgradeStore) error {
+	for _, label := range []string{proxyAgentLabel, agentLabel} {
+		loaded, _, err := platform.printJob(ctx, label)
+		if err != nil {
+			return err
+		}
+		if loaded {
+			return fmt.Errorf("runtime cleanup requires unloaded jobs")
+		}
+	}
+	path := proxy.RuntimeLifecyclePath(platform.roots.State)
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	lifecycle := os.NewFile(uintptr(fd), "cleanup-lifecycle")
+	defer lifecycle.Close()
+	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return proxy.ErrRuntimeOwnerReleaseUnproven
+	}
+	receipt, err := store.Load()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err == nil {
+		if err := proxy.RetireRuntimeUpgradeGuard(ctx, lifecycle, receipt); err != nil {
+			return err
+		}
+	}
+	root := filepath.Join(platform.roots.State, "runtime-artifacts")
+	if _, err := os.Lstat(root); err == nil {
+		if err := fsutil.ValidateSecureDirectory(fsutil.OSFileSystem{}, root); err != nil {
+			return err
+		}
+		if err := os.RemoveAll(root); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Remove(store.Path()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}

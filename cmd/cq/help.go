@@ -113,6 +113,7 @@ Manage proxy and refresh services as one installation.
 
 Commands:
   service install      Install and start both services
+  service upgrade      Select a retained Homebrew runtime
   service restart      Restart both services
   service status       Show installed service health
   service uninstall    Stop and remove both services
@@ -120,6 +121,12 @@ Commands:
 	"service install": `Usage: cq service install
 
 Install and start proxy and refresh services for the current user.
+`,
+	"service upgrade": `Usage: cq service upgrade --owner=homebrew --candidate-executable=PATH [--service-executable=PATH] [--json]
+
+Upgrade compatible macOS Homebrew proxy and refresh services for the current user
+at a quiet request boundary.
+A deferred upgrade keeps the previous runtime active and exits unsuccessfully.
 `,
 	"service restart": `Usage: cq service restart
 
@@ -1069,7 +1076,7 @@ func manualHelpInspectionPath(args []string) ([]string, bool) {
 	case "agent":
 		return interceptedGroupHelpPath("agent", args[1:], map[string]bool{"install": true, "uninstall": true})
 	case "service":
-		return interceptedGroupHelpPath("service", args[1:], map[string]bool{"install": true, "restart": true, "status": true, "uninstall": true})
+		return interceptedGroupHelpPath("service", args[1:], map[string]bool{"install": true, "upgrade": true, "restart": true, "status": true, "uninstall": true})
 	case "models":
 		return modelsHelpInspectionPath(args[1:])
 	case "proxy":

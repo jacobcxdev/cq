@@ -33,6 +33,7 @@ type RuntimeUpgradeReadyV1 struct {
 	ArtifactDigest string `json:"artifact_digest"`
 }
 type runtimeUpgradeRecoveryRequest struct {
+	Retire            bool                 `json:"retire,omitempty"`
 	TransactionID     string               `json:"transaction_id"`
 	Generation        uint64               `json:"generation"`
 	Holder            LifecycleHolderProof `json:"holder"`
@@ -128,6 +129,7 @@ func RunRuntimeUpgradeGuardWithFiles(ctx context.Context, listener, controlFile,
 		return err
 	}
 	recoveries := make(chan runtimeUpgradeGuardRecovery, 1)
+	retire := make(chan struct{}, 1)
 	guardCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	serveDone := make(chan struct{})
@@ -138,7 +140,7 @@ func RunRuntimeUpgradeGuardWithFiles(ctx context.Context, listener, controlFile,
 				cancel()
 			}
 		}()
-		serveRuntimeUpgradeRecovery(guardCtx, private, listener, secretFile, store, resume, recoveries)
+		serveRuntimeUpgradeRecovery(guardCtx, private, listener, secretFile, store, resume, recoveries, retire)
 	}()
 	defer func() { cancel(); private.Close(); <-serveDone }()
 	if err := WriteRuntimeControlMessage(control, secret, RuntimeControlFrameV1{SchemaVersion: 1, Sequence: 1, Kind: "upgrade_guard_ready", Payload: json.RawMessage(`{}`)}); err != nil {
@@ -179,6 +181,9 @@ func RunRuntimeUpgradeGuardWithFiles(ctx context.Context, listener, controlFile,
 			}()
 		}
 		select {
+		case <-retire:
+			listener.Close()
+			return nil
 		case <-guardCtx.Done():
 			if control != nil {
 				control.Close()
@@ -285,7 +290,7 @@ func RunRuntimeUpgradeGuardWithFiles(ctx context.Context, listener, controlFile,
 	}
 }
 
-func serveRuntimeUpgradeRecovery(ctx context.Context, private *net.UnixListener, listener, secretFile *os.File, store RuntimeUpgradeStore, original RuntimeUpgradeResumeV1, recoveries chan<- runtimeUpgradeGuardRecovery) {
+func serveRuntimeUpgradeRecovery(ctx context.Context, private *net.UnixListener, listener, secretFile *os.File, store RuntimeUpgradeStore, original RuntimeUpgradeResumeV1, recoveries chan<- runtimeUpgradeGuardRecovery, retire chan<- struct{}) {
 	for {
 		private.SetDeadline(time.Now().Add(100 * time.Millisecond))
 		conn, err := private.AcceptUnix()
@@ -301,7 +306,7 @@ func serveRuntimeUpgradeRecovery(ctx context.Context, private *net.UnixListener,
 		func() {
 			defer conn.Close()
 			conn.SetDeadline(time.Now().Add(5 * time.Second))
-			pid, err := runtimeUpgradeManagedPeer(ctx, conn, original.JobTarget)
+			pid, err := runtimeUpgradePeer(conn)
 			if err != nil {
 				return
 			}
@@ -316,7 +321,7 @@ func serveRuntimeUpgradeRecovery(ctx context.Context, private *net.UnixListener,
 				return
 			}
 			loaded, err := store.Load()
-			if err != nil || loaded.TransactionID != request.TransactionID || loaded.Generation != request.Generation || loaded.terminal() || loaded.RecoveryAttempts >= 3 {
+			if err != nil || loaded.TransactionID != request.TransactionID || loaded.Generation != request.Generation {
 				return
 			}
 			priorPID := loaded.SupervisorPID
@@ -332,6 +337,29 @@ func serveRuntimeUpgradeRecovery(ctx context.Context, private *net.UnixListener,
 			}
 			holder, err := RuntimeLifecycleHolder(lifecycle, request.Holder.DescriptionID)
 			if err != nil || holder != request.Holder || holder.LockIdentity != original.SupervisorHolder.LockIdentity {
+				return
+			}
+			if request.Retire {
+				if err := runtimeUpgradeJobAbsent(ctx, original.JobTarget); err != nil {
+					return
+				}
+				if err := unix.Flock(int(lifecycle.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+					return
+				}
+				if _, err := conn.Write([]byte{1}); err != nil {
+					return
+				}
+				select {
+				case retire <- struct{}{}:
+				case <-ctx.Done():
+				}
+				return
+			}
+			if loaded.terminal() || loaded.RecoveryAttempts >= 3 {
+				return
+			}
+			managed, err := runtimeUpgradeManagedPeer(ctx, conn, original.JobTarget)
+			if err != nil || managed != pid {
 				return
 			}
 			// The dead supervisor's control EOF must also release any child
@@ -439,6 +467,87 @@ func runtimeUpgradeManagedPeer(ctx context.Context, conn *net.UnixConn, target s
 	}
 	return 0, ErrRuntimeUpgradeReceipt
 }
+func runtimeUpgradeJobAbsent(ctx context.Context, target string) error {
+	if !runtimeUpgradeJobTargetPattern.MatchString(target) || !strings.HasPrefix(target, "gui/"+strconv.Itoa(os.Geteuid())+"/") {
+		return ErrRuntimeUpgradeReceipt
+	}
+	probe, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	_, err := exec.CommandContext(probe, "launchctl", "print", target).Output()
+	var exit *exec.ExitError
+	if errors.As(err, &exit) && (exit.ExitCode() == 3 || exit.ExitCode() == 113) {
+		return nil
+	}
+	return ErrRuntimeUpgradeReceipt
+}
+
+// RetireRuntimeUpgradeGuard releases its listener only after registered jobs and
+// all lifecycle owners have gone. It never signals a PID inferred from a journal.
+func RetireRuntimeUpgradeGuard(ctx context.Context, lifecycle *os.File, receipt RuntimeUpgradeReceiptV1) error {
+	if lifecycle == nil {
+		return ErrRuntimeUpgradeReceipt
+	}
+	if receipt.GuardPID == 0 || errors.Is(unix.Kill(receipt.GuardPID, 0), unix.ESRCH) {
+		return nil
+	}
+	roots, err := userdirs.Default()
+	if err != nil {
+		return err
+	}
+	if err := fsutil.ValidateSecureDirectory(fsutil.OSFileSystem{}, roots.State); err != nil {
+		return err
+	}
+	path := RuntimeUpgradeGuardSocketPath(roots.State)
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 {
+		return ErrRuntimeUpgradeReceipt
+	}
+	connection, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		return err
+	}
+	defer connection.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	if value, ok := ctx.Deadline(); ok && value.Before(deadline) {
+		deadline = value
+	}
+	connection.SetDeadline(deadline)
+	pid, err := runtimeUpgradePeer(connection)
+	if err != nil || pid != receipt.GuardPID {
+		return ErrRuntimeUpgradeReceipt
+	}
+	holder, err := RuntimeLifecycleHolder(lifecycle, "retirement")
+	if err != nil {
+		return err
+	}
+	digest, err := RuntimeDescriptorIdentityDigest(lifecycle)
+	if err != nil {
+		return err
+	}
+	request, _ := json.Marshal(runtimeUpgradeRecoveryRequest{Retire: true, TransactionID: receipt.TransactionID, Generation: receipt.Generation, Holder: holder, LifecycleIdentity: digest})
+	if err := runtimeUpgradeWriteRights(connection, request, []int{int(lifecycle.Fd())}); err != nil {
+		return err
+	}
+	var ack [1]byte
+	if _, err := io.ReadFull(connection, ack[:]); err != nil {
+		return err
+	}
+	if ack[0] != 1 {
+		return ErrRuntimeUpgradeReceipt
+	}
+	for time.Now().Before(deadline) {
+		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	return ErrRuntimeUpgradeReceipt
+}
+
 func runtimeUpgradeRights(oob []byte, want int) ([]int, error) {
 	messages, err := unix.ParseSocketControlMessage(oob)
 	if err != nil {

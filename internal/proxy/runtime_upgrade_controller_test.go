@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+"os"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -333,4 +334,28 @@ type upgradeFailingCheckpoint struct{}
 
 func (upgradeFailingCheckpoint) Select(context.Context, RuntimeHolderCheckpointV1) (string, error) {
 	return "", errors.New("checkpoint failed")
+}
+
+func TestRuntimeUpgradeRollbackBeforePackageOwnershipCommit(t *testing.T) {
+	controller, supervisor, _, request := upgradeControllerFixture(t)
+	previous := controller.options.Previous
+	committed := RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "package-before-refresh", Generation: 1, Previous: previous, Candidate: request.Candidate, ListenerIdentity: supervisor.listenerIdentity, SupervisorPID: os.Getpid()}
+	for _, phase := range []string{"prepared", "waiting", "handoff", "verifying", "committed"} {
+		committed.Phase = phase
+		if err := controller.options.Store.Save(committed); err != nil {
+			t.Fatal(err)
+		}
+	}
+	controller.options.Previous = request.Candidate
+	supervisor.workerManifest.WorkerArtifactDigest = request.Candidate.SHA256
+	request.Candidate = previous
+	request.TransactionID = "package-rollback"
+	request.ExpectedGeneration = 1
+	if _, err := controller.Begin(context.Background(), request); err != nil {
+		t.Fatalf("rollback before package ownership commit rejected: %v", err)
+	}
+	receipt := upgradeWaitTerminal(t, controller, request.TransactionID)
+	if receipt.Phase != "committed" || receipt.Candidate != previous {
+		t.Fatalf("package rollback: %+v", receipt)
+	}
 }

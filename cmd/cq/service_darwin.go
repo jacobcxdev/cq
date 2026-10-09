@@ -92,7 +92,7 @@ func defaultDarwinServiceLifecycle(stableExecutable string) (*serviceLifecycle, 
 		initialiseProxy: initialiseDarwinRuntimeLifecycle,
 	}
 	store := &installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}
-	return &serviceLifecycle{
+	lifecycle := &serviceLifecycle{
 		Platform:       platform,
 		Store:          store,
 		Executable:     executable,
@@ -100,7 +100,9 @@ func defaultDarwinServiceLifecycle(stableExecutable string) (*serviceLifecycle, 
 		StatusAttempts: 20,
 		StatusInterval: time.Second,
 		MutationLocker: installer.FileInstallLocker{FS: fsutil.OSFileSystem{}, StateRoot: roots.State},
-	}, nil
+	}
+	configureDarwinServiceUpgrades(lifecycle, platform)
+	return lifecycle, nil
 }
 
 func newDarwinCommandServicePlatform(home string, roots userdirs.Roots, executable string) *darwinServicePlatform {
@@ -827,7 +829,22 @@ func inspectDarwinProxyRuntime(ctx context.Context, executable string) component
 	if facts.runtime.Status == proxy.FactKnown && facts.runtime.Value != nil && status.LiveExecutable == "" {
 		status.LiveExecutable = facts.runtime.Value.Executable
 	}
-	status.Healthy = status.Running && status.Listener != "" && facts.runtime.Status == proxy.FactKnown && facts.runtime.Value != nil && facts.runtime.Value.Reachable && facts.runtime.Value.Health == "healthy" && sameDarwinExecutable(status.LiveExecutable, executable)
+	expected := executable
+	roots, rootsErr := userdirs.Default()
+	if rootsErr == nil {
+		artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: roots}
+		pinned, pinErr := darwinExistingRuntimeArtifact(ctx, artifacts, executable)
+		if pinErr == nil && pinned.Path == executable {
+			ownership, loadErr := (installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}).Load()
+			if loadErr == nil && ownership.Owner == installstate.OwnerHomebrew {
+				selected, selectErr := darwinSelectedRuntimeArtifact(ctx, artifacts, proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: roots}, ownership)
+				if selectErr == nil {
+					expected = selected.Path
+				}
+			}
+		}
+	}
+	status.Healthy = status.Running && status.Listener != "" && facts.runtime.Status == proxy.FactKnown && facts.runtime.Value != nil && facts.runtime.Value.Reachable && facts.runtime.Value.Health == "healthy" && sameDarwinExecutable(status.LiveExecutable, expected)
 	return status
 }
 

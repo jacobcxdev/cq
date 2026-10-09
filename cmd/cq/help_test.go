@@ -48,7 +48,7 @@ func TestRootHelpShowsFullCLISurface(t *testing.T) {
 }
 
 func TestServiceHelpDescribesCompleteCurrentUserLifecycle(t *testing.T) {
-	for _, path := range [][]string{{"service"}, {"service", "install"}, {"service", "uninstall"}} {
+	for _, path := range [][]string{{"service"}, {"service", "install"}, {"service", "upgrade"}, {"service", "uninstall"}} {
 		help, ok := manualHelp(path)
 		if !ok {
 			t.Fatalf("manualHelp(%v) missing entry", path)

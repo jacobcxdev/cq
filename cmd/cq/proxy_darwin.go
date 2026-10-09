@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -158,15 +159,20 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 		facts.service = proxy.InvalidFact[proxy.ServiceState]("service_invalid")
 		return facts
 	}
+	liveExecutable, err := darwinLiveProcessExecutable(ctx, pid)
+	if err != nil {
+		facts.service = proxy.InvalidFact[proxy.ServiceState]("process_executable_unavailable")
+		return facts
+	}
 	lsofOutput, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-a", fmt.Sprintf("-iTCP:%d", listenerPort), "-sTCP:LISTEN", "-Fp").Output()
 	if err != nil || requireInstalledHTTPValidationListenerPID(lsofOutput, pid) != nil {
-		facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "running", PID: pid, Executable: executable})
+		facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "running", PID: pid, Executable: liveExecutable})
 		facts.listener = proxy.InvalidFact[proxy.ListenerState]("listener_mismatch")
 		return facts
 	}
-	facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "running", PID: pid, Executable: executable})
-	facts.listener = proxy.KnownFact(proxy.ListenerState{State: "listening", Listener: listenerAddress, PID: pid, Executable: executable})
-	facts.process = proxy.KnownFact(proxy.ProcessState{PID: pid, Executable: executable})
+	facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "running", PID: pid, Executable: liveExecutable})
+	facts.listener = proxy.KnownFact(proxy.ListenerState{State: "listening", Listener: listenerAddress, PID: pid, Executable: liveExecutable})
+	facts.process = proxy.KnownFact(proxy.ProcessState{PID: pid, Executable: liveExecutable})
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listenerAddress+"/health", http.NoBody)
 	if err != nil {
 		return facts
@@ -180,12 +186,27 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusOK {
-		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Reachable: true, PID: pid, Executable: executable, Health: "healthy"})
+		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Reachable: true, PID: pid, Executable: liveExecutable, Health: "healthy"})
 	} else {
-		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Reachable: true, PID: pid, Executable: executable, Health: "unhealthy"})
+		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Reachable: true, PID: pid, Executable: liveExecutable, Health: "unhealthy"})
 	}
 	facts.dataPlane = proxy.KnownFact(proxy.DataPlaneProof{Code: "unproven"})
 	return facts
+}
+
+func darwinLiveProcessExecutable(ctx context.Context, pid int) (string, error) {
+	if pid <= 1 {
+		return "", fmt.Errorf("invalid process PID")
+	}
+	output, err := exec.CommandContext(ctx, "/bin/ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil || len(output) > 4096 {
+		return "", fmt.Errorf("process executable unavailable")
+	}
+	path := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\r\n") {
+		return "", fmt.Errorf("invalid process executable")
+	}
+	return filepath.Clean(path), nil
 }
 
 func darwinProxyInspectionListenerPort(configured, service int) int {

@@ -132,6 +132,130 @@ func TestRuntimeUpgradeGuardRetainsSocketAfterControlDeath(t *testing.T) {
 	}
 }
 
+func TestRuntimeUpgradeGuardRetiresOnlyAfterOwnerRelease(t *testing.T) {
+	store := guardTestStore(t)
+	tcp, err := net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := tcp.Addr().String()
+	dead := exec.Command("/usr/bin/true")
+	if err := dead.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.EnsureSecureDirectory(store.FS, store.Roots.State); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle, err := os.OpenFile(RuntimeLifecyclePath(store.Roots.State), os.O_CREATE|os.O_RDONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lifecycle.Close()
+	if err := unix.Flock(int(lifecycle.Fd()), unix.LOCK_SH|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	holder, err := RuntimeLifecycleHolder(lifecycle, "retirement-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, err := RuntimeDescriptorIdentityDigest(lifecycle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := tcp.File()
+	tcp.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	previous := installer.RuntimeArtifact{Path: filepath.Join(store.Roots.State, "cq"), SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Version: "test", ProtocolVersion: 1}
+	receipt := RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "guard-test", Generation: 1, Phase: "prepared", Previous: previous, Candidate: previous, ListenerIdentity: "tcp|" + address, SupervisorPID: dead.Process.Pid}
+	for _, phase := range []string{"prepared", "waiting", "handoff"} {
+		receipt.Phase = phase
+		if err := store.Save(receipt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receipt.GuardPID = os.Getpid()
+	if err := store.Save(receipt); err != nil {
+		t.Fatal(err)
+	}
+	secretFile, secret, err := NewRuntimeUpgradeSecretFile(store.Roots.State)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secretFile.Close()
+	defer secret.Destroy()
+	parentFile, guardFile, err := newRuntimePrivateSocketFiles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parentFile.Close()
+	defer guardFile.Close()
+	parent, err := net.FileConn(parentFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer parent.Close()
+	parent.SetDeadline(time.Now().Add(time.Second))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guardFD, err := unix.Dup(int(listener.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	guardListener := os.NewFile(uintptr(guardFD), "guard-listener")
+	finished := make(chan error, 1)
+	go func() {
+		finished <- RunRuntimeUpgradeGuardWithFiles(ctx, guardListener, guardFile, secretFile, receipt)
+	}()
+	resume := RuntimeUpgradeResumeV1{SchemaVersion: 1, Receipt: receipt, Release: RuntimeWorkerReleaseV1{ProcessIdentityDigest: "process", ProcessTreeAbsenceProofDigest: "absence", HolderReleaseProofDigest: "release"}, SupervisorHolder: holder, LifecycleIdentity: identity, JobTarget: fmt.Sprintf("gui/%d/dev.jacobcx.cq.upgrade-validation.absent.%d", os.Getuid(), time.Now().UnixNano())}
+	payload, _ := json.Marshal(resume)
+	if err := WriteRuntimeControlMessage(parent, secret, RuntimeControlFrameV1{SchemaVersion: 1, Sequence: 1, Kind: "upgrade_prepare", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	if frame, err := ReadRuntimeControlMessage(parent, NewRuntimeControlReceiver(secret)); err != nil || frame.Kind != "upgrade_guard_ready" {
+		t.Fatalf("guard ready: %+v %v", frame, err)
+	}
+	if frame, err := ReadRuntimeControlMessage(parent, NewRuntimeControlReceiver(secret)); err != nil || frame.Kind != "upgrade_resume" {
+		t.Fatalf("resume: %+v %v", frame, err)
+	}
+	parent.Close()
+	parentFile.Close()
+	listener.Close()
+	// A separate shared holder must prevent retirement even after supervisor death.
+	contender, err := os.Open(RuntimeLifecyclePath(store.Roots.State))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Flock(int(contender.Fd()), unix.LOCK_SH|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	if err := RetireRuntimeUpgradeGuard(ctx, lifecycle, receipt); err == nil {
+		t.Fatal("retired while worker held lifecycle")
+	}
+	contender.Close()
+	if err := unix.Flock(int(lifecycle.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	if err := RetireRuntimeUpgradeGuard(ctx, lifecycle, receipt); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-finished:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("guard did not retire")
+	}
+	if conn, err := net.DialTimeout("tcp", address, time.Second); err == nil {
+		conn.Close()
+		t.Fatal("guard retained public socket after retirement")
+	}
+
+}
+
 func TestDarwinRuntimeUpgradeCrashBeforeAckRecoversListener(t *testing.T) {
 	for _, backoff := range []bool{false, true} {
 		t.Run(fmt.Sprintf("backoff_%t", backoff), func(t *testing.T) { guardRecoveryLaunchdFixture(t, backoff) })

@@ -110,9 +110,12 @@ func (controller *RuntimeUpgradeController) Begin(ctx context.Context, request R
 	if err != nil {
 		return previous, err
 	}
-	if ownership.Validate() != nil || ownership.Owner != installstate.OwnerHomebrew || ownership.BinaryDigest != controller.options.Previous.SHA256 {
-		return previous, installstate.ErrOwnershipConflict
-	}
+    // Package ownership commits after refresh reconciliation. A failed refresh
+    // may need to return to the recorded predecessor while the selected runtime
+    // already matches the verified committed candidate.
+    matchesSelected:=ownership.BinaryDigest==controller.options.Previous.SHA256
+    pendingPackageCommit:=err==nil&&previous.Phase=="committed"&&previous.Candidate==controller.options.Previous&&ownership.BinaryDigest==previous.Previous.SHA256
+    if ownership.Validate()!=nil||ownership.Owner!=installstate.OwnerHomebrew||(!matchesSelected&&!pendingPackageCommit){return previous,installstate.ErrOwnershipConflict}
 	supervisor := controller.supervisor
 	supervisor.mu.Lock()
 	if supervisor.upgradeBusy || !supervisor.admissionReady || supervisor.trafficMode != TrafficModeNormal || supervisor.upgradeListener == nil || supervisor.upgradeConnections == nil || supervisor.workerManifest.WorkerArtifactDigest != controller.options.Previous.SHA256 {
