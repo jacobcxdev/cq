@@ -422,7 +422,9 @@ func (s *Server) RuntimeHandler() (http.Handler, error) {
 		return nil, err
 	}
 	gate := NewRuntimeUpgradeAdmission()
-	compatible := false
+	// Passthrough WebSockets retain their HTTP admission until the socket closes.
+	// A nonnil broker must explicitly support reversible turn admission.
+	compatible := s.CodexWebSocketBroker == nil
 	if broker, ok := s.CodexWebSocketBroker.(interface {
 		SetRuntimeUpgradeAdmission(*RuntimeUpgradeAdmission)
 	}); ok {

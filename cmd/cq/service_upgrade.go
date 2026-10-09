@@ -69,7 +69,7 @@ func (lifecycle *serviceLifecycle) Upgrade(ctx context.Context, owner installsta
 		return receipt, err
 	}
 	if receipt.Phase == "deferred" {
-		return receipt, ErrServiceUpgradeDeferred
+		return receipt, fmt.Errorf("%w: %s", ErrServiceUpgradeDeferred, receipt.ErrorCode)
 	}
 	if receipt.Phase != "committed" {
 		return receipt, fmt.Errorf("runtime upgrade %s: %s", receipt.Phase, receipt.ErrorCode)
