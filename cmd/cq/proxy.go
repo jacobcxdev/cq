@@ -112,6 +112,11 @@ func codexCallerBearerExpiry(accessToken string) time.Time {
 }
 
 var runProxyRuntimeRoleFn = runProxyRuntimeRole
+
+var runPlatformRuntimeUpgradeEntry = func([]string) (bool, error) { return false, nil }
+var configurePlatformRuntimeUpgrade = func(context.Context, *proxy.RuntimeSupervisor, *os.File, proxy.LifecycleHolderProof) error {
+	return nil
+}
 var newProxyRuntimeWorkerLauncherFn = func(proxy.RuntimeRoleManifestV1, proxy.LifecycleHolderProof) (proxy.RuntimeWorkerLauncher, error) {
 	return nil, proxy.ErrRuntimeRoleUnavailable
 }
@@ -1296,6 +1301,19 @@ func serveRuntimeSupervisor(ctx context.Context, listener net.Listener, handler 
 		return proxy.ErrRuntimeSupervisorUnavailable
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	if tcp, ok := listener.(*net.TCPListener); ok {
+		paused := proxy.NewRuntimeUpgradeListener(tcp)
+		connections := proxy.NewRuntimeUpgradeConnections()
+		paused.SetConnectionTracker(connections)
+		server.ConnState = connections.ConnState
+		listener = paused
+		if supervisor, ok := handler.(*proxy.RuntimeSupervisor); ok {
+			if err := supervisor.SetUpgradeIngress(paused, connections, server.SetKeepAlivesEnabled); err != nil {
+				return err
+			}
+		}
+	}
+
 	serveResult := make(chan error, 1)
 	go func() {
 		serveResult <- server.Serve(listener)

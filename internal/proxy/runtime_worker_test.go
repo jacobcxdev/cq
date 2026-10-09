@@ -480,7 +480,7 @@ func TestRuntimeWorkerRoleHelperProcess(t *testing.T) {
 		Control:   os.NewFile(RuntimeControlFD, "control"),
 		Secret:    os.NewFile(RuntimeSecretFD, "secret"),
 		Work:      os.NewFile(RuntimeWorkFD, "work"),
-	}, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	}, runtimeUpgradeFixtureHandler{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Query().Get("mode") {
 		case "large":
 			body, readErr := io.ReadAll(request.Body)
@@ -513,7 +513,7 @@ func TestRuntimeWorkerRoleHelperProcess(t *testing.T) {
 		writer.Header().Set("X-Worker", "child")
 		writer.WriteHeader(http.StatusCreated)
 		_, _ = writer.Write([]byte(request.Header.Get("Authorization")))
-	}), []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "worker-only-bearer", SubjectID: "codex-worker"}})
+	}), gate: NewRuntimeUpgradeAdmission()}, []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "worker-only-bearer", SubjectID: "codex-worker"}})
 	if err != nil {
 		os.Exit(94)
 	}
@@ -553,4 +553,133 @@ func TestRuntimeWorkerLauncherRejectsArtifactMismatchBeforeSpawn(t *testing.T) {
 	if spawned {
 		t.Fatal("artifact mismatch reached spawn")
 	}
+}
+
+func newRuntimeUpgradeWorkerTestProcess(t *testing.T) RuntimeWorkerProcess {
+	t.Helper()
+	path := t.TempDir() + "/lifecycle.lock"
+	if err := os.WriteFile(path, []byte("lock"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	supervisorFile, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { supervisorFile.Close() })
+	if err := unix.Flock(int(supervisorFile.Fd()), unix.LOCK_SH|unix.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+	supervisorProof, err := RuntimeLifecycleHolder(supervisorFile, "supervisor-description")
+	if err != nil {
+		t.Fatal(err)
+	}
+	holderDigest, err := RuntimeDescriptorIdentityDigest(supervisorFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Open(os.Args[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestHasher := sha256.New()
+	if _, err := io.Copy(manifestHasher, executable); err != nil {
+		t.Fatal(err)
+	}
+	_ = executable.Close()
+	var manifestDigest [sha256.Size]byte
+	copy(manifestDigest[:], manifestHasher.Sum(nil))
+	base := RuntimeRoleManifestV1{
+		SchemaVersion: 1, Role: RuntimeRoleSupervisor, ManifestDigest: manifestDigest,
+		ProxyInstanceID: "proxy-a", RuntimeInstanceID: "runtime-a",
+		ListenerFD: RuntimeListenerFD, LifecycleFD: RuntimeLifecycleFD,
+		ControlFD: RuntimeControlFD, SecretFD: RuntimeSecretFD, WorkFD: RuntimeNoWorkFD,
+		LifecycleHolderIdentityDigest: holderDigest,
+	}
+	launcher := &RuntimeProcessWorkerLauncher{
+		Executable: os.Args[0], BaseManifest: base, SupervisorHolder: supervisorProof,
+		Random: bytes.NewReader(bytes.Repeat([]byte{0x6e}, RuntimeSecretSize)),
+		OpenLifecycle: func() (*os.File, LifecycleHolderProof, error) {
+			file, err := os.Open(path)
+			if err != nil {
+				return nil, LifecycleHolderProof{}, err
+			}
+			if err := unix.Flock(int(file.Fd()), unix.LOCK_SH|unix.LOCK_NB); err != nil {
+				_ = file.Close()
+				return nil, LifecycleHolderProof{}, err
+			}
+			proof, err := RuntimeLifecycleHolder(file, "worker-description")
+			return file, proof, err
+		},
+		Command: func(ctx context.Context, _ string, args ...string) *exec.Cmd {
+			return exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=TestRuntimeWorkerRoleHelperProcess", "--"}, args...)...)
+		},
+	}
+	process, err := launcher.Launch(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(manifestDigest[:])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := process.Boot(context.Background(), WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(manifestDigest[:])}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		process.StopAndReap(ctx)
+	})
+	return process
+}
+func TestRuntimeUpgradeWorkerWaitsForActiveIngress(t *testing.T) {
+	process := newRuntimeUpgradeWorkerTestProcess(t)
+	worker, ok := process.(RuntimeUpgradeWorker)
+	if !ok {
+		t.Fatal("worker lacks reversible upgrade capability")
+	}
+	streaming := process.(interface {
+		ServeHTTP(http.ResponseWriter, *http.Request, RuntimeCallerAuthorityV1) error
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { streaming.ServeHTTP(w, r, RuntimeCallerAuthorityV1{}) }))
+	defer server.Close()
+	response, err := http.Get(server.URL + "/health?mode=sse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if err := worker.PrepareUpgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := worker.AwaitUpgradeQuiescence(short); err == nil {
+		t.Fatal("worker acknowledged quiescence before SSE completion")
+	}
+	if _, err := io.ReadAll(response.Body); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if err := worker.AwaitUpgradeQuiescence(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ResumeUpgrade(ctx); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type runtimeUpgradeFixtureHandler struct {
+	http.Handler
+	gate *RuntimeUpgradeAdmission
+}
+
+func (handler runtimeUpgradeFixtureHandler) RuntimeUpgradeAdmission() *RuntimeUpgradeAdmission {
+	return handler.gate
+}
+func (handler runtimeUpgradeFixtureHandler) PrepareUpgrade(ctx context.Context) error {
+	return handler.gate.Pause(ctx)
+}
+func (handler runtimeUpgradeFixtureHandler) AwaitUpgradeQuiescence(ctx context.Context) error {
+	return handler.gate.AwaitQuiescence(ctx)
+}
+func (handler runtimeUpgradeFixtureHandler) ResumeUpgrade(context.Context) error {
+	handler.gate.Resume()
+	return nil
 }

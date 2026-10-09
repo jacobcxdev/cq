@@ -374,11 +374,12 @@ func newDarwinServiceHarness(t *testing.T) (*darwinServicePlatform, *fakeDarwinL
 }
 
 type fakeDarwinLaunchctl struct {
-	calls          [][]string
-	loaded         map[string]bool
-	pendingBootout map[string]int
-	runs           map[string]int
-	failOnce       map[string]error
+	calls                  [][]string
+	loaded                 map[string]bool
+	pendingBootout         map[string]int
+	runs                   map[string]int
+	failOnce               map[string]error
+	rejectPendingBootstrap bool
 }
 
 func (runner *fakeDarwinLaunchctl) Run(_ context.Context, args ...string) ([]byte, error) {
@@ -411,6 +412,9 @@ func (runner *fakeDarwinLaunchctl) Run(_ context.Context, args ...string) ([]byt
 		return nil, nil
 	case "bootstrap":
 		label := strings.TrimSuffix(filepath.Base(args[2]), ".plist")
+		if runner.rejectPendingBootstrap && runner.pendingBootout[label] > 0 {
+			return nil, errors.New("job still unloading")
+		}
 		runner.loaded[label] = true
 		return nil, nil
 	case "kickstart":
@@ -471,3 +475,22 @@ func assertNoDarwinTemporaryFiles(t *testing.T, directory string) {
 }
 
 var _ servicePlatform = (*darwinServicePlatform)(nil)
+
+func TestDarwinServiceRestoreWaitsForUnloadingJob(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := platform.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.pendingBootout = map[string]int{proxyAgentLabel: 3}
+	runner.rejectPendingBootstrap = true
+	if err := platform.Restore(context.Background(), snapshot); err != nil {
+		t.Fatalf("restore bootstrapped before unload: %v", err)
+	}
+	if !runner.loaded[proxyAgentLabel] {
+		t.Fatal("previous job not restored")
+	}
+}

@@ -3402,7 +3402,7 @@ func TestCodexWSDownstreamReaderSerializesBurstFrames(t *testing.T) {
 	conn.waitForRead(t, 1)
 	conn.waitForRead(t, 2)
 	conn.assertReadBlocked(t, 3)
-	messageType, payload, err := reader.read(context.Background(), ctx, nil)
+	messageType, payload, err := reader.read(context.Background(), ctx, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -3411,7 +3411,7 @@ func TestCodexWSDownstreamReaderSerializesBurstFrames(t *testing.T) {
 	}
 	conn.waitForRead(t, 3)
 	for index, want := range [][]byte{second, third} {
-		messageType, payload, err = reader.read(context.Background(), ctx, nil)
+		messageType, payload, err = reader.read(context.Background(), ctx, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -4330,4 +4330,105 @@ func (dialer *codexWSBrokerDialerStub) Dial(_ context.Context, choice RouteChoic
 		onDispatch(attempt)
 	}
 	return connections[0], &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: make(http.Header)}, nil, attempt, nil
+}
+
+func TestRuntimeUpgradeWaitsForWebSocketTerminal(t *testing.T) {
+	coordinator, _, _ := openCodexLeaseRuntimeTestCoordinator(t)
+	planner := &codexWSBrokerPlannerStub{runtime: newCodexLeaseRuntimeTest(t, coordinator), slots: []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}}}
+	gate := NewRuntimeUpgradeAdmission()
+	downstream := &codexWSBrokerConnStub{
+		reads:         []codexWSBrokerRead{{messageType: websocket.TextMessage, payload: codexTerminatingWSFrame("turn-a", "")}},
+		readGateAfter: 1, readGate: make(chan struct{}),
+	}
+	completed := []byte(`{"type":"response.completed","response":{"id":"response-a","end_turn":true}}`)
+	upstream := &codexWSBrokerConnStub{
+		reads: []codexWSBrokerRead{
+			{messageType: websocket.TextMessage, payload: []byte(`{"type":"response.created","response":{"id":"response-a"}}`)},
+			{messageType: websocket.TextMessage, payload: completed},
+		},
+		readGateAfter: 1, readGate: make(chan struct{}),
+	}
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{"account-a": {upstream}}}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans: planner, Upstream: dialer, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 1, UpgradeAdmission: gate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- broker.Serve(context.Background(), downstream) }()
+	deadline := time.After(time.Second)
+	for len(downstream.writtenPayloads()) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("active turn never started")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	if err := gate.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := gate.AwaitQuiescence(short); err == nil {
+		t.Fatal("quiescence preceded terminal persistence")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("active turn stopped before completion: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	upstream.mu.Lock()
+	upstream.releaseReadGateLocked()
+	upstream.mu.Unlock()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("active turn drain = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("completed turn held worker after drain")
+	}
+	if payloads := downstream.writtenPayloads(); len(payloads) != 2 || !bytes.Equal(payloads[1], completed) {
+		t.Fatalf("active turn lost completion: %q", payloads)
+	}
+}
+
+func TestRuntimeUpgradeIdleWebSocketReconnects(t *testing.T) {
+	gate := NewRuntimeUpgradeAdmission()
+	downstream := newCodexWSBrokerBlockingConn()
+	dialer := &codexWSBrokerDialerStub{}
+	broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{
+		Plans: &codexWSBrokerPlannerStub{}, Upstream: dialer,
+		UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 1, UpgradeAdmission: gate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- broker.Serve(context.Background(), downstream) }()
+	<-downstream.started
+	if err := gate.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("idle socket drain = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("idle socket held the worker after drain")
+	}
+	if err := gate.AwaitQuiescence(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	gate.Resume()
+	release, err := gate.BeginTurn()
+	if err != nil {
+		t.Fatal("resumed socket cannot admit turn")
+	}
+	release()
+	if len(dialer.accounts) != 0 {
+		t.Fatalf("idle socket dispatched a turn: %v", dialer.accounts)
+	}
 }

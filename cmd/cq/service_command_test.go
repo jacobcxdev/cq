@@ -301,3 +301,15 @@ func TestOrdinaryCheckDoesNotInstallRefreshAgent(t *testing.T) {
 		t.Fatalf("ordinary check created refresh agent %s: %v", agent, err)
 	}
 }
+
+func TestHomebrewSnapshotRestoreAcceptsStableExecutable(t *testing.T) {
+	for _, action := range []string{"snapshot", "restore"} {
+		command, err := parseServiceCommand([]string{action, "--owner=homebrew", "--installer-lock-held", "--snapshot-file=/tmp/private/snapshot.json", "--service-executable=/opt/homebrew/bin/cq"})
+		if err != nil || command.ServiceExecutable != "/opt/homebrew/bin/cq" {
+			t.Fatalf("%s lost stable Homebrew identity: %+v %v", action, command, err)
+		}
+		if _, err := parseServiceCommand([]string{action, "--owner=go", "--installer-lock-held", "--snapshot-file=/tmp/private/snapshot.json", "--service-executable=/opt/homebrew/bin/cq"}); err == nil {
+			t.Fatalf("%s accepted foreign package owner", action)
+		}
+	}
+}

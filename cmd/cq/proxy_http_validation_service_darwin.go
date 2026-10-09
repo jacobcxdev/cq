@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,7 +18,9 @@ import (
 	"strings"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 	"golang.org/x/sys/unix"
 )
 
@@ -27,10 +30,11 @@ const (
 )
 
 type installedHTTPValidationServiceOperations struct {
-	executable     func() (string, error)
-	plistPath      func(string) (string, error)
-	launchctlPrint func(string) error
-	evalSymlinks   func(string) (string, error)
+	executable      func() (string, error)
+	plistPath       func(string) (string, error)
+	launchctlPrint  func(string) error
+	evalSymlinks    func(string) (string, error)
+	retainedRuntime func(string, string) (installer.RuntimeArtifact, error)
 }
 
 type installedHTTPValidationCandidateOperations struct {
@@ -152,8 +156,17 @@ func restartInstalledHTTPValidationCandidate(label string) error {
 func cleanupInstalledHTTPValidationCandidate() error { return nil }
 
 func resolveInstalledHTTPValidationService(expectedLabel string) (installedHTTPValidationServiceBinding, error) {
+	return resolveInstalledHTTPValidationServiceExecutable(expectedLabel, "")
+}
+
+func resolveInstalledHTTPValidationServiceExecutable(expectedLabel, expectedExecutable string) (installedHTTPValidationServiceBinding, error) {
 	return resolveInstalledHTTPValidationServiceWithOperations(expectedLabel, installedHTTPValidationServiceOperations{
-		executable: os.Executable,
+		executable: func() (string, error) {
+			if expectedExecutable != "" {
+				return expectedExecutable, nil
+			}
+			return os.Executable()
+		},
 		plistPath: func(label string) (string, error) {
 			switch label {
 			case proxyAgentLabel:
@@ -182,6 +195,13 @@ func resolveInstalledHTTPValidationService(expectedLabel string) (installedHTTPV
 			return exec.Command("launchctl", "print", target).Run()
 		},
 		evalSymlinks: filepath.EvalSymlinks,
+		retainedRuntime: func(current, configured string) (installer.RuntimeArtifact, error) {
+			roots, err := userdirs.Default()
+			if err != nil {
+				return installer.RuntimeArtifact{}, err
+			}
+			return resolveDarwinRetainedServiceRuntime(context.Background(), roots, current, configured)
+		},
 	})
 }
 
@@ -248,7 +268,14 @@ func resolveInstalledHTTPValidationServiceWithOperations(expectedLabel string, o
 	if err != nil {
 		return installedHTTPValidationServiceBinding{}, fmt.Errorf("resolve installed proxy executable: %w", err)
 	}
-	if !constantTimeStringEqual(currentExecutable, serviceExecutable) {
+	var selected installer.RuntimeArtifact
+	if label == proxyAgentLabel && ops.retainedRuntime != nil {
+		selected, err = ops.retainedRuntime(currentExecutable, serviceExecutable)
+		if err != nil {
+			return installedHTTPValidationServiceBinding{}, err
+		}
+	}
+	if selected.Path == "" && !constantTimeStringEqual(currentExecutable, serviceExecutable) {
 		return installedHTTPValidationServiceBinding{}, errors.New("installed proxy service executable differs from current CQ executable")
 	}
 	_, executableDigest, err := readInstalledHTTPValidationRegularFile(serviceExecutable, installedHTTPValidationExecutableMaxBytes, true)
@@ -261,22 +288,30 @@ func resolveInstalledHTTPValidationServiceWithOperations(expectedLabel string, o
 		ExecutablePath   string `json:"executable_path"`
 		ExecutableSHA256 string `json:"executable_sha256"`
 		PlistSHA256      string `json:"plist_sha256"`
+		RuntimePath      string `json:"runtime_path,omitempty"`
+		RuntimeSHA256    string `json:"runtime_sha256,omitempty"`
 	}{
 		Version:          1,
 		Label:            label,
 		ExecutablePath:   serviceExecutable,
 		ExecutableSHA256: executableDigest,
 		PlistSHA256:      plistDigest,
+		RuntimePath:      selected.Path,
+		RuntimeSHA256:    selected.SHA256,
 	})
 	if err != nil {
 		return installedHTTPValidationServiceBinding{}, fmt.Errorf("encode installed proxy service binding: %w", err)
 	}
 	serviceDigest := sha256.Sum256(payload)
+	if selected.Path != "" {
+		executableDigest = selected.SHA256
+	}
 	return installedHTTPValidationServiceBinding{
-		label:            label,
-		executableSHA256: executableDigest,
-		serviceSHA256:    hex.EncodeToString(serviceDigest[:]),
-		port:             port,
+		label:             label,
+		executableSHA256:  executableDigest,
+		serviceSHA256:     hex.EncodeToString(serviceDigest[:]),
+		port:              port,
+		runtimeExecutable: selected.Path,
 	}, nil
 }
 

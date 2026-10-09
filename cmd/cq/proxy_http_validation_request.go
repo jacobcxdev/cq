@@ -36,10 +36,11 @@ type installedHTTPValidationFileSystem interface {
 }
 
 type installedHTTPValidationServiceBinding struct {
-	label            string
-	executableSHA256 string
-	serviceSHA256    string
-	port             int
+	label             string
+	executableSHA256  string
+	serviceSHA256     string
+	port              int
+	runtimeExecutable string
 }
 
 type installedHTTPValidationRequestStore struct {

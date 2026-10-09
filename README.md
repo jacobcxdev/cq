@@ -242,6 +242,8 @@ After an explicit account switch, already-running clients or MCP servers may nee
 
 ### Service lifecycle and status
 
+macOS Homebrew upgrades retain the proxy listener, wait for a quiet request boundary, and select verified runtime copies. First adoption needs a maintenance window. See [Homebrew upgrades](docs/homebrew-upgrades.md).
+
 Complete installers own service installation and removal. Use `cq service` to
 inspect or restart both package-owned components together:
 
@@ -687,6 +689,7 @@ cq proxy validate-http
 cq refresh
 cq service
 cq service install
+cq service upgrade
 cq service restart
 cq service status
 cq service uninstall
