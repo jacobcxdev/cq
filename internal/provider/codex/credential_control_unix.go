@@ -158,6 +158,9 @@ func openCredentialControlPreparedWithLegacyMaintenanceVerifierAndRecoveryObserv
 		}
 	}
 
+	if coordinator.codexBarRenewal != nil {
+		coordinator.codexBarRenewal.beginOwnerOperation = control.BeginOwnerOperation
+	}
 	server := rpc.NewServer()
 	if err := server.RegisterName("CredentialRPC", &credentialRPC{Coordinator: coordinator, Control: control}); err != nil {
 		return nil, errors.Join(err, control.Close())
