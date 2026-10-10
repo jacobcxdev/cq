@@ -1380,12 +1380,20 @@ func (store *CodexLeaseStore) validateV2RouteAndAttempts(record CodexJournalReco
 	pendingHardRebind := len(record.Attempts) > 1 && !record.NonMigratable &&
 		record.Attempts[len(record.Attempts)-2].State == CodexAttemptAccountUnavailable &&
 		(current.State == CodexAttemptPrepared || current.State == CodexAttemptDispatched || current.State == CodexAttemptAccountUnavailable)
+	// An unavailable account can be replaced before the turn's first admission.
+	// Restore abandons an unsent replacement or pins a dispatched replacement
+	// as indeterminate; neither transition moves the original account binding.
+	interruptedHardRebind := !record.EverAdmitted && len(record.Attempts) > 1 &&
+		record.Attempts[len(record.Attempts)-2].State == CodexAttemptAccountUnavailable &&
+		record.RoutingRefs == 0 && record.AttemptRefs == 0 && record.ResponseObserverRefs == 0 && record.SocketLineageExtinct &&
+		((!record.NonMigratable && current.State == CodexAttemptAbandonedBeforeDispatch) ||
+			(record.NonMigratable && current.State == CodexAttemptIndeterminate))
 	pendingFullCreateRebind := record.EverAdmitted && !record.NonMigratable &&
 		(current.State == CodexAttemptPrepared || current.State == CodexAttemptDispatched || current.State == CodexAttemptAbandonedBeforeDispatch || current.State == CodexAttemptAccountUnavailable) &&
 		!constantTimeCodexLeaseDigestEqual(envelope.Slots[current.Slot-1].AccountHash, record.AccountHash)
 	pendingIndeterminateFullCreateRebind := record.EverAdmitted && record.NonMigratable && current.State == CodexAttemptIndeterminate &&
 		!constantTimeCodexLeaseDigestEqual(envelope.Slots[current.Slot-1].AccountHash, record.AccountHash)
-	if record.CurrentAttemptGeneration != current.Generation || (!constantTimeCodexLeaseDigestEqual(envelope.Slots[current.Slot-1].AccountHash, record.AccountHash) && !pendingHardRebind && !pendingFullCreateRebind && !pendingIndeterminateFullCreateRebind) {
+	if record.CurrentAttemptGeneration != current.Generation || (!constantTimeCodexLeaseDigestEqual(envelope.Slots[current.Slot-1].AccountHash, record.AccountHash) && !pendingHardRebind && !interruptedHardRebind && !pendingFullCreateRebind && !pendingIndeterminateFullCreateRebind) {
 		return errors.New("current attempt does not match latest persisted route")
 	}
 	if current.State == CodexAttemptIndeterminate && !record.NonMigratable {
