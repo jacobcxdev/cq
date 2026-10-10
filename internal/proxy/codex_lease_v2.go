@@ -1381,12 +1381,12 @@ func (store *CodexLeaseStore) validateV2RouteAndAttempts(record CodexJournalReco
 		record.Attempts[len(record.Attempts)-2].State == CodexAttemptAccountUnavailable &&
 		(current.State == CodexAttemptPrepared || current.State == CodexAttemptDispatched || current.State == CodexAttemptAccountUnavailable)
 	// An unavailable account can be replaced before the turn's first admission.
-	// Restore abandons an unsent replacement or pins a dispatched replacement
-	// as indeterminate; neither transition moves the original account binding.
+	// Restore abandons an unsent replacement. A dispatched replacement can be
+	// pinned as indeterminate before or during restore, while preserving binding.
 	interruptedHardRebind := !record.EverAdmitted && len(record.Attempts) > 1 &&
 		record.Attempts[len(record.Attempts)-2].State == CodexAttemptAccountUnavailable &&
-		record.RoutingRefs == 0 && record.AttemptRefs == 0 && record.ResponseObserverRefs == 0 && record.SocketLineageExtinct &&
-		((!record.NonMigratable && current.State == CodexAttemptAbandonedBeforeDispatch) ||
+		((!record.NonMigratable && current.State == CodexAttemptAbandonedBeforeDispatch &&
+			record.RoutingRefs == 0 && record.AttemptRefs == 0 && record.ResponseObserverRefs == 0 && record.SocketLineageExtinct) ||
 			(record.NonMigratable && current.State == CodexAttemptIndeterminate))
 	pendingFullCreateRebind := record.EverAdmitted && !record.NonMigratable &&
 		(current.State == CodexAttemptPrepared || current.State == CodexAttemptDispatched || current.State == CodexAttemptAbandonedBeforeDispatch || current.State == CodexAttemptAccountUnavailable) &&
