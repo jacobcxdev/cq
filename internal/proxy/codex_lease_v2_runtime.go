@@ -2351,7 +2351,7 @@ func codexLeaseRuntimeCanBeginRequest(record CodexJournalRecordV2) bool {
 	if record.Generation == 0 {
 		return record.State == LeaseReserving && codexCurrentRequestIsZero(record.CodexCurrentRequest)
 	}
-	if record.EverAdmitted && record.State == LeaseOrphaned && codexLeaseCurrentAttemptState(record) == CodexAttemptIndeterminate && codexLeaseCurrentAttemptAccountDiffersFromBinding(record) {
+	if record.State == LeaseOrphaned && codexLeaseCurrentAttemptState(record) == CodexAttemptIndeterminate && codexLeaseCurrentAttemptAccountDiffersFromBinding(record) {
 		return false
 	}
 	if record.RoutingRefs != 0 || record.AttemptRefs != 0 || record.ResponseObserverRefs != 0 || !codexLeaseAttemptTerminalForRequest(codexLeaseCurrentAttemptState(record)) {
