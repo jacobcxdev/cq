@@ -26,6 +26,7 @@ type CodexLeaseRequestEvidence struct {
 	TurnState          string
 	HasTurnState       bool
 	HasEncryptedState  bool
+	displacedTurnState string
 }
 
 type codexContinuityReason string
@@ -67,6 +68,7 @@ type CodexLeaseBoundExpectation struct {
 // upstream dispatch. Raw account and candidate values are HMACed before they
 // enter the journal.
 type CodexLeaseRequestPlan struct {
+	RedistributionGeneration      uint64
 	Key                           LeaseKey
 	Accounts                      []codex.AccountKey
 	Authority                     CodexLeaseAuthorityPolicy
@@ -672,7 +674,14 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if restored.Classification == CodexRestoredLaneHistorical && !restartingFailedHead {
 		return nil, ErrCodexStaleTurn
 	}
-	restoredRequiresAccount, err := runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity, ingressContinuity)
+	redistributing, err := runtime.validateRedistributionPlan(restored, requestIdentity, plan)
+	if err != nil {
+		return nil, err
+	}
+	var restoredRequiresAccount bool
+	if !redistributing {
+		restoredRequiresAccount, err = runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity, ingressContinuity)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -745,7 +754,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if migrateTurnStateLatch && !constantTimeCodexLeaseDigestEqual(current.Record.TurnStateHash, runtime.store.hash("turn-state", plan.Evidence.TurnState)) {
 		desired.TurnStateHash = runtime.store.hash("turn-state", plan.Evidence.TurnState)
 	}
-	if !requiresAccountContinuity && (codexLeaseAccountUnavailableCanBeginRequest(current.Record) || codexLeaseAffinityInvalidationCanBeginRequest(restored, current.Record, plan.Evidence) || codexLeaseRecordAllowsPortableReset(current.Record)) {
+	if !requiresAccountContinuity && (redistributing || codexLeaseAccountUnavailableCanBeginRequest(current.Record) || codexLeaseAffinityInvalidationCanBeginRequest(restored, current.Record, plan.Evidence) || codexLeaseRecordAllowsPortableReset(current.Record)) {
 		if current.Record.EverAdmitted {
 			desired.AccountHash = current.Record.AccountHash
 		}
@@ -806,7 +815,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	handle.newTurn = newTurn
 	handle.relatchTurnStateOnAdmission = runtime.canRelatchAuthenticatedTurnState(current.Record, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity) ||
-		(current.Record.HasTurnState && codexLeasePortableUnavailableContinuation(current.Record, plan.Evidence))
+		(current.Record.HasTurnState && (redistributing || codexLeasePortableUnavailableContinuation(current.Record, plan.Evidence)))
 	return handle, nil
 }
 
@@ -1961,16 +1970,17 @@ func (runtime *CodexLeaseRuntime) requestAfterImage(plan CodexLeaseRequestPlan) 
 		dispatchPermitDigest = runtime.store.hash("dispatch-permit", plan.DispatchPermitDigest)
 	}
 	return CodexCurrentRequest{
-		RequestKind:          plan.RequestKind,
-		CompactionPhase:      plan.CompactionPhase,
-		RequestedModelHash:   runtime.store.hash("requested-model", plan.RequestedModel),
-		EffectiveModel:       plan.EffectiveModel,
-		RequiredBuckets:      append([]CapacityBucket(nil), plan.RequiredBuckets...),
-		DispatchPermitDigest: dispatchPermitDigest,
-		QuotaExhaustionProbe: plan.QuotaExhaustionProbe,
-		AttemptEnvelope:      envelope,
-		RoutingRefs:          1,
-		Attempts:             []CodexJournalAttempt{{Slot: plan.InitialSlot, State: CodexAttemptPrepared}},
+		RedistributionGeneration: plan.RedistributionGeneration,
+		RequestKind:              plan.RequestKind,
+		CompactionPhase:          plan.CompactionPhase,
+		RequestedModelHash:       runtime.store.hash("requested-model", plan.RequestedModel),
+		EffectiveModel:           plan.EffectiveModel,
+		RequiredBuckets:          append([]CapacityBucket(nil), plan.RequiredBuckets...),
+		DispatchPermitDigest:     dispatchPermitDigest,
+		QuotaExhaustionProbe:     plan.QuotaExhaustionProbe,
+		AttemptEnvelope:          envelope,
+		RoutingRefs:              1,
+		Attempts:                 []CodexJournalAttempt{{Slot: plan.InitialSlot, State: CodexAttemptPrepared}},
 	}
 }
 
@@ -2075,7 +2085,8 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 			return false, &codexContinuityError{reason: codexContinuityTurnStateMismatch}
 		}
 		missingAuthenticatedState := authenticatedCallerContinuity && authority.Record.HasTurnState && !evidence.HasTurnState
-		if authority.Record.HasTurnState != evidence.HasTurnState && !missingAuthenticatedState && !portableUnavailable {
+		missingDisplacedState := authority.Record.HasTurnState && !evidence.HasTurnState && evidence.PreviousResponseID == "" && evidence.displacedTurnState != "" && constantTimeCodexLeaseDigestEqual(authority.Record.PreviousTurnStateHash, runtime.store.hash("turn-state", evidence.displacedTurnState))
+		if authority.Record.HasTurnState != evidence.HasTurnState && !missingAuthenticatedState && !missingDisplacedState && !portableUnavailable {
 			return false, &codexContinuityError{reason: codexContinuityTurnStatePresenceMismatch}
 		}
 		if evidence.HasTurnState && !constantTimeCodexLeaseDigestEqual(authority.Record.TurnStateHash, runtime.store.hash("turn-state", evidence.TurnState)) &&
@@ -2255,7 +2266,7 @@ func (runtime *CodexLeaseRuntime) validateAndClonePlan(plan CodexLeaseRequestPla
 	if !validCodexLeaseRuntimeRequest(plan.RequestKind, plan.CompactionPhase) || plan.RequestedModel == "" || plan.EffectiveModel == "" || strings.TrimSpace(plan.EffectiveModel) != plan.EffectiveModel || !validCodexLeaseBuckets(plan.RequiredBuckets, plan.EffectiveModel) || len(plan.Slots) == 0 || uint64(len(plan.Slots)) > uint64(math.MaxUint32) || plan.InitialSlot == 0 || int(plan.InitialSlot) > len(plan.Slots) {
 		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: incomplete request plan", ErrCodexLeaseInvalidMutation)
 	}
-	if plan.Evidence.HasTurnState != (plan.Evidence.TurnState != "") || len(plan.Evidence.TurnState) > codexTurnMetadataMaxBytes || len(plan.Evidence.PreviousResponseID) > codexTurnIDMaxBytes {
+	if plan.Evidence.HasTurnState != (plan.Evidence.TurnState != "") || len(plan.Evidence.TurnState) > codexTurnMetadataMaxBytes || len(plan.Evidence.PreviousResponseID) > codexTurnIDMaxBytes || len(plan.Evidence.displacedTurnState) > codexTurnMetadataMaxBytes {
 		return CodexLeaseRequestPlan{}, fmt.Errorf("%w: invalid request continuity evidence", ErrCodexLeaseInvalidMutation)
 	}
 	hasCallerContinuityEvidence := plan.Evidence.PreviousResponseID != "" || plan.Evidence.HasTurnState

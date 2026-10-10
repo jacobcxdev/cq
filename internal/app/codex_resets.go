@@ -38,12 +38,13 @@ type CodexResetAttempts interface {
 }
 
 type CodexResetApp struct {
-	Backend  CodexResetBackend
-	Usage    CodexResetUsage
-	History  CodexResetHistory
-	Attempts CodexResetAttempts
-	Cache    Cache
-	Clock    Clock
+	AfterReset func(context.Context, codexprov.AccountKey, string) error
+	Backend    CodexResetBackend
+	Usage      CodexResetUsage
+	History    CodexResetHistory
+	Attempts   CodexResetAttempts
+	Cache      Cache
+	Clock      Clock
 }
 
 type CodexResetPublicError struct {
@@ -287,6 +288,11 @@ func (a *CodexResetApp) ExecuteUse(ctx context.Context, plan CodexResetUsePlan) 
 	case codexprov.ConsumeReset, codexprov.ConsumeAlreadyRedeemed:
 		a.finishResetAttempt(&result, account, selection.Credit.ID)
 		a.refreshAfterReset(ctx, &result, account, plan.CurrentWindows)
+		if a.AfterReset != nil {
+			if err := callResetRouting(ctx, a.AfterReset, account.AccountKey, codexprov.ResetIdempotencyKey(account.AccountKey, selection.Credit.ID)); err != nil {
+				result.Warnings = append(result.Warnings, CodexResetWarning{Code: "redistribution_failed"})
+			}
+		}
 		return result, nil
 	case codexprov.ConsumeNothingToReset, codexprov.ConsumeNoCredit:
 		a.finishResetAttempt(&result, account, selection.Credit.ID)
@@ -294,6 +300,15 @@ func (a *CodexResetApp) ExecuteUse(ctx context.Context, plan CodexResetUsePlan) 
 	default:
 		return CodexResetUseResult{}, resetAppError("consume_indeterminate", errors.New("unknown reset consume outcome"))
 	}
+}
+
+func callResetRouting(ctx context.Context, notify func(context.Context, codexprov.AccountKey, string) error, account codexprov.AccountKey, eventID string) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("reset routing notification panic")
+		}
+	}()
+	return notify(ctx, account, eventID)
 }
 
 func callResetConsume(

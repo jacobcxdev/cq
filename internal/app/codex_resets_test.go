@@ -332,6 +332,62 @@ func TestCodexResetExecutePersistsBeforeConsumeAndReportsChange(t *testing.T) {
 	}
 }
 
+// Successful consumption must notify routing after refetch, using the account
+// and stable credit event even if the proxy is temporarily unavailable.
+func TestCodexResetExecuteNotifiesRoutingWithoutFailingConsumedReset(t *testing.T) {
+	for _, outcome := range []codexprov.ConsumeResetOutcome{codexprov.ConsumeReset, codexprov.ConsumeAlreadyRedeemed, codexprov.ConsumeNothingToReset, codexprov.ConsumeNoCredit} {
+		t.Run(string(outcome), func(t *testing.T) {
+			now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+			app, backend, usage, _ := completeResetApp(now)
+			plan, err := app.PrepareUse(context.Background(), "a@example.com", "credit-account-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			backend.consume = codexprov.ConsumeResetResult{Outcome: outcome}
+			beforeFetches := usage.calls
+			called := 0
+			app.AfterReset = func(_ context.Context, account codexprov.AccountKey, eventID string) error {
+				called++
+				if account != "account-a" || eventID != codexprov.ResetIdempotencyKey("account-a", "credit-account-a") || usage.calls <= beforeFetches {
+					t.Fatalf("notification account=%q event=%q fetches=%d", account, eventID, usage.calls)
+				}
+				return errors.New("proxy unavailable")
+			}
+			result, err := app.ExecuteUse(context.Background(), plan)
+			if err != nil || result.Outcome != outcome || backend.consumeCalls != 1 {
+				t.Fatalf("result=%+v err=%v consume=%d", result, err, backend.consumeCalls)
+			}
+			want := 0
+			if outcome == codexprov.ConsumeReset || outcome == codexprov.ConsumeAlreadyRedeemed {
+				want = 1
+			}
+			if called != want {
+				t.Fatalf("routing notifications=%d, want %d", called, want)
+			}
+			if want == 1 && (len(result.Warnings) != 1 || result.Warnings[0].Code != "redistribution_failed") {
+				t.Fatalf("warnings=%+v", result.Warnings)
+			}
+		})
+	}
+}
+
+func TestCodexResetExecuteNotifiesRoutingAfterRefetchFailure(t *testing.T) {
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	app, backend, usage, _ := completeResetApp(now)
+	plan, err := app.PrepareUse(context.Background(), "a@example.com", "credit-account-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.consume = codexprov.ConsumeResetResult{Outcome: codexprov.ConsumeReset}
+	usage.err = errors.New("usage unavailable")
+	called := false
+	app.AfterReset = func(context.Context, codexprov.AccountKey, string) error { called = true; panic("proxy unavailable") }
+	result, err := app.ExecuteUse(context.Background(), plan)
+	if err != nil || !called || len(result.Warnings) != 2 {
+		t.Fatalf("result=%+v err=%v notified=%v", result, err, called)
+	}
+}
+
 func TestCodexResetExecuteRetainsAttemptOnIndeterminateFailure(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	app, backend, _, attempts := completeResetApp(now)

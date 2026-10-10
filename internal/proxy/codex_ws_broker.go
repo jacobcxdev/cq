@@ -822,6 +822,19 @@ func (broker *codexTerminatingWSBroker) serveFrameReserveAttempt(ctx context.Con
 	if pending.prewarm {
 		return broker.servePrewarm(ctx, downstream, pending, active)
 	}
+	if pending != nil && !pending.portable && (active == nil || active.prewarm.State != CodexPrewarmReady) {
+		account := codex.AccountKey("")
+		if active != nil {
+			account = active.account
+		}
+		if planner, ok := broker.config.Plans.(interface {
+			ShouldRedistribute(context.Context, CodexProtocolRequest, codex.AccountKey) bool
+		}); ok && planner.ShouldRedistribute(ctx, pending.request, account) {
+			closeCodexWSActiveUpstream(active)
+			emitCodexTrace(ctx, CodexTraceEvent{Phase: "failover", Outcome: "resynchronise", Reason: "quota_redistribution", Retry: true})
+			return writeCodexWSAccountUnavailableClose(downstream)
+		}
+	}
 	// A ready prewarm is this turn's anchor, not a prior Cyber turn.
 	if pending != nil && !pending.portable && active != nil && active.account != "" && active.prewarm.State != CodexPrewarmReady {
 		if planner, ok := broker.config.Plans.(interface {

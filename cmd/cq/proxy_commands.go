@@ -301,7 +301,7 @@ func classifyProxyReadAuthority(argv []string) (OrdinaryCommandAuthorityV1, erro
 		if !validProxyLeaseArguments(argv[2:]) {
 			return terminatingOrdinary("ordinary_usage_error"), nil
 		}
-		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_leases_invalidate", Deadline: CommandDeadlineV1{Total: proxyLeaseInvalidationTimeout, Forward: proxyLeaseInvalidationTimeout}}, nil
+		return OrdinaryCommandAuthorityV1{Catalogue: "proxy", Row: "proxy_leases_" + argv[2], Deadline: CommandDeadlineV1{Total: proxyLeaseInvalidationTimeout, Forward: proxyLeaseInvalidationTimeout}}, nil
 	}
 	if len(argv) >= 2 && argv[1] == "trace" {
 		if helpRequested(argv[2:]) {
@@ -331,10 +331,10 @@ func classifyProxyReadAuthority(argv []string) (OrdinaryCommandAuthorityV1, erro
 }
 
 func validProxyLeaseArguments(argv []string) bool {
-	if len(argv) == 1 && argv[0] == "invalidate" {
+	if len(argv) == 1 && (argv[0] == "invalidate" || argv[0] == "redistribute") {
 		return true
 	}
-	if len(argv) != 3 || argv[0] != "invalidate" || argv[1] != "--port" {
+	if len(argv) != 3 || (argv[0] != "invalidate" && argv[0] != "redistribute") || argv[1] != "--port" {
 		return false
 	}
 	port, err := strconv.Atoi(argv[2])

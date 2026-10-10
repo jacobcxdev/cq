@@ -127,12 +127,13 @@ func newCodexResetsDependencies(ctx context.Context) (codexResetsDependencies, f
 		Now:     time.Now,
 	}
 	service := &app.CodexResetApp{
-		Backend:  backend,
-		Usage:    codexprov.New(httpClient),
-		History:  historyStore,
-		Attempts: attempts,
-		Cache:    quotaCache,
-		Clock:    systemClock{},
+		AfterReset: notifyProxyCodexReset,
+		Backend:    backend,
+		Usage:      codexprov.New(httpClient),
+		History:    historyStore,
+		Attempts:   attempts,
+		Cache:      quotaCache,
+		Clock:      systemClock{},
 	}
 	return codexResetsDependencies{
 		App: service, In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr,

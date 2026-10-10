@@ -70,7 +70,9 @@ func normalCallerPolicy(request *http.Request) normalCallerRoutePolicy {
 	if request.Method == http.MethodPost && path == RuntimePolicySessionDigestPath {
 		return normalCallerRouteLocal
 	}
-	if request.Method == http.MethodPost && path == RuntimeCodexLeaseInvalidationPath {
+	// ServeMux matches decoded path segments. Encoded control names must keep
+	// the same local-only authority as their canonical spelling.
+	if request.Method == http.MethodPost && (request.URL.Path == RuntimeCodexLeaseInvalidationPath || request.URL.Path == RuntimeCodexLeaseRedistributionPath) {
 		return normalCallerRouteLocal
 	}
 	if request.Method == http.MethodPost && (path == RuntimeCodexTurnReceiptPath || path == RuntimeCodexTurnReceiptV2Path) {

@@ -152,7 +152,12 @@ func TestProxyLeasesHelpDocumentsReselectionBoundary(t *testing.T) {
 		{
 			args: []string{"proxy", "leases", "--help"},
 			path: []string{"proxy", "leases"},
-			want: []string{"Usage: cq proxy leases <command>", "proxy leases invalidate"},
+			want: []string{"Usage: cq proxy leases <command>", "proxy leases invalidate", "proxy leases redistribute"},
+		},
+		{
+			args: []string{"proxy", "leases", "redistribute", "--help"},
+			path: []string{"proxy", "leases", "redistribute"},
+			want: []string{"Usage: cq proxy leases redistribute [--port PORT]", "Current responses finish unchanged", "CQ never consumes a banked reset automatically", "survives worker restart"},
 		},
 		{
 			args: []string{"proxy", "leases", "invalidate", "--help"},

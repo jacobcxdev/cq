@@ -243,10 +243,21 @@ With no --port, enter restores the CQ service if the listener is missing.
 `,
 	"proxy leases": `Usage: cq proxy leases <command>
 
-Manage reusable Codex account leases.
+Manage Codex account leases and schedule safe redistribution.
 
 Commands:
-  proxy leases invalidate  Invalidate reusable Codex account leases
+  proxy leases invalidate    Invalidate reusable Codex account leases
+  proxy leases redistribute  Schedule all chats for fresh account selection
+`,
+	"proxy leases redistribute": `Usage: cq proxy leases redistribute [--port PORT]
+
+Schedule all existing Codex chats for fresh account selection at the next safe
+request boundary. Current responses finish unchanged. Confirmed included quota
+is preferred over unknown or exhausted accounts within current routing policy.
+WebSocket account-owned deltas use the existing reconnect/resync path before moving.
+HTTP previous_response_id continuations wait for a portable full-history request.
+Successful banked resets and fresh detected quota resets schedule this automatically.
+CQ never consumes a banked reset automatically. Pending work survives worker restart.
 `,
 	"proxy leases invalidate": `Usage: cq proxy leases invalidate [--port PORT]
 
@@ -815,7 +826,7 @@ func validateProxyLexicalGrammar(args []string) error {
 		return nil
 	case "leases":
 		if !validProxyLeaseArguments(args[1:]) {
-			return errors.New("usage: cq proxy leases invalidate [--port PORT]")
+			return errors.New("usage: cq proxy leases {invalidate|redistribute} [--port PORT]")
 		}
 		return nil
 	case "trace":
@@ -1224,8 +1235,8 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 			_, ok := manualHelp(path)
 			return path, ok
 		}
-		if args[1] == "invalidate" && helpRequested(args[2:]) {
-			return []string{"proxy", "leases", "invalidate"}, true
+		if (args[1] == "invalidate" || args[1] == "redistribute") && helpRequested(args[2:]) {
+			return []string{"proxy", "leases", args[1]}, true
 		}
 		return nil, false
 	}

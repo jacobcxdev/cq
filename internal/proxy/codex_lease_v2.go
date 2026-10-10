@@ -58,28 +58,30 @@ type CodexLeaseCutover struct {
 }
 
 type CodexJournalLane struct {
-	SessionHash                      string    `json:"session_hash"`
-	ThreadHash                       string    `json:"thread_hash"`
-	NamespaceHash                    string    `json:"namespace_hash"`
-	Generation                       uint64    `json:"generation"`
-	CurrentTurnHash                  string    `json:"current_turn_hash,omitempty"`
-	CurrentModeEpoch                 uint64    `json:"current_mode_epoch,omitempty"`
-	CurrentAuthoritative             bool      `json:"current_authoritative,omitempty"`
-	LastTurnHash                     string    `json:"last_turn_hash,omitempty"`
-	LastModeEpoch                    uint64    `json:"last_mode_epoch,omitempty"`
-	LastAuthoritative                bool      `json:"last_authoritative,omitempty"`
-	LastAdmittedAccountHash          string    `json:"last_admitted_account_hash,omitempty"`
-	LastAdmittedTurnHash             string    `json:"last_admitted_turn_hash,omitempty"`
-	LastAdmittedModeEpoch            uint64    `json:"last_admitted_mode_epoch,omitempty"`
-	LastAdmittedAuthoritative        bool      `json:"last_admitted_authoritative,omitempty"`
-	LastAdmissionJournalGeneration   uint64    `json:"last_admission_journal_generation,omitempty"`
-	AffinityRefreshJournalGeneration uint64    `json:"affinity_refresh_journal_generation,omitempty"`
-	LastAdmittedAt                   time.Time `json:"last_admitted_at,omitempty"`
-	LastCacheAdmittedAt              time.Time `json:"last_cache_admitted_at,omitzero"`
-	LastCacheEffectiveModel          string    `json:"last_cache_effective_model,omitempty"`
-	RequestUnavailableAccountHashes  []string  `json:"request_unavailable_account_hashes,omitempty"`
-	QuotaExhaustedAccountHashes      []string  `json:"quota_exhausted_account_hashes,omitempty"`
-	LastObservedAt                   time.Time `json:"last_observed_at"`
+	RedistributionRequestedGeneration uint64    `json:"redistribution_requested_generation,omitempty"`
+	RedistributionCompletedGeneration uint64    `json:"redistribution_completed_generation,omitempty"`
+	SessionHash                       string    `json:"session_hash"`
+	ThreadHash                        string    `json:"thread_hash"`
+	NamespaceHash                     string    `json:"namespace_hash"`
+	Generation                        uint64    `json:"generation"`
+	CurrentTurnHash                   string    `json:"current_turn_hash,omitempty"`
+	CurrentModeEpoch                  uint64    `json:"current_mode_epoch,omitempty"`
+	CurrentAuthoritative              bool      `json:"current_authoritative,omitempty"`
+	LastTurnHash                      string    `json:"last_turn_hash,omitempty"`
+	LastModeEpoch                     uint64    `json:"last_mode_epoch,omitempty"`
+	LastAuthoritative                 bool      `json:"last_authoritative,omitempty"`
+	LastAdmittedAccountHash           string    `json:"last_admitted_account_hash,omitempty"`
+	LastAdmittedTurnHash              string    `json:"last_admitted_turn_hash,omitempty"`
+	LastAdmittedModeEpoch             uint64    `json:"last_admitted_mode_epoch,omitempty"`
+	LastAdmittedAuthoritative         bool      `json:"last_admitted_authoritative,omitempty"`
+	LastAdmissionJournalGeneration    uint64    `json:"last_admission_journal_generation,omitempty"`
+	AffinityRefreshJournalGeneration  uint64    `json:"affinity_refresh_journal_generation,omitempty"`
+	LastAdmittedAt                    time.Time `json:"last_admitted_at,omitempty"`
+	LastCacheAdmittedAt               time.Time `json:"last_cache_admitted_at,omitzero"`
+	LastCacheEffectiveModel           string    `json:"last_cache_effective_model,omitempty"`
+	RequestUnavailableAccountHashes   []string  `json:"request_unavailable_account_hashes,omitempty"`
+	QuotaExhaustedAccountHashes       []string  `json:"quota_exhausted_account_hashes,omitempty"`
+	LastObservedAt                    time.Time `json:"last_observed_at"`
 }
 
 type CodexAttemptSlotKind string
@@ -116,6 +118,7 @@ type CodexJournalAttempt struct {
 // stable logical turn record. Generation disambiguates callbacks after a
 // completed request is atomically replaced by an explicit BeginRequest.
 type CodexCurrentRequest struct {
+	RedistributionGeneration uint64                `json:"redistribution_generation,omitempty"`
 	Generation               uint64                `json:"generation"`
 	RequestKind              CodexRequestKind      `json:"request_kind,omitempty"`
 	CompactionPhase          CodexCompactionPhase  `json:"compaction_phase,omitempty"`
@@ -174,14 +177,15 @@ type CodexJournalRecordV2 struct {
 }
 
 type codexLeaseJournalEnvelopeV2 struct {
-	Version                        int                    `json:"version"`
-	HashVersion                    int                    `json:"hash_version"`
-	Generation                     uint64                 `json:"generation"`
-	AffinityInvalidationGeneration uint64                 `json:"affinity_invalidation_generation,omitempty"`
-	Cutover                        CodexLeaseCutover      `json:"cutover"`
-	Lanes                          []CodexJournalLane     `json:"lanes"`
-	Records                        []CodexJournalRecordV2 `json:"records"`
-	MAC                            string                 `json:"mac"`
+	ResetRedistributionEvents      []codexResetRedistributionEvent `json:"reset_redistribution_events,omitempty"`
+	Version                        int                             `json:"version"`
+	HashVersion                    int                             `json:"hash_version"`
+	Generation                     uint64                          `json:"generation"`
+	AffinityInvalidationGeneration uint64                          `json:"affinity_invalidation_generation,omitempty"`
+	Cutover                        CodexLeaseCutover               `json:"cutover"`
+	Lanes                          []CodexJournalLane              `json:"lanes"`
+	Records                        []CodexJournalRecordV2          `json:"records"`
+	MAC                            string                          `json:"mac"`
 }
 
 type CodexLeaseWriterAuthority interface {
@@ -1105,16 +1109,16 @@ func (store *CodexLeaseStore) validateCodexLeaseEnvelope(envelope codexLeaseJour
 		return fmt.Errorf("%w: unsupported Codex lease cutover source", ErrCodexLeaseTrustLost)
 	}
 	if !cacheFieldsAllowed {
-		if envelope.AffinityInvalidationGeneration != 0 {
+		if envelope.AffinityInvalidationGeneration != 0 || len(envelope.ResetRedistributionEvents) != 0 {
 			return fmt.Errorf("%w: schema-v2 journal contains affinity invalidation", ErrCodexLeaseTrustLost)
 		}
 		for _, lane := range envelope.Lanes {
-			if lane.AffinityRefreshJournalGeneration != 0 || !lane.LastCacheAdmittedAt.IsZero() || lane.LastCacheEffectiveModel != "" || len(lane.RequestUnavailableAccountHashes) != 0 || len(lane.QuotaExhaustedAccountHashes) != 0 {
+			if lane.RedistributionRequestedGeneration != 0 || lane.RedistributionCompletedGeneration != 0 || lane.AffinityRefreshJournalGeneration != 0 || !lane.LastCacheAdmittedAt.IsZero() || lane.LastCacheEffectiveModel != "" || len(lane.RequestUnavailableAccountHashes) != 0 || len(lane.QuotaExhaustedAccountHashes) != 0 {
 				return fmt.Errorf("%w: schema-v2 journal contains schema-v3 cache affinity", ErrCodexLeaseTrustLost)
 			}
 		}
 		for _, record := range envelope.Records {
-			if record.QuotaExhaustionProbe {
+			if record.QuotaExhaustionProbe || record.RedistributionGeneration != 0 {
 				return fmt.Errorf("%w: schema-v2 journal contains schema-v3 quota probe", ErrCodexLeaseTrustLost)
 			}
 		}
@@ -1133,10 +1137,21 @@ func (store *CodexLeaseStore) validateV2SemanticState(envelope codexLeaseJournal
 }
 
 func (store *CodexLeaseStore) validateV2SemanticStateForSchema(envelope codexLeaseJournalEnvelopeV2, protocolSchema int) error {
+	if len(envelope.ResetRedistributionEvents) > 128 {
+		return errors.New("too many reset redistribution events")
+	}
+	for index, event := range envelope.ResetRedistributionEvents {
+		if !validCodexLeaseDigest(event.AccountHash) || !validCodexLeaseDigest(event.EventHash) || event.Generation == 0 || event.Generation > envelope.Generation || (index > 0 && envelope.ResetRedistributionEvents[index-1].AccountHash >= event.AccountHash) {
+			return errors.New("invalid reset redistribution event")
+		}
+	}
 	laneIndexes := make(map[string]int, len(envelope.Lanes))
 	for index, lane := range envelope.Lanes {
 		if !validCodexLeaseDigest(lane.SessionHash) || !validCodexLeaseDigest(lane.ThreadHash) || lane.NamespaceHash != store.hash("namespace", CodexResponsesNamespace) {
 			return errors.New("invalid lane identity hash")
+		}
+		if lane.RedistributionCompletedGeneration > lane.RedistributionRequestedGeneration || lane.RedistributionRequestedGeneration > envelope.Generation {
+			return errors.New("invalid redistribution generation")
 		}
 		if lane.Generation == 0 || lane.Generation > envelope.Generation || lane.LastObservedAt.IsZero() || !codexLeaseUTCTime(lane.LastObservedAt) {
 			return errors.New("invalid lane generation or timestamp")
@@ -1192,6 +1207,9 @@ func (store *CodexLeaseStore) validateV2SemanticStateForSchema(envelope codexLea
 			return errors.New("record references absent lane")
 		}
 		lane := envelope.Lanes[laneIndex]
+		if record.RedistributionGeneration > lane.RedistributionRequestedGeneration {
+			return errors.New("request redistribution exceeds lane authority")
+		}
 		if err := store.validateV2Record(envelope, lane, record, protocolSchema); err != nil {
 			return err
 		}
@@ -1664,6 +1682,9 @@ func canonicaliseCodexLeaseV2(envelope *codexLeaseJournalEnvelopeV2) {
 	if envelope == nil {
 		return
 	}
+	sort.Slice(envelope.ResetRedistributionEvents, func(i, j int) bool {
+		return envelope.ResetRedistributionEvents[i].AccountHash < envelope.ResetRedistributionEvents[j].AccountHash
+	})
 	if envelope.Lanes == nil {
 		envelope.Lanes = []CodexJournalLane{}
 	}
@@ -1733,6 +1754,7 @@ func canonicaliseCodexLeaseV2(envelope *codexLeaseJournalEnvelopeV2) {
 }
 
 func cloneCodexLeaseV2Envelope(envelope codexLeaseJournalEnvelopeV2) codexLeaseJournalEnvelopeV2 {
+	envelope.ResetRedistributionEvents = append([]codexResetRedistributionEvent(nil), envelope.ResetRedistributionEvents...)
 	clone := envelope
 	clone.Cutover.AuthoritativeModeEpochs = cloneCodexLeaseSlice(envelope.Cutover.AuthoritativeModeEpochs)
 	clone.Cutover.ShadowModeEpochs = cloneCodexLeaseSlice(envelope.Cutover.ShadowModeEpochs)

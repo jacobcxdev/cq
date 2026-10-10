@@ -1000,6 +1000,15 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexCapacityRefresher.IntervalForAccount = codexReserve.RefreshInterval
 	codexCapacityRefresher.OnInventory = codexReserve.ObserveInventory
+	if codexContinuity != nil {
+		codexCapacity.OnReset = func(event proxy.CodexQuotaResetEvent) error {
+			_, err := codexContinuity.Coordinator.RedistributeTaskAffinitiesForReset(proxyCtx, event.AccountKey, event.EventID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "cq: Codex reset redistribution unavailable; retry pending")
+			}
+			return err
+		}
+	}
 	codexRefreshDone := make(chan struct{})
 	go func() {
 		defer close(codexRefreshDone)
@@ -1120,6 +1129,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	var codexRoutes proxy.CodexHTTPRequestRouteSnapshotter
 	var codexPlanRuntime proxy.CodexHTTPRequestPlanRuntime
 	var codexLeaseInvalidator proxy.CodexLeaseInvalidator
+	var codexLeaseRedistributor proxy.CodexLeaseRedistributor
 	var sessionPolicy *proxy.SessionPolicyResolver
 	var cyberEligibility *proxy.CyberEligibilityStore
 	var dispatchPermits proxy.CallerDispatchPermitAuthority
@@ -1127,6 +1137,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		codexRoutes = codexContinuity.Coordinator
 		codexPlanRuntime = codexContinuity.Runtime
 		codexLeaseInvalidator = codexContinuity.Coordinator
+		codexLeaseRedistributor = codexContinuity.Coordinator
 	}
 	if resilienceState != nil {
 		sessionPolicy = resilienceState.Routing.Resolver()
@@ -1261,6 +1272,13 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		SessionPolicy:                    sessionPolicy,
 		CodexTurnReceipts:                codexTurnReceipts,
 		CodexLeaseInvalidator:            codexLeaseInvalidator,
+		CodexLeaseRedistributor:          codexLeaseRedistributor,
+		CodexResetCapacityRefresh: func(ctx context.Context, account codexprov.AccountKey) error {
+			if !codexCapacityRefresher.ForceRefresh(ctx, []codexprov.AccountKey{account}) || codexCapacity.Capacity(account, proxy.CapacityBucketBase).State != proxy.CapacityPositive {
+				return errors.New("fresh included quota unavailable")
+			}
+			return nil
+		},
 	}
 	if resilienceState != nil {
 		srv.RoutingPolicy = resilienceState.Routing
