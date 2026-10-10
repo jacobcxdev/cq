@@ -39,8 +39,12 @@ func (lifecycle *serviceLifecycle) Upgrade(ctx context.Context, owner installsta
 	if err := lifecycle.RuntimePreflight(ctx, record); err != nil {
 		return proxy.RuntimeUpgradeReceiptV1{}, err
 	}
+	sameRuntime := false
 	if lifecycle.RuntimePrune != nil {
 		defer func() {
+			if sameRuntime {
+				return
+			}
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			defer cancel()
 			if err := lifecycle.RuntimePrune(cleanup); err != nil {
@@ -52,6 +56,9 @@ func (lifecycle *serviceLifecycle) Upgrade(ctx context.Context, owner installsta
 	if err != nil {
 		return proxy.RuntimeUpgradeReceiptV1{}, err
 	}
+	if err := lifecycle.RuntimeArtifacts.Verify(ctx, candidate); err != nil {
+		return proxy.RuntimeUpgradeReceiptV1{}, err
+	}
 	status, err := lifecycle.Platform.Inspect(ctx)
 	if err != nil {
 		return proxy.RuntimeUpgradeReceiptV1{}, err
@@ -60,27 +67,53 @@ func (lifecycle *serviceLifecycle) Upgrade(ctx context.Context, owner installsta
 	if err != nil {
 		return proxy.RuntimeUpgradeReceiptV1{}, ErrServiceUpgradeMaintenance
 	}
+	if err := lifecycle.RuntimeArtifacts.Verify(ctx, previous); err != nil {
+		return proxy.RuntimeUpgradeReceiptV1{}, err
+	}
 	snapshot, err := lifecycle.Platform.Snapshot(ctx)
 	if err != nil {
 		return proxy.RuntimeUpgradeReceiptV1{}, err
 	}
-	receipt, err := lifecycle.RuntimeApply(ctx, candidate)
-	if err != nil {
-		return receipt, err
+	var receipt proxy.RuntimeUpgradeReceiptV1
+	if candidate == previous && status.Proxy.Registered && status.Proxy.Running && status.Proxy.Healthy &&
+		sameServiceExecutable(status.Proxy.LiveExecutable, candidate.Path) && lifecycle.RuntimeReceipt != nil {
+		if retained, receiptErr := lifecycle.RuntimeReceipt(); receiptErr == nil && retained.Validate() == nil {
+			selected := retained.Previous
+			if retained.Phase == "committed" {
+				selected = retained.Candidate
+			}
+			terminal := retained.Phase == "committed" || retained.Phase == "deferred" || retained.Phase == "rolled_back"
+			bound := record.BinaryDigest == selected.SHA256 || (retained.Phase == "committed" && record.BinaryDigest == retained.Previous.SHA256)
+			if terminal && selected == candidate && bound {
+				// This is package reconciliation, not another runtime switch.
+				// Preserve the prior attempt's truthful receipt and its artifacts.
+				receipt, sameRuntime = retained, true
+			}
+		}
 	}
-	if receipt.Phase == "deferred" {
-		return receipt, fmt.Errorf("%w: %s", ErrServiceUpgradeDeferred, receipt.ErrorCode)
-	}
-	if receipt.Phase != "committed" {
-		return receipt, fmt.Errorf("runtime upgrade %s: %s", receipt.Phase, receipt.ErrorCode)
+	if !sameRuntime {
+		receipt, err = lifecycle.RuntimeApply(ctx, candidate)
+		if err != nil {
+			return receipt, err
+		}
+		if receipt.Phase == "deferred" {
+			return receipt, fmt.Errorf("%w: %s", ErrServiceUpgradeDeferred, receipt.ErrorCode)
+		}
+		if receipt.Phase != "committed" {
+			return receipt, fmt.Errorf("runtime upgrade %s: %s", receipt.Phase, receipt.ErrorCode)
+		}
 	}
 	lifecycle.RuntimeExecutable = candidate.Path
 	rollback := func(cause error) (proxy.RuntimeUpgradeReceiptV1, error) {
 		recovery, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
 		defer cancel()
-		reverted, revertErr := lifecycle.RuntimeApply(recovery, previous)
-		if revertErr != nil || reverted.Phase != "committed" {
-			return reverted, errors.Join(cause, fmt.Errorf("runtime rollback unverified: %s", reverted.Phase), revertErr)
+		reverted := receipt
+		if !sameRuntime {
+			var revertErr error
+			reverted, revertErr = lifecycle.RuntimeApply(recovery, previous)
+			if revertErr != nil || reverted.Phase != "committed" {
+				return reverted, errors.Join(cause, fmt.Errorf("runtime rollback unverified: %s", reverted.Phase), revertErr)
+			}
 		}
 		lifecycle.RuntimeExecutable = previous.Path
 		refreshErr := lifecycle.RuntimeRestoreRefresh(recovery, snapshot)

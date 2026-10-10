@@ -2,10 +2,12 @@
 
 Compatible installations keep their proxy LaunchAgent and listener registered.
 CQ stages each executable in private, immutable storage before package cleanup.
-It waits up to 30 seconds for active HTTP requests, SSE streams and WebSocket
-turns to finish. Idle broker WebSocket sessions do not block that boundary;
-clients reconnect after the runtime changes. Raw relayed WebSocket connections
-must close before upgrading. New connections can wait in the kernel backlog
+It stops admitting new work before waiting for active HTTP requests, SSE streams
+and WebSocket turns to finish. Each broker WebSocket session reconnects with
+`1012` after its current turn completes; idle sessions reconnect immediately.
+Drainage has no default deadline, so overlapping chats cannot keep renewing work
+on the retiring worker. Raw relayed WebSocket connections must close before
+upgrading. New connections can wait in the kernel backlog during drainage and
 while the successor starts. A full backlog or loss of both successor and guard
 can still interrupt service; this is not an unconditional zero-downtime promise.
 
@@ -26,7 +28,8 @@ contents. Cleanup errors emit a warning without reverting a completed upgrade.
 
 `cq service status` shows active and pending runtime versions. The JSON form
 adds `active_runtime_version`, `pending_runtime_version` and `upgrade_phase`.
-A busy runtime defers the upgrade and keeps its predecessor active. The package
+An explicit bounded upgrade can defer and keep its predecessor active. Normal
+package upgrades wait for the recorded transaction to finish. A failed package
 hook exits unsuccessfully instead of claiming the candidate became active.
 A failed successor resumes the retained predecessor. A refresh-job failure
 selects the previous runtime through a fresh transaction and restores refresh

@@ -59,7 +59,7 @@ func NewRuntimeUpgradeController(supervisor *RuntimeSupervisor, options RuntimeU
 	if err := options.Artifacts.Verify(context.Background(), options.Previous); err != nil {
 		return nil, err
 	}
-	controller := &RuntimeUpgradeController{supervisor: supervisor, options: options, quietTimeout: 30 * time.Second, done: closedRuntimeWaitChannel()}
+	controller := &RuntimeUpgradeController{supervisor: supervisor, options: options, done: closedRuntimeWaitChannel()}
 	supervisor.mu.Lock()
 	defer supervisor.mu.Unlock()
 	if supervisor.upgradeController != nil {
@@ -204,39 +204,38 @@ func (controller *RuntimeUpgradeController) run(ctx context.Context, receipt Run
 		close(controller.done)
 		controller.mu.Unlock()
 	}()
-	quiet, cancel := context.WithTimeout(ctx, wait)
-	defer cancel()
 	receipt.Phase = "waiting"
 	if err := controller.save(receipt); err != nil {
 		return
 	}
 	supervisor := controller.supervisor
-	if err := supervisor.upgradeRequests.AwaitQuiescence(quiet); err != nil {
-		controller.deferUpgrade(ctx, &receipt, worker, pausedAt, "quiet_deadline")
-		return
-	}
-	if err := worker.AwaitUpgradeQuiescence(quiet); err != nil {
-		controller.deferUpgrade(ctx, &receipt, worker, pausedAt, "worker_not_quiescent")
-		return
-	}
-	if err := supervisor.upgradeConnections.Admission.AwaitQuiescence(quiet); err != nil {
-		controller.deferUpgrade(ctx, &receipt, worker, pausedAt, "ingress_not_quiescent")
-		return
-	}
+	// Stop renewal before awaiting quiet: existing work finishes, while new
+	// connections remain queued on the listener and WebSockets yield at a turn.
+	preparation, cancelPreparation := context.WithTimeout(ctx, 30*time.Second)
+	defer cancelPreparation()
 	pausedAt = time.Now()
-	if err := supervisor.upgradeListener.Pause(quiet); err != nil {
+	if err := supervisor.upgradeListener.Pause(preparation); err != nil {
 		controller.deferUpgrade(ctx, &receipt, worker, pausedAt, "quiet_deadline")
 		return
 	}
 	supervisor.upgradeKeepAlive(false)
-	if err := supervisor.upgradeRequests.Pause(quiet); err != nil {
+	if err := supervisor.upgradeRequests.Pause(preparation); err != nil {
 		controller.deferUpgrade(ctx, &receipt, worker, pausedAt, "quiet_deadline")
 		return
 	}
-	if err := worker.PrepareUpgrade(quiet); err != nil {
+	if err := worker.PrepareUpgrade(preparation); err != nil {
 		controller.deferUpgrade(ctx, &receipt, worker, pausedAt, "upgrade_unsupported")
 		return
 	}
+	cancelPreparation()
+	var quiet context.Context
+	var cancel context.CancelFunc
+	if wait > 0 {
+		quiet, cancel = context.WithTimeout(ctx, wait)
+	} else {
+		quiet, cancel = context.WithCancel(ctx)
+	}
+	defer cancel()
 	for _, await := range []func(context.Context) error{supervisor.upgradeConnections.Admission.AwaitQuiescence, supervisor.upgradeRequests.AwaitQuiescence, worker.AwaitUpgradeQuiescence} {
 		if err := await(quiet); err != nil {
 			controller.deferUpgrade(ctx, &receipt, worker, pausedAt, "quiet_deadline")
@@ -245,7 +244,6 @@ func (controller *RuntimeUpgradeController) run(ctx context.Context, receipt Run
 	}
 	supervisor.mu.RLock()
 	normalZero := supervisor.normalZero
-	same := supervisor.worker == selected
 	supervisor.mu.RUnlock()
 	select {
 	case <-normalZero:
@@ -253,6 +251,9 @@ func (controller *RuntimeUpgradeController) run(ctx context.Context, receipt Run
 		controller.deferUpgrade(ctx, &receipt, worker, pausedAt, "quiet_deadline")
 		return
 	}
+	supervisor.mu.RLock()
+	same := supervisor.worker == selected
+	supervisor.mu.RUnlock()
 	if !same || quiet.Err() != nil {
 		controller.deferUpgrade(ctx, &receipt, worker, pausedAt, "runtime_changed")
 		return

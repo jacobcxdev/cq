@@ -403,7 +403,7 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 	if gate := broker.config.UpgradeAdmission; gate != nil {
 		release, err := gate.beginSession()
 		if err != nil {
-			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy upgrading"), time.Now().Add(time.Second))
+			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
 			return nil
 		}
 		defer release()
@@ -420,7 +420,7 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 	for {
 		select {
 		case <-upgrade:
-			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy upgrading"), time.Now().Add(time.Second))
+			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
 			return nil
 		case <-broker.config.Drain:
 			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy restarting"), time.Now().Add(time.Second))
@@ -428,6 +428,10 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		default:
 		}
 		messageType, encoded, err := downstreamReader.read(ctx, serveCtx, broker.config.Drain, upgrade)
+		if errors.Is(err, errCodexWSUpgrading) {
+			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
+			return nil
+		}
 		if errors.Is(err, errCodexWSDraining) {
 			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy restarting"), time.Now().Add(time.Second))
 			return nil
@@ -440,7 +444,7 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 			release, err := gate.BeginTurn()
 			if err != nil {
 				clearBytes(encoded)
-				_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy upgrading"), time.Now().Add(time.Second))
+				_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
 				return nil
 			}
 			releaseTurn = release
@@ -554,13 +558,15 @@ func startCodexWSDownstreamReader(ctx context.Context, cancel context.CancelFunc
 
 var errCodexWSDraining = errors.New("Codex WebSocket draining")
 
+var errCodexWSUpgrading = errors.New("Codex WebSocket upgrading")
+
 func (reader *codexWSDownstreamReader) read(parent, ctx context.Context, drain, upgrade <-chan struct{}) (int, []byte, error) {
 	if reader == nil {
 		return 0, nil, ErrCodexLeaseWriterUnavailable
 	}
 	select {
 	case <-upgrade:
-		return 0, nil, errCodexWSDraining
+		return 0, nil, errCodexWSUpgrading
 	case <-drain:
 		return 0, nil, errCodexWSDraining
 	case frame, ok := <-reader.frames:
