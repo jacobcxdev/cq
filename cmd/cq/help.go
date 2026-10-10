@@ -124,8 +124,8 @@ Install and start proxy and refresh services for the current user.
 `,
 	"service upgrade": `Usage: cq service upgrade --owner=homebrew --candidate-executable=PATH [--service-executable=PATH] [--json]
 
-Upgrade compatible macOS Homebrew proxy and refresh services for the current user
-at a quiet request boundary.
+Upgrade compatible macOS Homebrew proxy and refresh services for the current user.
+Queue new requests while existing turns finish, then switch the runtime.
 A deferred upgrade keeps the previous runtime active and exits unsuccessfully.
 `,
 	"service restart": `Usage: cq service restart

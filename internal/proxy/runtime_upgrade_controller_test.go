@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -232,7 +234,6 @@ type crashingUpgradeWorker struct {
 	exited     chan struct{}
 	waiting    chan struct{}
 	pausedCase bool
-	awaits     int
 }
 
 func (worker *crashingUpgradeWorker) Exited() <-chan struct{} { return worker.exited }
@@ -241,16 +242,17 @@ func (worker *crashingUpgradeWorker) PrepareUpgrade(ctx context.Context) error {
 		return err
 	}
 	close(worker.waiting)
+	if !worker.pausedCase {
+		select {
+		case <-worker.exited:
+			return ErrRuntimeSupervisorUnavailable
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	return nil
 }
 func (worker *crashingUpgradeWorker) AwaitUpgradeQuiescence(ctx context.Context) error {
-	worker.awaits++
-	if worker.pausedCase && worker.awaits == 1 {
-		return nil
-	}
-	if !worker.pausedCase {
-		close(worker.waiting)
-	}
 	select {
 	case <-worker.exited:
 		return ErrRuntimeSupervisorUnavailable
@@ -262,7 +264,7 @@ func (worker *crashingUpgradeWorker) ResumeUpgrade(context.Context) error {
 	return ErrRuntimeSupervisorUnavailable
 }
 
-func TestRuntimeUpgradeRecoversWorkerDeathDuringWaitingAndPausedDrain(t *testing.T) {
+func TestRuntimeUpgradeRecoversWorkerDeathDuringPreparationAndPausedDrain(t *testing.T) {
 	for _, paused := range []bool{false, true} {
 		t.Run(fmt.Sprint("paused=", paused), func(t *testing.T) {
 			controller, supervisor, worker, request := upgradeControllerFixture(t)
@@ -496,5 +498,147 @@ func TestRuntimeUpgradeRollbackBeforePackageOwnershipCommit(t *testing.T) {
 	receipt := upgradeWaitTerminal(t, controller, request.TransactionID)
 	if receipt.Phase != "committed" || receipt.Candidate != previous {
 		t.Fatalf("package rollback: %+v", receipt)
+	}
+}
+
+func TestRuntimeUpgradePausesRenewalBeforeWaitingForExistingTurns(t *testing.T) {
+	controller, supervisor, worker, request := upgradeControllerFixture(t)
+	controller.quietTimeout = time.Second
+	releaseHTTP, err := supervisor.upgradeRequests.BeginRequest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseTurnA, err := worker.gate.BeginTurn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseTurnA()
+	releaseTurnB, err := worker.gate.BeginTurn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseTurnB()
+
+	stop := make(chan struct{})
+	renewing := make(chan struct{})
+	renewalStopped := make(chan struct{})
+	var renewals atomic.Int64
+	go func() {
+		defer close(renewalStopped)
+		current := releaseHTTP
+		defer func() { current() }()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			next, beginErr := supervisor.upgradeRequests.BeginRequest()
+			if beginErr != nil {
+				return
+			}
+			current()
+			current = next
+			if renewals.Add(1) == 1 {
+				close(renewing)
+			}
+			runtime.Gosched()
+		}
+	}()
+	defer func() { close(stop); <-renewalStopped }()
+	<-renewing
+	if _, err := controller.Begin(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-worker.gate.PauseSignal():
+	case <-controller.done:
+		receipt, _ := controller.Status(context.Background(), request.TransactionID)
+		t.Fatalf("renewing admissions starved pause: %+v", receipt)
+	case <-time.After(2 * time.Second):
+		t.Fatal("existing turns prevented early pause")
+	}
+	select {
+	case <-renewalStopped:
+	case <-time.After(time.Second):
+		t.Fatal("new HTTP admissions continued after pause")
+	}
+	worker.mu.Lock()
+	stopped := worker.stopped
+	worker.mu.Unlock()
+	if stopped != 0 {
+		t.Fatal("active turns were stopped before completion")
+	}
+	releaseTurnA()
+	releaseTurnB()
+	receipt := upgradeWaitTerminal(t, controller, request.TransactionID)
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	if receipt.Phase != "committed" || worker.stopped != 1 || renewals.Load() == 0 {
+		t.Fatalf("finite drain did not hand off once: %+v stopped=%d renewals=%d", receipt, worker.stopped, renewals.Load())
+	}
+}
+
+func TestRuntimeUpgradeDefaultDrainWaitsForExistingTurn(t *testing.T) {
+	controller, _, worker, request := upgradeControllerFixture(t)
+	controller.quietTimeout = 0
+	release, err := worker.gate.BeginTurn()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if _, err := controller.Begin(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-worker.gate.PauseSignal():
+	case <-controller.done:
+		t.Fatal("default drain expired before existing turn completed")
+	case <-time.After(time.Second):
+		t.Fatal("default drain did not pause renewal")
+	}
+	select {
+	case <-controller.done:
+		t.Fatal("default drain aborted an existing turn")
+	case <-time.After(75 * time.Millisecond):
+	}
+	release()
+	if receipt := upgradeWaitTerminal(t, controller, request.TransactionID); receipt.Phase != "committed" {
+		t.Fatalf("default drain failed after old turn finished: %+v", receipt)
+	}
+}
+
+func TestRuntimeUpgradeRetainsOwnerUntilNormalAdmissionCompletes(t *testing.T) {
+	controller, supervisor, worker, request := upgradeControllerFixture(t)
+	controller.quietTimeout = 0
+	supervisor.mu.Lock()
+	supervisor.normalAdmitted = 1
+	supervisor.normalZero = make(chan struct{})
+	supervisor.mu.Unlock()
+	var finished sync.Once
+	finish := func() { finished.Do(supervisor.releaseNormalAdmission) }
+	defer finish()
+	if _, err := controller.Begin(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-worker.gate.PauseSignal():
+	case <-time.After(time.Second):
+		t.Fatal("worker was not prepared")
+	}
+	select {
+	case <-controller.done:
+		t.Fatal("upgrade released owner with normal admission active")
+	case <-time.After(25 * time.Millisecond):
+	}
+	worker.mu.Lock()
+	stopped := worker.stopped
+	worker.mu.Unlock()
+	if stopped != 0 {
+		t.Fatal("worker stopped before final normal admission completed")
+	}
+	finish()
+	if receipt := upgradeWaitTerminal(t, controller, request.TransactionID); receipt.Phase != "committed" {
+		t.Fatalf("normal admission drain = %+v", receipt)
 	}
 }

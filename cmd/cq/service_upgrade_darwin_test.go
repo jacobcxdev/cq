@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -232,6 +233,122 @@ func TestDarwinRuntimeUpgradeSettlesAmbiguousSubmission(t *testing.T) {
 				t.Fatalf("returned before accepted transaction settled: %+v %v", settled, err)
 			}
 		})
+	}
+}
+
+func TestDarwinRuntimeUpgradeWaitsForKnownTransactionPastDiscoveryDeadline(t *testing.T) {
+	store := proxy.RuntimeUpgradeStore{FS: fsutil.NewMemFS(), Roots: userdirs.Roots{State: "/fixture/state"}}
+	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
+	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "long-drain", Generation: 1, Phase: "prepared", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
+	if err := store.Save(receipt); err != nil {
+		t.Fatal(err)
+	}
+	receipt.Phase = "waiting"
+	if err := store.Save(receipt); err != nil {
+		t.Fatal(err)
+	}
+	discovery, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if recover() != nil {
+				done <- errors.New("receipt publication panic")
+			}
+		}()
+		time.Sleep(25 * time.Millisecond)
+		for _, phase := range []string{"waiting", "handoff", "verifying", "committed"} {
+			receipt.Phase = phase
+			if err := store.Save(receipt); err != nil {
+				done <- err
+				return
+			}
+		}
+		done <- nil
+	}()
+	settled, err := awaitDarwinServiceRuntimeUpgrade(discovery, store, candidate, "long-drain", proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, nil)
+	if updateErr := <-done; updateErr != nil {
+		t.Fatal(updateErr)
+	}
+	if err != nil || settled.Phase != "committed" {
+		t.Fatalf("accepted drain lost to discovery deadline: %+v %v", settled, err)
+	}
+}
+
+func TestDarwinRuntimeUpgradePreparedOnlyKeepsDiscoveryBound(t *testing.T) {
+	store := proxy.RuntimeUpgradeStore{FS: fsutil.NewMemFS(), Roots: userdirs.Roots{State: "/fixture/state"}}
+	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
+	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "prepared-only", Generation: 1, Phase: "prepared", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
+	if err := store.Save(receipt); err != nil {
+		t.Fatal(err)
+	}
+	discovery, cancel := context.WithCancel(context.Background())
+	cancel()
+	// A terminal fallback also releases the pre-fix poller, so the regression
+	// fails without leaving a background upgrade wait behind.
+	timer := time.AfterFunc(100*time.Millisecond, func() {
+		receipt.Phase = "failed"
+		_ = store.Save(receipt)
+	})
+	defer timer.Stop()
+	settled, err := awaitDarwinServiceRuntimeUpgrade(discovery, store, candidate, receipt.TransactionID, proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, nil)
+	if !errors.Is(err, context.Canceled) || settled.Phase != "prepared" {
+		t.Fatalf("prepared receipt hid failed waiting publication: %+v %v", settled, err)
+	}
+}
+
+type upgradeReceiptReadFailureFS struct {
+	*fsutil.MemFS
+	reads    atomic.Int32
+	recovery atomic.Bool
+	err      error
+}
+
+func (fsys *upgradeReceiptReadFailureFS) OpenSecureDirectory(path string) (fsutil.SecureDirectory, error) {
+	if fsys.reads.Add(1) > 1 && !fsys.recovery.Load() {
+		return nil, fsys.err
+	}
+	return fsys.MemFS.OpenSecureDirectory(path)
+}
+
+func TestDarwinRuntimeUpgradeReportsReceiptReadFailureAfterWaiting(t *testing.T) {
+	store := proxy.RuntimeUpgradeStore{FS: fsutil.NewMemFS(), Roots: userdirs.Roots{State: "/fixture/state"}}
+	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
+	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "unreadable-drain", Generation: 1, Phase: "prepared", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
+	for _, phase := range []string{"prepared", "waiting"} {
+		receipt.Phase = phase
+		if err := store.Save(receipt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	readErr := errors.New("receipt storage unavailable")
+	fsys := &upgradeReceiptReadFailureFS{MemFS: store.FS.(*fsutil.MemFS), err: readErr}
+	unreadable := store
+	unreadable.FS = fsys
+	timer := time.AfterFunc(100*time.Millisecond, func() {
+		for _, phase := range []string{"handoff", "verifying", "committed"} {
+			receipt.Phase = phase
+			_ = store.Save(receipt)
+		}
+		fsys.recovery.Store(true)
+	})
+	defer timer.Stop()
+	settled, err := awaitDarwinServiceRuntimeUpgrade(context.Background(), unreadable, candidate, receipt.TransactionID, proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, nil)
+	if !errors.Is(err, readErr) || !strings.Contains(err.Error(), "runtime selection unverified") || settled.Phase != "waiting" {
+		t.Fatalf("waiting receipt hid storage failure: %+v %v", settled, err)
+	}
+}
+
+func TestDarwinRuntimeUpgradeUnobservedTransactionKeepsDiscoveryBound(t *testing.T) {
+	store := proxy.RuntimeUpgradeStore{FS: fsutil.NewMemFS(), Roots: userdirs.Roots{State: "/fixture/state"}}
+	discovery, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := awaitDarwinServiceRuntimeUpgrade(discovery, store, installer.RuntimeArtifact{}, "missing", proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, errors.New("submission lost"))
+	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "submission lost") {
+		t.Fatalf("unobserved transaction lost bounded reconciliation: %v", err)
 	}
 }
 

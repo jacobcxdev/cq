@@ -410,6 +410,7 @@ func (f *nativeUpgradeFixture) isolateSource(source string) {
 	fixtureSource := fmt.Sprintf(`package main
 import("os";"net/http";"fmt";"strings")
 var nativeFixtureFailure string
+func nativeFixtureUpgradeWaitSeconds() int { if _,err:=os.Stat(%q);err==nil{return 1};return 0 }
 func init(){
  os.Setenv("HOME",%q);os.Setenv("XDG_CONFIG_HOME","");os.Setenv("XDG_CACHE_HOME","");os.Setenv("CODEX_HOME",%q);os.Setenv("TMPDIR",%q)
  http.DefaultTransport= &http.Transport{Proxy:func(r *http.Request)(*url.URL,error){if r.URL.Hostname()!="127.0.0.1"&&r.URL.Hostname()!="localhost" {return nil,fmt.Errorf("fixture blocked non-loopback request")};return nil,nil}}
@@ -417,7 +418,7 @@ func init(){
  if nativeFixtureFailure=="boot"&&strings.Contains(strings.Join(os.Args," "),"--runtime-role worker"){os.Exit(74)}
  if nativeFixtureFailure=="refresh"&&len(os.Args)>1&&os.Args[1]=="refresh"{os.Exit(75)}
 }
-`, f.home, filepath.Join(f.home, ".codex"), filepath.Join(f.root, "tmp"))
+`, filepath.Join(f.roots.State, "native-bounded-drain"), f.home, filepath.Join(f.home, ".codex"), filepath.Join(f.root, "tmp"))
 	fixtureSource = strings.Replace(fixtureSource, `"strings"`, `"strings";"net/url"`, 1)
 	if err := os.WriteFile(filepath.Join(source, "cmd/cq/native_upgrade_fixture.go"), []byte(fixtureSource), 0o600); err != nil {
 		f.t.Fatal(err)
@@ -434,6 +435,19 @@ func init(){
 		}
 		data = bytes.Replace(data, []byte(marker), []byte(marker+`
  if nativeFixtureFailure=="setup" && resume!=nil && !resume.Recovery { return fmt.Errorf("fixture setup failed") }`), 1)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			f.t.Fatal(err)
+		}
+		path = filepath.Join(source, "cmd/cq/service_upgrade_darwin.go")
+		data, err = os.ReadFile(path)
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		requestMarker := "ExpectedGeneration: generation, Candidate: candidate})"
+		if bytes.Count(data, []byte(requestMarker)) != 1 {
+			f.t.Fatal("bounded fixture drain injection boundary missing")
+		}
+		data = bytes.Replace(data, []byte(requestMarker), []byte("ExpectedGeneration: generation, Candidate: candidate, WaitTimeoutSeconds: nativeFixtureUpgradeWaitSeconds()})"), 1)
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			f.t.Fatal(err)
 		}
@@ -554,7 +568,7 @@ func (f *nativeUpgradeFixture) respondTurn(body []byte, write func([]byte) error
 
 func (f *nativeUpgradeFixture) compatibleTrafficUpgrade() {
 	f.t.Helper()
-	// Finish requests already admitted by the old worker before opening its quiet boundary.
+	// Hold admitted turns until the old worker has stopped further admissions.
 	turns := make(chan error, 2)
 	go func() {
 		defer func() {
@@ -600,28 +614,75 @@ func (f *nativeUpgradeFixture) compatibleTrafficUpgrade() {
 	defer slow.Close()
 	slowBody := nativeTurnBody("slow-headers", "", false, false)
 	fmt.Fprintf(slow, "POST /v1/responses HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n", f.token, len(slowBody))
-	release := make(chan struct{})
+	release := make(chan error, 1)
+	queuedDone := make(chan error, 1)
 	go func() {
+		released := false
 		defer func() {
+			if !released {
+				slow.Close()
+			}
+			f.mu.Lock()
+			select {
+			case <-f.hold:
+			default:
+				close(f.hold)
+			}
+			f.mu.Unlock()
 			if recover() != nil {
-				turns <- fmt.Errorf("release fixture panic")
+				release <- fmt.Errorf("release fixture panic")
 			}
 		}()
-		store := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: f.roots}
-		deadline := time.Now().Add(15 * time.Second)
-		for time.Now().Before(deadline) {
-			receipt, err := store.Load()
-			if err == nil && receipt.Phase == "waiting" {
-				break
-			}
-			time.Sleep(20 * time.Millisecond)
+		// This close proves PrepareUpgrade ran while both dispatched turns were
+		// still live. Waiting for global quiet first would time out here.
+		idle.SetReadDeadline(time.Now().Add(15 * time.Second))
+		_, _, err := idle.ReadMessage()
+		var closed *websocket.CloseError
+		if !errors.As(err, &closed) || closed.Code != websocket.CloseServiceRestart {
+			release <- fmt.Errorf("idle WebSocket was not paused before held turns finished: %v", err)
+			return
 		}
-		close(f.hold)
-		fmt.Fprint(slow, "\r\n")
-		slow.Write(slowBody)
-		close(release)
+		f.mu.Lock()
+		finishedEarly := f.terminal["response-held-http"] || f.terminal["response-held-ws"]
+		f.mu.Unlock()
+		if finishedEarly {
+			release <- fmt.Errorf("held turn finished before admission pause")
+			return
+		}
+		go func() {
+			defer func() {
+				if recover() != nil {
+					queuedDone <- fmt.Errorf("queued HTTP fixture panic")
+				}
+			}()
+			queuedDone <- f.httpTurn("paused-queue", "", false)
+		}()
+		blocked := time.NewTimer(150 * time.Millisecond)
+		defer blocked.Stop()
+		for {
+			select {
+			case turn := <-f.admitted:
+				if turn == "paused-queue" {
+					release <- fmt.Errorf("new HTTP request dispatched while old turns were draining")
+					return
+				}
+			case err := <-queuedDone:
+				release <- fmt.Errorf("queued HTTP request returned before handoff: %v", err)
+				return
+			case <-blocked.C:
+				released = true
+				f.mu.Lock()
+				close(f.hold)
+				f.mu.Unlock()
+				fmt.Fprint(slow, "\r\n")
+				_, err := slow.Write(slowBody)
+				release <- err
+				return
+			}
+		}
 	}()
 	stop := make(chan struct{})
+	renewed := make(chan struct{})
 	shortDone := make(chan error, 1)
 	go func() {
 		defer func() {
@@ -640,15 +701,30 @@ func (f *nativeUpgradeFixture) compatibleTrafficUpgrade() {
 				shortDone <- err
 				return
 			}
+			if n == 0 {
+				close(renewed)
+			}
 			time.Sleep(30 * time.Millisecond)
 		}
 	}()
+	select {
+	case <-renewed:
+	case err := <-shortDone:
+		f.t.Fatalf("continuous HTTP traffic did not start: %v", err)
+	case <-time.After(10 * time.Second):
+		f.t.Fatal("continuous HTTP traffic did not start")
+	}
 	f.packageOperation("upgrade", "0.34.1", "0.34.0", false)
 	close(stop)
 	if err := <-shortDone; err != nil {
 		f.t.Fatal(err)
 	}
-	<-release
+	if err := <-release; err != nil {
+		f.t.Fatal(err)
+	}
+	if err := <-queuedDone; err != nil {
+		f.t.Fatal(err)
+	}
 	for n := 0; n < 2; n++ {
 		if err := <-turns; err != nil {
 			f.t.Fatal(err)
@@ -664,21 +740,12 @@ func (f *nativeUpgradeFixture) compatibleTrafficUpgrade() {
 	if err != nil || response.StatusCode != 200 || !bytes.Contains(data, []byte("response.completed")) {
 		f.t.Fatalf("slow headers lost: %d %s %v", response.StatusCode, data, err)
 	}
-	idle.SetReadDeadline(time.Now().Add(5 * time.Second))
-	if _, _, err := idle.ReadMessage(); err == nil {
-		f.t.Fatal("idle WebSocket survived worker retirement unexpectedly")
-	} else {
-		var timeout net.Error
-		if errors.As(err, &timeout) && timeout.Timeout() {
-			f.t.Fatal("idle WebSocket retirement was not observed")
-		}
-	}
 	reconnected, err := f.wsTurn("idle-reconnected", "", false)
 	if err != nil {
 		f.t.Fatal(err)
 	}
 	reconnected.Close()
-	f.evidence.Outcomes = append(f.evidence.Outcomes, "admitted-SSE-and-multiframe-WebSocket-completed", "idle-WebSocket-reconnected", "slow-headers-completed", "concurrent-HTTP-survived")
+	f.evidence.Outcomes = append(f.evidence.Outcomes, "admitted-SSE-and-multiframe-WebSocket-completed", "idle-WebSocket-reconnected", "slow-headers-completed", "concurrent-HTTP-survived", "admission-paused-before-held-turns-completed", "new-HTTP-queued-until-handoff")
 }
 
 func (f *nativeUpgradeFixture) traffic(turn string) {
@@ -1086,6 +1153,13 @@ func (f *nativeUpgradeFixture) assertRetainedRuntimes() {
 	}
 }
 func (f *nativeUpgradeFixture) deadlineDeferral() {
+	// Only this case exercises the explicit bounded drain override. Normal
+	// upgrades keep the production default and wait for existing turns to finish.
+	marker := filepath.Join(f.roots.State, "native-bounded-drain")
+	if err := os.WriteFile(marker, []byte("1\n"), 0o600); err != nil {
+		f.t.Fatal(err)
+	}
+	defer os.Remove(marker)
 	f.mu.Lock()
 	f.hold = make(chan struct{})
 	f.mu.Unlock()

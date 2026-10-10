@@ -105,6 +105,110 @@ func TestHomebrewUpgradeKeepsJobsAndUsesRetainedRuntime(t *testing.T) {
 	}
 }
 
+func TestHomebrewUpgradeReconcilesVerifiedSelectedRuntimeWithoutHandoff(t *testing.T) {
+	for _, phase := range []string{"committed", "deferred", "rolled_back"} {
+		t.Run(phase, func(t *testing.T) {
+			lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+			selected := previous
+			if phase == "committed" {
+				if _, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, candidate.Path); err != nil {
+					t.Fatal(err)
+				}
+				selected = candidate
+			}
+			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "prior-attempt", Generation: 2, Phase: phase, Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
+			lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+			platform.calls = nil
+			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
+				t.Fatal("verified live artifact unnecessarily handed off")
+				return proxy.RuntimeUpgradeReceiptV1{}, nil
+			}
+			lifecycle.RuntimePrune = func(context.Context) error { t.Fatal("package reconciliation pruned rollback artifacts"); return nil }
+			got, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, selected.Path)
+			if err != nil || got != receipt || platform.live != selected.Path || platform.refresh != selected.Path {
+				t.Fatalf("same-runtime reconciliation=%+v err=%v", got, err)
+			}
+			record, err := store.Load()
+			if err != nil || record.BinaryDigest != selected.SHA256 || record.Version != selected.Version {
+				t.Fatalf("reconciled ownership=%+v err=%v", record, err)
+			}
+		})
+	}
+}
+
+func TestHomebrewUpgradeDoesNotReconcileUnprovenLiveArtifact(t *testing.T) {
+	for _, scenario := range []string{"unhealthy", "not registered", "not running", "same version different digest", "receipt selects another artifact", "active receipt", "ownership mismatch"} {
+		t.Run(scenario, func(t *testing.T) {
+			lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "prior-attempt", Generation: 2, Phase: "deferred", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
+			path := previous.Path
+			switch scenario {
+			case "unhealthy":
+				platform.proxyHealthy = false
+			case "not registered":
+				platform.proxyRegistered = false
+			case "not running":
+				platform.proxyRunning = false
+			case "same version different digest":
+				candidate.Version = previous.Version
+				lifecycle.RuntimeArtifacts.(serviceUpgradeArtifacts)[candidate.Path] = candidate
+				path = candidate.Path
+			case "receipt selects another artifact":
+				receipt.Phase = "committed"
+			case "active receipt":
+				receipt.Phase = "waiting"
+			case "ownership mismatch":
+				record, err := store.Load()
+				if err != nil {
+					t.Fatal(err)
+				}
+				record.BinaryDigest = strings.Repeat("c", 64)
+				if err := store.Save(record); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+			barrierErr := errors.New("runtime handoff barrier retained")
+			called := false
+			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
+				called = true
+				return proxy.RuntimeUpgradeReceiptV1{}, barrierErr
+			}
+			_, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, path)
+			if !called || !errors.Is(err, barrierErr) {
+				t.Fatalf("unproven selection bypassed handoff: called=%v err=%v", called, err)
+			}
+		})
+	}
+}
+
+func TestHomebrewSameRuntimeReconciliationRestoresMetadataOnFailure(t *testing.T) {
+	for _, failure := range []string{"refresh", "ownership"} {
+		t.Run(failure, func(t *testing.T) {
+			lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "prior-attempt", Generation: 2, Phase: "deferred", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
+			lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
+				t.Fatal("metadata rollback switched unchanged runtime")
+				return receipt, nil
+			}
+			if failure == "refresh" {
+				platform.installRefreshErr = errors.New("refresh failed")
+			} else {
+				lifecycle.Store = &failCandidateOwnershipStore{serviceStateStore: store, candidate: previous.SHA256}
+			}
+			got, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, previous.Path)
+			if err == nil || got != receipt || platform.live != previous.Path || platform.refresh != previous.Path {
+				t.Fatalf("metadata failure changed live selection: %+v %v", got, err)
+			}
+			record, loadErr := store.Load()
+			if loadErr != nil || record.BinaryDigest != previous.SHA256 {
+				t.Fatalf("metadata rollback lost previous ownership: %+v %v", record, loadErr)
+			}
+		})
+	}
+}
+
 func TestHomebrewUpgradePrunesAfterOwnershipSettles(t *testing.T) {
 	for _, rollback := range []bool{false, true} {
 		t.Run(fmt.Sprint(rollback), func(t *testing.T) {

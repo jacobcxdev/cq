@@ -320,6 +320,11 @@ func submitDarwinServiceRuntimeUpgrade(ctx context.Context, store proxy.RuntimeU
 	// must reconcile this known transaction before Homebrew can revert package.
 	wait, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
 	defer cancel()
+	return awaitDarwinServiceRuntimeUpgrade(wait, store, candidate, id, previous, prepared, submissionErr)
+}
+
+func awaitDarwinServiceRuntimeUpgrade(wait context.Context, store proxy.RuntimeUpgradeStore, candidate installer.RuntimeArtifact, id string, previous, prepared proxy.RuntimeUpgradeReceiptV1, submissionErr error) (proxy.RuntimeUpgradeReceiptV1, error) {
+	discoveryDeadline := wait.Done()
 	for {
 		receipt, err := store.Load()
 		if err == nil {
@@ -331,13 +336,21 @@ func submitDarwinServiceRuntimeUpgrade(ctx context.Context, store proxy.RuntimeU
 				switch receipt.Phase {
 				case "committed", "deferred", "rolled_back", "failed":
 					return receipt, nil
+				case "waiting", "handoff", "verifying", "rolling_back":
+					// A durable waiting phase proves the controller started its
+					// drain. Healthy active turns may outlast discovery or caller
+					// cancellation; reconcile their terminal outcome. Prepared
+					// alone cannot prove waiting publication succeeded.
+					discoveryDeadline = nil
 				}
 			} else if receipt.Generation > previous.Generation {
 				return receipt, proxy.ErrRuntimeUpgradeGeneration
 			}
+		} else if discoveryDeadline == nil {
+			return prepared, errors.Join(submissionErr, fmt.Errorf("runtime selection unverified: %w", err))
 		}
 		select {
-		case <-wait.Done():
+		case <-discoveryDeadline:
 			return prepared, errors.Join(submissionErr, err, fmt.Errorf("runtime selection unverified: %w", wait.Err()))
 		case <-time.After(20 * time.Millisecond):
 		}
