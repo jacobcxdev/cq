@@ -168,7 +168,11 @@ func initialiseCredentialOwner(ctx context.Context, coordinator *CredentialCoord
 	if err := capability.AssertOwner(); err != nil {
 		return err
 	}
-	return coordinator.RecoverCredentialState(ctx)
+	if err := coordinator.RecoverCredentialState(ctx); err != nil {
+		return err
+	}
+	coordinator.enableCodexBarRenewal()
+	return nil
 }
 
 type RefreshRPCArgs struct {

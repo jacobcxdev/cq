@@ -138,7 +138,7 @@ cq operation --help
 ### Providers
 
 - **Claude** discovers stored accounts, fetches profile and usage data in parallel, refreshes eligible tokens, and reports each account.
-- **Codex** discovers system, CQ-managed, and declared read-only external accounts. Ordinary checks do not activate, remove, refresh, or rewrite system credentials. Eligible CQ-owned credentials refresh only through CQ's coordinator.
+- **Codex** discovers system, CQ-managed, and declared external accounts. Ordinary checks do not activate, remove, refresh, or rewrite system credentials. Eligible CQ-owned credentials refresh only through CQ's coordinator.
 - **Gemini** reads Antigravity Keychain credential and cached project ID concurrently, calls Antigravity OAuth and quota HTTP APIs directly, and never invokes `agy`. Credential/project stores remain read-only; refreshed tokens live only in process memory.
 
 ### Cache and history
@@ -208,6 +208,8 @@ cq codex resets use EMAIL --credit CREDIT_ID --yes
 ```
 
 CQ-owned Codex accounts live under `~/.codex/accounts/` with registry metadata. System `~/.codex/auth.json` remains distinct. Automatic quota/routing reads never switch the system account.
+
+The credential coordinator also renews explicitly declared CodexBar managed accounts within 60 seconds of access expiry. It shares CodexBar's account lock and writes renewed tokens and their fingerprint back to the declared owner home; later CodexBar login takes priority. Renewal runs in the background, preserving healthy-account routing. If every credential is unavailable, reads wait up to one second for fast repair. Other external accounts and system auth remain read-only. An ambiguous refresh outcome is retained without replay and can require owner reauthentication.
 
 `cq codex resets recommend` plans across every account shown by `cq codex accounts`. It fetches fresh usage and banked-reset inventories, reports a non-actionable incomplete schedule when any portfolio input is missing, and never consumes a credit. Banked resets restore shared-window percentages without changing natural 5-hour or 7-day reset dates.
 
