@@ -324,3 +324,16 @@ func TestProxyCommandClassifiesReconciledStatusAndRescue(t *testing.T) {
 		t.Fatalf("leases authority = %+v err=%v", leases, err)
 	}
 }
+
+func TestProxyLeasesRedistributeAuthorityIsBounded(t *testing.T) {
+	authority, err := ClassifyProxyCommand([]string{"proxy", "leases", "redistribute", "--port", "29280"})
+	if err != nil || authority.Row != "proxy_leases_redistribute" || authority.Terminating || authority.Deadline.Total != proxyLeaseInvalidationTimeout {
+		t.Fatalf("authority=%+v, error=%v", authority, err)
+	}
+	for _, args := range [][]string{{"proxy", "leases", "redistribute", "--port", "0"}, {"proxy", "leases", "redistribute", "extra"}} {
+		authority, err := ClassifyProxyCommand(args)
+		if err != nil || !authority.Terminating {
+			t.Fatalf("invalid arguments accepted: %+v, error=%v", authority, err)
+		}
+	}
+}

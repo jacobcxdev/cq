@@ -36,7 +36,26 @@ type CodexPrimerUsageReaderAPI interface {
 	Read(context.Context, codex.AccountKey) (codex.UsageObservation, error)
 }
 
+// ForceRefresh requests an immediate bounded usage read after an explicit reset.
+// True confirms newly accepted, fresh positive shared quota, never older facts.
+func (r *CodexRoutingCapacityRefresher) ForceRefresh(ctx context.Context, accounts []codex.AccountKey) bool {
+	if r == nil {
+		return false
+	}
+	r.mu.Lock()
+	for _, account := range accounts {
+		delete(r.nextRefresh, account)
+		delete(r.lastSuccess, account)
+	}
+	r.mu.Unlock()
+	return r.refresh(ctx, accounts, true)
+}
+
 func (r *CodexRoutingCapacityRefresher) Refresh(ctx context.Context, accounts []codex.AccountKey) bool {
+	return r.refresh(ctx, accounts, false)
+}
+
+func (r *CodexRoutingCapacityRefresher) refresh(ctx context.Context, accounts []codex.AccountKey, requirePositive bool) bool {
 	if r == nil || r.Usage == nil || r.Capacity == nil {
 		return false
 	}
@@ -137,8 +156,8 @@ func (r *CodexRoutingCapacityRefresher) Refresh(ctx context.Context, accounts []
 				FetchedAt: now,
 			}
 			r.Capacity.ObserveQuotaSnapshot(outcome.account, snapshot)
-			r.Capacity.ObserveLivePositiveQuotaSnapshot(outcome.stream, outcome.account, snapshot)
-			published = true
+			positive := r.Capacity.observeLivePositiveQuotaSnapshot(outcome.stream, outcome.account, snapshot)
+			published = published || !requirePositive || positive
 		}
 		r.mu.Lock()
 		delete(r.inFlight, outcome.account)

@@ -372,11 +372,24 @@ Session selectors accept `--session-id`, `--session-id-stdin`, or a full keyed `
 
 Pool names are case-insensitive selectors and retain their configured display casing. Higher values preserve a pool's account capacity by routing ordinary unbound work through lower-value viable accounts first. Session bindings and task affinity remain hard constraints.
 
-### Lease invalidation
+### Lease redistribution and invalidation
 
 ```bash
+cq proxy leases redistribute
 cq proxy leases invalidate
 ```
+
+Redistribution schedules all existing Codex chats for fresh account selection at
+the next safe request boundary. Active responses finish unchanged; confirmed
+included quota is preferred over unknown or exhausted accounts within existing
+pools, pins, model compatibility, and reserve rules. WebSocket account-owned
+deltas use the existing reconnect/resync path before moving. HTTP continuations
+with `previous_response_id` stay on their account until the client sends a
+portable full-history request. Pending redistribution survives a worker restart.
+
+Successful `cq codex resets use` and fresh detected quota resets schedule this
+automatically. CQ never consumes a banked reset automatically. A failed reset
+notification emits a warning without undoing or repeating reset consumption.
 
 Lease invalidation clears reusable Codex account affinity across all sessions.
 Active requests and required continuity remain unchanged. Each next eligible
@@ -647,6 +660,7 @@ cq proxy hook
 cq proxy hook codex-stop
 cq proxy install
 cq proxy leases
+cq proxy leases redistribute
 cq proxy leases invalidate
 cq proxy pin
 cq proxy pin claude
