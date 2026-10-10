@@ -320,11 +320,55 @@ func submitDarwinServiceRuntimeUpgrade(ctx context.Context, store proxy.RuntimeU
 	// must reconcile this known transaction before Homebrew can revert package.
 	wait, cancel := context.WithTimeout(context.WithoutCancel(ctx), 90*time.Second)
 	defer cancel()
-	return awaitDarwinServiceRuntimeUpgrade(wait, store, candidate, id, previous, prepared, submissionErr)
+	return awaitDarwinServiceRuntimeUpgrade(wait, store, candidate, id, previous, prepared, submissionErr, func() error {
+		return probeDarwinServiceRuntimeUpgrade(request, client, candidate, id)
+	})
 }
 
-func awaitDarwinServiceRuntimeUpgrade(wait context.Context, store proxy.RuntimeUpgradeStore, candidate installer.RuntimeArtifact, id string, previous, prepared proxy.RuntimeUpgradeReceiptV1, submissionErr error) (proxy.RuntimeUpgradeReceiptV1, error) {
+// A paused listener cannot answer status during a healthy drain. Probe failures
+// therefore remain pending; only an explicit controller rejection or verified
+// conflicting transaction can disprove the durable waiting receipt.
+func probeDarwinServiceRuntimeUpgrade(submission *http.Request, client httputil.Doer, candidate installer.RuntimeArtifact, id string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(submission.Context()), time.Second)
+	defer cancel()
+	request := submission.Clone(ctx)
+	request.Method = http.MethodGet
+	statusURL := *submission.URL
+	statusURL.Path, statusURL.RawPath = proxy.RuntimeUpgradeStatusPath, ""
+	query := statusURL.Query()
+	query.Set("transaction_id", id)
+	statusURL.RawQuery = query.Encode()
+	request.URL = &statusURL
+	request.Body, request.GetBody, request.ContentLength = nil, nil, 0
+	request.Header.Del("Content-Type")
+	request.Close = true
+	response, err := client.Do(request)
+	if response != nil {
+		defer response.Body.Close()
+	}
+	if err != nil || response == nil {
+		return nil
+	}
+	if response.StatusCode == http.StatusConflict {
+		return fmt.Errorf("runtime upgrade status rejected: HTTP %d", response.StatusCode)
+	}
+	if response.StatusCode != http.StatusOK {
+		return nil
+	}
+	body, err := httputil.ReadBody(response.Body)
+	var receipt proxy.RuntimeUpgradeReceiptV1
+	if err != nil || proxy.DecodeRuntimeUpgradePayload(body, &receipt) != nil || receipt.Validate() != nil {
+		return nil
+	}
+	if receipt.TransactionID != id || receipt.Candidate != candidate {
+		return proxy.ErrRuntimeUpgradeGeneration
+	}
+	return nil
+}
+
+func awaitDarwinServiceRuntimeUpgrade(wait context.Context, store proxy.RuntimeUpgradeStore, candidate installer.RuntimeArtifact, id string, previous, prepared proxy.RuntimeUpgradeReceiptV1, submissionErr error, statusProbe func() error) (proxy.RuntimeUpgradeReceiptV1, error) {
 	discoveryDeadline := wait.Done()
+	var nextProbe time.Time
 	for {
 		receipt, err := store.Load()
 		if err == nil {
@@ -348,6 +392,12 @@ func awaitDarwinServiceRuntimeUpgrade(wait context.Context, store proxy.RuntimeU
 			}
 		} else if discoveryDeadline == nil {
 			return prepared, errors.Join(submissionErr, fmt.Errorf("runtime selection unverified: %w", err))
+		}
+		if discoveryDeadline == nil && wait.Err() != nil && statusProbe != nil && !time.Now().Before(nextProbe) {
+			nextProbe = time.Now().Add(5 * time.Second)
+			if err := statusProbe(); err != nil {
+				return prepared, errors.Join(submissionErr, fmt.Errorf("runtime selection unverified: %w", err))
+			}
 		}
 		select {
 		case <-discoveryDeadline:

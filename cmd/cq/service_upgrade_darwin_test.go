@@ -267,11 +267,15 @@ func TestDarwinRuntimeUpgradeWaitsForKnownTransactionPastDiscoveryDeadline(t *te
 		}
 		done <- nil
 	}()
-	settled, err := awaitDarwinServiceRuntimeUpgrade(discovery, store, candidate, "long-drain", proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, nil)
+	var probes atomic.Int32
+	settled, err := awaitDarwinServiceRuntimeUpgrade(discovery, store, candidate, "long-drain", proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, nil, func() error {
+		probes.Add(1)
+		return nil // The paused listener's timed-out status probe is inconclusive.
+	})
 	if updateErr := <-done; updateErr != nil {
 		t.Fatal(updateErr)
 	}
-	if err != nil || settled.Phase != "committed" {
+	if err != nil || settled.Phase != "committed" || probes.Load() != 1 {
 		t.Fatalf("accepted drain lost to discovery deadline: %+v %v", settled, err)
 	}
 }
@@ -293,9 +297,36 @@ func TestDarwinRuntimeUpgradePreparedOnlyKeepsDiscoveryBound(t *testing.T) {
 		_ = store.Save(receipt)
 	})
 	defer timer.Stop()
-	settled, err := awaitDarwinServiceRuntimeUpgrade(discovery, store, candidate, receipt.TransactionID, proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, nil)
+	settled, err := awaitDarwinServiceRuntimeUpgrade(discovery, store, candidate, receipt.TransactionID, proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, nil, nil)
 	if !errors.Is(err, context.Canceled) || settled.Phase != "prepared" {
 		t.Fatalf("prepared receipt hid failed waiting publication: %+v %v", settled, err)
+	}
+}
+
+func TestDarwinRuntimeUpgradeReportsStoppedControllerWithReadableWaitingReceipt(t *testing.T) {
+	store := proxy.RuntimeUpgradeStore{FS: fsutil.NewMemFS(), Roots: userdirs.Roots{State: "/fixture/state"}}
+	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
+	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "stopped-controller", Generation: 1, Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
+	for _, phase := range []string{"prepared", "waiting"} {
+		receipt.Phase = phase
+		if err := store.Save(receipt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	discovery, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Release the pre-fix poller after demonstrating that readable waiting
+	// alone cannot detect the controller's stopped transaction.
+	timer := time.AfterFunc(100*time.Millisecond, func() {
+		receipt.Phase = "failed"
+		_ = store.Save(receipt)
+	})
+	defer timer.Stop()
+	statusErr := errors.New("runtime upgrade status rejected: HTTP 409")
+	settled, err := awaitDarwinServiceRuntimeUpgrade(discovery, store, candidate, receipt.TransactionID, proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, nil, func() error { return statusErr })
+	if !errors.Is(err, statusErr) || !strings.Contains(err.Error(), "runtime selection unverified") || settled.Phase != "waiting" {
+		t.Fatalf("stopped controller hid behind readable waiting: %+v %v", settled, err)
 	}
 }
 
@@ -336,7 +367,7 @@ func TestDarwinRuntimeUpgradeReportsReceiptReadFailureAfterWaiting(t *testing.T)
 		fsys.recovery.Store(true)
 	})
 	defer timer.Stop()
-	settled, err := awaitDarwinServiceRuntimeUpgrade(context.Background(), unreadable, candidate, receipt.TransactionID, proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, nil)
+	settled, err := awaitDarwinServiceRuntimeUpgrade(context.Background(), unreadable, candidate, receipt.TransactionID, proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, nil, nil)
 	if !errors.Is(err, readErr) || !strings.Contains(err.Error(), "runtime selection unverified") || settled.Phase != "waiting" {
 		t.Fatalf("waiting receipt hid storage failure: %+v %v", settled, err)
 	}
@@ -346,7 +377,7 @@ func TestDarwinRuntimeUpgradeUnobservedTransactionKeepsDiscoveryBound(t *testing
 	store := proxy.RuntimeUpgradeStore{FS: fsutil.NewMemFS(), Roots: userdirs.Roots{State: "/fixture/state"}}
 	discovery, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := awaitDarwinServiceRuntimeUpgrade(discovery, store, installer.RuntimeArtifact{}, "missing", proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, errors.New("submission lost"))
+	_, err := awaitDarwinServiceRuntimeUpgrade(discovery, store, installer.RuntimeArtifact{}, "missing", proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, errors.New("submission lost"), nil)
 	if !errors.Is(err, context.Canceled) || !strings.Contains(err.Error(), "submission lost") {
 		t.Fatalf("unobserved transaction lost bounded reconciliation: %v", err)
 	}
@@ -440,5 +471,63 @@ func TestDarwinRetainedInspectionAndValidationAfterUpgrade(t *testing.T) {
 	current = sources[0]
 	if _, err := resolve(""); err == nil {
 		t.Fatal("unowned stale package executable accepted")
+	}
+}
+
+func TestDarwinRuntimeUpgradeStatusProbe(t *testing.T) {
+	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
+	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "status-probe", Generation: 1, Phase: "waiting", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflict := receipt
+	conflict.TransactionID = "different-transaction"
+	conflictingBody, err := json.Marshal(conflict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name           string
+		status         int
+		body           []byte
+		transportError error
+		wantError      bool
+	}{
+		{name: "waiting", status: http.StatusOK, body: body},
+		{name: "stopped", status: http.StatusConflict, wantError: true},
+		{name: "transient", status: http.StatusServiceUnavailable},
+		{name: "paused", transportError: context.DeadlineExceeded},
+		{name: "unreadable", status: http.StatusOK, body: []byte("invalid")},
+		{name: "conflicting", status: http.StatusOK, body: conflictingBody, wantError: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			submission, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://127.0.0.1:29280"+proxy.RuntimeUpgradePath, strings.NewReader("submission"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			submission.Header.Set("Authorization", "Bearer fixture-local-token")
+			submission.Header.Set("Content-Type", "application/json")
+			client := testDoer(func(request *http.Request) (*http.Response, error) {
+				deadline, bounded := request.Context().Deadline()
+				if request.Method != http.MethodGet || request.URL.Path != proxy.RuntimeUpgradeStatusPath || request.URL.Query().Get("transaction_id") != receipt.TransactionID || request.Header.Get("Authorization") != submission.Header.Get("Authorization") || request.Body != nil || request.ContentLength != 0 || !request.Close || request.Context().Err() != nil || !bounded || time.Until(deadline) > time.Second {
+					t.Fatal("status probe lost authentication, transaction or timeout boundary")
+				}
+				if tc.transportError != nil {
+					return nil, tc.transportError
+				}
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(string(tc.body)))}, nil
+			})
+			err = probeDarwinServiceRuntimeUpgrade(submission, client, candidate, receipt.TransactionID)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("probe error = %v, want error %t", err, tc.wantError)
+			}
+			if submission.Method != http.MethodPost || submission.Body == nil || submission.Header.Get("Content-Type") != "application/json" {
+				t.Fatal("status probe changed submission")
+			}
+		})
 	}
 }
