@@ -16,19 +16,18 @@ import (
 
 // CodexDotsCmd manages the Dots adapter and its private state.
 type CodexDotsCmd struct {
-	Root       string              `help:"Private Dots installation directory (default ~/.local/share/cq/dots)" placeholder:"ABS_PATH"`
-	Install    CodexDotsInstallCmd `cmd:"" help:"Install multi-account Dots for the normal native app"`
-	Start      CodexDotsActionCmd  `cmd:"" help:"Start Dots in the configured native app"`
-	Stop       CodexDotsActionCmd  `cmd:"" help:"Stop the Dots adapter after quitting the app"`
-	Status     CodexDotsActionCmd  `cmd:"" help:"Show Dots status"`
-	Sync       CodexDotsActionCmd  `cmd:"" help:"Refresh Dots account discovery"`
-	List       CodexDotsActionCmd  `cmd:"" help:"List discovered Dots"`
-	Prime      CodexDotsPrimeCmd   `cmd:"" help:"Prime a Dot or all discovered Dots"`
-	RestoreApp CodexDotsActionCmd  `cmd:"" help:"Restore the original app signature after quitting the app"`
+	Root    string              `help:"Private Dots installation directory (default ~/.local/share/cq/dots)" placeholder:"ABS_PATH"`
+	Install CodexDotsInstallCmd `cmd:"" help:"Install multi-account Dots for the normal native app"`
+	Start   CodexDotsActionCmd  `cmd:"" help:"Start Dots in the configured native app"`
+	Stop    CodexDotsActionCmd  `cmd:"" help:"Stop the Dots adapter after quitting the app"`
+	Status  CodexDotsActionCmd  `cmd:"" help:"Show Dots status"`
+	Sync    CodexDotsActionCmd  `cmd:"" help:"Refresh Dots account discovery"`
+	List    CodexDotsActionCmd  `cmd:"" help:"List discovered Dots"`
+	Prime   CodexDotsPrimeCmd   `cmd:"" help:"Prime a Dot or all discovered Dots"`
 }
 
 type CodexDotsInstallCmd struct {
-	Mode          string `help:"Patch and locally re-sign normal app, or use isolated research profile" default:"native" enum:"native,isolated"`
+	Mode          string `help:"Use normal native profile or isolated research profile" default:"native" enum:"native,isolated"`
 	App           string `help:"Native app bundle" default:"/Applications/ChatGPT.app" placeholder:"ABS_PATH"`
 	SystemAuth    string `help:"Read-only native Codex authentication path" placeholder:"ABS_PATH"`
 	CQAccounts    string `help:"Read-only CQ Codex accounts directory" placeholder:"ABS_PATH"`

@@ -1,5 +1,5 @@
 import test_support
-import json,os,unittest
+import json,os,pathlib,tempfile,unittest
 from unittest.mock import patch
 import isolated_native as native
 import settings
@@ -50,39 +50,35 @@ class NativeIdentityTests(unittest.TestCase):
                 with patch.object(native.subprocess,'check_output',side_effect=[valid,parent,identity]):
                     with self.assertRaises(ValueError):native.isolated_pid()
 
-    def test_embedded_requires_same_owned_app_pid_and_normal_profile(self):
-        executable=str(settings.APP/'Contents/MacOS/ChatGPT')
-        valid=f'123 {os.getuid()} {executable}\n'
-        identity={'app_pid':123,'broker_pid':123,'debug_transport':'embedded'}
-        with patch.object(settings,'INTEGRATION_MODE','native'), \
-             patch('native_debug._embedded_auth',return_value=identity), \
-             patch('native_debug.identity',return_value=identity), \
-             patch.object(native,'app_check') as checked:
-            with patch.object(native.subprocess,'check_output',return_value=valid):
-                self.assertEqual(native.isolated_pid(),123)
-            checked.assert_called_once_with()
-            for row in (valid.replace('123 ', '124 ',1),
-                        valid.replace(f' {os.getuid()} ',f' {os.getuid()+1} '),
-                        valid.rstrip()+' --user-data-dir=/other\n',
-                        valid.rstrip()+' --remote-debugging-pipe\n',
-                        valid.replace('/Contents/MacOS/ChatGPT',
-                                      '/Contents/Frameworks/ChatGPT Helper.app/Contents/MacOS/ChatGPT Helper'),valid+valid):
-                with self.subTest(row=row),patch.object(native.subprocess,'check_output',return_value=row):
-                    with self.assertRaises(ValueError):native.isolated_pid()
-            for reply in ({**identity,'app_pid':124},{**identity,'broker_pid':122},
-                          {**identity,'debug_transport':'pipe'}):
-                with patch('native_debug.identity',return_value=reply), \
-                     patch.object(native.subprocess,'check_output',return_value=valid):
-                    with self.assertRaises(ValueError):native.isolated_pid()
+    def test_native_accepted_only_configured_framework_broker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base=pathlib.Path(directory).resolve()
+            root=base/'runtime';(root/'venv/bin').mkdir(parents=True)
+            version=base/'Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14'
+            interpreter=version/'bin/python3.14';interpreter.parent.mkdir(parents=True)
+            interpreter.write_text('framework launcher fixture')
+            executable=version/'Resources/Python.app/Contents/MacOS/Python'
+            executable.parent.mkdir(parents=True);executable.write_text('framework executable fixture')
+            (root/'venv/bin/python').symlink_to(interpreter)
+            valid=f'123 {os.getuid()} {settings.APP}/Contents/MacOS/ChatGPT --cq-dots-runtime={root} --remote-debugging-pipe\n'
+            broker=f'{executable} -u {root}/native_debug.py'
+            with patch.object(native,'ROOT',root),patch.object(settings,'INTEGRATION_MODE','native'), \
+                 patch('native_debug.identity',return_value={'app_pid':123,'broker_pid':122}):
+                with patch.object(native.subprocess,'check_output',side_effect=[valid,'122',f'{os.getuid()} {broker}']):
+                    self.assertEqual(native.isolated_pid(),123)
+                for parent,identity in [('999',f'{os.getuid()} {broker}'),
+                        ('122',f'{os.getuid()+1} {broker}'),
+                        ('122',f'{os.getuid()} /other/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python -u {root}/native_debug.py'),
+                        ('122',f'{os.getuid()} {executable} -c {root}/native_debug.py'),
+                        ('122',f'{os.getuid()} {executable} -u {base}/native_debug.py')]:
+                    with self.subTest(parent=parent,identity=identity),patch.object(native.subprocess,'check_output',side_effect=[valid,parent,identity]):
+                        with self.assertRaises(ValueError):native.isolated_pid()
 
-    def test_embedded_rejects_unverified_bundle_before_accepting_identity(self):
-        identity={'app_pid':123,'broker_pid':123,'debug_transport':'embedded'}
-        valid=f'123 {os.getuid()} {settings.APP}/Contents/MacOS/ChatGPT\n'
-        with patch.object(settings,'INTEGRATION_MODE','native'), \
-             patch('native_debug._embedded_auth',return_value=identity), \
-             patch('native_debug.identity',return_value=identity), \
-             patch.object(native.subprocess,'check_output',return_value=valid), \
-             patch.object(native,'app_check',side_effect=ValueError('Bundle verification failed')):
-            with self.assertRaisesRegex(ValueError,'Bundle verification failed'):native.isolated_pid()
+    def test_process_inventory_skipped_malformed_ids_and_negative_system_uid(self):
+        args=str(settings.APP/'Contents/MacOS/ChatGPT')+' --user-data-dir='+str(native.ROOT/'user-data')+' --remote-debugging-port=9999'
+        invalid=['not-a-pid '+str(os.getuid())+' '+args,'777 invalid '+args,'778 -2 /usr/libexec/system-daemon']
+        rows='\n'.join(invalid+[f'123 {os.getuid()} {args}'])+'\n'
+        with patch.object(native.subprocess,'check_output',side_effect=[rows,'123\n']):
+            self.assertEqual(native.isolated_pid(9999),123)
 
 if __name__=='__main__':unittest.main()

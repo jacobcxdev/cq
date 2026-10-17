@@ -65,30 +65,6 @@ class NativeDebugTests(unittest.TestCase):
         self.addCleanup(broker.close)
         return broker
 
-    def embedded(self, response=None):
-        token = 'a' * 64
-        state = {'debug_transport': 'embedded', 'app_pid': 12345, 'broker_pid': 12345}
-        (self.root / self.module.STATE_NAME).write_text(json.dumps(state))
-        (self.root / self.module.STATE_NAME).chmod(0o600)
-        (self.root / self.module.TOKEN_NAME).write_text(token + '\n')
-        (self.root / self.module.TOKEN_NAME).chmod(0o600)
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(str(self.root / self.module.SOCKET_NAME))
-        (self.root / self.module.SOCKET_NAME).chmod(0o600)
-        listener.listen(1)
-        listener.settimeout(1)
-        self.addCleanup(listener.close)
-        requests = []
-        def server():
-            connection, _ = listener.accept()
-            with connection:
-                request = self.module._receive(connection, self.module.MAX_REQUEST)
-                requests.append(request)
-                result = {'ok': True, **state} if request['operation'] == 'identity' else {'ok': True, 'app_pid': 12345, 'value': {'ready': True}}
-                if response is not None: result.update(response)
-                self.module._send(connection, result, self.module.MAX_FRAME)
-        return server, requests, state, token
-
     def request(self, broker, value):
         worker = threading.Thread(target=broker.once)
         worker.start()
@@ -217,72 +193,6 @@ class NativeDebugTests(unittest.TestCase):
         self.assertEqual(self.module.evaluate('one()', 12345, self.root), {'expression': 'one()'})
         worker.join(2)
         self.assertFalse(worker.is_alive())
-
-    def test_embedded_identity_requires_token_and_same_process(self):
-        server, requests, _, token = self.embedded()
-        worker = threading.Thread(target=server)
-        worker.start()
-        self.assertEqual(self.module.identity(self.root), {'app_pid': 12345, 'broker_pid': 12345,
-                                                         'debug_transport': 'embedded'})
-        worker.join(2)
-        self.assertEqual(requests, [{'operation': 'identity', 'token': token}])
-
-    def test_embedded_evaluate_adds_private_token(self):
-        server, requests, _, token = self.embedded()
-        worker = threading.Thread(target=server)
-        worker.start()
-        self.assertEqual(self.module.evaluate('one()', 12345, self.root), {'ready': True})
-        worker.join(2)
-        self.assertEqual(requests, [{'operation': 'evaluate', 'app_pid': 12345,
-                                    'expression': 'one()', 'token': token}])
-
-    def test_embedded_response_must_match_private_state(self):
-        server, _, _, _ = self.embedded({'app_pid': 12346})
-        worker = threading.Thread(target=server)
-        worker.start()
-        with self.assertRaisesRegex(ValueError, 'identity changed'):
-            self.module.evaluate('one()', 12345, self.root)
-        worker.join(2)
-
-    def test_embedded_does_not_fall_back_when_private_token_missing(self):
-        self.embedded()
-        (self.root / self.module.TOKEN_NAME).unlink()
-        with self.assertRaises(FileNotFoundError):
-            self.module.identity(self.root)
-
-    def test_embedded_wrong_expected_pid_rejected_before_send(self):
-        self.embedded()
-        with self.assertRaisesRegex(ValueError, 'identity changed'):
-            self.module.evaluate('one()', 12346, self.root)
-
-    def test_embedded_rejects_broad_state_or_token_and_symlinks(self):
-        self.embedded()
-        for name in (self.module.STATE_NAME, self.module.TOKEN_NAME):
-            path = self.root / name
-            path.chmod(0o644)
-            with self.assertRaisesRegex(ValueError, '0600'):
-                self.module.identity(self.root)
-            path.chmod(0o600)
-            other = self.root / (name + '.real')
-            path.rename(other)
-            path.symlink_to(other)
-            with self.assertRaises(OSError):
-                self.module.identity(self.root)
-            path.unlink()
-            other.rename(path)
-
-    def test_embedded_rejects_invalid_token_or_metadata(self):
-        _, _, state, _ = self.embedded()
-        token = self.root / self.module.TOKEN_NAME
-        for value in ('short', 'G' * 64, 'a' * 129):
-            token.write_text(value)
-            with self.assertRaisesRegex(ValueError, 'token invalid|0600'):
-                self.module.identity(self.root)
-        token.write_text('a' * 64)
-        for change in ({'broker_pid': 1}, {'app_pid': True}, {'debug_transport': 'unknown'}):
-            (self.root / self.module.STATE_NAME).write_text(json.dumps({**state, **change}))
-            with self.assertRaisesRegex(ValueError, 'state invalid'):
-                self.module.identity(self.root)
 
     def test_wrong_peer_uid_rejected_before_expression(self):
         evaluator = mock.Mock()

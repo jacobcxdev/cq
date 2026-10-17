@@ -21,8 +21,7 @@ FILES = ('catalog.py', 'self_projection.py', 'celsius.py', 'probe.py',
          'native_dot_transport.py', 'native_executor_reuse.py',
          'native_null_executor.py', 'local_executor.py', 'launch.py',
          'stop_isolated.py', 'room_coordination.py', 'native_gate.py',
-         'settings.py', 'awareness.py', 'account_watch.py', 'native_debug.py',
-         'app_patch.py', 'native_bootstrap.py', 'native_startup.cjs')
+         'settings.py', 'awareness.py', 'account_watch.py', 'native_debug.py')
 EXECUTABLES = {'cloud_stdio.py', 'native_null_executor.py'}
 PYTHON_VERSION = '3.14'
 WEBSOCKETS_VERSION = '17.2'
@@ -51,10 +50,7 @@ def app_check():
     if (info['CFBundleShortVersionString'], str(info['CFBundleVersion'])) != (settings.APP_VERSION, settings.APP_BUILD):
         raise ValueError('Native app version differs from configured pin')
     if digest(settings.APP / 'Contents/Resources/app.asar') != settings.ASAR_SHA256:
-        if getattr(settings, 'INTEGRATION_MODE', 'isolated') != 'native':
-            raise ValueError('Native app renderer differs from configured pin')
-        import app_patch
-        app_patch.verify_installed(settings.APP, settings.ROOT.parent, settings.ASAR_SHA256)
+        raise ValueError('Native app renderer differs from configured pin')
 
 
 def identity():
@@ -160,15 +156,6 @@ def process_identity(pid):
                     and not any(a.startswith('--user-data-dir') for a in args)
                     and [a for a in args if a.startswith('--cq-dots-runtime=')] == ['--cq-dots-runtime='+str(root)]
                     and [a for a in args if a.startswith('--remote-debugging-')] == ['--remote-debugging-pipe']):
-                return 'app'
-            if (state.get('debug_transport') == 'embedded'
-                    and state.get('app_pid') == pid and state.get('broker_pid') == pid
-                    and not any(a.startswith(('--user-data-dir', '--remote-debugging-')) for a in args)):
-                try:
-                    import app_patch
-                    app_patch.verify_installed(settings.APP, root.parent, settings.ASAR_SHA256)
-                except (OSError, ValueError):
-                    return None
                 return 'app'
             return None
         directories = [a.split('=', 1)[1] for a in args if a.startswith('--user-data-dir=')]

@@ -615,7 +615,6 @@ cq codex canary stop
 cq codex dots install
 cq codex dots list
 cq codex dots prime
-cq codex dots restore-app
 cq codex dots start
 cq codex dots status
 cq codex dots stop
@@ -727,16 +726,15 @@ cq service uninstall
 `cq codex dots install` defaults to the normal native app and its existing
 profile, tasks and signed-in account. Dots discovered from your CQ accounts
 share that app's sidebar. CQ keeps adapter state, its Python environment and
-loopback certificates in a separate private directory. Native mode patches one
-startup entry and its integrity seal, then locally signs the affected framework,
-helpers and app bundle. This removes OpenAI push and Keychain-group entitlements
-and disables library validation; Keychain or permission prompts may return.
-Browser and computer integration under this signature remain unqualified.
+loopback certificates in a separate private directory. It does not patch or
+re-sign the installed app bundle. Native app qualification is version-pinned;
+unsupported app updates fail before launch.
 
-Normal-profile support is under qualification. Once applied, the startup hook
-runs on Dock, Applications and command-line launches, using the existing profile.
-Installation never quits an already-running app: it stages the patch and asks
-you to quit, then run `cq codex dots start` to apply it.
+Normal-profile support is under qualification. After quitting the app, use
+`cq codex dots start` as the CQ launcher. This preserves the original app signature
+and opens the existing profile with CQ routing. Opening the app directly from
+Dock or Applications bypasses the adapter. Installation never quits an
+already-running normal app; it reports that a restart is required.
 The previous isolated research mode remains available with `install --mode isolated`.
 
 ```sh
@@ -746,7 +744,6 @@ cq codex dots status
 cq codex dots prime DOT_ID
 cq codex dots prime --all
 cq codex dots stop
-cq codex dots restore-app
 ```
 
 Each discovered Dot receives one automatic setup attempt per installation,
@@ -756,7 +753,7 @@ outcomes are not automatically retried. `prime` explicitly sends a fresh reminde
 Display names can repeat; use the stable ID from `list` when a name is ambiguous.
 Account changes are watched automatically; `cq codex dots sync` requests an
 immediate reconciliation. A changed normal-profile catalogue requires an app
-restart; the watcher does not interrupt existing work. Roles and
+restart through CQ; the watcher does not interrupt existing work. Roles and
 current work remain unknown unless reported.
 
 This optional macOS feature requires Python 3.14 (`brew install python@3.14`),
@@ -764,8 +761,7 @@ websockets 17.2 in its private environment, valid read-only account credentials,
 and already-onboarded Dots. It does not add empty-account onboarding slots,
 native cross-account `@` selection or persistent secondary Reboot. Fresh local
 task execution remains unqualified. See [Dots installation details](experiments/dots/README.md)
-for qualification, explicit paths, app-update handling and rollback. After
-quitting the app, `restore-app` restores the preserved original app signature.
+for qualification, explicit paths and rollback.
 
 ## Development
 

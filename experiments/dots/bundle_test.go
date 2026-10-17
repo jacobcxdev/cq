@@ -25,8 +25,7 @@ func TestExtractContainsOnlyPublicSources(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"release.py", "control.py", "runtime/settings.py", "runtime/awareness.py",
-		"runtime/app_patch.py", "runtime/native_bootstrap.py", "runtime/native_startup.cjs"} {
+	for _, name := range []string{"release.py", "control.py", "runtime/settings.py", "runtime/awareness.py"} {
 		if len(sources[name]) == 0 {
 			t.Errorf("missing %s", name)
 		}

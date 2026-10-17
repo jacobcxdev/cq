@@ -71,14 +71,13 @@ class InstallationTests(unittest.TestCase):
         args=types.SimpleNamespace(root=self.root,app=str(self.base/'app'),system_auth=str(auth),
             cq_accounts=str(self.base/'accounts'),account_source=None,mode='native')
         release=types.SimpleNamespace(activate=mock.Mock())
-        settings=types.SimpleNamespace(validate_runtime_paths=mock.Mock(),reload=mock.Mock(),APP=self.base/'app')
+        settings=types.SimpleNamespace(validate_runtime_paths=mock.Mock(),reload=mock.Mock())
         with mock.patch.object(cli.sys,'platform','darwin'), \
              mock.patch.object(cli,'app_pin',return_value=cli.PIN), \
              mock.patch.object(cli,'configure',return_value=settings), \
              mock.patch.object(cli,'provision') as provision, \
              mock.patch.object(cli,'refresh'), \
              mock.patch.object(cli,'candidate',return_value='/candidate'), \
-             mock.patch('app_patch.prepare') as patch_app, \
              mock.patch.object(cli,'start',return_value={'restart_required':True}), \
              mock.patch.dict(sys.modules,{'release':release}):
             result=cli.install(args)
@@ -86,7 +85,6 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual(json.loads((self.root/'settings.json').read_text())['integration_mode'],'native')
         provision.assert_called_once_with(self.root,mode='native')
         release.activate.assert_called_once_with('/candidate')
-        patch_app.assert_called_once_with(self.base/'app',self.root,update_hook=True)
 
     def test_provision_rejects_shared_python_and_partial_certificate_state(self):
         self.root.mkdir(mode=0o700)
@@ -289,36 +287,6 @@ class NativeLifecycleTests(unittest.TestCase):
         self.assertTrue(result['started'])
         self.control.stop.assert_called_once_with(preserve_watcher=True)
         self.control.start.assert_called_once_with('/candidate',preserve_watcher=True)
-
-
-class NativePatchReportingTests(unittest.TestCase):
-    def setUp(self):
-        temporary=tempfile.TemporaryDirectory();self.addCleanup(temporary.cleanup)
-        self.root=pathlib.Path(temporary.name)
-        self.runtime=self.root/'runtime';self.runtime.mkdir(mode=0o700)
-        self.settings=types.SimpleNamespace(INTEGRATION_MODE='native',APP=self.root/'Fixture.app',ROOT=self.runtime)
-        item=mock.patch.object(cli,'configure',return_value=self.settings)
-        item.start();self.addCleanup(item.stop)
-
-    def test_reports_modified_bundle_even_when_lifecycle_result_said_unchanged(self):
-        with mock.patch('app_patch.status',return_value={'state':'installed','system_app_modified':True}):
-            result={'system_app_modified':False,**cli.native_patch_summary(self.root)}
-        self.assertTrue(result['system_app_modified']);self.assertEqual(result['app_patch'],'installed')
-
-    def test_reports_update_action_without_requiring_native_renderer(self):
-        path=self.runtime/'app-patch-status.json'
-        cli.save(path,{'state':'action_required','reason':'unsupported_app_version','action':'Update CQ.'})
-        with mock.patch('app_patch.status',return_value={'state':'update_required','system_app_modified':None}):
-            result=cli.native_patch_summary(self.root)
-        self.assertIsNone(result['system_app_modified'])
-        self.assertEqual(result['app_update']['reason'],'unsupported_app_version')
-
-    def test_does_not_follow_update_status_symlink(self):
-        target=self.root/'outside';target.write_text('private secret')
-        (self.runtime/'app-patch-status.json').symlink_to(target)
-        with mock.patch('app_patch.status',return_value={'state':'installed','system_app_modified':True}):
-            self.assertEqual(cli.native_patch_summary(self.root),{'system_app_modified':None})
-        self.assertEqual(target.read_text(),'private secret')
 
 
 class DiscoveryRetryTests(unittest.TestCase):
