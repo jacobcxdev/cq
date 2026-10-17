@@ -32,6 +32,18 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(value.PROOF_PROFILE_IDS, {'11111111': 'primary-profile-example', '22222222': 'secondary-profile-example'})
         self.assertEqual(value.DOT_OWNERS['Primary'], value.SYSTEM_ALIAS)
         self.assertEqual(value.DEBUG_PORT, 0)
+        self.assertEqual(value.INTEGRATION_MODE, 'isolated')
+
+    def test_native_mode_is_explicit_and_strict(self):
+        self.data['integration_mode'] = 'native'
+        self.write()
+        self.assertEqual(settings.load(self.path).INTEGRATION_MODE, 'native')
+        for value in ('', 'normal', True, None, []):
+            with self.subTest(value=value):
+                self.data['integration_mode'] = value
+                self.write()
+                with self.assertRaisesRegex(ValueError, 'integration_mode'):
+                    settings.load(self.path)
 
     def test_environment_path_and_cached_constants(self):
         settings.get_settings.cache_clear()

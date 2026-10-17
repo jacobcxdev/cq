@@ -3,6 +3,9 @@ import datetime
 import errno
 import hmac
 import hashlib
+import os
+import queue
+import tempfile
 import catalog
 import settings
 import self_projection
@@ -21,6 +24,9 @@ CATALOG_FIXTURE = None
 CELSIUS = None
 CHALLENGE_LOCK = threading.Lock()
 CHALLENGES = {}
+NATIVE_OWNER_TIMEOUT = 3
+NATIVE_OWNER_WORKERS = threading.BoundedSemaphore(8)
+CATALOG_GENERATION = 0
 
 
 def owner_headers(headers, owner):
@@ -61,6 +67,121 @@ def known_owners(fixture):
     if system['alias'] != settings.SYSTEM_ALIAS or set(accounts) != set(settings.DOT_OWNERS.values()):
         raise ValueError('Catalog account principals differ from configured owners')
     return accounts
+
+
+def publish_native_roots(fixture):
+    known_owners(fixture)
+    _, profiles, owners, _ = fixture
+    roots = [{'owner_alias': owners[profile['id']]['alias'], 'profile_id': profile['id'],
+              'root_thread_id': profile['active_root_thread_id']} for profile in profiles]
+    if len({row['root_thread_id'] for row in roots}) != len(roots):
+        raise ValueError('Catalog root collision')
+    target = ROOT / 'native-roots.json'
+    if target.is_symlink():
+        raise ValueError('Native roots must not be a symlink')
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=ROOT, prefix='.native-roots-', delete=False) as output:
+            temporary = output.name
+            os.chmod(temporary, 0o600)
+            json.dump({'version': 1, 'roots': roots}, output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            os.unlink(temporary)
+
+
+def observe_native_primary(headers, data):
+    global CATALOG_FIXTURE, CATALOG_GENERATION
+    value = json.loads(data)
+    selection, returned = value.get('selection'), value.get('profile')
+    if not isinstance(selection, dict) or selection.get('available') is not True:
+        return
+    NATIVE_GATE.require(headers)
+    with CATALOG_LOCK:
+        fixture = CATALOG_FIXTURE
+        if fixture is None:
+            return
+        accounts = known_owners(fixture)
+        system, profiles, owners, summary = fixture
+        account = accounts[settings.SYSTEM_ALIAS]
+        expected = [profile for profile in profiles if owners[profile['id']]['alias'] == settings.SYSTEM_ALIAS]
+        root = selection.get('thread_id')
+        if (len(expected) != 1 or not isinstance(returned, dict) or returned.get('id') != expected[0]['id']
+                or not isinstance(root, str) or not 0 < len(root) <= 128
+                or returned.get('active_root_thread_id') != root):
+            raise ValueError('Native primary differs from configured owner profile')
+        updated = {**expected[0], **returned}
+        next_owners = {key: owner for key, owner in owners.items() if owner['alias'] != settings.SYSTEM_ALIAS}
+        for key in ['id', 'active_root_thread_id', 'messaging_room_id']:
+            identifier = updated.get(key)
+            if identifier:
+                if not isinstance(identifier, str) or identifier in next_owners:
+                    raise ValueError('Native primary resource ownership collision')
+                next_owners[identifier] = account
+        next_profiles = [updated if profile['id'] == updated['id'] else profile for profile in profiles]
+        refreshed = (system, next_profiles, next_owners, summary)
+        publish_native_roots(refreshed)
+        CATALOG_FIXTURE = refreshed
+        CATALOG_GENERATION += 1
+
+
+def native_owner_results(accounts, operation):
+    # Workers never publish state. Late results stay in this bounded, private queue.
+    results = queue.Queue(maxsize=max(1, len(accounts)))
+    pending = set()
+    completed = {}
+    deadline = time.monotonic() + NATIVE_OWNER_TIMEOUT
+    def run(account):
+        try:
+            try:
+                result = (True, operation(account))
+            except Exception as error:
+                result = (False, type(error).__name__)
+            results.put_nowait((account['alias'], time.monotonic(), result))
+        finally:
+            NATIVE_OWNER_WORKERS.release()
+    for account in accounts:
+        alias = account['alias']
+        if NATIVE_OWNER_WORKERS.acquire(blocking=False):
+            try:
+                threading.Thread(target=run, args=(account,), daemon=True).start()
+                pending.add(alias)
+            except Exception:
+                NATIVE_OWNER_WORKERS.release()
+                completed[alias] = (False, 'WorkerUnavailable')
+        else:
+            completed[alias] = (False, 'WorkersUnavailable')
+    while pending:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            alias, finished, result = results.get(timeout=remaining)
+        except queue.Empty:
+            break
+        if finished <= deadline:
+            pending.discard(alias)
+            completed[alias] = result
+    for alias in pending:
+        completed[alias] = (False, 'DeadlineExceeded')
+    return completed
+
+
+def native_owner_challenge(account, path, headers):
+    upstream = http.client.HTTPSConnection('chatgpt.com', timeout=NATIVE_OWNER_TIMEOUT)
+    try:
+        upstream.request('GET', path, headers=owner_headers(headers, account))
+        response = upstream.getresponse()
+        data = response.read(1024 * 1024 + 1)
+        if len(data) > 1024 * 1024:
+            raise ValueError('owner challenge response too large')
+        return response.status, data
+    finally:
+        upstream.close()
 
 
 def listen_port():
@@ -239,6 +360,26 @@ def live_owner(path, fixture):
         return None
     return message_owner('/backend-api/messaging/rooms/' + match[1] + '/messages', fixture)
 
+def resource_owner(path, fixture):
+    if fixture is None:
+        return None
+    match = re.match(r'^/backend-api/(?:tbo/by-thread/([^/]+)|tbo/([^/]+)|messaging/rooms/([^/]+))(?:/|$)', path)
+    if match is None:
+        return None
+    identifier = urllib.parse.unquote(next(value for value in match.groups() if value is not None))
+    field = ['active_root_thread_id', 'id', 'messaging_room_id'][next(
+        index for index, value in enumerate(match.groups()) if value is not None)]
+    _, profiles, owners, _ = fixture
+    matching = [profile for profile in profiles if profile.get(field) == identifier]
+    if not matching:
+        return None
+    owner = owners.get(identifier)
+    if (len(matching) != 1 or owner is None
+            or owners.get(matching[0]['id'], {}).get('account_id') != owner['account_id']
+            or owners.get(matching[0].get('active_root_thread_id'), {}).get('account_id') != owner['account_id']):
+        raise ValueError('Resource ownership differs from current catalog')
+    return owner
+
 def valid_read_receipt(body):
     try:
         value = json.loads(body)
@@ -295,18 +436,139 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         self.handle_request()
 
+    do_HEAD = do_GET
+    do_PUT = do_POST
+    do_PATCH = do_POST
+    do_DELETE = do_POST
+    do_OPTIONS = do_POST
+
+    def primary_body(self, size, chunked):
+        while chunked or size:
+            if chunked:
+                line = self.rfile.readline(8193)
+                if len(line) > 8192 or not line.endswith(b'\r\n'):
+                    raise ValueError('Invalid native request chunk')
+                value = line[:-2].split(b';', 1)[0]
+                if re.fullmatch(rb'[0-9a-fA-F]+', value) is None:
+                    raise ValueError('Invalid native request chunk')
+                size = int(value, 16)
+                if size == 0:
+                    trailer_size = 0
+                    while True:
+                        line = self.rfile.readline(8193)
+                        trailer_size += len(line)
+                        if trailer_size > 65536 or not line.endswith(b'\r\n'):
+                            raise ValueError('Invalid native request trailers')
+                        if line == b'\r\n':
+                            return
+            while size:
+                data = self.rfile.read(min(size, 65536))
+                if not data:
+                    raise ValueError('Incomplete native request body')
+                size -= len(data)
+                yield data
+            if chunked and self.rfile.read(2) != b'\r\n':
+                raise ValueError('Invalid native request chunk terminator')
+
+    def forward_primary(self, size, chunked):
+        connection = http.client.HTTPSConnection('chatgpt.com', timeout=25)
+        response_started = False
+        try:
+            hop_headers = {'connection', 'proxy-connection', 'keep-alive', 'te', 'trailer', 'upgrade'}
+            excluded = hop_headers | {'host'}
+            excluded.update(value.strip().lower() for value in self.headers.get('Connection', '').split(','))
+            headers = {key: value for key, value in self.headers.items() if key.lower() not in excluded}
+            observe_primary = self.command == 'GET' and urllib.parse.urlsplit(self.path).path == '/backend-api/tbo/primary'
+            if observe_primary:
+                headers = {key: value for key, value in headers.items() if key.lower() != 'accept-encoding'}
+                headers['Accept-Encoding'] = 'identity'
+            body = self.primary_body(size, chunked) if size or chunked else None
+            connection.request(self.command, self.path, body=body, headers=headers, encode_chunked=chunked)
+            response = connection.getresponse()
+            buffered = bytearray()
+            complete = False
+            if observe_primary and response.status == 200:
+                while len(buffered) <= 1024 * 1024:
+                    data = response.read1(min(65536, 1024 * 1024 + 1 - len(buffered)))
+                    if not data:
+                        complete = True
+                        break
+                    buffered.extend(data)
+                if complete and buffered:
+                    try:
+                        observe_native_primary(dict(self.headers.items()), buffered)
+                    except Exception as error:
+                        event({'native_primary_observation_failed': True, 'error_type': type(error).__name__})
+            self.send_response(response.status)
+            response_started = True
+            excluded = hop_headers | {'transfer-encoding'}
+            excluded.update(value.strip().lower() for value in response.getheader('Connection', '').split(','))
+            for key, value in response.getheaders():
+                if key.lower() not in excluded:
+                    if key.lower() == 'set-cookie':
+                        value = re.sub(r';\s*Domain=[^;]+', '', value, flags=re.I)
+                    self.send_header(key, value)
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.close_connection = True
+            if self.command != 'HEAD':
+                if buffered:
+                    self.wfile.write(buffered)
+                    self.wfile.flush()
+                while not complete:
+                    data = response.read1(65536)
+                    if not data:
+                        break
+                    self.wfile.write(data)
+                    self.wfile.flush()
+            event({'method': self.command, 'path': urllib.parse.urlsplit(self.path).path,
+                   'status': response.status, 'native_primary_passthrough': True})
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as error:
+            event({'method': self.command, 'path': urllib.parse.urlsplit(self.path).path,
+                   'error_type': type(error).__name__, 'native_primary_passthrough': True})
+            if not response_started:
+                self.send_response(502)
+                self.end_headers()
+        finally:
+            connection.close()
+
     def handle_request(self):
-        global CATALOG_FIXTURE, NATIVE_REBOOT_AUTH
+        global CATALOG_FIXTURE, CATALOG_GENERATION, NATIVE_REBOOT_AUTH
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
-        if parsed.netloc or not path.startswith('/') or self.headers.get('Transfer-Encoding'):
+        if parsed.netloc or not path.startswith('/'):
+            self.send_response(400);self.end_headers();return
+        native_mode = getattr(settings, 'INTEGRATION_MODE', 'isolated') == 'native'
+        owner = None
+        if native_mode:
+            try:
+                with CATALOG_LOCK:
+                    owner = resource_owner(path, CATALOG_FIXTURE)
+                    catalog_generation = CATALOG_GENERATION
+            except ValueError:
+                self.send_response(409);self.end_headers();return
+        secondary = owner is not None and owner['alias'] != settings.SYSTEM_ALIAS
+        inspected_response = (self.command == 'GET' and path in [
+            '/backend-api/tbo', '/backend-api/celsius/ws/user', '/backend-api/ios/attestation_challenge']
+            or self.command in ['GET', 'POST'] and path.endswith('/wham/statsig/bootstrap'))
+        primary_passthrough = native_mode and not secondary and not inspected_response and path != '/probe/state'
+        transfer_encoding = self.headers.get('Transfer-Encoding', '')
+        chunked = transfer_encoding.lower().strip() == 'chunked'
+        lengths = [value for key, value in self.headers.items() if key.lower() == 'content-length']
+        if (len(lengths) > 1 or transfer_encoding and (not primary_passthrough or not chunked or lengths)):
             self.send_response(400);self.end_headers();return
         try:
             size=int(self.headers.get('Content-Length','0'))
-            if not 0<=size<=1024*1024:raise ValueError('Request exceeds bound')
+            if size < 0 or not primary_passthrough and size > 1024*1024:
+                raise ValueError('Request exceeds bound')
         except ValueError:
             self.send_response(413);self.end_headers();return
         self.connection.settimeout(30)
+        if primary_passthrough:
+            self.forward_primary(size, chunked)
+            return
         body=self.rfile.read(size)
         if len(body)!=size:self.send_response(400);self.end_headers();return
         if path == '/probe/state':
@@ -316,11 +578,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(STATE).encode())
             return
-        try:NATIVE_GATE.require(dict(self.headers.items()))
-        except Exception:
-            event({'native_request_rejected':True,'method':self.command})
-            self.send_response(401);self.end_headers();self.wfile.write(b'{"error":"Native authentication required"}');return
-        if self.command == 'POST' and path == '/backend-api/flora/cca/executor' and (ROOT/'native-secondary-executor.enabled').exists():
+        if not native_mode or secondary or inspected_response:
+            try:NATIVE_GATE.require(dict(self.headers.items()))
+            except Exception:
+                event({'native_request_rejected':True,'method':self.command})
+                self.send_response(401);self.end_headers();self.wfile.write(b'{"error":"Native authentication required"}');return
+        if not native_mode and self.command == 'POST' and path == '/backend-api/flora/cca/executor' and (ROOT/'native-secondary-executor.enabled').exists():
             try:
                 if parsed.query:raise ValueError('Unexpected registration query')
                 import native_executor_reuse
@@ -331,13 +594,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 payload=b'{"error":"Isolated research executor reuse unavailable"}';self.send_response(409)
             self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload)
             return
-        if self.command == 'POST' and path == '/backend-api/cloud-aeons/primary/reboot':
+        if not native_mode and self.command == 'POST' and path == '/backend-api/cloud-aeons/primary/reboot':
             self.reboot_probe(parsed,body)
             return
         with CATALOG_LOCK:
             runtime_fixture=CATALOG_FIXTURE
             runtime_owner=runtime_control_owner(self.path,body,runtime_fixture) if self.command=='POST' else None
-        if runtime_owner is not None:
+        if runtime_owner is not None and not native_mode:
             try:
                 with REBOOT_LOCK:
                     authority=NATIVE_REBOOT_AUTH
@@ -365,31 +628,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
         message_write = send_owner is not None and (
             path.endswith('/aeon/prepare') and not body
             or path.endswith('/messages') and valid_text_message(body))
-        if STATE['primary_probe_owner'] is not None:
+        if not native_mode and STATE['primary_probe_owner'] is not None:
             message_write = False
         allowed = self.command == 'GET' or runtime_owner is not None or message_write or receipt_write or watch_request or (
             self.command == 'POST' and (path.endswith('/wham/statsig/bootstrap') or path == '/backend-api/devicecheck'))
+        if native_mode:
+            allowed = not secondary or self.command in ['GET', 'HEAD'] or runtime_owner is not None or message_write or receipt_write or watch_request
         if not allowed:
             event({'method': self.command, 'path': path, 'blocked': True})
             self.send_response(503)
             self.end_headers()
             self.wfile.write(b'{"error":"Read-only probe blocks this operation"}')
             return
-        headers = {k: v for k, v in self.headers.items()
-                   if k.lower() not in ['host', 'connection', 'content-length', 'accept-encoding']}
-        headers['Accept-Encoding'] = 'identity'
-        owner = None
-        with CATALOG_LOCK:
-            if CATALOG_FIXTURE is not None:
-                _, _, owners, _ = CATALOG_FIXTURE
-                parts = path.split('/')
-                if path.startswith('/backend-api/tbo/by-thread/'):
-                    owner = owners.get(urllib.parse.unquote(parts[4]))
-                elif path.startswith('/backend-api/tbo/') and parts[3] != 'primary':
-                    owner = owners.get(urllib.parse.unquote(parts[3]))
-                elif path.startswith('/backend-api/messaging/rooms/'):
-                    owner = owners.get(urllib.parse.unquote(parts[4]))
-        if owner is not None:
+        identity_encoding = not native_mode or secondary or inspected_response
+        excluded = ['host', 'connection', 'content-length'] + (['accept-encoding'] if identity_encoding else [])
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in excluded}
+        if identity_encoding:
+            headers['Accept-Encoding'] = 'identity'
+        if not native_mode:
+            with CATALOG_LOCK:
+                if CATALOG_FIXTURE is not None:
+                    _, _, owners, _ = CATALOG_FIXTURE
+                    parts = path.split('/')
+                    if path.startswith('/backend-api/tbo/by-thread/'):
+                        owner = owners.get(urllib.parse.unquote(parts[4]))
+                    elif path.startswith('/backend-api/tbo/') and parts[3] != 'primary':
+                        owner = owners.get(urllib.parse.unquote(parts[3]))
+                    elif path.startswith('/backend-api/messaging/rooms/'):
+                        owner = owners.get(urllib.parse.unquote(parts[4]))
+        if owner is not None and (not native_mode or secondary):
             headers = {k: v for k, v in headers.items()
                        if k.lower() not in ['authorization', 'chatgpt-account-id', 'x-openai-account-routing-override',
                                             'x-openai-expected-account-id', 'cookie']}
@@ -413,6 +680,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(b'{"error":"Owner native verification unavailable; no message submitted"}')
                 return
         connection = http.client.HTTPSConnection('chatgpt.com', timeout=25)
+        response_started = False
         try:
             connection.request(self.command, self.path, body=body or None, headers=headers)
             response = connection.getresponse()
@@ -422,6 +690,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 event({'operation':'owner_room_live','routed_owner_alias':owner['alias'],
                        'status':response.status,'streaming':True})
                 self.send_response(response.status)
+                response_started = True
                 for key,value in response.getheaders():
                     if key.lower() not in ['content-length','transfer-encoding','content-encoding','connection','set-cookie']:
                         self.send_header(key,value)
@@ -464,18 +733,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 envelope = json.loads(data)
                 if envelope.get('cursor') is not None or parsed.query.find('cursor=') >= 0:
                     raise ValueError('system catalog pagination exceeds isolated proof scope')
-                with CATALOG_LOCK:
-                    if CATALOG_FIXTURE is None:
-                        CATALOG_FIXTURE = catalog.fixture(headers, envelope['items'])
-                        event({'catalog_fixture': CATALOG_FIXTURE[3]})
-                    system, profiles, _, _ = CATALOG_FIXTURE
-                validate_profiles(CATALOG_FIXTURE)
-                envelope['items'] = profiles
-                envelope['cursor'] = None
-                data = json.dumps(envelope).encode()
-                summary['aggregate_profile_count'] = len(profiles)
-                summary['native_ui_identity_preserved'] = True
-            if self.command == 'GET' and path == '/backend-api/tbo/primary' and response.status == 200:
+                if native_mode:
+                    try:
+                        success, refreshed = native_owner_results([{'alias': settings.SYSTEM_ALIAS}],
+                            lambda account: catalog.fixture(headers, envelope['items']))[settings.SYSTEM_ALIAS]
+                        if not success:
+                            raise ValueError('Owner catalogue refresh unavailable')
+                        known_owners(refreshed)
+                        with CATALOG_LOCK:
+                            if catalog_generation == CATALOG_GENERATION:
+                                publish_native_roots(refreshed)
+                                CATALOG_FIXTURE = refreshed
+                                CATALOG_GENERATION += 1
+                            fixture = CATALOG_FIXTURE
+                    except Exception as error:
+                        summary['catalog_refresh_error_type'] = type(error).__name__
+                        with CATALOG_LOCK:
+                            fixture = CATALOG_FIXTURE
+                        try:
+                            known_owners(fixture)
+                            primary = [profile for profile in fixture[1]
+                                       if fixture[2][profile['id']]['alias'] == settings.SYSTEM_ALIAS]
+                            current = [profile for profile in envelope['items'] if profile.get('id') == primary[0]['id']]
+                            if (len(primary) != 1 or len(current) != 1
+                                    or any(current[0].get(key) != primary[0].get(key)
+                                           for key in ['active_root_thread_id', 'messaging_room_id'])):
+                                raise ValueError('Cached catalogue primary changed')
+                            summary['catalog_verified_cache_used'] = True
+                        except Exception:
+                            fixture = None
+                            summary['catalog_primary_passthrough'] = True
+                else:
+                    with CATALOG_LOCK:
+                        if CATALOG_FIXTURE is None:
+                            CATALOG_FIXTURE = catalog.fixture(headers, envelope['items'])
+                            event({'catalog_fixture': CATALOG_FIXTURE[3]})
+                        fixture = CATALOG_FIXTURE
+                if fixture is not None:
+                    validate_profiles(fixture)
+                    system, profiles, _, _ = fixture
+                    envelope['items'] = profiles
+                    envelope['cursor'] = None
+                    data = json.dumps(envelope).encode()
+                    summary['aggregate_profile_count'] = len(profiles)
+                    summary['native_ui_identity_preserved'] = True
+            if not native_mode and self.command == 'GET' and path == '/backend-api/tbo/primary' and response.status == 200:
                 with CATALOG_LOCK:
                     if CATALOG_FIXTURE is None:
                         system,_ = catalog.inventory()
@@ -503,7 +805,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     data = json.dumps(envelope).encode()
                     summary['owner_self_hint_count'] = count
                     summary['direct_send_response_projection'] = self.command == 'POST'
-            if path.endswith('/wham/statsig/bootstrap') and response.status == 200:
+            if path.endswith('/wham/statsig/bootstrap') and response.status == 200 and (not native_mode or inspected_response):
                 envelope = json.loads(data)
                 payload = json.loads(envelope['statsigPayload'])
                 gate = payload.get('feature_gates', {}).get('2929219922')
@@ -525,21 +827,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     envelope['statsigPayload'] = json.dumps(payload)
                     data = json.dumps(envelope).encode()
                     summary['catalog_after'] = True
-            if path == '/backend-api/celsius/ws/user' and response.status == 200 and CELSIUS is not None:
-                with CATALOG_LOCK:
-                    if CATALOG_FIXTURE is None:
-                        system,_ = catalog.inventory()
-                        CATALOG_FIXTURE = catalog.fixture(headers,catalog.catalog(system,headers))
-                    _,_,owners,_ = CATALOG_FIXTURE
-                accounts = known_owners(CATALOG_FIXTURE)
-                value=json.loads(data)
-                urls={settings.SYSTEM_ALIAS:value['websocket_url']}
-                for alias, account in accounts.items():
-                    if alias != settings.SYSTEM_ALIAS:
-                        urls[alias]=catalog.get(account,self.path,owner_headers(headers,account))['websocket_url']
-                value['websocket_url']=CELSIUS.issue(urls,owners)
-                data=json.dumps(value).encode()
-                summary['owner_celsius_fanout']=True
+            if path == '/backend-api/celsius/ws/user' and response.status == 200 and CELSIUS is not None and (not native_mode or self.command == 'GET'):
+                try:
+                    with CATALOG_LOCK:
+                        if CATALOG_FIXTURE is None and not native_mode:
+                            system,_ = catalog.inventory()
+                            CATALOG_FIXTURE = catalog.fixture(headers,catalog.catalog(system,headers))
+                        fixture = CATALOG_FIXTURE
+                    accounts = known_owners(fixture)
+                    value=json.loads(data)
+                    urls={settings.SYSTEM_ALIAS:value['websocket_url']}
+                    candidates = [account for alias, account in accounts.items() if alias != settings.SYSTEM_ALIAS]
+                    if native_mode:
+                        results = native_owner_results(candidates, lambda account:
+                            catalog.get(account, self.path, owner_headers(headers, account)))
+                        for alias, (success, result) in results.items():
+                            if not success:
+                                raise ValueError('Secondary websocket unavailable')
+                            urls[alias] = result['websocket_url']
+                    else:
+                        for account in candidates:
+                            urls[account['alias']]=catalog.get(account,self.path,owner_headers(headers,account))['websocket_url']
+                    value['websocket_url']=CELSIUS.issue(urls,fixture[2])
+                    data=json.dumps(value).encode()
+                    summary['owner_celsius_fanout']=True
+                except Exception as error:
+                    if not native_mode:
+                        raise
+                    summary['owner_celsius_fanout'] = False
+                    summary['secondary_error_type'] = type(error).__name__
             if path == '/backend-api/ios/attestation_challenge':
                 summary['request_header_names'] = sorted(headers.keys())
                 summary['native_device_proof_present'] = any(
@@ -550,7 +866,27 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         candidates = [] if CATALOG_FIXTURE is None else [
                             account for alias, account in known_owners(CATALOG_FIXTURE).items()
                             if alias != settings.SYSTEM_ALIAS]
-                    for secondary in candidates:
+                    if native_mode:
+                        started = time.monotonic()
+                        results = native_owner_results(candidates, lambda account:
+                            native_owner_challenge(account, self.path, headers))
+                        for alias, (success, result) in results.items():
+                            issued = False
+                            try:
+                                if not success:
+                                    event({'operation':'owner_native_challenge', 'routed_owner_alias':alias,
+                                           'issued':False, 'error_type':result})
+                                    continue
+                                status, owner_data = result
+                                if status == 200:
+                                    remember_challenge(data, owner_data, alias, now=started)
+                                    issued = True
+                                event({'operation':'owner_native_challenge', 'routed_owner_alias':alias,
+                                       'status':status, 'issued':issued, 'native_device_proof_preserved':True})
+                            except Exception as error:
+                                event({'operation':'owner_native_challenge', 'routed_owner_alias':alias,
+                                       'issued':False, 'error_type':type(error).__name__})
+                    for secondary in [] if native_mode else candidates:
                         upstream = http.client.HTTPSConnection('chatgpt.com', timeout=25)
                         try:
                             upstream.request('GET', self.path, headers=owner_headers(headers, secondary))
@@ -576,19 +912,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
             event(summary)
             self.send_response(response.status)
             for k, v in response.getheaders():
-                if k.lower() not in ['content-length', 'transfer-encoding', 'content-encoding', 'connection']:
+                if k.lower() not in ['content-length', 'transfer-encoding', 'connection'] + (['content-encoding'] if identity_encoding else []):
                     if k.lower() == 'set-cookie':
                         v = re.sub(r';\s*Domain=[^;]+', '', v, flags=re.I)
                     self.send_header(k, v)
-            self.send_header('Content-Length', str(len(data)))
+            self.send_header('Content-Length', response.getheader('Content-Length', '0') if self.command == 'HEAD' else str(len(data)))
             self.end_headers()
-            self.wfile.write(data)
+            if self.command != 'HEAD':
+                self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as e:
             event({'method': self.command, 'path': path, 'error_type': type(e).__name__})
-            self.send_response(502)
-            self.end_headers()
+            if not response_started:
+                self.send_response(502)
+                self.end_headers()
         finally:
             connection.close()
 

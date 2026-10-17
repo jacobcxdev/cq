@@ -1,4 +1,4 @@
-"""Packaged, private Dots installation. Never changes the system native app."""
+"""Packaged Dots adapter for the normal native app or isolated research profile."""
 import argparse
 import contextlib
 import fcntl
@@ -95,10 +95,11 @@ def run_checked(command, *, timeout=120):
     return result
 
 
-def provision(root):
+def provision(root, mode='isolated'):
     runtime = private_directory(root / 'runtime')
-    for name in ('user-data', 'codex-home', 'null-executor', 'null-executor/home',
-                 'null-executor/tmp', 'null-executor/work', 'null-executor/room-relay'):
+    for name in (() if mode == 'native' else
+                 ('user-data', 'codex-home', 'null-executor', 'null-executor/home',
+                  'null-executor/tmp', 'null-executor/work', 'null-executor/room-relay')):
         private_directory(runtime / name)
     venv = runtime / 'venv'
     if venv.is_symlink():
@@ -201,7 +202,7 @@ def install(args):
         configure(root)
         import release
         if release.isolated_processes():
-            raise ValueError('Stop this isolated Dots installation before reinstalling')
+            raise ValueError('Quit the desktop app and stop this Dots installation before reinstalling')
         prior = json.loads(existing.read_text())
     else:
         prior = {}
@@ -212,7 +213,7 @@ def install(args):
               'system_auth': str(pathlib.Path(args.system_auth).resolve()),
               'cq_accounts': str(pathlib.Path(args.cq_accounts).resolve()),
               'system_alias': prior.get('system_alias', '00000000'), 'dots': prior.get('dots', {}),
-              'debug_port': 0}
+              'debug_port': 0, 'integration_mode': args.mode}
     if args.account_source:
         config['account_source'] = str(pathlib.Path(args.account_source).resolve())
     # Derive system identity directly without loading the not-yet-complete runtime settings.
@@ -241,7 +242,7 @@ def install(args):
     save(existing, config)
     settings = configure(root)
     settings.validate_runtime_paths()
-    provision(root)
+    provision(root, mode=args.mode)
     refresh(root)
     settings.reload()
     import release
@@ -258,6 +259,20 @@ def install(args):
     return start(root)
 
 
+def native_restart_required(root, settings):
+    try:
+        launch = json.loads((settings.ROOT / 'launch.json').read_text())
+        return launch.get('catalogue_revision') != settings.catalogue_revision()
+    except (OSError, ValueError):
+        return True
+
+
+def restart_pending(control):
+    return {'installed': True, 'started': False, 'restart_required': True,
+            'reason': 'Quit the normal desktop app, then run cq codex dots start; CQ will not interrupt running work',
+            **control.ensure_watcher(), 'system_app_modified': False}
+
+
 def start(root, preserve_watcher=False):
     settings = configure(root)
     if not settings.DOTS:
@@ -268,18 +283,32 @@ def start(root, preserve_watcher=False):
     if settings.SYSTEM_ALIAS not in settings.DOT_OWNERS.values():
         raise ValueError('Onboard the system account Dot through the native or web UI before starting secondary Dots')
     import control
+    if getattr(settings, 'INTEGRATION_MODE', 'isolated') == 'native':
+        import release
+        identities = [release.process_identity(pid) for pid in release.isolated_processes()]
+        if release.normal_app_running():
+            if 'app' in identities and not native_restart_required(root, settings):
+                return control.finish_start()
+            return restart_pending(control)
+        # A user quit leaves sidecars behind; restart only those, never the app.
+        if identities:
+            control.stop(preserve_watcher=True)
+        preserve_watcher = True
     return control.start(candidate(root), preserve_watcher=preserve_watcher)
 
 
 def sync(root, preserve_watcher=False):
-    configure(root)
+    settings = configure(root)
     import release
     import control
     identities = [release.process_identity(pid) for pid in release.isolated_processes()]
     running = any(identity != 'account_watch.py' for identity in identities)
     preserve_watcher = preserve_watcher or (not running and 'account_watch.py' in identities)
     changed, accounts = refresh(root)
-    if changed:
+    native = getattr(settings, 'INTEGRATION_MODE', 'isolated') == 'native'
+    if native and release.normal_app_running() and (changed or native_restart_required(root, settings)):
+        result = restart_pending(control)
+    elif changed:
         if running:
             control.stop(preserve_watcher=preserve_watcher)
         # Source manifest identity excludes catalogue rows, so no runtime source rewrite is needed.
@@ -333,6 +362,7 @@ def main(argv=None):
     parser.add_argument('target', nargs='?')
     parser.add_argument('--root', type=pathlib.Path, required=True)
     parser.add_argument('--app', default='/Applications/ChatGPT.app')
+    parser.add_argument('--mode', choices=('native', 'isolated'), default='native')
     parser.add_argument('--system-auth', default=str(pathlib.Path.home() / '.codex/auth.json'))
     parser.add_argument('--cq-accounts', default=str(pathlib.Path.home() / '.codex/accounts'))
     parser.add_argument('--account-source')
@@ -358,7 +388,7 @@ def main(argv=None):
             if args.operation == 'preinstall':
                 import release
                 if release.isolated_processes():
-                    raise ValueError('Stop this isolated Dots installation before reinstalling')
+                    raise ValueError('Quit the desktop app and stop this Dots installation before reinstalling')
                 result = {'safe_to_extract': True}
             elif args.operation == 'install':
                 result = install(args)

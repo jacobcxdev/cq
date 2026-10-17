@@ -1,6 +1,6 @@
 import test_support
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from native_gate import NativeGate
 import settings
 
@@ -45,6 +45,17 @@ class NativeGateTests(unittest.TestCase):
         for _ in range(2):
             with self.assertRaises(ValueError):self.gate.require(self.headers)
         self.assertEqual(self.upstream.call_count,2)
+
+    def test_native_mode_checks_current_bearer_without_requiring_dot(self):
+        with patch.object(settings, 'INTEGRATION_MODE', 'native'):
+            self.gate.require({**self.headers, 'Authorization': 'Bearer stored-token'})
+        self.upstream.assert_not_called()
+
+    def test_native_mode_never_substitutes_for_unverified_bearer(self):
+        with patch.object(settings, 'INTEGRATION_MODE', 'native'):
+            with self.assertRaisesRegex(ValueError, 'bearer'):
+                self.gate.require(self.headers)
+        self.upstream.assert_not_called()
 
 
 class HandlerGateTests(unittest.TestCase):

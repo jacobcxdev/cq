@@ -1,7 +1,8 @@
-"""Task-only Chromium proxy. Only known Dot view signalling is decrypted/routed.
+"""Chromium proxy. Only known Dot view signalling has owner credentials substituted.
 
-All other accepted CONNECT traffic remains an opaque tunnel. No SDP, ICE,
-cookies, auth values, or response bodies are logged or persisted.
+Native realtime HTTP keeps desktop credentials and streams bodies unchanged.
+Other accepted CONNECT hosts remain opaque tunnels. No SDP, ICE, cookies,
+auth values, or response bodies are logged or persisted.
 """
 import http.client, http.server, json, re, select, socket, socketserver, ssl, threading, time, urllib.parse
 import catalog
@@ -40,11 +41,76 @@ def signalling_owner(method, path, content_type, accounts=None):
 
 class Realtime(http.server.BaseHTTPRequestHandler):
     def log_message(self,*args): pass
-    def do_GET(self): self.reject()
+    def do_GET(self):
+        if getattr(settings,'INTEGRATION_MODE','isolated')=='native': self.native_passthrough()
+        else: self.reject()
+    do_HEAD=do_PUT=do_PATCH=do_DELETE=do_OPTIONS=do_TRACE=do_GET
+
+    def native_passthrough(self):
+        # Close ordinary HTTP connections after the response, so every later Dot
+        # request is classified independently. Upgraded streams stay opaque.
+        self.close_connection=True
+        upstream=None;raw=None;started=False
+        upgrade=bool(self.headers.get('Upgrade'))
+        try:
+            raw=socket.create_connection(('realtime.chatgpt.com',443),timeout=25)
+            upstream=self.server.public_tls.wrap_socket(raw,server_hostname='realtime.chatgpt.com')
+            headers=self.headers.raw_items() if hasattr(self.headers,'raw_items') else self.headers.items()
+            request=self.raw_requestline+b''.join(
+                f'{key}: {value}\r\n'.encode('latin-1') for key,value in headers
+                if upgrade or key.lower()!='connection')
+            if not upgrade:request+=b'Connection: close\r\n'
+            upstream.sendall(request+b'\r\n')
+            self.connection.settimeout(None);upstream.settimeout(None)
+            def send_body():
+                try:
+                    while True:
+                        data=self.rfile.read1(65536)
+                        if not data:break
+                        upstream.sendall(data)
+                except (OSError,ssl.SSLError):pass
+                finally:
+                    try:upstream.shutdown(socket.SHUT_WR)
+                    except OSError:pass
+            sender=threading.Thread(target=send_body,daemon=True)
+            sender.start()
+            while True:
+                data=upstream.recv(65536)
+                if not data:break
+                started=True;self.wfile.write(data);self.wfile.flush()
+        except (BrokenPipeError,ConnectionResetError):pass
+        except Exception as error:
+            event({'native_passthrough_failure_type':type(error).__name__})
+            if not started:self.send_response(502);self.end_headers()
+        finally:
+            if upstream is not None:
+                try:upstream.shutdown(socket.SHUT_RDWR)
+                except OSError:pass
+                upstream.close()
+            elif raw is not None:raw.close()
+            try:self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:pass
+
+    def native_signalling(self):
+        parsed=urllib.parse.urlsplit(self.path);query=urllib.parse.parse_qs(parsed.query)
+        if (self.command!='POST' or parsed.path!='/v1/cua' or parsed.netloc
+                or self.headers.get('Content-Type')!='application/sdp'
+                or set(query)!={'source','thread_id','aeon_id'}
+                or any(len(value)!=1 for value in query.values()) or query['source']!=['aeon']):
+            return False
+        with RESOURCE_LOCK:profiles={profile for _,profile in RESOURCES.values()}
+        if query['aeon_id'][0] not in profiles|set(catalog.PROOF_PROFILE_IDS.values()):return False
+        NATIVE_GATE.require(dict(self.headers.items()))
+        try:
+            signalling_owner(self.command,self.path,self.headers.get('Content-Type',''),self.server.owners)
+            return True
+        except ValueError:return False
     def reject(self):
         self.send_response(403); self.end_headers()
     def do_POST(self):
         try:
+            if getattr(settings,'INTEGRATION_MODE','isolated')=='native' and not self.native_signalling():
+                self.native_passthrough();return
             NATIVE_GATE.require(dict(self.headers.items()))
             alias=signalling_owner(self.command,self.path,self.headers.get('Content-Type',''),self.server.owners)
             size=int(self.headers.get('Content-Length','0'))

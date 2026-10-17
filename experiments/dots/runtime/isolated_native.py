@@ -1,4 +1,4 @@
-"""Call stock native API only inside the verified isolated renderer."""
+"""Call stock native API only inside the verified CQ-managed app process."""
 import hashlib,json,os,pathlib,shlex,subprocess,urllib.parse,urllib.request
 from websockets.sync.client import connect
 import settings
@@ -14,7 +14,7 @@ def app_check():
             raise ValueError('Native renderer differs from qualified build')
         _verified_app=identity
 
-def isolated_pid(port):
+def isolated_pid(port=None):
     rows=subprocess.check_output(['/bin/ps','-axo','pid=,uid=,command='],text=True).splitlines()
     expected=str(settings.APP/'Contents/MacOS/ChatGPT')
     matches=[]
@@ -23,17 +23,36 @@ def isolated_pid(port):
         if len(values)!=3:continue
         try:args=shlex.split(values[2])
         except ValueError:continue
+        data_args=[a for a in args if a.startswith('--user-data-dir')]
+        if settings.INTEGRATION_MODE == 'native':
+            profile_matches=(not data_args
+                and [a for a in args if a.startswith('--cq-dots-runtime=')]==['--cq-dots-runtime='+str(ROOT)]
+                and [a for a in args if a.startswith('--remote-debugging-')]==['--remote-debugging-pipe'])
+        else:
+            profile_matches=data_args==['--user-data-dir='+str(ROOT/'user-data')]
         if (int(values[1])==os.getuid() and args and args[0]==expected
-                and [a for a in args if a.startswith('--user-data-dir=')]==['--user-data-dir='+str(ROOT/'user-data')]
-                and [a for a in args if a.startswith('--remote-debugging-port=')]==['--remote-debugging-port='+str(port)]):
+                and profile_matches
+                and (settings.INTEGRATION_MODE=='native' or [a for a in args if a.startswith('--remote-debugging-port=')]==['--remote-debugging-port='+str(port)])):
             matches.append(int(values[0]))
     if len(matches)!=1:raise ValueError('Exact isolated process unavailable')
+    if settings.INTEGRATION_MODE=='native':
+        import native_debug
+        identity=native_debug.identity(ROOT)
+        if identity['app_pid']!=matches[0]:raise ValueError('Native private renderer app identity changed')
+        child=subprocess.check_output(['/bin/ps','-p',str(matches[0]),'-o','ppid='],text=True).strip()
+        broker=subprocess.check_output(['/bin/ps','-p',str(identity['broker_pid']),'-o','uid=,command='],text=True).strip().split(maxsplit=1)
+        expected_broker=[str(ROOT/'venv/bin/python'),'-u',str(ROOT/'native_debug.py')]
+        if (child!=str(identity['broker_pid']) or len(broker)!=2 or broker[0]!=str(os.getuid())
+                or shlex.split(broker[1])[:3]!=expected_broker):
+            raise ValueError('Native private renderer broker identity changed')
+        return matches[0]
     listeners=subprocess.check_output(['/usr/sbin/lsof','-t','-a','-iTCP:'+str(port),'-sTCP:LISTEN'],text=True)
     owners={int(x) for x in listeners.split()}
     if matches[0] not in owners:
         raise ValueError('Isolated debugger listener ownership changed')
     # Stock computer-use helper inherits this socket from its direct app parent.
-    helper=str(ROOT/'codex-home/computer-use/Codex Computer Use.app/Contents/MacOS/SkyComputerUseService')
+    home=settings.SYSTEM.parent if settings.INTEGRATION_MODE=='native' else ROOT/'codex-home'
+    helper=str(home/'computer-use/Codex Computer Use.app/Contents/MacOS/SkyComputerUseService')
     for pid in owners-{matches[0]}:
         child=subprocess.check_output(['/bin/ps','-p',str(pid),'-o','ppid=,uid=,command='],text=True).strip().split(maxsplit=2)
         if (len(child)!=3 or child[0]!=str(matches[0]) or child[1]!=str(os.getuid())
@@ -51,6 +70,9 @@ def debugger_url(value,port):
 
 def evaluate(expression):
     app_check()
+    if settings.INTEGRATION_MODE=='native':
+        import native_debug
+        return native_debug.evaluate(expression,isolated_pid(),ROOT)
     launch=json.loads((ROOT/'launch.json').read_text());port=launch['debug_port']
     if type(port) is not int or not 1024<port<65536:raise ValueError('Invalid isolated debugger port')
     isolated_pid(port)
@@ -59,7 +81,11 @@ def evaluate(expression):
     if len(data)>1024*1024:raise ValueError('Debugger target response too large')
     targets=json.loads(data)
     matches=[t for t in targets if t.get('type')=='page' and t.get('url')=='app://-/index.html']
-    if len(matches)!=1:raise ValueError('Isolated renderer selection ambiguous')
+    if not matches or (settings.INTEGRATION_MODE!='native' and len(matches)!=1):
+        raise ValueError('Native renderer selection ambiguous')
+    # Native mode may have several normal windows. All belong to the same verified
+    # app/profile; API calls target explicit owner resources, never visible chat state.
+    matches.sort(key=lambda target: target['id'])
     with connect(debugger_url(matches[0]['webSocketDebuggerUrl'],port),proxy=None,open_timeout=5,max_size=2*1024*1024) as ws:
         ws.send(json.dumps({'id':1,'method':'Runtime.evaluate','params':{'expression':expression,'awaitPromise':True,'returnByValue':True}}))
         while True:

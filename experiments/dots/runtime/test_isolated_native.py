@@ -30,4 +30,24 @@ class NativeIdentityTests(unittest.TestCase):
             with self.subTest(child=bad),patch.object(native.subprocess,'check_output',side_effect=[valid,'123\n124\n',bad]),self.assertRaises(ValueError):
                 native.isolated_pid(9999)
 
+    def test_native_requires_owned_runtime_marker_and_private_pipe(self):
+        app=str(settings.APP/'Contents/MacOS/ChatGPT')
+        marker='--cq-dots-runtime='+str(native.ROOT)
+        args=app+' '+marker+' --remote-debugging-pipe'
+        valid=f'123 {os.getuid()} {args}\n'
+        broker=str(native.ROOT/'venv/bin/python')+' -u '+str(native.ROOT/'native_debug.py')
+        with patch.object(settings,'INTEGRATION_MODE','native'), \
+             patch('native_debug.identity',return_value={'app_pid':123,'broker_pid':122}):
+            with patch.object(native.subprocess,'check_output',side_effect=[valid,'122',f'{os.getuid()} {broker}']):
+                self.assertEqual(native.isolated_pid(),123)
+            for row in (valid.replace(marker,''),valid.replace(marker,marker+'-other'),
+                        valid.replace('--remote-debugging-pipe','--remote-debugging-port=9999'),
+                        valid+valid,valid.replace(' --remote-debugging-pipe',' --user-data-dir=/other --remote-debugging-pipe')):
+                with self.subTest(row=row),patch.object(native.subprocess,'check_output',return_value=row):
+                    with self.assertRaises(ValueError):native.isolated_pid()
+            for parent,identity in [('999',f'{os.getuid()} {broker}'),('122',f'{os.getuid()+1} {broker}'),
+                                    ('122',f'{os.getuid()} /wrong/broker')]:
+                with patch.object(native.subprocess,'check_output',side_effect=[valid,parent,identity]):
+                    with self.assertRaises(ValueError):native.isolated_pid()
+
 if __name__=='__main__':unittest.main()

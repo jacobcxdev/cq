@@ -55,7 +55,7 @@ type ClaudeCmd struct {
 
 // CodexCmd groups Codex-specific subcommands.
 type CodexCmd struct {
-	Dots     CodexDotsCmd   `cmd:"" help:"Manage isolated multi-account Dots"`
+	Dots     CodexDotsCmd   `cmd:"" help:"Manage multi-account Dots"`
 	Login    LoginCmd       `cmd:"" help:"Add Codex account"`
 	Accounts AccountsCmd    `cmd:"" help:"List Codex accounts"`
 	Switch   SwitchCmd      `cmd:"" help:"Switch active Codex account"`

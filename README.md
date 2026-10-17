@@ -721,14 +721,20 @@ cq service uninstall
 
 </details>
 
-## Isolated Dots
+## Multi-account Dots
 
-`cq codex dots install` provisions and starts a private native app instance with
-existing Dots discovered from your CQ accounts. It uses the unchanged app bundle
-with separate app data, Codex home, Python environment and loopback certificates.
-Your system Codex configuration, credentials and services are not changed. Use
-the CQ-launched window for the combined catalogue. Native app qualification is
-version-pinned; unsupported app updates fail before launch.
+`cq codex dots install` defaults to the normal native app and its existing
+profile, tasks and signed-in account. Dots discovered from your CQ accounts
+share that app's sidebar. CQ keeps adapter state, its Python environment and
+loopback certificates in a separate private directory. It does not patch or
+re-sign the installed app bundle. Native app qualification is version-pinned;
+unsupported app updates fail before launch.
+
+Normal-profile support is under qualification. The persistent Dock/Applications
+launch hook is not implemented: after quitting the app, use `cq codex dots start`
+to open it with CQ routing. Opening it directly bypasses the adapter. Installation
+never quits an already-running normal app; it reports that a restart is required.
+The previous isolated research mode remains available with `install --mode isolated`.
 
 ```sh
 cq codex dots install
@@ -745,7 +751,9 @@ renames, reboots and removing/re-adding an account do not repeat it. Unknown sen
 outcomes are not automatically retried. `prime` explicitly sends a fresh reminder.
 Display names can repeat; use the stable ID from `list` when a name is ambiguous.
 Account changes are watched automatically; `cq codex dots sync` requests an
-immediate reconciliation. Roles and current work remain unknown unless reported.
+immediate reconciliation. A changed normal-profile catalogue requires an app
+restart through CQ; the watcher does not interrupt existing work. Roles and
+current work remain unknown unless reported.
 
 This optional macOS feature requires Python 3.14 (`brew install python@3.14`),
 websockets 17.2 in its private environment, valid read-only account credentials,

@@ -14,19 +14,20 @@ import (
 	dotspayload "github.com/jacobcxdev/cq/experiments/dots"
 )
 
-// CodexDotsCmd manages only the private Dots installation.
+// CodexDotsCmd manages the Dots adapter and its private state.
 type CodexDotsCmd struct {
 	Root    string              `help:"Private Dots installation directory (default ~/.local/share/cq/dots)" placeholder:"ABS_PATH"`
-	Install CodexDotsInstallCmd `cmd:"" help:"Install and start isolated multi-account Dots"`
-	Start   CodexDotsActionCmd  `cmd:"" help:"Start isolated Dots"`
-	Stop    CodexDotsActionCmd  `cmd:"" help:"Stop isolated Dots"`
-	Status  CodexDotsActionCmd  `cmd:"" help:"Show isolated Dots status"`
-	Sync    CodexDotsActionCmd  `cmd:"" help:"Refresh account discovery and restart isolated Dots"`
+	Install CodexDotsInstallCmd `cmd:"" help:"Install multi-account Dots for the normal native app"`
+	Start   CodexDotsActionCmd  `cmd:"" help:"Start Dots in the configured native app"`
+	Stop    CodexDotsActionCmd  `cmd:"" help:"Stop the Dots adapter after quitting the app"`
+	Status  CodexDotsActionCmd  `cmd:"" help:"Show Dots status"`
+	Sync    CodexDotsActionCmd  `cmd:"" help:"Refresh Dots account discovery"`
 	List    CodexDotsActionCmd  `cmd:"" help:"List discovered Dots"`
 	Prime   CodexDotsPrimeCmd   `cmd:"" help:"Prime a Dot or all discovered Dots"`
 }
 
 type CodexDotsInstallCmd struct {
+	Mode          string `help:"Use normal native profile or isolated research profile" default:"native" enum:"native,isolated"`
 	App           string `help:"Native app bundle" default:"/Applications/ChatGPT.app" placeholder:"ABS_PATH"`
 	SystemAuth    string `help:"Read-only native Codex authentication path" placeholder:"ABS_PATH"`
 	CQAccounts    string `help:"Read-only CQ Codex accounts directory" placeholder:"ABS_PATH"`
@@ -135,6 +136,12 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 	python := filepath.Join(root, "runtime", "venv", "bin", "python")
 	if op == "install" {
 		install := options.Install
+		if install.Mode == "" {
+			install.Mode = "native"
+		}
+		if install.Mode != "native" && install.Mode != "isolated" {
+			return fmt.Errorf("Dots mode must be native or isolated")
+		}
 		if install.SystemAuth == "" {
 			install.SystemAuth = filepath.Join(home, ".codex", "auth.json")
 		}
@@ -163,7 +170,7 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 		} else if !filepath.IsAbs(python) {
 			return fmt.Errorf("Dots Python path must be absolute")
 		}
-		args = append(args, "--app", install.App, "--system-auth", install.SystemAuth, "--cq-accounts", install.CQAccounts)
+		args = append(args, "--mode", install.Mode, "--app", install.App, "--system-auth", install.SystemAuth, "--cq-accounts", install.CQAccounts)
 		if install.AccountSource != "" {
 			args = append(args, "--account-source", install.AccountSource)
 		}

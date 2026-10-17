@@ -23,6 +23,7 @@ class ControlTests(unittest.TestCase):
             DOTS={'dot-first':('profile-first','root-first')})
         self.addCleanup(mock.patch.stopall)
         mock.patch.object(release, 'settings', settings).start()
+        mock.patch.object(release, 'normal_app_running', return_value=False).start()
 
     def test_process_only_allows_verified_lifecycle_components(self):
         for identity, expected in [('probe.py', 'probe.py'), ('app', None),
@@ -47,6 +48,36 @@ class ControlTests(unittest.TestCase):
              mock.patch.object(control.os, 'kill') as kill:
             with self.assertRaisesRegex(ValueError, 'could not be stopped'):
                 control.stop()
+        kill.assert_not_called()
+
+    def test_native_stop_never_quits_user_app_or_removes_its_transports(self):
+        release.settings.INTEGRATION_MODE = 'native'
+        with mock.patch.object(release, 'isolated_processes', return_value=[111]), \
+             mock.patch.object(release, 'process_identity', return_value='app'), \
+             mock.patch.object(control.subprocess, 'run') as run, \
+             mock.patch.object(control.os, 'kill') as kill:
+            with self.assertRaisesRegex(ValueError, 'Quit the normal desktop app'):
+                control.stop()
+        run.assert_not_called()
+        kill.assert_not_called()
+
+    def test_native_status_allows_paused_primary_dot(self):
+        release.settings.INTEGRATION_MODE = 'native'
+        ready = {'profiles': ['profile-first', 'profile-second'], 'primary': 'profile-first',
+                 'available': False, 'workspaceError': False}
+        with mock.patch.object(control.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, json.dumps(ready))), \
+             mock.patch.object(release, 'isolated_processes', return_value=[]):
+            self.assertTrue(control.status()['native_catalog_ready'])
+
+    def test_native_stop_preserves_normal_app_when_adapter_identity_is_missing(self):
+        release.settings.INTEGRATION_MODE = 'native'
+        with mock.patch.object(release, 'normal_app_running', return_value=True), \
+             mock.patch.object(release, 'isolated_processes', return_value=[]), \
+             mock.patch.object(control.subprocess, 'run') as run, \
+             mock.patch.object(control.os, 'kill') as kill:
+            with self.assertRaisesRegex(ValueError, 'Quit the normal desktop app'):
+                control.stop()
+        run.assert_not_called()
         kill.assert_not_called()
 
     def test_status_uses_configured_module_and_exact_profile_set(self):
@@ -102,6 +133,28 @@ class ControlTests(unittest.TestCase):
         self.assertTrue(result['onboarding_required'])
         self.assertEqual([call.args[1] for call in spawn.call_args_list],['probe.py','realtime_probe.py'])
         awareness.assert_not_called();stop.assert_not_called()
+
+    def test_native_start_failure_preserves_live_app_and_original_error(self):
+        release.settings.INTEGRATION_MODE = 'native'
+        for app_alive in (False, True):
+            with self.subTest(app_alive=app_alive):
+                failure = subprocess.CalledProcessError(1, ['launch.py'])
+                with mock.patch.object(release, 'verify', return_value={'files': {}}), \
+                     mock.patch.object(release, 'preflight'), \
+                     mock.patch.object(control, 'running', return_value=[]), \
+                     mock.patch.object(control, '_spawn', return_value=types.SimpleNamespace(poll=lambda: None)), \
+                     mock.patch.object(control.subprocess, 'run', side_effect=failure), \
+                     mock.patch.object(release, 'isolated_processes', return_value=[111] if app_alive else []), \
+                     mock.patch.object(release, 'process_identity', return_value='app'), \
+                     mock.patch.object(control, 'stop') as stop, \
+                     mock.patch.object(control.time, 'sleep'):
+                    with self.assertRaises(subprocess.CalledProcessError) as raised:
+                        control.start('/candidate')
+                self.assertIs(raised.exception, failure)
+                if app_alive:
+                    stop.assert_not_called()
+                else:
+                    stop.assert_called_once_with(preserve_watcher=False)
 
     def test_ready_completion_starts_relay_once_and_reuses_verified_process(self):
         ready={'native_catalog_ready':True}

@@ -231,6 +231,19 @@ class ReleaseTests(unittest.TestCase):
         self.assertIsNone(self.identity(app + ' --user-data-dir=' + str(self.base)))
         self.assertIsNone(self.identity('/other/ChatGPT ' + data))
 
+    def test_native_app_identity_requires_runtime_marker_and_private_pipe(self):
+        release.settings.INTEGRATION_MODE = 'native'
+        (self.root / 'native-debug.json').write_text(json.dumps({'app_pid': 123}))
+        app = str(self.app / 'Contents/MacOS/ChatGPT')
+        marker = '--cq-dots-runtime=' + str(self.root)
+        args = app + ' ' + marker + ' --remote-debugging-pipe'
+        self.assertEqual(self.identity(args), 'app')
+        for bad in (args.replace(marker, ''), args.replace(marker, marker+'-other'),
+                    args.replace('--remote-debugging-pipe','--remote-debugging-port=9999'),
+                    args + ' --user-data-dir=/other', args + ' ' + marker):
+            with self.subTest(args=bad):
+                self.assertIsNone(self.identity(bad))
+
 
 if __name__ == '__main__':
     unittest.main()

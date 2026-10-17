@@ -57,9 +57,31 @@ func TestDotsInstallForwardsStructuredArguments(t *testing.T) {
 	if err := runner.execute(context.Background(), &options, "install", true, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{filepath.Join(root, "payload", "cli.py"), "install", "--root", root, "--app", "/Applications/ChatGPT.app", "--system-auth", filepath.Join(home, ".codex", "auth.json"), "--cq-accounts", filepath.Join(home, ".codex", "accounts"), "--account-source", "/private/account store", "--json"}
+	want := []string{filepath.Join(root, "payload", "cli.py"), "install", "--root", root, "--mode", "native", "--app", "/Applications/ChatGPT.app", "--system-auth", filepath.Join(home, ".codex", "auth.json"), "--cq-accounts", filepath.Join(home, ".codex", "accounts"), "--account-source", "/private/account store", "--json"}
 	if program != "/custom/python3.14" || extracted != root || !reflect.DeepEqual(arguments, want) {
 		t.Fatalf("program %q extract %q args %#v", program, extracted, arguments)
+	}
+}
+
+func TestDotsInstallModeParsing(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"codex", "dots", "install"}, "native"},
+		{[]string{"codex", "dots", "install", "--mode", "isolated"}, "isolated"},
+	} {
+		var cli CLI
+		parser, err := kong.New(&cli, kong.Writers(io.Discard, io.Discard))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parser.Parse(test.args); err != nil {
+			t.Fatal(err)
+		}
+		if got := cli.Codex.Dots.Install.Mode; got != test.want {
+			t.Fatalf("mode %q, want %q", got, test.want)
+		}
 	}
 }
 
@@ -113,6 +135,7 @@ func TestDotsInvalidInstallNeverExtractsOrExecutes(t *testing.T) {
 	calls := 0
 	runner := dotsRunner{home: func() (string, error) { return home, nil }, extract: func(string) error { calls++; return nil }, run: func(context.Context, string, []string, io.Writer, io.Writer) error { calls++; return nil }}
 	for _, options := range []CodexDotsCmd{
+		{Root: filepath.Join(home, "dots"), Install: CodexDotsInstallCmd{Mode: "other", App: "/Applications/ChatGPT.app"}},
 		{Root: "relative", Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app"}},
 		{Root: filepath.Join(home, ".codex", "dots"), Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app"}},
 		{Root: filepath.Join(home, "dots"), Install: CodexDotsInstallCmd{App: "relative"}},
