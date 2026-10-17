@@ -21,7 +21,7 @@ FILES = ('catalog.py', 'self_projection.py', 'celsius.py', 'probe.py',
          'native_dot_transport.py', 'native_executor_reuse.py',
          'native_null_executor.py', 'local_executor.py', 'launch.py',
          'stop_isolated.py', 'room_coordination.py', 'native_gate.py',
-         'settings.py', 'awareness.py')
+         'settings.py', 'awareness.py', 'account_watch.py')
 EXECUTABLES = {'cloud_stdio.py', 'native_null_executor.py'}
 PYTHON_VERSION = '3.14'
 WEBSOCKETS_VERSION = '17.2'
@@ -68,8 +68,10 @@ def prepare(output):
     # Resolve parents before checking write boundaries, including symlinked parents.
     output = output.resolve()
     home = pathlib.Path.home()
-    protected = [settings.ROOT, settings.APP, settings.SOURCE, settings.SYSTEM.parent,
+    protected = [settings.ROOT, settings.APP, settings.SYSTEM.parent,
                  home / '.codex']
+    if settings.SOURCE is not None:
+        protected.append(settings.SOURCE)
     protected += [home / 'Library/Application Support' / name for name in
                   ('Codex', 'ChatGPT', 'com.openai.codex', 'com.openai.chat', 'OpenAI')]
     if any(output == root.resolve() or root.resolve() in output.parents for root in protected):

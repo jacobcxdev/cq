@@ -92,7 +92,7 @@ class SettingsTests(unittest.TestCase):
                    {'system_alias': 'invalid'}, {'secondary_alias': '11111111'},
                    {'secondary_selector': ''}, {'asar_sha256': 'invalid'},
                    {'module_asset': '../app-shared-example.js'}, {'debug_port': True},
-                   {'debug_port': 65536}, {'unknown': 'ignored'}, {'dots': {}}]
+                   {'debug_port': 65536}, {'unknown': 'ignored'}, {'dots': []}]
         for change in changes:
             with self.subTest(change=change):
                 original = self.data
@@ -103,7 +103,7 @@ class SettingsTests(unittest.TestCase):
                 self.data = original
 
     def test_profile_authority_collisions(self):
-        for field, value in [('owner_alias', '11111111'), ('owner_alias', '33333333'),
+        for field, value in [('owner_alias', '11111111'), ('owner_alias', 'invalid'),
                              ('profile_id', 'primary-profile-example'),
                              ('root_thread_id', 'primary-root-example')]:
             with self.subTest(field=field, value=value):
@@ -186,6 +186,74 @@ class SettingsTests(unittest.TestCase):
         launch.chmod(0o600)
         settings.validate_runtime_paths(runtime)
 
+    def test_single_account_and_optional_sources(self):
+        self.data.pop('secondary_alias')
+        self.data.pop('secondary_selector')
+        self.data.pop('account_source')
+        self.data['dots'] = {'Primary': self.data['dots']['Primary']}
+        self.write()
+        value = settings.load(self.path)
+        self.assertIsNone(value.SOURCE)
+        self.assertIsNone(value.SECONDARY_ALIAS)
+        self.assertEqual(value.CQ_ACCOUNTS, value.SYSTEM.parent / 'accounts')
+        self.assertEqual(len(value.DOTS), 1)
+        self.data['dots'] = {}
+        self.write()
+        self.assertEqual(settings.load(self.path).DOTS, {})
+
+    def test_many_accounts_and_duplicate_names_have_stable_identity(self):
+        import hashlib
+        self.data['dots'] = {}
+        for index, name in enumerate(['Same', 'Same', 'sAME', 'directory']):
+            owner = 'synthetic-owner-' + str(index)
+            alias = hashlib.sha256(owner.encode()).hexdigest()[:8]
+            profile = 'synthetic-profile-' + str(index)
+            handle = settings.stable_handle(owner, profile)
+            self.data['dots'][handle] = {'owner_alias': alias, 'owner_account_id': owner,
+                                        'profile_id': profile, 'root_thread_id': 'root-' + str(index),
+                                        'display_name': name}
+        self.write()
+        value = settings.load(self.path)
+        self.assertEqual(len(value.DOTS), 4)
+        self.assertEqual(list(value.DOT_NAMES.values()), ['Same', 'Same', 'sAME', 'directory'])
+        handle, row = next(iter(self.data['dots'].items()))
+        row['display_name'] = 'Renamed'
+        row['root_thread_id'] = 'changed-root'
+        self.write()
+        self.assertEqual(settings.load(self.path).DOT_NAMES[handle], 'Renamed')
+        row['owner_account_id'] = 'foreign-owner'
+        self.write()
+        with self.assertRaisesRegex(ValueError, 'stable identity'):
+            settings.load(self.path)
+
+    def test_legacy_directory_routing_key_reserved(self):
+        self.data['dots'] = {'directory': self.data['dots']['Primary']}
+        self.write()
+        with self.assertRaisesRegex(ValueError, 'profile configuration'):
+            settings.load(self.path)
+
+    def test_full_system_identity_pin_is_verified(self):
+        import hashlib
+        owner = 'synthetic-system-owner'
+        self.data['system_alias'] = hashlib.sha256(owner.encode()).hexdigest()[:8]
+        self.data['system_account_id'] = owner
+        self.write()
+        self.assertEqual(settings.load(self.path).SYSTEM_ACCOUNT_ID, owner)
+        self.data['system_account_id'] = 'foreign-owner'
+        self.write()
+        with self.assertRaisesRegex(ValueError, 'system account identity'):
+            settings.load(self.path)
+
+    def test_reload_refreshes_cached_configuration(self):
+        settings.get_settings.cache_clear()
+        self.addCleanup(settings.get_settings.cache_clear)
+        with patch.dict(os.environ, {'CQ_DOTS_CONFIG': str(self.path)}):
+            self.assertEqual(settings.DEBUG_PORT, 0)
+            self.data['debug_port'] = 12345
+            self.write()
+            self.assertEqual(settings.DEBUG_PORT, 0)
+            self.assertEqual(settings.reload().DEBUG_PORT, 12345)
+
     def test_debug_port_default_and_upper_bound(self):
         del self.data['debug_port']
         self.write()
@@ -214,7 +282,7 @@ class CatalogSettingsTests(unittest.TestCase):
             roots = self.catalog.primary_roots(accounts, {})
         self.assertEqual(set(roots), {root for _, root in settings.DOTS.values()})
 
-    def test_fixture_uses_secondary_alias_and_selector(self):
+    def test_fixture_uses_all_configured_owner_profiles(self):
         system = {'account_id': 'primary-account', 'alias': settings.SYSTEM_ALIAS, 'email': 'primary@example.invalid'}
         secondary = {'account_id': 'secondary-account', 'alias': settings.SECONDARY_ALIAS,
                      'email': settings.SECONDARY_SELECTOR}

@@ -1,5 +1,6 @@
 """Validated private configuration for the isolated Dots runtime."""
 import functools
+import hashlib
 import json
 import os
 import pathlib
@@ -16,13 +17,16 @@ class Settings:
     APP_BUILD: str
     ASAR_SHA256: str
     MODULE_ASSET: str
-    SOURCE: pathlib.Path
+    SOURCE: pathlib.Path | None
+    CQ_ACCOUNTS: pathlib.Path
     SYSTEM: pathlib.Path
     SYSTEM_ALIAS: str
-    SECONDARY_ALIAS: str
-    SECONDARY_SELECTOR: str
+    SYSTEM_ACCOUNT_ID: str | None
+    SECONDARY_ALIAS: str | None
+    SECONDARY_SELECTOR: str | None
     DOTS: dict
     DOT_OWNERS: dict
+    DOT_NAMES: dict
     PROOF_PROFILE_IDS: dict
     DEBUG_PORT: int
 
@@ -60,7 +64,7 @@ def validate_runtime_paths(root=None):
         return
     _private_directory(root)
     resolved = root.resolve()
-    for name in ('user-data', 'codex-home', 'null-executor',
+    for name in ('user-data', 'codex-home', 'awareness', 'null-executor',
                  'null-executor/home', 'null-executor/tmp', 'null-executor/work',
                  'null-executor/room-relay'):
         path = root / name
@@ -103,7 +107,7 @@ def load(path=None):
         raise ValueError('Dots configuration must be valid JSON') from None
     fields = {'runtime_root', 'app_path', 'app_version', 'app_build', 'asar_sha256',
               'module_asset', 'account_source', 'system_auth', 'system_alias',
-              'secondary_alias', 'secondary_selector', 'dots', 'debug_port'}
+              'secondary_alias', 'secondary_selector', 'dots', 'debug_port', 'cq_accounts', 'system_account_id'}
     if not isinstance(data, dict) or set(data) - fields:
         raise ValueError('unsupported Dots configuration fields')
     root = _path(data, 'runtime_root')
@@ -114,11 +118,13 @@ def load(path=None):
     if root.exists() or root.is_symlink():
         _private_directory(root)
     app = _path(data, 'app_path')
-    source = _path(data, 'account_source')
+    source = _path(data, 'account_source') if data.get('account_source') is not None else None
     system = _path(data, 'system_auth')
+    cq_accounts = _path(data, 'cq_accounts') if 'cq_accounts' in data else system.parent / 'accounts'
     resolved_root = root.resolve()
     home = pathlib.Path.home().resolve()
-    protected = [app, source, system.parent, home / '.codex']
+    protected = [app, cq_accounts, system.parent, home / '.codex']
+    if source is not None:protected.append(source)
     protected += [home / 'Library' / 'Application Support' / name for name in
                   ('Codex', 'ChatGPT', 'com.openai.codex', 'com.openai.chat', 'OpenAI')]
     if home.is_relative_to(resolved_root):
@@ -128,44 +134,66 @@ def load(path=None):
         if resolved_root.is_relative_to(boundary) or boundary.is_relative_to(resolved_root):
             raise ValueError('Dots runtime overlaps a protected application or credential path')
     system_alias = _text(data, 'system_alias')
-    secondary_alias = _text(data, 'secondary_alias')
+    system_account_id = _text(data, 'system_account_id') if 'system_account_id' in data else None
+    if system_account_id is not None and hashlib.sha256(system_account_id.encode()).hexdigest()[:8] != system_alias:
+        raise ValueError('system account identity mismatch')
+    secondary_alias = _text(data, 'secondary_alias') if 'secondary_alias' in data else None
+    secondary_selector = _text(data, 'secondary_selector') if 'secondary_selector' in data else None
     if (not re.fullmatch(r'[0-9a-f]{8}', system_alias)
-            or not re.fullmatch(r'[0-9a-f]{8}', secondary_alias)
-            or system_alias == secondary_alias):
-        raise ValueError('Dots requires two distinct account aliases')
+            or (secondary_alias is not None and (not re.fullmatch(r'[0-9a-f]{8}', secondary_alias)
+                                                or system_alias == secondary_alias))):
+        raise ValueError('invalid Dots account aliases')
     digest = _text(data, 'asar_sha256')
     if not re.fullmatch(r'[0-9a-f]{64}', digest):
         raise ValueError('invalid Dots setting: asar_sha256')
     asset = _text(data, 'module_asset')
-    if not re.fullmatch(r'app-shared-[A-Za-z0-9_-]+\.js', asset):
+    if not re.fullmatch(r'app-(?:shared|initial)-[A-Za-z0-9_-]+\.js', asset):
         raise ValueError('invalid Dots setting: module_asset')
     port = data.get('debug_port', 0)
     if type(port) is not int or not 0 <= port <= 65535:
         raise ValueError('invalid Dots setting: debug_port')
-    dots = data.get('dots')
-    if not isinstance(dots, dict) or len(dots) != 2:
-        raise ValueError('Dots requires two configured native profiles')
-    targets, owners, profiles = {}, {}, {}
+    dots = data.get('dots', {})
+    if not isinstance(dots, dict):
+        raise ValueError('invalid Dots profile configuration')
+    targets, owners, names, profiles = {}, {}, {}, {}
     roots = set()
     for name, dot in dots.items():
         if (not isinstance(name, str) or not name or len(name) > 80
                 or any(ord(c) < 32 for c in name) or not isinstance(dot, dict)
-                or set(dot) != {'owner_alias', 'profile_id', 'root_thread_id'}):
+                or not {'owner_alias', 'profile_id', 'root_thread_id'} <= set(dot)
+                or set(dot) - {'owner_alias', 'profile_id', 'root_thread_id', 'display_name', 'owner_account_id'}
+                or name == 'directory'):
             raise ValueError('invalid Dots profile configuration')
         alias = _text(dot, 'owner_alias')
         profile = _text(dot, 'profile_id', 128)
         thread = _text(dot, 'root_thread_id', 128)
-        if (alias not in {system_alias, secondary_alias} or alias in profiles
+        if (not re.fullmatch(r'[0-9a-f]{8}', alias) or alias in profiles
                 or profile in profiles.values() or thread in roots):
             raise ValueError('Dots profile ownership must be unique')
+        display_name = _text(dot, 'display_name', 80) if 'display_name' in dot else name
+        if 'display_name' in dot or 'owner_account_id' in dot:
+            account_id = _text(dot, 'owner_account_id')
+            if (hashlib.sha256(account_id.encode()).hexdigest()[:8] != alias
+                    or stable_handle(account_id, profile) != name):
+                raise ValueError('Dots stable identity mismatch')
+        names[name] = display_name
         profiles[alias] = profile
         roots.add(thread)
         owners[name] = alias
         targets[name] = (profile, thread)
     validate_runtime_paths(root)
     return Settings(resolved_root, app, _text(data, 'app_version'), _text(data, 'app_build'),
-                    digest, asset, source, system, system_alias, secondary_alias,
-                    _text(data, 'secondary_selector'), targets, owners, profiles, port)
+                    digest, asset, source, cq_accounts, system, system_alias, system_account_id, secondary_alias,
+                    secondary_selector, targets, owners, names, profiles, port)
+
+
+def stable_handle(account_id, profile_id):
+    return 'dot-' + hashlib.sha256((account_id + '\0' + profile_id).encode()).hexdigest()[:24]
+
+
+def reload():
+    get_settings.cache_clear()
+    return get_settings()
 
 
 @functools.lru_cache(maxsize=1)

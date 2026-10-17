@@ -13,13 +13,17 @@ EVENT_TYPES = {'calpico-room-read-receipt','calpico-is-responding-heartbeat',
                'calpico-message-update','calpico-room-update','calpico-message-add',
                'calpico-room-read','calpico-room-metadata-update','calpico-room-leave','calpico-room-live'}
 
+def owner_aliases(owners):
+    aliases={owner['alias'] for owner in owners.values()}
+    return [PRIMARY,*sorted(aliases-{PRIMARY})]
+
 def targets(command, owners):
     kind = command.get('type')
     if kind in {'connect','presence'}:
-        return [PRIMARY,SECONDARY]
+        return owner_aliases(owners)
     topic = command.get('topic_id')
     if kind in {'subscribe','unsubscribe'} and topic in TOPICS:
-        return [PRIMARY,SECONDARY]
+        return owner_aliases(owners)
     if kind in {'subscribe','unsubscribe'} and isinstance(topic,str) and topic.startswith('calpico-room-live:'):
         owner=owners.get(topic.removeprefix('calpico-room-live:'))
         if owner is None: raise ValueError('Unknown live room')
@@ -32,20 +36,22 @@ def event_room(payload):
     if room is None and isinstance(payload.get('room'),dict):room=payload['room'].get('id')
     return room
 
-def secondary_frame(frame, owners, viewer_ids):
+def secondary_frame(frame, owners, viewer_ids, source=None):
+    source=SECONDARY if source is None else source
+    if source==PRIMARY: return None
     if not isinstance(frame,dict) or frame.get('type')!='message': return None
     payload=frame.get('payload')
     if not isinstance(payload,dict) or payload.get('type') not in EVENT_TYPES: return None
     room=event_room(payload.get('payload'))
     owner=owners.get(room) if isinstance(room,str) else None
-    if owner is None or owner['alias']!=SECONDARY: return None
+    if owner is None or owner['alias']!=source: return None
     if frame.get('topic_id') not in TOPICS | {'calpico-room-live:'+room}: return None
     def conflicting(value):
         if isinstance(value,dict):
             for key,item in value.items():
                 if key in {'room_id','thread_id','aeon_id'} and isinstance(item,str):
                     found=owners.get(item)
-                    if found is not None and found['alias']!=SECONDARY:return True
+                    if found is not None and found['alias']!=source:return True
                 if conflicting(item):return True
         elif isinstance(value,list):return any(conflicting(item) for item in value)
         return False
@@ -73,7 +79,9 @@ class Broker:
         self.event({'celsius_broker_port':self.port})
 
     def issue(self,urls,owners):
-        if set(urls)!={PRIMARY,SECONDARY}:raise ValueError('Both owner URLs required')
+        aliases=set(owner_aliases(owners))
+        if aliases!=set(settings.DOT_OWNERS.values())|{PRIMARY} or set(urls)!=aliases:
+            raise ValueError('Configured owner URLs required')
         for url in urls.values():
             parsed=urllib.parse.urlsplit(url)
             if parsed.scheme!='wss' or parsed.hostname!='ws.chatgpt.com' or parsed.port not in {None,443}:
@@ -132,7 +140,7 @@ class Broker:
                         awaiting[native_id]={'remaining':set(destinations),'replies':{},'command':command}
                         for alias in destinations:
                             upstream_command=copy.deepcopy(command)
-                            if alias==SECONDARY:upstream_command.pop('offset',None)
+                            if alias!=PRIMARY:upstream_command.pop('offset',None)
                             pending[(alias,next_id)]=native_id
                             sockets[alias].send(json.dumps([{'id':next_id,'command':upstream_command}]))
                             next_id+=1
@@ -157,7 +165,7 @@ class Broker:
                         elif source==PRIMARY:
                             forwarded.append(frame)
                         else:
-                            projected=secondary_frame(frame,owners,next(v['viewer_ids'] for v in owners.values() if v['alias']==SECONDARY))
+                            projected=secondary_frame(frame,owners,next(v['viewer_ids'] for v in owners.values() if v['alias']==source),source)
                             if projected is not None:
                                 forwarded.append(projected)
                                 self.event({'celsius_secondary_event_type':projected['payload'].get('type')})

@@ -84,15 +84,16 @@ class NativeBootstrapTests(unittest.TestCase):
         return {'alias':alias or cloud_stdio.settings.SYSTEM_ALIAS,
                 'token':'synthetic-sensitive-access-token','account_id':'synthetic-system-account'}
 
-    def run_adapter(self, process, marked=False, requests=None):
+    def run_adapter(self, process, marked=False, requests=None, accounts=None):
         requests=requests or [{'id':17,'method':'initialize','params':{'clientInfo':{'name':'test'}}},
                               {'method':'initialized'}]
         system=self.owner()
         secondary={**self.owner(cloud_stdio.settings.SECONDARY_ALIAS),'account_id':'synthetic-secondary-account'}
         arguments=['adapter','app-server']
-        if marked: arguments+=['-c',cloud_stdio.APP_MARKER]
+        if marked: arguments+=['-c',cloud_stdio.APP_MARKER if marked is True else marked]
         output=io.StringIO()
         events=[]
+        self.events=events
         self.emitted=[]
         sockets=[]
         def open_socket(*args,**kwargs):
@@ -106,7 +107,7 @@ class NativeBootstrapTests(unittest.TestCase):
             output.write(json.dumps(value)+'\n')
         with patch.object(cloud_stdio.sys,'argv',arguments), \
              patch.object(cloud_stdio.sys,'stdin',io.StringIO(''.join(json.dumps(r)+'\n' for r in requests))), \
-             patch.object(cloud_stdio.catalog,'inventory',return_value=(system,[system,secondary])), \
+             patch.object(cloud_stdio.catalog,'inventory',return_value=(system,accounts if accounts is not None else [system,secondary])), \
              patch.object(cloud_stdio,'event',side_effect=events.append), \
              patch.object(cloud_stdio,'emit',side_effect=emit), \
              patch.object(cloud_stdio,'refresh_thread_owners') as roots, \
@@ -145,6 +146,37 @@ class NativeBootstrapTests(unittest.TestCase):
             self.assertEqual([m.get('method') for m in socket.messages],['initialize','initialized'])
         self.assertEqual(output,[{'id':17,'result':{'userAgent':'synthetic-native'}}])
 
+    def test_disabled_app_tools_plugin_still_identifies_desktop_session(self):
+        marker=cloud_stdio.APP_MARKER.removesuffix('true')+'false'
+        _,roots,connect,_=self.run_adapter(ScriptedProcess(),marked=marker)
+        roots.assert_called_once()
+        self.assertEqual(connect.call_count,2)
+        self.assertTrue(self.events[0]['app_session'])
+
+    def test_single_configured_owner_starts_one_cloud_session(self):
+        system=self.owner()
+        with patch.object(cloud_stdio.settings,'DOT_OWNERS',{'stable-handle':system['alias']}):
+            _,_,connect,_=self.run_adapter(ScriptedProcess(),marked=True,accounts=[system])
+        self.assertEqual(connect.call_count,1)
+
+    def test_duplicate_labels_keep_distinct_owner_sessions_and_resource_routes(self):
+        system=self.owner()
+        other={**self.owner('33333333'),'account_id':'another-account'}
+        unconfigured={**self.owner('44444444'),'account_id':'unconfigured-account'}
+        handles={'dot-system':system['alias'],'dot-other':other['alias']}
+        roots={'system-root':system['alias'],'other-root':other['alias']}
+        with patch.object(cloud_stdio.settings,'DOT_OWNERS',handles), \
+             patch.object(cloud_stdio.settings,'DOT_NAMES',{'dot-system':'Dot','dot-other':'Dot'},create=True), \
+             patch.dict(cloud_stdio.THREAD_OWNERS,roots,clear=True):
+            _,_,connect,_=self.run_adapter(ScriptedProcess(),marked=True,accounts=[system,other,unconfigured])
+            self.assertEqual(select_owner('thread/resume',{'threadId':'system-root'},system['alias']),(system['alias'],'system-root'))
+            self.assertEqual(select_owner('thread/resume',{'threadId':'other-root'},system['alias']),(other['alias'],'other-root'))
+            with self.assertRaises(ValueError):
+                select_owner('thread/resume',{'threadId':'unconfigured-root'},system['alias'])
+        self.assertEqual(connect.call_count,2)
+        routed={call.kwargs['additional_headers']['ChatGPT-Account-Id'] for call in connect.call_args_list}
+        self.assertEqual(routed,{system['account_id'],other['account_id']})
+
     def test_missing_or_wrong_owner_routing_never_releases_initialize(self):
         for routing in [None,{}, {'chatgptAccountId':'another-owner','backendOrigin':'https://chatgpt.com',
                                 'accountRoutingOverride':'NO_CONSTRAINT'},
@@ -163,6 +195,21 @@ class NativeBootstrapTests(unittest.TestCase):
                 process=ScriptedProcess({method:{'error':{'code':-32000,'message':self.owner()['token']}}})
                 with self.assertRaisesRegex(ValueError,'^Local authentication bootstrap failed$'):
                     self.run_adapter(process)
+                self.assertEqual(self.emitted,[])
+
+    def test_routing_errors_use_exact_safe_categories(self):
+        cases=[('workspace routing discovery failed','discovery_failed'),
+               ('failed to load workspace requirements','requirements_load'),
+               ('workspace routing discovery failed '+self.owner()['token'],'unclassified')]
+        for message,category in cases:
+            with self.subTest(category=category):
+                process=ScriptedProcess({'account/read':{'error':{'code':-32603,'message':message}}})
+                with self.assertRaisesRegex(ValueError,'^Local authentication bootstrap failed$'):
+                    self.run_adapter(process)
+                rejected=[event for event in self.events if 'bootstrap_rejected_method' in event]
+                self.assertEqual(rejected,[{'bootstrap_rejected_method':'account/read',
+                                          'bootstrap_error_code':-32603,
+                                          'bootstrap_error_category':category}])
                 self.assertEqual(self.emitted,[])
 
     def test_policy_must_be_read_without_substitution(self):

@@ -1,5 +1,6 @@
 import test_support
 import unittest, urllib.parse
+from unittest.mock import patch
 from realtime_probe import signalling_owner, RESOURCES
 
 class SignallingBoundaryTests(unittest.TestCase):
@@ -9,6 +10,18 @@ class SignallingBoundaryTests(unittest.TestCase):
     def test_known_resource_pairs_pin_owner(self):
         for thread,(owner,dot) in RESOURCES.items():
             self.assertEqual(signalling_owner('POST',self.url(thread,dot),'application/sdp'),owner)
+
+    def test_single_owner_and_duplicate_labels_do_not_change_resource_authority(self):
+        for resources in [{'one-root':('11111111','one-profile')},
+                          {'one-root':('11111111','one-profile'),'two-root':('33333333','two-profile')}]:
+            with self.subTest(resources=resources), patch.dict(RESOURCES,resources,clear=True):
+                for root,(alias,profile) in resources.items():
+                    self.assertEqual(signalling_owner('POST',self.url(root,profile),'application/sdp'),alias)
+                with self.assertRaises(ValueError):
+                    signalling_owner('POST',self.url('unverified-root','one-profile'),'application/sdp')
+                if len(resources)>1:
+                    with self.assertRaises(ValueError):
+                        signalling_owner('POST',self.url('one-root','two-profile'),'application/sdp')
 
     def test_cross_owner_pair_is_rejected(self):
         threads=list(RESOURCES)

@@ -4,10 +4,11 @@ import isolated_native as native
 import settings
 ROOT=settings.ROOT
 DOTS=settings.DOTS
-SYSTEM_DOT=next(value for value in DOTS.values() if value[0]==settings.PROOF_PROFILE_IDS[settings.SYSTEM_ALIAS])
+SYSTEM_DOT=next((value for target,value in DOTS.items() if settings.DOT_OWNERS[target]==settings.SYSTEM_ALIAS),None)
 
 
 def send(target,text,ledger):
+    if SYSTEM_DOT is None: raise ValueError('System Dot unavailable')
     if target not in DOTS or not isinstance(text,str) or not 0<len(text)<=4000:
         raise ValueError('Research message outside bound')
     profile,root=DOTS[target]
@@ -16,12 +17,12 @@ def send(target,text,ledger):
     with ledger.open('x') as f:
         ledger.chmod(0o600);json.dump(summary,f)
     expression="""(async()=>{const m=await import('app://-/assets/MODULE_ASSET_PLACEHOLDER');
-const api=m.$wt;const expected=%s;
+const api=m.Ymr;const expected=%s;
 const primary=await api.safeGet('/tbo/primary');
 if(primary.profile?.id!==%s||primary.selection?.thread_id!==%s)throw Error('Native principal changed');
 const p=await api.safeGet('/tbo/by-thread/'+expected.root);
 if(p.id!==expected.profile||p.active_root_thread_id!==expected.root||typeof p.messaging_room_id!=='string')throw Error('Target changed');
-const headers={[m.e7t]:'1'};
+const headers={'X-OpenAI-Attach-DeviceCheck-Token':'1'};
 const challenge=await api.safeGet('/ios/attestation_challenge',{additionalHeaders:headers});
 if(typeof challenge.attestation_challenge!=='string'||!challenge.attestation_challenge)throw Error('Native proof missing');
 try{const sent=await api.safePost('/messaging/rooms/{room_id}/messages',{parameters:{path:{room_id:p.messaging_room_id}},additionalHeaders:headers,retry:false,requestBody:{app_attest_challenge:challenge.attestation_challenge,content:{text:expected.text},request_id:expected.request,idempotency_token:expected.request,timezone_offset_min:new Date().getTimezoneOffset()}});
@@ -39,10 +40,11 @@ catch(e){return {accepted:false,status:e.status??null,error_code:e.code??null};}
     return summary
 
 def matching_reply(target,marker,exclude_id=None):
+    if SYSTEM_DOT is None: raise ValueError('System Dot unavailable')
     profile,root=DOTS[target]
     # Keep all conversation contents inside native renderer; return matching synthetic reply only.
-    expression="""(async()=>{const m=await import('app://-/assets/MODULE_ASSET_PLACEHOLDER');const p=await m.$wt.safeGet('/tbo/by-thread/'+%s);
+    expression="""(async()=>{const m=await import('app://-/assets/MODULE_ASSET_PLACEHOLDER');const p=await m.Ymr.safeGet('/tbo/by-thread/'+%s);
 if(p.id!==%s||p.active_root_thread_id!==%s)throw Error('Target changed');
-const room=await m.$wt.safeGet('/messaging/rooms/{room_id}',{parameters:{path:{room_id:p.messaging_room_id}}});const actors=room.members.filter(x=>x.aeon_id===p.id);if(actors.length!==1)throw Error('Dot actor ambiguous');const v=await m.$wt.safeGet('/messaging/rooms/{room_id}/messages',{parameters:{path:{room_id:p.messaging_room_id},query:{limit:20}}});
+const room=await m.Ymr.safeGet('/messaging/rooms/{room_id}',{parameters:{path:{room_id:p.messaging_room_id}}});const actors=room.members.filter(x=>x.aeon_id===p.id);if(actors.length!==1)throw Error('Dot actor ambiguous');const v=await m.Ymr.safeGet('/messaging/rooms/{room_id}/messages',{parameters:{path:{room_id:p.messaging_room_id},query:{limit:20}}});
 return {keys:Object.keys(v),match:(v.items??[]).filter(x=>x.id!==%s&&x.account_user_id===actors[0].account_user_id&&(x.content?.text??'').includes(%s)).map(x=>({id:x.id,content:x.content,role:x.role,created_at:x.created_at}))};})()"""%(json.dumps(root),json.dumps(profile),json.dumps(root),json.dumps(exclude_id),json.dumps(marker))
     return native.evaluate(expression.replace("MODULE_ASSET_PLACEHOLDER",settings.MODULE_ASSET))

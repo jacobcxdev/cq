@@ -612,6 +612,13 @@ cq codex canary
 cq codex canary start
 cq codex canary status
 cq codex canary stop
+cq codex dots install
+cq codex dots list
+cq codex dots prime
+cq codex dots start
+cq codex dots status
+cq codex dots stop
+cq codex dots sync
 cq codex login
 cq codex remove
 cq codex resets
@@ -714,14 +721,38 @@ cq service uninstall
 
 </details>
 
-## Dots experiment
+## Isolated Dots
 
-[Isolated multi-account Dots](experiments/dots/README.md) is a separate, opt-in
-research runtime for two existing account-owned Dots in one unmodified native
-app. It includes an explicit message relay and ordinary setup messages that
-introduce the peer roster and relay syntax. It is not part of the supported CQ
-CLI or service, and requires private configuration and a qualified native app
-version. See its README for limits, validation and rollback.
+`cq codex dots install` provisions and starts a private native app instance with
+existing Dots discovered from your CQ accounts. It uses the unchanged app bundle
+with separate app data, Codex home, Python environment and loopback certificates.
+Your system Codex configuration, credentials and services are not changed. Use
+the CQ-launched window for the combined catalogue. Native app qualification is
+version-pinned; unsupported app updates fail before launch.
+
+```sh
+cq codex dots install
+cq codex dots list
+cq codex dots status
+cq codex dots prime DOT_ID
+cq codex dots prime --all
+cq codex dots stop
+```
+
+Each discovered Dot receives one automatic setup attempt per installation,
+teaching the explicit relay and on-demand peer directory. Restarts, upgrades,
+renames, reboots and removing/re-adding an account do not repeat it. Unknown send
+outcomes are not automatically retried. `prime` explicitly sends a fresh reminder.
+Display names can repeat; use the stable ID from `list` when a name is ambiguous.
+Account changes are watched automatically; `cq codex dots sync` requests an
+immediate reconciliation. Roles and current work remain unknown unless reported.
+
+This optional macOS feature requires Python 3.14 (`brew install python@3.14`),
+websockets 17.2 in its private environment, valid read-only account credentials,
+and already-onboarded Dots. It does not add empty-account onboarding slots,
+native cross-account `@` selection or persistent secondary Reboot. Fresh local
+task execution remains unqualified. See [Dots installation details](experiments/dots/README.md)
+for qualification, explicit paths and rollback.
 
 ## Development
 

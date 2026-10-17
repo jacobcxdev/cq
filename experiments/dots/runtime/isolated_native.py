@@ -70,5 +70,5 @@ def evaluate(expression):
                 return result['result'].get('value')
 
 if __name__=='__main__':
-    expression="(async()=>{const m=await import('app://-/assets/"+settings.MODULE_ASSET+"');return {nativeApi:typeof m.$wt?.safeGet==='function'};})()"
+    expression="(async()=>{const m=await import('app://-/assets/"+settings.MODULE_ASSET+"');return {nativeApi:typeof m.Ymr?.safeGet==='function'};})()"
     print(json.dumps(evaluate(expression)))

@@ -8,6 +8,32 @@ import settings
 ROOT = settings.ROOT
 REAL = str(settings.APP / 'Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex')
 APP_MARKER = 'plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled=true'
+APP_MARKERS = {APP_MARKER, APP_MARKER.removesuffix('true')+'false'}
+# Exact upstream WorkspaceRoutingError messages only; arbitrary backend errors may contain credentials.
+WORKSPACE_ROUTING_ERRORS = {
+    'failed to load workspace requirements':'requirements_load',
+    'workspace routing requires a ChatGPT account id':'missing_account_id',
+    'workspace routing discovery cancelled':'discovery_cancelled',
+    'account changed during workspace routing discovery':'account_changed',
+    'workspace routing discovery unauthorized (401)':'discovery_unauthorized',
+    'workspace routing discovery failed':'discovery_failed',
+    'selected workspace missing from routing discovery':'missing_workspace',
+    'duplicate workspace in routing discovery':'duplicate_workspace',
+    'failed to reload workspace requirements':'requirements_reload',
+    'configuration changed during workspace routing discovery; retry account/read':'configuration_changed',
+    'invalid model provider URL':'invalid_provider_url',
+    'invalid ChatGPT backend URL':'invalid_bootstrap_url',
+    'invalid session ChatGPT backend URL':'invalid_session_bootstrap_url',
+    'ChatGPT backend changed; start a new thread before sending more content':'session_backend_changed',
+    'workspace routing discovery cancelled during shutdown':'shutdown',
+    'workspace routing discovery timed out':'discovery_timeout',
+    'workspace routing discovery missing backend origin':'missing_backend_origin',
+    'workspace routing discovery has invalid account routing override':'invalid_routing_override',
+    'workspace routing discovery must return an origin':'backend_is_not_origin',
+    'required ChatGPT backend conflicts with workspace routing':'backend_conflict',
+    'invalid workspace backend URL':'invalid_backend_url',
+    'workspace backend must use an HTTPS origin without credentials':'invalid_backend_origin',
+}
 THREAD_OWNERS = {root: settings.DOT_OWNERS[name] for name, (_, root) in settings.DOTS.items()}
 THREAD_OWNER_LOCK=threading.Lock()
 LOCAL_READS = {'account/read','getAuthStatus','configRequirements/read','config/read'}
@@ -140,6 +166,14 @@ class LocalBootstrap:
             try: response=self.responses.get(timeout=max(0,deadline-time.monotonic()))
             except queue.Empty: raise ValueError('Local authentication bootstrap timed out') from None
             if response is None or 'error' in response or not isinstance(response.get('result'),dict):
+                error = (response or {}).get('error', {})
+                code = error.get('code') if isinstance(error,dict) else None
+                message = error.get('message') if isinstance(error,dict) else None
+                category = (WORKSPACE_ROUTING_ERRORS.get(message,'unclassified')
+                            if method=='account/read' and isinstance(message,str) else 'unclassified')
+                event({'bootstrap_rejected_method':method,
+                       'bootstrap_error_code':code if type(code) is int else None,
+                       'bootstrap_error_category':category})
                 raise ValueError('Local authentication bootstrap failed')
             return response['result']
         finally:
@@ -191,11 +225,13 @@ def main():
     env=dict(os.environ); env['CODEX_CLI_PATH']=REAL
     if 'app-server' not in arguments:
         os.execve(REAL,[REAL,*arguments],env)
-    app_session=APP_MARKER in arguments
+    # Desktop supplies this override even when the app-tools plugin is unavailable.
+    app_session=any(marker in arguments for marker in APP_MARKERS)
     event({'app_stdio_adapter_started':True,'read_only':True,'app_session':app_session})
     system,accounts=catalog.inventory()
-    owners={a['alias']:a for a in accounts if a['alias'] in {settings.SYSTEM_ALIAS,settings.SECONDARY_ALIAS}}
-    if system['alias']!=settings.SYSTEM_ALIAS or len(owners)!=2:
+    aliases=set(settings.DOT_OWNERS.values())|{settings.SYSTEM_ALIAS}
+    owners={a['alias']:a for a in accounts if a['alias'] in aliases}
+    if system['alias']!=settings.SYSTEM_ALIAS or set(owners)!=aliases or system['alias'] not in owners:
         raise ValueError('Frozen proof owner identity changed')
     if app_session: refresh_thread_owners(owners)
     local=subprocess.Popen(local_arguments(arguments),env=env,stdin=subprocess.PIPE,
@@ -367,5 +403,16 @@ def main():
 if __name__=='__main__':
     try: main()
     except Exception as error:
-        event({'adapter_failure_type':type(error).__name__})
+        reasons={
+            'Frozen proof owner identity changed':'owner_inventory_changed',
+            'Public upstream CA roots unavailable':'public_ca_unavailable',
+            'Local authentication bootstrap timed out':'local_auth_timeout',
+            'Local authentication bootstrap failed':'local_auth_rejected',
+            'Local workspace routing verification failed':'workspace_routing_rejected',
+            'Local workspace policy verification failed':'workspace_policy_rejected',
+            'Primary profile outside proof scope':'primary_profile_changed',
+            'system credential principal changed':'system_identity_changed',
+        }
+        event({'adapter_failure_type':type(error).__name__,
+               'adapter_failure_code':reasons.get(str(error),'validation_failure')})
         sys.exit(1)

@@ -152,8 +152,9 @@ class Server(socketserver.ThreadingTCPServer):
 
 if __name__=='__main__':
     _,accounts=catalog.inventory()
-    owners={a['alias']:a for a in accounts if a['alias'] in {settings.SYSTEM_ALIAS,settings.SECONDARY_ALIAS}}
-    if len(owners)!=2: raise ValueError('Frozen signalling principals unavailable')
+    aliases=set(settings.DOT_OWNERS.values())|{settings.SYSTEM_ALIAS}
+    owners={a['alias']:a for a in accounts if a['alias'] in aliases}
+    if set(owners)!=aliases: raise ValueError('Configured signalling principals unavailable')
     port_file=ROOT/'realtime-port'
     server=Server(('127.0.0.1',int(port_file.read_text()) if port_file.exists() else 0),Connect)
     server.owners=owners

@@ -1,5 +1,6 @@
 import http.server, http.client, json, threading, time, urllib.parse, ssl, re
 import datetime
+import errno
 import hmac
 import hashlib
 import catalog
@@ -30,8 +31,63 @@ def owner_headers(headers, owner):
     result['ChatGPT-Account-Id'] = owner['account_id']
     return result
 
+
+def validate_profiles(fixture):
+    _, profiles, owners, _ = fixture
+    configured = {target[0]: handle for handle, target in settings.DOTS.items()}
+    if len(profiles) != len(configured) or {p.get('id') for p in profiles} != set(configured):
+        raise ValueError('Catalog profiles differ from configured Dot IDs')
+    for profile in profiles:
+        handle = configured[profile['id']]
+        root = profile.get('active_root_thread_id')
+        alias = settings.DOT_OWNERS[handle]
+        if (not isinstance(root, str) or not root
+                or owners.get(profile['id'], {}).get('alias') != alias
+                or owners.get(root, {}).get('alias') != alias
+                or owners[profile['id']].get('account_id') != owners[root].get('account_id')):
+            raise ValueError('Catalog profile ownership differs from configured Dot owner')
+
+
+def known_owners(fixture):
+    validate_profiles(fixture)
+    system, profiles, owners, _ = fixture
+    accounts = {system['alias']: system}
+    for profile in profiles:
+        account = owners[profile['id']]
+        previous = accounts.get(account['alias'])
+        if previous is not None and previous['account_id'] != account['account_id']:
+            raise ValueError('Catalog account alias collision')
+        accounts[account['alias']] = account
+    if system['alias'] != settings.SYSTEM_ALIAS or set(accounts) != set(settings.DOT_OWNERS.values()):
+        raise ValueError('Catalog account principals differ from configured owners')
+    return accounts
+
+
+def listen_port():
+    path = ROOT / 'port'
+    if path.is_symlink():
+        raise ValueError('Proxy port must not be a symlink')
+    if not path.exists():
+        return 8000
+    with path.open() as source:
+        value = source.read(32)
+    if len(value) == 32:
+        raise ValueError('Proxy port file exceeds bound')
+    port = int(value)
+    if port != 8000:
+        raise ValueError('Qualified native authentication requires loopback proxy port 8000')
+    return port
+
+def create_server():
+    try:
+        return http.server.ThreadingHTTPServer(('127.0.0.1', listen_port()), Handler)
+    except OSError as error:
+        if error.errno == errno.EADDRINUSE:
+            raise ValueError('Native Dots proxy requires free loopback port 8000; existing listener was left running') from None
+        raise
+
 def primary_probe_response(headers, fixture, alias):
-    if fixture is None or alias != settings.SECONDARY_ALIAS:
+    if fixture is None or alias == settings.SYSTEM_ALIAS or alias not in settings.DOT_OWNERS.values():
         raise ValueError('Unknown primary proof owner')
     _, profiles, owners, _ = fixture
     candidates = [p for p in profiles if owners.get(p['id'],{}).get('alias') == alias]
@@ -117,7 +173,7 @@ def runtime_control_owner(path, body, fixture):
     identifier=urllib.parse.unquote(parts[3])
     matches=[p for p in profiles if p['id']==identifier]
     owner=owners.get(identifier)
-    if (len(matches)!=1 or owner is None or owner['alias']!=settings.SECONDARY_ALIAS
+    if (len(matches)!=1 or owner is None or owner['alias']==settings.SYSTEM_ALIAS
             or owners.get(matches[0].get('active_root_thread_id'),{}).get('account_id')!=owner['account_id']):return None
     return owner
 
@@ -141,7 +197,7 @@ def remember_challenge(primary_data, owner_data, owner_alias, now=None):
         for key in list(CHALLENGES):
             if CHALLENGES[key][1] <= now:
                 del CHALLENGES[key]
-        if len(CHALLENGES) >= 16:
+        if len(CHALLENGES) >= 16 * max(1, len(set(settings.DOT_OWNERS.values())) - 1):
             raise ValueError('native challenge cache full')
         key = (primary, owner_alias)
         if key in CHALLENGES:
@@ -298,7 +354,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
         with CATALOG_LOCK:
             send_owner = message_owner(path, CATALOG_FIXTURE) if self.command == 'POST' and STATE['messages'] else None
-            if send_owner is not None and send_owner['alias'] == settings.SECONDARY_ALIAS and not STATE['secondary_messages']:
+            if send_owner is not None and send_owner['alias'] != settings.SYSTEM_ALIAS and not STATE['secondary_messages']:
                 send_owner = None
         with CATALOG_LOCK:
             read_owner = receipt_owner(path, CATALOG_FIXTURE) if self.command == 'POST' else None
@@ -344,9 +400,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if (message_write and owner != send_owner or receipt_write and owner != read_owner
                     or watch_request and owner != watch_owner):
                 raise ValueError('Room operation owner changed before forwarding')
-            if owner['alias'] == settings.SECONDARY_ALIAS:
+            if owner['alias'] != settings.SYSTEM_ALIAS:
                 headers = {k:v for k,v in headers.items() if k.lower() != 'x-openai-orbit-selection'}
-        if message_write and path.endswith('/messages') and owner['alias'] == settings.SECONDARY_ALIAS:
+        if message_write and path.endswith('/messages') and owner['alias'] != settings.SYSTEM_ALIAS:
             try:
                 body = owner_message_body(body, owner['alias'])
             except (ValueError, TypeError):
@@ -399,7 +455,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 summary['owner_receipt_operation'] = True
             if message_write:
                 summary['owner_message_operation'] = 'prepare' if path.endswith('/aeon/prepare') else 'send'
-                if path.endswith('/messages') and owner['alias'] == settings.SECONDARY_ALIAS:
+                if path.endswith('/messages') and owner['alias'] != settings.SYSTEM_ALIAS:
                     summary['owner_native_challenge_replaced'] = True
                 summary['request_header_names'] = sorted(headers.keys())
                 if response.status >= 400:
@@ -413,8 +469,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         CATALOG_FIXTURE = catalog.fixture(headers, envelope['items'])
                         event({'catalog_fixture': CATALOG_FIXTURE[3]})
                     system, profiles, _, _ = CATALOG_FIXTURE
-                if len(profiles) != 2 or {p['display_name'] for p in profiles} != set(settings.DOTS):
-                    raise ValueError('Expected exactly the two configured Dot profiles')
+                validate_profiles(CATALOG_FIXTURE)
                 envelope['items'] = profiles
                 envelope['cursor'] = None
                 data = json.dumps(envelope).encode()
@@ -438,7 +493,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     summary['primary_projection_owner_alias'] = STATE['primary_probe_owner']
                     summary['genuine_owner_primary_selection'] = True
                     summary['remote_primary_mutation_sent'] = False
-            if (owner is not None and owner['alias'] == settings.SECONDARY_ALIAS
+            if (owner is not None and owner['alias'] != settings.SYSTEM_ALIAS
                     and response.status == 200
                     and (self.command == 'GET' or message_write and path.endswith('/messages'))
                     and path.startswith('/backend-api/messaging/rooms/')):
@@ -476,10 +531,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         system,_ = catalog.inventory()
                         CATALOG_FIXTURE = catalog.fixture(headers,catalog.catalog(system,headers))
                     _,_,owners,_ = CATALOG_FIXTURE
-                secondary=next(account for account in owners.values() if account['alias']==settings.SECONDARY_ALIAS)
-                secondary_url=catalog.get(secondary,self.path,owner_headers(headers,secondary))['websocket_url']
+                accounts = known_owners(CATALOG_FIXTURE)
                 value=json.loads(data)
-                value['websocket_url']=CELSIUS.issue({settings.SYSTEM_ALIAS:value['websocket_url'],settings.SECONDARY_ALIAS:secondary_url},owners)
+                urls={settings.SYSTEM_ALIAS:value['websocket_url']}
+                for alias, account in accounts.items():
+                    if alias != settings.SYSTEM_ALIAS:
+                        urls[alias]=catalog.get(account,self.path,owner_headers(headers,account))['websocket_url']
+                value['websocket_url']=CELSIUS.issue(urls,owners)
                 data=json.dumps(value).encode()
                 summary['owner_celsius_fanout']=True
             if path == '/backend-api/ios/attestation_challenge':
@@ -490,10 +548,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         and STATE['secondary_challenges'] and summary['native_device_proof_present']):
                     with CATALOG_LOCK:
                         candidates = [] if CATALOG_FIXTURE is None else [
-                            account for account in CATALOG_FIXTURE[2].values()
-                            if account['alias'] == settings.SECONDARY_ALIAS]
-                    if candidates:
-                        secondary = candidates[0]
+                            account for alias, account in known_owners(CATALOG_FIXTURE).items()
+                            if alias != settings.SYSTEM_ALIAS]
+                    for secondary in candidates:
                         upstream = http.client.HTTPSConnection('chatgpt.com', timeout=25)
                         try:
                             upstream.request('GET', self.path, headers=owner_headers(headers, secondary))
@@ -579,7 +636,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     CELSIUS = celsius.Broker(event)
-    server = http.server.ThreadingHTTPServer(('127.0.0.1', 8000), Handler)
+    server = create_server()
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(ROOT / 'leaf-cert.pem', ROOT / 'leaf-key.pem')
     server.socket = context.wrap_socket(server.socket, server_side=True)

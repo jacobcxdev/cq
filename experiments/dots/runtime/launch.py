@@ -35,6 +35,7 @@ if '--cloud-stdio' in sys.argv:
 elif (p/'connect-port').exists():
     env.update({'NODE_USE_ENV_PROXY':'1','HTTPS_PROXY':'http://127.0.0.1:'+(p/'connect-port').read_text(),'HTTP_PROXY':'http://127.0.0.1:'+(p/'connect-port').read_text()})
 for k,v in env.items():cmd+=['--env',k+'='+v]
+cmd+=['--env','CODEX_SPARKLE_ENABLED=false']
 cmd+=[str(settings.APP),'--args','--user-data-dir='+str(p/'user-data'),'--remote-debugging-port='+str(debug),'--remote-debugging-address=127.0.0.1','--ignore-certificate-errors-spki-list='+spki]
 if '--computer-proxy' in sys.argv:
     cmd+=['--proxy-server=http://127.0.0.1:'+(p/'realtime-port').read_text(),

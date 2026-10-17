@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/alecthomas/kong"
@@ -54,6 +55,7 @@ type ClaudeCmd struct {
 
 // CodexCmd groups Codex-specific subcommands.
 type CodexCmd struct {
+	Dots     CodexDotsCmd   `cmd:"" help:"Manage isolated multi-account Dots"`
 	Login    LoginCmd       `cmd:"" help:"Add Codex account"`
 	Accounts AccountsCmd    `cmd:"" help:"List Codex accounts"`
 	Switch   SwitchCmd      `cmd:"" help:"Switch active Codex account"`
@@ -229,6 +231,13 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if handled, err := runCodexDotsEntry(os.Args[1:], os.Stdout, os.Stderr); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if handled, err := runPlatformRuntimeUpgradeEntry(os.Args[1:]); handled {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: runtime upgrade: %v\n", err)
@@ -379,6 +388,9 @@ func runAgent(args []string) error {
 }
 
 func dispatch(ctx *kong.Context, cli *CLI) error {
+	if strings.HasPrefix(ctx.Command(), "codex dots ") {
+		return defaultDotsRunner().execute(context.Background(), &cli.Codex.Dots, strings.TrimPrefix(ctx.Command(), "codex dots "), cli.JSON, os.Stdout, os.Stderr)
+	}
 	switch ctx.Command() {
 	case "check", "check <providers>":
 		return runCheck(cli)

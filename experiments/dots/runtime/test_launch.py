@@ -33,6 +33,7 @@ class LaunchTests(unittest.TestCase):
             with patch.object(settings,'ROOT',root),patch.object(settings,'validate_runtime_paths'),patch('subprocess.check_output',return_value=b'public key'),patch('subprocess.run',return_value=Mock(stdout=b'der')) as run,patch('sys.argv',['launch.py','--cloud-stdio','--native-null-executor']):
                 runpy.run_path(str(source/'launch.py'))
             command=run.call_args.args[0]
+            self.assertIn('CODEX_SPARKLE_ENABLED=false',command)
             for variable,name in [('CODEX_CLI_PATH','cloud-stdio-launch'),('CODEX_TPP_LOCAL_EXECUTOR_CLI_PATH','native-executor-launch')]:
                 launcher=root/name
                 self.assertIn(variable+'='+str(launcher),command)
