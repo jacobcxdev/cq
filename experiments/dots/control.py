@@ -10,7 +10,7 @@ import subprocess
 import time
 import release
 
-COMPONENTS = {'probe.py', 'realtime_probe.py', 'room_coordination.py', 'native_null_executor.py', 'account_watch.py', 'native_debug.py'}
+COMPONENTS = {'probe.py', 'realtime_probe.py', 'room_coordination.py', 'native_null_executor.py', 'account_watch.py', 'native_debug.py', 'native_bootstrap.py'}
 
 
 def process(pid):
@@ -123,6 +123,18 @@ def ensure_watcher():
 
 def finish_start(ready=None):
     """Resume startup after native onboarding; awareness guards own send deduplication."""
+    root = release.TARGET
+    fd = os.open(root / 'finish-start.lock', os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, 'w') as lock:
+        info = os.fstat(lock.fileno())
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600):
+            raise ValueError('Native startup lock must be owned and mode 0600')
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _finish_start(ready)
+
+
+def _finish_start(ready=None):
     ready = status() if ready is None else ready
     if ready.get('onboarding_required'):
         return {**ready, **ensure_watcher(), 'system_app_modified': False}
@@ -153,14 +165,27 @@ def start(candidate, preserve_watcher=False):
     release.settings.validate_runtime_paths()
     python = root / 'venv/bin/python'
 
-
     try:
-        probe = _spawn(root, 'probe.py'); realtime = _spawn(root, 'realtime_probe.py')
-        time.sleep(2)
-        if probe.poll() is not None or realtime.poll() is not None:
-            raise ValueError('Research proxy failed to start')
-        subprocess.run([str(python), str(root / 'launch.py'), '--cloud-stdio',
-                        '--computer-proxy'], cwd=root, check=True, capture_output=True)
+        embedded = False
+        if (getattr(release.settings, 'INTEGRATION_MODE', 'isolated') == 'native'
+                and (root.parent / 'app-patch/receipt.json').exists()):
+            import app_patch
+            app_patch.verify_installed(release.settings.APP, root.parent, release.settings.ASAR_SHA256)
+            embedded = True
+        if embedded:
+            # Every launch path enters the same patched startup hook. It starts
+            # transports before native networking; no second launcher or profile.
+            log = os.open(root / 'native-app.log', os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(log, 'ab') as stream:
+                subprocess.Popen([str(release.settings.APP / 'Contents/MacOS/ChatGPT')],
+                                 cwd=root, stdout=stream, stderr=stream, start_new_session=True)
+        else:
+            probe = _spawn(root, 'probe.py'); realtime = _spawn(root, 'realtime_probe.py')
+            time.sleep(2)
+            if probe.poll() is not None or realtime.poll() is not None:
+                raise ValueError('Research proxy failed to start')
+            subprocess.run([str(python), str(root / 'launch.py'), '--cloud-stdio',
+                            '--computer-proxy'], cwd=root, check=True, capture_output=True)
         deadline = time.monotonic() + 90
         while True:
             try:

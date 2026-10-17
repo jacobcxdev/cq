@@ -12,7 +12,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
-//go:embed *.py runtime/*.py
+//go:embed *.py runtime/*.py runtime/*.cjs
 var payload embed.FS
 
 // Sources returns only deployable sources, never test fixtures or private settings.
@@ -22,7 +22,7 @@ func Sources() (map[string][]byte, error) {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), "test_") || !strings.HasSuffix(path, ".py") {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), "test_") || (!strings.HasSuffix(path, ".py") && !strings.HasSuffix(path, ".cjs")) {
 			return nil
 		}
 		data, err := payload.ReadFile(path)

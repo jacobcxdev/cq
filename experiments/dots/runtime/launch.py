@@ -3,6 +3,9 @@ import settings
 p=settings.ROOT
 settings.validate_runtime_paths()
 native=getattr(settings,'INTEGRATION_MODE','research')=='native'
+prepare_native='--prepare-native' in sys.argv
+if prepare_native and not native:
+    raise ValueError('Embedded startup requires native integration mode')
 if native:
     if '--native-null-executor' in sys.argv:
         raise ValueError('Native Dots launch cannot use the research executor')
@@ -13,13 +16,18 @@ if native:
         raise ValueError('Native Dots launch requires the configured normal CODEX_HOME')
     if 'CODEX_ELECTRON_USER_DATA_PATH' in os.environ:
         raise ValueError('Native Dots launch requires the normal desktop profile')
-    expected=str(settings.APP/'Contents/MacOS/ChatGPT')
-    rows=subprocess.check_output(['/bin/ps','-axo','uid=,command='],text=True).splitlines()
-    for row in rows:
-        values=row.strip().split(maxsplit=1)
-        if (len(values)==2 and values[0]==str(os.getuid())
-                and (values[1]==expected or values[1].startswith(expected+' '))):
-            raise ValueError('Codex restart required: quit the official desktop app, then start Dots again; CQ will not stop it')
+    if prepare_native:
+        parents=[value.split('=',1)[1] for value in sys.argv if value.startswith('--parent-pid=')]
+        if len(parents)!=1 or not parents[0].isdigit() or int(parents[0])<=0:
+            raise ValueError('Embedded startup requires its verified parent PID')
+    else:
+        expected=str(settings.APP/'Contents/MacOS/ChatGPT')
+        rows=subprocess.check_output(['/bin/ps','-axo','uid=,command='],text=True).splitlines()
+        for row in rows:
+            values=row.strip().split(maxsplit=1)
+            if (len(values)==2 and values[0]==str(os.getuid())
+                    and (values[1]==expected or values[1].startswith(expected+' '))):
+                raise ValueError('Codex restart required: quit the official desktop app, then start Dots again; CQ will not stop it')
 source=pathlib.Path(__file__).resolve().parent
 port=int((p/'port').read_text())
 debug=None
@@ -39,7 +47,7 @@ def cli_launcher(name,script):
     command='#!/bin/sh\nexec '+shlex.quote(str(p/'venv/bin/python'))+' '+shlex.quote(str(source/script))+' "$@"\n'
     private_state(name,command,0o700)
     return str(p/name)
-private_state('launch.json',json.dumps({'debug_transport':'pipe' if native else 'tcp',
+private_state('launch.json',json.dumps({'debug_transport':'embedded' if prepare_native else ('pipe' if native else 'tcp'),
     'debug_port':debug,'proxy_port':port,'catalogue_revision':settings.catalogue_revision()}))
 pub=subprocess.check_output(['openssl','x509','-in',str(p/'leaf-cert.pem'),'-pubkey','-noout'])
 der=subprocess.run(['openssl','pkey','-pubin','-outform','DER'],input=pub,capture_output=True,check=True).stdout
@@ -71,7 +79,7 @@ if '--native-null-executor' in sys.argv:
     env['CODEX_TPP_LOCAL_EXECUTOR_CLI_PATH']=cli_launcher('native-executor-launch','native_null_executor.py')
 else:
     (p/'native-secondary-executor.enabled').unlink(missing_ok=True)
-if '--cloud-stdio' in sys.argv:
+if '--cloud-stdio' in sys.argv or prepare_native:
     env.update({'CODEX_APP_SERVER_FORCE_CLI':'1','CODEX_CLI_PATH':cli_launcher('cloud-stdio-launch','cloud_stdio.py')})
 elif (p/'connect-port').exists():
     env.update({'NODE_USE_ENV_PROXY':'1','HTTPS_PROXY':'http://127.0.0.1:'+(p/'connect-port').read_text(),'HTTP_PROXY':'http://127.0.0.1:'+(p/'connect-port').read_text()})
@@ -81,10 +89,15 @@ if not native:
 cmd+=[('--cq-dots-runtime='+str(p.resolve())) if native else ('--user-data-dir='+str(p/'user-data'))]
 if not native:cmd+=['--remote-debugging-port='+str(debug),'--remote-debugging-address=127.0.0.1']
 cmd+=['--ignore-certificate-errors-spki-list='+spki]
-if '--computer-proxy' in sys.argv:
+if '--computer-proxy' in sys.argv or prepare_native:
     cmd+=['--proxy-server=http://127.0.0.1:'+(p/'realtime-port').read_text(),
           '--proxy-bypass-list=localhost;127.0.0.1']
-if native:
+if prepare_native:
+    result={'env':env,'switches':{value[2:].split('=',1)[0]:value.split('=',1)[1] for value in cmd}}
+    encoded=json.dumps(result,separators=(',',':'))
+    if len(encoded.encode())>65536:raise ValueError('Embedded startup configuration exceeds bound')
+    print(encoded)
+elif native:
     # Spawn the signed app with its normal profile. Private inherited CDP pipes
     # replace the research debugger TCP port; no global LaunchServices edits.
     import native_debug, time
@@ -105,4 +118,5 @@ if native:
                 raise ValueError('Native private renderer bridge failed to start') from None
             time.sleep(0.1)
 else:subprocess.run(cmd,check=True)
-print(('normal-profile' if native else 'isolated')+' launch with exact probe certificate exception',{'debug_port':debug,'proxy_port':port, 'catalogue_revision':settings.catalogue_revision()})
+if not prepare_native:
+    print(('normal-profile' if native else 'isolated')+' launch with exact probe certificate exception',{'debug_port':debug,'proxy_port':port, 'catalogue_revision':settings.catalogue_revision()})

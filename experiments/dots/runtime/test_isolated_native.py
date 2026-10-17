@@ -50,4 +50,39 @@ class NativeIdentityTests(unittest.TestCase):
                 with patch.object(native.subprocess,'check_output',side_effect=[valid,parent,identity]):
                     with self.assertRaises(ValueError):native.isolated_pid()
 
+    def test_embedded_requires_same_owned_app_pid_and_normal_profile(self):
+        executable=str(settings.APP/'Contents/MacOS/ChatGPT')
+        valid=f'123 {os.getuid()} {executable}\n'
+        identity={'app_pid':123,'broker_pid':123,'debug_transport':'embedded'}
+        with patch.object(settings,'INTEGRATION_MODE','native'), \
+             patch('native_debug._embedded_auth',return_value=identity), \
+             patch('native_debug.identity',return_value=identity), \
+             patch.object(native,'app_check') as checked:
+            with patch.object(native.subprocess,'check_output',return_value=valid):
+                self.assertEqual(native.isolated_pid(),123)
+            checked.assert_called_once_with()
+            for row in (valid.replace('123 ', '124 ',1),
+                        valid.replace(f' {os.getuid()} ',f' {os.getuid()+1} '),
+                        valid.rstrip()+' --user-data-dir=/other\n',
+                        valid.rstrip()+' --remote-debugging-pipe\n',
+                        valid.replace('/Contents/MacOS/ChatGPT',
+                                      '/Contents/Frameworks/ChatGPT Helper.app/Contents/MacOS/ChatGPT Helper'),valid+valid):
+                with self.subTest(row=row),patch.object(native.subprocess,'check_output',return_value=row):
+                    with self.assertRaises(ValueError):native.isolated_pid()
+            for reply in ({**identity,'app_pid':124},{**identity,'broker_pid':122},
+                          {**identity,'debug_transport':'pipe'}):
+                with patch('native_debug.identity',return_value=reply), \
+                     patch.object(native.subprocess,'check_output',return_value=valid):
+                    with self.assertRaises(ValueError):native.isolated_pid()
+
+    def test_embedded_rejects_unverified_bundle_before_accepting_identity(self):
+        identity={'app_pid':123,'broker_pid':123,'debug_transport':'embedded'}
+        valid=f'123 {os.getuid()} {settings.APP}/Contents/MacOS/ChatGPT\n'
+        with patch.object(settings,'INTEGRATION_MODE','native'), \
+             patch('native_debug._embedded_auth',return_value=identity), \
+             patch('native_debug.identity',return_value=identity), \
+             patch.object(native.subprocess,'check_output',return_value=valid), \
+             patch.object(native,'app_check',side_effect=ValueError('Bundle verification failed')):
+            with self.assertRaisesRegex(ValueError,'Bundle verification failed'):native.isolated_pid()
+
 if __name__=='__main__':unittest.main()

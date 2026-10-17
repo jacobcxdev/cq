@@ -1,4 +1,4 @@
-"""Private native renderer access over Chromium's inherited debugging pipe.
+"""Private native renderer access through an embedded bridge or inherited pipe.
 
 Chromium reads fd 3 and writes fd 4, using NUL-delimited JSON. Electron quits
 when that pipe disconnects. This broker therefore keeps both descriptors open
@@ -9,6 +9,7 @@ import json
 import ctypes
 import os
 import pathlib
+import re
 import selectors
 import signal
 import socket
@@ -26,6 +27,43 @@ MAX_REQUEST = 1024 * 1024
 TIMEOUT = 35
 SOCKET_NAME = 'native-debug.sock'
 STATE_NAME = 'native-debug.json'
+TOKEN_NAME = 'native-debug-token'
+
+
+def _private_file(path, limit):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > limit):
+            raise ValueError('Native bridge state must be owned regular mode 0600')
+        value = os.read(fd, limit + 1)
+        after = os.fstat(fd)
+        if (len(value) > limit or (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+                != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns)):
+            raise ValueError('Native bridge state changed during read')
+        return value
+    finally:
+        os.close(fd)
+
+
+def _embedded_auth(root):
+    try:
+        data = json.loads(_private_file(root / STATE_NAME, 4096))
+    except FileNotFoundError:
+        return None
+    if not isinstance(data, dict):
+        raise ValueError('Native bridge state invalid')
+    transport = data.get('debug_transport', 'pipe')
+    if transport == 'pipe':
+        return None
+    if (transport != 'embedded' or type(data.get('app_pid')) is not int or data['app_pid'] <= 0
+            or type(data.get('broker_pid')) is not int or data['broker_pid'] != data['app_pid']):
+        raise ValueError('Native bridge state invalid')
+    token = _private_file(root / TOKEN_NAME, 128).decode('ascii').strip()
+    if not re.fullmatch('[0-9a-f]{64}', token):
+        raise ValueError('Native bridge token invalid')
+    return {'app_pid': data['app_pid'], 'token': token}
 
 
 def _root(root=None):
@@ -295,6 +333,11 @@ class Broker:
 
 def _request(value, root=None):
     root = _root(root)
+    embedded = _embedded_auth(root)
+    if embedded is not None:
+        if value.get('operation') == 'evaluate' and value.get('app_pid') != embedded['app_pid']:
+            raise ValueError('Native bridge app identity changed')
+        value = {**value, 'token': embedded['token']}
     path = root / SOCKET_NAME
     info = path.lstat()
     if (not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.getuid()
@@ -309,6 +352,14 @@ def _request(value, root=None):
         response = _receive(connection, MAX_FRAME)
     if not isinstance(response, dict) or response.get('ok') is not True:
         raise ValueError('Native debugger request failed')
+    if embedded is not None:
+        if type(response.get('app_pid')) is not int or response['app_pid'] != embedded['app_pid']:
+            raise ValueError('Native bridge app identity changed')
+        if value.get('operation') == 'identity' and (response.get('debug_transport') != 'embedded'
+                or type(response.get('broker_pid')) is not int or response['broker_pid'] != embedded['app_pid']):
+            raise ValueError('Native bridge identity invalid')
+    elif response.get('debug_transport') == 'embedded':
+        raise ValueError('Native bridge private state unavailable')
     return response
 
 
@@ -316,7 +367,10 @@ def identity(root=None):
     response = _request({'operation': 'identity'}, root)
     if any(type(response.get(name)) is not int or response[name] <= 0 for name in ('app_pid', 'broker_pid')):
         raise ValueError('Native debugger identity invalid')
-    return {name: response[name] for name in ('app_pid', 'broker_pid')}
+    result = {name: response[name] for name in ('app_pid', 'broker_pid')}
+    if response.get('debug_transport') == 'embedded':
+        result['debug_transport'] = 'embedded'
+    return result
 
 
 def evaluate(expression, expected_pid, root=None):

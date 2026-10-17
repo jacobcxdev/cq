@@ -21,7 +21,8 @@ FILES = ('catalog.py', 'self_projection.py', 'celsius.py', 'probe.py',
          'native_dot_transport.py', 'native_executor_reuse.py',
          'native_null_executor.py', 'local_executor.py', 'launch.py',
          'stop_isolated.py', 'room_coordination.py', 'native_gate.py',
-         'settings.py', 'awareness.py', 'account_watch.py', 'native_debug.py')
+         'settings.py', 'awareness.py', 'account_watch.py', 'native_debug.py',
+         'app_patch.py', 'native_bootstrap.py', 'native_startup.cjs')
 EXECUTABLES = {'cloud_stdio.py', 'native_null_executor.py'}
 PYTHON_VERSION = '3.14'
 WEBSOCKETS_VERSION = '17.2'
@@ -50,7 +51,10 @@ def app_check():
     if (info['CFBundleShortVersionString'], str(info['CFBundleVersion'])) != (settings.APP_VERSION, settings.APP_BUILD):
         raise ValueError('Native app version differs from configured pin')
     if digest(settings.APP / 'Contents/Resources/app.asar') != settings.ASAR_SHA256:
-        raise ValueError('Native app renderer differs from configured pin')
+        if getattr(settings, 'INTEGRATION_MODE', 'isolated') != 'native':
+            raise ValueError('Native app renderer differs from configured pin')
+        import app_patch
+        app_patch.verify_installed(settings.APP, settings.ROOT.parent, settings.ASAR_SHA256)
 
 
 def identity():
@@ -112,6 +116,24 @@ def verify(candidate):
     return manifest
 
 
+def python_executables():
+    configured = settings.ROOT / 'venv/bin/python'
+    executables = {str(configured)}
+    try:
+        base = configured.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return executables
+    version = base.parent.parent
+    if (base.name == 'python' + PYTHON_VERSION and base.parent.name == 'bin'
+            and version.name == PYTHON_VERSION and version.parent.name == 'Versions'
+            and version.parent.parent.name == 'Python.framework'):
+        # Framework Python re-execs this exact binary while preserving the venv.
+        framework = version / 'Resources/Python.app/Contents/MacOS/Python'
+        if framework.is_file():
+            executables.add(str(framework))
+    return executables
+
+
 def process_identity(pid):
     """Match an owned process to the configured app or an exact runtime script."""
     result = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'uid=,command='],
@@ -139,12 +161,21 @@ def process_identity(pid):
                     and [a for a in args if a.startswith('--cq-dots-runtime=')] == ['--cq-dots-runtime='+str(root)]
                     and [a for a in args if a.startswith('--remote-debugging-')] == ['--remote-debugging-pipe']):
                 return 'app'
+            if (state.get('debug_transport') == 'embedded'
+                    and state.get('app_pid') == pid and state.get('broker_pid') == pid
+                    and not any(a.startswith(('--user-data-dir', '--remote-debugging-')) for a in args)):
+                try:
+                    import app_patch
+                    app_patch.verify_installed(settings.APP, root.parent, settings.ASAR_SHA256)
+                except (OSError, ValueError):
+                    return None
+                return 'app'
             return None
         directories = [a.split('=', 1)[1] for a in args if a.startswith('--user-data-dir=')]
         if len(directories) == 1 and pathlib.Path(directories[0]).resolve() == root / 'user-data':
             return 'app'
         return None
-    if args[0] != str(root / 'venv/bin/python'):
+    if args[0] not in python_executables():
         return None
     remaining = args[1:]
     if remaining and remaining[0] == '-u':
@@ -183,8 +214,7 @@ def normal_app_running():
 
 def isolated_processes():
     lines = subprocess.check_output(['/bin/ps', '-axo', 'pid=,command='], text=True).splitlines()
-    executables = {str(settings.APP / 'Contents/MacOS/ChatGPT'),
-                   str(settings.ROOT / 'venv/bin/python')}
+    executables = {str(settings.APP / 'Contents/MacOS/ChatGPT')} | python_executables()
     matches = []
     for line in lines:
         parts = line.strip().split(maxsplit=1)

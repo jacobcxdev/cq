@@ -72,10 +72,17 @@ def validate_location(root, app, system_auth, accounts, source=None):
     return root
 
 
-def app_pin(app):
+def app_pin(app, root=None):
     app = pathlib.Path(app)
     info = plistlib.loads((app / 'Contents/Info.plist').read_bytes())
     digest = hashlib.sha256((app / 'Contents/Resources/app.asar').read_bytes()).hexdigest()
+    if (info.get('CFBundleShortVersionString') == PIN['app_version']
+            and str(info.get('CFBundleVersion')) == PIN['app_build']
+            and digest != PIN['asar_sha256'] and root is not None):
+        sys.path.insert(0, str(HERE / 'runtime'))
+        import app_patch
+        app_patch.verify_installed(app, root, PIN['asar_sha256'])
+        return dict(PIN)
     if (info.get('CFBundleShortVersionString') != PIN['app_version']
             or str(info.get('CFBundleVersion')) != PIN['app_build']
             or digest != PIN['asar_sha256']):
@@ -195,7 +202,7 @@ def install(args):
     if sys.platform != 'darwin':
         raise ValueError('Native Dots installation currently requires macOS')
     root = validate_location(args.root, args.app, args.system_auth, args.cq_accounts, args.account_source)
-    pin = app_pin(args.app)
+    pin = app_pin(args.app, root if args.mode == 'native' else None)
     private_directory(root)
     existing = root / 'settings.json'
     if existing.exists():
@@ -254,9 +261,30 @@ def install(args):
         shutil.rmtree(old)
     prepared = candidate(root)
     release.activate(prepared)
+    if args.mode == 'native':
+        import app_patch
+        app_patch.prepare(settings.APP, root, update_hook=True)
     save(root / 'installation.json', {'schema': 1, 'installed': True, 'app': pin,
                                     'installed_at': time.time(), 'system_app_modified': False})
     return start(root)
+
+
+def apply_native_patch(root):
+    """Apply a prepared native hook only after the user's existing app exits."""
+    settings = configure(root)
+    if getattr(settings, 'INTEGRATION_MODE', 'isolated') != 'native':
+        return None
+    if not (root / 'app-patch/receipt.json').exists():
+        return None  # Older manually launched installations retain their transport.
+    import app_patch
+    import release
+    receipt = app_patch.prepare(settings.APP, root)
+    if receipt['state'] == 'prepared':
+        if release.normal_app_running():
+            return {'app_patch': 'prepared', 'system_app_modified': False,
+                    'restart_required': True}
+        receipt = app_patch.install(receipt)
+    return {'app_patch': receipt['state'], 'system_app_modified': receipt['state'] == 'installed'}
 
 
 def native_restart_required(root, settings):
@@ -275,6 +303,10 @@ def restart_pending(control):
 
 def start(root, preserve_watcher=False):
     settings = configure(root)
+    patch = apply_native_patch(root)
+    if patch and patch.get('restart_required'):
+        import control
+        return {**restart_pending(control), **patch}
     if not settings.DOTS:
         import control
         watcher = control.ensure_watcher()
@@ -294,7 +326,7 @@ def start(root, preserve_watcher=False):
         if identities:
             control.stop(preserve_watcher=True)
         preserve_watcher = True
-    return control.start(candidate(root), preserve_watcher=preserve_watcher)
+    return {**control.start(candidate(root), preserve_watcher=preserve_watcher), **(patch or {})}
 
 
 def sync(root, preserve_watcher=False):
@@ -336,6 +368,37 @@ def list_dots(root):
                      for handle in settings.DOTS]}
 
 
+def native_patch_summary(root):
+    """Report bundle state even when a transport operation has failed."""
+    try:
+        settings = configure(root)
+        if getattr(settings, 'INTEGRATION_MODE', 'isolated') != 'native':
+            return {'system_app_modified': False}
+        import app_patch
+        state = app_patch.status(settings.APP, root)
+        result = {'app_patch': state['state'],
+                  'system_app_modified': state['system_app_modified']}
+        path = settings.ROOT / 'app-patch-status.json'
+        if path.exists() or path.is_symlink():
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+                        or stat.S_IMODE(info.st_mode) != 0o600 or info.st_size > 4096):
+                    raise ValueError('Native update status must be a private regular file')
+                update = json.loads(os.read(fd, 4097))
+            finally:
+                os.close(fd)
+            if (not isinstance(update, dict) or set(update) - {'state', 'reason', 'action'}
+                    or update.get('state') not in ('installed', 'waiting', 'action_required')
+                    or not all(isinstance(value, str) for value in update.values())):
+                raise ValueError('Native update status is invalid')
+            result['app_update'] = update
+        return result
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {'system_app_modified': None}
+
+
 @contextlib.contextmanager
 def operation_lock(root, wait_seconds=0):
     fd = os.open(root / 'operation.lock',
@@ -358,7 +421,7 @@ def operation_lock(root, wait_seconds=0):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('install', 'preinstall', 'start', 'stop', 'status', 'sync', 'list', 'prime'))
+    parser.add_argument('operation', choices=('install', 'preinstall', 'start', 'stop', 'status', 'sync', 'list', 'prime', 'restore-app'))
     parser.add_argument('target', nargs='?')
     parser.add_argument('--root', type=pathlib.Path, required=True)
     parser.add_argument('--app', default='/Applications/ChatGPT.app')
@@ -370,6 +433,7 @@ def main(argv=None):
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--watcher', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    root = args.root
     try:
         if args.root.is_symlink():
             raise ValueError('Installation root must not be a symlink')
@@ -401,9 +465,15 @@ def main(argv=None):
             elif args.operation == 'prime':
                 import awareness
                 result = {'priming': awareness.prime(args.target, all=args.all, manual=True)}
+            elif args.operation == 'restore-app':
+                import app_patch
+                receipt, _ = app_patch._receipt(settings.APP, root, require_hook=False)
+                restored = app_patch.rollback(receipt)
+                result = {'app_patch': restored['state'], 'system_app_modified': False}
             else:
                 import control
                 result = {'stop': control.stop, 'status': control.status}[args.operation]()
+        result.update(native_patch_summary(root))
         print(json.dumps(result))
         if args.operation == 'prime' and any(row['outcome'] != 'accepted' for row in result['priming']):
             return 1
@@ -411,7 +481,7 @@ def main(argv=None):
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:
         # External output, credential JSON and server bodies never become diagnostics.
         message = str(error) if isinstance(error, ValueError) else type(error).__name__
-        print(json.dumps({'error': message, 'system_app_modified': False}), file=sys.stderr)
+        print(json.dumps({'error': message, **native_patch_summary(root)}), file=sys.stderr)
         return 1
 
 

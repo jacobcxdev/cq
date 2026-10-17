@@ -11,10 +11,17 @@ def app_check():
     info=archive.stat(); identity=(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns)
     if identity!=_verified_app:
         if hashlib.sha256(archive.read_bytes()).hexdigest()!=settings.ASAR_SHA256:
-            raise ValueError('Native renderer differs from qualified build')
+            if settings.INTEGRATION_MODE!='native':
+                raise ValueError('Native renderer differs from qualified build')
+            import app_patch
+            app_patch.verify_installed(settings.APP,ROOT.parent,settings.ASAR_SHA256)
         _verified_app=identity
 
 def isolated_pid(port=None):
+    embedded=None
+    if settings.INTEGRATION_MODE=='native':
+        import native_debug
+        embedded=native_debug._embedded_auth(ROOT)
     rows=subprocess.check_output(['/bin/ps','-axo','pid=,uid=,command='],text=True).splitlines()
     expected=str(settings.APP/'Contents/MacOS/ChatGPT')
     matches=[]
@@ -25,9 +32,12 @@ def isolated_pid(port=None):
         except ValueError:continue
         data_args=[a for a in args if a.startswith('--user-data-dir')]
         if settings.INTEGRATION_MODE == 'native':
-            profile_matches=(not data_args
+            profile_matches=(not data_args and (
+                (embedded is not None and int(values[0])==embedded['app_pid']
+                 and not any(a.startswith('--remote-debugging-') for a in args)) or
+                (embedded is None
                 and [a for a in args if a.startswith('--cq-dots-runtime=')]==['--cq-dots-runtime='+str(ROOT)]
-                and [a for a in args if a.startswith('--remote-debugging-')]==['--remote-debugging-pipe'])
+                and [a for a in args if a.startswith('--remote-debugging-')]==['--remote-debugging-pipe'])))
         else:
             profile_matches=data_args==['--user-data-dir='+str(ROOT/'user-data')]
         if (int(values[1])==os.getuid() and args and args[0]==expected
@@ -39,6 +49,11 @@ def isolated_pid(port=None):
         import native_debug
         identity=native_debug.identity(ROOT)
         if identity['app_pid']!=matches[0]:raise ValueError('Native private renderer app identity changed')
+        if embedded is not None:
+            app_check()
+            if identity.get('debug_transport')!='embedded' or identity['broker_pid']!=matches[0]:
+                raise ValueError('Native embedded renderer identity changed')
+            return matches[0]
         child=subprocess.check_output(['/bin/ps','-p',str(matches[0]),'-o','ppid='],text=True).strip()
         broker=subprocess.check_output(['/bin/ps','-p',str(identity['broker_pid']),'-o','uid=,command='],text=True).strip().split(maxsplit=1)
         expected_broker=[str(ROOT/'venv/bin/python'),'-u',str(ROOT/'native_debug.py')]

@@ -1,6 +1,9 @@
 import fcntl
 import importlib.util
+import json
+import os
 import pathlib
+import plistlib
 import subprocess
 import tempfile
 import types
@@ -145,6 +148,152 @@ class AccountWatchTests(unittest.TestCase):
         with mock.patch.object(watcher,'fingerprint') as fingerprint:
             with self.assertRaises(OSError):watcher.main()
         self.assertEqual(outside.read_text(),'unchanged');fingerprint.assert_not_called()
+
+
+class NativePatchWatchTests(unittest.TestCase):
+    def setUp(self):
+        self.directory=tempfile.TemporaryDirectory();self.addCleanup(self.directory.cleanup)
+        self.root=pathlib.Path(self.directory.name).resolve();self.root.chmod(0o700)
+        self.runtime=self.root/'runtime';self.runtime.mkdir(mode=0o700)
+        self.app=self.root/'fixture.app'
+        (self.app/'Contents/Resources').mkdir(parents=True)
+        self.info=self.app/'Contents/Info.plist'
+        self.info.write_bytes(plistlib.dumps({'CFBundleShortVersionString':'1.2.3','CFBundleVersion':'123'}))
+        self.asar=self.app/'Contents/Resources/app.asar';self.asar.write_text('original')
+        (self.root/'app-patch').mkdir(mode=0o700)
+        self.receipt_path=self.root/'app-patch/receipt.json'
+        self.receipt_path.write_text('{}');self.receipt_path.chmod(0o600)
+        self.receipt={'state':'installed','patched_asar_sha256':'patched'}
+        self.patch_module=types.SimpleNamespace(
+            PIN={'app_version':'1.2.3','app_build':'123','asar_sha256':'original'},
+            _receipt=mock.Mock(side_effect=lambda *_:(self.receipt,self.root/'app-patch')),
+            digest=mock.Mock(side_effect=lambda path:path.read_text()),
+            verify_installed=mock.Mock(return_value='patched'),
+            _ensure_stopped=mock.Mock(),status=mock.Mock(return_value={'automatic_reapply_allowed':True}),
+            prepare=mock.Mock(return_value={'state':'prepared'}),install=mock.Mock(side_effect=self.install))
+        patches=[mock.patch.object(CONFIG,'ROOT',self.runtime,create=True),
+                 mock.patch.object(CONFIG,'APP',self.app,create=True),
+                 mock.patch.object(CONFIG,'INTEGRATION_MODE','native',create=True),
+                 mock.patch.dict('sys.modules',{'app_patch':self.patch_module})]
+        for item in patches:item.start();self.addCleanup(item.stop)
+
+    def install(self, *_):
+        self.asar.write_text('patched')
+        self.receipt_path.write_text('{"state":"installed"}')
+        return {'state':'installed'}
+
+    def test_same_pin_pristine_update_reapplies_once_after_verified_exit(self):
+        state,event=watcher.watch_patch_once(None)
+        self.assertEqual(state['status'],{'state':'installed','reason':'reapplied'})
+        self.assertEqual(event['event'],'native_patch_installed')
+        self.patch_module._ensure_stopped.assert_called_once_with(self.app)
+        self.patch_module.status.assert_called_once_with(self.app,self.root)
+        self.patch_module.prepare.assert_called_once_with(self.app,self.root)
+        self.patch_module.install.assert_called_once_with({'state':'prepared'})
+        self.assertEqual(watcher.watch_patch_once(state),(state,None))
+        self.assertEqual(self.patch_module.install.call_count,1)
+        status=self.runtime/'app-patch-status.json'
+        self.assertEqual(status.stat().st_mode&0o777,0o600)
+        self.assertEqual(json.loads(status.read_text()),state['status'])
+
+    def test_running_app_is_left_untouched_then_reapplied_after_exit(self):
+        self.patch_module._ensure_stopped.side_effect=[ValueError('still running'),None]
+        state,event=watcher.watch_patch_once(None)
+        self.assertEqual(state['status']['state'],'waiting')
+        self.assertIn('will not stop or restart',state['status']['action'])
+        self.patch_module.prepare.assert_not_called();self.patch_module.install.assert_not_called()
+        state,event=watcher.watch_patch_once(state)
+        self.assertEqual(state['status']['reason'],'reapplied')
+        self.patch_module.install.assert_called_once()
+
+    def test_unknown_version_or_hash_settles_without_patch_or_retry_loop(self):
+        for change in ('version','hash'):
+            with self.subTest(change=change):
+                self.info.write_bytes(plistlib.dumps({'CFBundleShortVersionString':'new' if change=='version' else '1.2.3','CFBundleVersion':'123'}))
+                self.asar.write_text('unknown' if change=='hash' else 'original')
+                with mock.patch.object(watcher,'_check_patch',wraps=watcher._check_patch) as check:
+                    state,event=watcher.watch_patch_once(None)
+                    self.assertEqual(state['status']['state'],'action_required')
+                    self.assertEqual(watcher.watch_patch_once(state),(state,None))
+                check.assert_called_once()
+        self.patch_module.prepare.assert_not_called();self.patch_module.install.assert_not_called()
+        self.patch_module._ensure_stopped.assert_not_called()
+
+    def test_prepared_rollback_and_transitional_receipts_never_auto_activate(self):
+        for value in ('prepared','rolled_back','installing','rolling_back'):
+            with self.subTest(state=value):
+                self.receipt['state']=value
+                state,event=watcher.watch_patch_once(None)
+                self.assertEqual(state['status']['reason'],'explicit_start_required')
+        self.patch_module.prepare.assert_not_called();self.patch_module.install.assert_not_called()
+        self.patch_module.status.assert_not_called()
+
+    def test_patch_module_can_deny_reapplication_of_an_installed_receipt(self):
+        self.patch_module.status.return_value={'state':'update_required','automatic_reapply_allowed':False}
+        state,event=watcher.watch_patch_once(None)
+        self.assertEqual(state['status']['reason'],'explicit_start_required')
+        self.patch_module.prepare.assert_not_called();self.patch_module.install.assert_not_called()
+
+    def test_existing_patched_app_is_verified_without_preparing_or_installing(self):
+        self.asar.write_text('patched')
+        state,event=watcher.watch_patch_once(None)
+        self.assertEqual(state['status'],{'state':'installed','reason':'verified'})
+        self.patch_module.verify_installed.assert_called_once()
+        self.patch_module.prepare.assert_not_called();self.patch_module.install.assert_not_called()
+
+    def test_operation_lock_defers_reapplication_without_mutating_app(self):
+        path=self.root/'operation.lock';path.touch(mode=0o600)
+        with path.open('r+') as lock:
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            state,event=watcher.watch_patch_once(None)
+        self.assertEqual(state['status']['reason'],'operation_busy')
+        self.patch_module.prepare.assert_not_called();self.patch_module.install.assert_not_called()
+        state,event=watcher.watch_patch_once(state)
+        self.assertEqual(state['status']['reason'],'reapplied')
+
+    def test_failed_reapplication_is_generic_and_does_not_retry_automatically(self):
+        self.patch_module.install.side_effect=ValueError('private path or signing details')
+        state,event=watcher.watch_patch_once(None)
+        self.assertEqual(state['status']['reason'],'patch_reapplication_failed')
+        self.assertNotIn('private path',json.dumps(event))
+        self.assertEqual(watcher.watch_patch_once(state),(state,None))
+        self.patch_module.install.assert_called_once()
+
+    def test_app_update_metadata_is_seen_without_reading_authentication(self):
+        initial=watcher.patch_fingerprint()
+        self.asar.write_text('changed archive')
+        with mock.patch.object(pathlib.Path,'read_text',side_effect=AssertionError('No reads')), \
+             mock.patch.object(pathlib.Path,'read_bytes',side_effect=AssertionError('No reads')):
+            self.assertNotEqual(watcher.patch_fingerprint(),initial)
+
+    def test_update_action_required_never_runs_account_sync_or_starts_app(self):
+        state={'revision':'unknown','status':{'state':'action_required','reason':'unsupported_app_version'}}
+        with mock.patch.object(watcher.time,'sleep',side_effect=[None,KeyboardInterrupt]),mock.patch.object(watcher,'watch_patch_once',return_value=(state,{'event':'native_patch_action_required'})),mock.patch.object(watcher,'watch_once') as sync,mock.patch('builtins.print'):
+            with self.assertRaises(KeyboardInterrupt):watcher.main()
+        sync.assert_not_called()
+
+    def test_successful_reapply_leaves_app_closed_without_account_sync(self):
+        state={'revision':'changed','status':{'state':'installed','reason':'reapplied'}}
+        with mock.patch.object(watcher.time,'sleep',side_effect=[None,None,KeyboardInterrupt]),mock.patch.object(watcher,'watch_patch_once',side_effect=[(state,{'event':'native_patch_installed','reason':'reapplied'}),(state,None)]),mock.patch.object(watcher,'_normal_app_open',return_value=False),mock.patch.object(watcher,'sync') as sync,mock.patch('builtins.print'):
+            with self.assertRaises(KeyboardInterrupt):watcher.main()
+        sync.assert_not_called()
+
+    def test_pending_account_changes_reconcile_when_user_opens_reapplied_app(self):
+        state={'revision':'changed','status':{'state':'installed','reason':'reapplied'}}
+        with mock.patch.object(watcher.time,'sleep',side_effect=[None,None,KeyboardInterrupt]),mock.patch.object(watcher,'watch_patch_once',return_value=(state,None)),mock.patch.object(watcher,'_normal_app_open',side_effect=[False,True]),mock.patch.object(watcher,'watch_once',return_value=('accounts',None)) as reconcile:
+            with self.assertRaises(KeyboardInterrupt):watcher.main()
+        reconcile.assert_called_once_with(None)
+
+    def test_app_open_lookup_requires_exact_current_user_executable(self):
+        executable=str(self.app/'Contents/MacOS/ChatGPT')
+        for rows,expected in [(f'42 {os.getuid()} {executable}\n',True),
+                              (f'41 -2 /usr/libexec/dhcp6d\n42 {os.getuid()} {executable}\n',True),
+                              (f'42 {os.getuid()+1} {executable}\n',False),
+                              (f'42 {os.getuid()} {executable}Helper\n',False),
+                              (f'42 {os.getuid()} {executable} --user-data-dir=/research\n',False),
+                              ('malformed process listing',False)]:
+            with self.subTest(rows=rows),mock.patch.object(watcher.subprocess,'run',return_value=types.SimpleNamespace(returncode=0,stdout=rows)):
+                self.assertEqual(watcher._normal_app_open(),expected)
 
 
 if __name__=='__main__':unittest.main()

@@ -4,6 +4,7 @@ import pathlib
 import signal
 import subprocess
 import sys
+import tempfile
 import types
 import unittest
 from unittest import mock
@@ -15,7 +16,9 @@ import release
 
 class ControlTests(unittest.TestCase):
     def setUp(self):
-        self.root = pathlib.Path('/private/isolated-fixture')
+        temporary = tempfile.TemporaryDirectory(prefix='cq-control-test-')
+        self.addCleanup(temporary.cleanup)
+        self.root = pathlib.Path(temporary.name)
         settings = types.SimpleNamespace(ROOT=self.root, APP=pathlib.Path('/Applications/Fixture.app'),
             validate_runtime_paths=mock.Mock(),
             MODULE_ASSET='app-shared-fixture.js',
@@ -26,7 +29,7 @@ class ControlTests(unittest.TestCase):
         mock.patch.object(release, 'normal_app_running', return_value=False).start()
 
     def test_process_only_allows_verified_lifecycle_components(self):
-        for identity, expected in [('probe.py', 'probe.py'), ('app', None),
+        for identity, expected in [('probe.py', 'probe.py'), ('native_bootstrap.py', 'native_bootstrap.py'), ('app', None),
                                    ('launch.py', None), (None, None)]:
             with mock.patch.object(release, 'process_identity', return_value=identity):
                 self.assertEqual(control.process(123), expected)
