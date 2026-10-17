@@ -179,10 +179,10 @@ def preflight(candidate):
         regular(root / name)
     regular(root / 'venv/pyvenv.cfg')
     version = subprocess.check_output([str(root / 'venv/bin/python'), '-c',
-        'import pathlib,sys;'
-        'assert sys.prefix != sys.base_prefix;'
-        'assert pathlib.Path(sys.prefix).resolve() == pathlib.Path(sys.argv[1]).resolve();'
-        'import websockets;'
+        'import pathlib,sys\n'
+        'if sys.prefix == sys.base_prefix or pathlib.Path(sys.prefix).resolve() != pathlib.Path(sys.argv[1]).resolve():\n'
+        ' raise RuntimeError("Interpreter escaped isolated venv")\n'
+        'import websockets\n'
         'print(str(sys.version_info.major)+"."+str(sys.version_info.minor)+" "+websockets.__version__)',
         str(root / 'venv')], text=True).strip()
     if version != PYTHON_VERSION + ' ' + WEBSOCKETS_VERSION:

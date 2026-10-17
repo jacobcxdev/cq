@@ -4,6 +4,8 @@ This Python experiment exposes two existing account-owned Dots through one unmod
 
 The runtime routes cloud sessions, room requests, text sends, receipts, thinking status, Pause/Resume and computer signalling to each resource's owner. Native request authentication is checked against the real backend before owner credentials are substituted. Read verification caches for at most 60 seconds; HTTP state mutation is disabled and request bodies are bounded.
 
+The isolated native app-server receives the verified system account's access token through its external-token login protocol. Tokens stay in process memory; the native backend discovers workspace routing and loads account policy. No credential file is copied or refreshed, and token-refresh callbacks are rejected. Expired credentials require stopping the runtime and renewing them through the account's normal sign-in flow.
+
 Explicit Dot-authored CQ blocks can relay in both directions with source attribution, a correlation ID and at most one request plus one reply. Normal history, memories and connectors are not mirrored. Cloud plugins, memories and connector authorisations remain account-owned. The native sender identity remains the signed-in account.
 
 ## Scope and limits

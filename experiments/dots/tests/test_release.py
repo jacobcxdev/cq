@@ -120,15 +120,17 @@ class ReleaseTests(unittest.TestCase):
         (self.root / 'venv/bin/python').write_text(
             '#!' + sys.executable + '\n'
             'import os, sys\n'
-            'os.execv(sys.executable, [sys.executable, "-I", *sys.argv[1:]])\n')
+            'os.execv(sys.executable, [sys.executable, "-I", *(["-O"] if os.environ.get("PYTHONOPTIMIZE") else []), *sys.argv[1:]])\n')
         (self.root / 'venv/bin/python').chmod(0o700)
         real_check_output = subprocess.check_output
-        with mock.patch.object(release.subprocess, 'check_output',
-                               side_effect=lambda *args, **kwargs: real_check_output(
-                                   *args, **kwargs, stderr=subprocess.PIPE)):
-            with self.assertRaises(subprocess.CalledProcessError) as caught:
-                release.preflight(self.candidate)
-        self.assertIn('AssertionError', caught.exception.stderr)
+        for optimisation in ('', '1'):
+            with self.subTest(optimisation=optimisation), mock.patch.dict(os.environ, PYTHONOPTIMIZE=optimisation):
+                with mock.patch.object(release.subprocess, 'check_output',
+                                       side_effect=lambda *args, **kwargs: real_check_output(
+                                           *args, **kwargs, stderr=subprocess.PIPE)):
+                    with self.assertRaises(subprocess.CalledProcessError) as caught:
+                        release.preflight(self.candidate)
+                self.assertIn('Interpreter escaped isolated venv', caught.exception.stderr)
 
     def test_activation_and_rollback_preserve_private_state(self):
         self.prepare()

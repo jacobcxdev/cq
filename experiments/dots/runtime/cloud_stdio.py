@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Task-only read-only adapter for stock Codex's explicit CLI override seam."""
-import http.client, json, os, pathlib, ssl, subprocess, sys, threading, time, urllib.parse
+import http.client, json, os, pathlib, queue, ssl, subprocess, sys, threading, time, urllib.parse
 from websockets.sync.client import connect
 import catalog
 import settings
@@ -99,19 +99,108 @@ def fail(request, message):
     if 'id' in request:
         emit({'id':request['id'],'error':{'code':-32000,'message':message}})
 
+class LocalBootstrap:
+    """Seed only this app-server's process-local auth before native initialization."""
+    def __init__(self, stream):
+        self.stream=stream
+        self.write_lock=threading.Lock()
+        self.lock=threading.Lock()
+        self.waiting=None
+        self.responses=queue.Queue(maxsize=1)
+        self.sequence=0
+
+    def send(self, value):
+        with self.write_lock:
+            self.stream.write(json.dumps(value)+'\n')
+            self.stream.flush()
+
+    def accept(self, value):
+        if value.get('method')=='account/chatgptAuthTokens/refresh':
+            if 'id' in value:
+                self.send({'id':value['id'],'error':{'code':-32000,
+                           'message':'Credential refresh is disabled for this read-only session'}})
+            return True
+        with self.lock:
+            if value.get('method') is None and self.waiting is not None and value.get('id')==self.waiting:
+                if self.responses.empty(): self.responses.put_nowait(value)
+                return True
+        return False
+
+    def closed(self):
+        with self.lock:
+            if self.waiting is not None and self.responses.empty():
+                self.responses.put_nowait(None)
+
+    def rpc(self, method, params, deadline):
+        self.sequence+=1
+        identifier='cq-internal-bootstrap-'+str(self.sequence)
+        with self.lock: self.waiting=identifier
+        try:
+            self.send({'id':identifier,'method':method,'params':params})
+            try: response=self.responses.get(timeout=max(0,deadline-time.monotonic()))
+            except queue.Empty: raise ValueError('Local authentication bootstrap timed out') from None
+            if response is None or 'error' in response or not isinstance(response.get('result'),dict):
+                raise ValueError('Local authentication bootstrap failed')
+            return response['result']
+        finally:
+            with self.lock: self.waiting=None
+
+    def initialize(self, request, owner, timeout=60):
+        deadline=time.monotonic()+timeout
+        result=self.rpc('initialize',request.get('params',{}),deadline)
+        self.send({'method':'initialized'})
+        self.rpc('account/login/start',{'type':'chatgptAuthTokens',
+                 'accessToken':owner['token'],'chatgptAccountId':owner['account_id']},deadline)
+        account=self.rpc('account/read',{'refreshToken':False},deadline)
+        routing=account.get('workspaceRouting')
+        if (not isinstance(routing,dict) or routing.get('chatgptAccountId')!=owner['account_id']
+                or routing.get('accountRoutingOverride') not in {'us','us_cr','NO_CONSTRAINT'}):
+            raise ValueError('Local workspace routing verification failed')
+        origin=urllib.parse.urlsplit(routing.get('backendOrigin',''))
+        if (origin.scheme!='https' or not origin.hostname or origin.username is not None
+                or origin.password is not None or origin.path not in {'','/'} or origin.query or origin.fragment):
+            raise ValueError('Local workspace routing verification failed')
+        policy=self.rpc('configRequirements/read',{},deadline)
+        if 'requirements' not in policy or (policy['requirements'] is not None and not isinstance(policy['requirements'],dict)):
+            raise ValueError('Local workspace policy verification failed')
+        return result
+
+
+def local_arguments(arguments):
+    """CLI overrides win over file/profile config; remove conflicting CLI values."""
+    clean=[]
+    index=0
+    while index<len(arguments):
+        argument=arguments[index]
+        if argument in {'-c','--config'} and index+1<len(arguments):
+            value=arguments[index+1]
+            if value.split('=',1)[0].strip()=='cli_auth_credentials_store':
+                index+=2
+                continue
+        if any(argument.startswith(prefix) and argument[len(prefix):].split('=',1)[0].strip()=='cli_auth_credentials_store'
+               for prefix in ['-c=','--config=','-c']):
+            index+=1
+            continue
+        clean.append(argument)
+        index+=1
+    return [REAL,'-c','cli_auth_credentials_store="ephemeral"',*clean]
+
+
 def main():
     arguments=sys.argv[1:]
     env=dict(os.environ); env['CODEX_CLI_PATH']=REAL
-    if 'app-server' not in arguments or APP_MARKER not in arguments:
+    if 'app-server' not in arguments:
         os.execve(REAL,[REAL,*arguments],env)
-    event({'app_stdio_adapter_started':True,'read_only':True})
+    app_session=APP_MARKER in arguments
+    event({'app_stdio_adapter_started':True,'read_only':True,'app_session':app_session})
     system,accounts=catalog.inventory()
     owners={a['alias']:a for a in accounts if a['alias'] in {settings.SYSTEM_ALIAS,settings.SECONDARY_ALIAS}}
     if system['alias']!=settings.SYSTEM_ALIAS or len(owners)!=2:
         raise ValueError('Frozen proof owner identity changed')
-    refresh_thread_owners(owners)
-    local=subprocess.Popen([REAL,*arguments],env=env,stdin=subprocess.PIPE,
+    if app_session: refresh_thread_owners(owners)
+    local=subprocess.Popen(local_arguments(arguments),env=env,stdin=subprocess.PIPE,
                            stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,bufsize=1)
+    bootstrap=LocalBootstrap(local.stdin)
     sessions={}
     initialized=False
     stopping=threading.Event()
@@ -177,6 +266,7 @@ def main():
                 raw=stream.readline() if source=='local' else stream.recv()
                 if not raw: break
                 value=json.loads(raw)
+                if source=='local' and bootstrap.accept(value): continue
                 if 'id' in value:
                     identifier=str(value['id'])
                     if identifier.startswith('cq-internal-'): continue
@@ -208,13 +298,15 @@ def main():
                         emit(value)
         except Exception as error:
             event({'owner_alias':source,'receive_failure_type':type(error).__name__})
+        finally:
+            if source=='local': bootstrap.closed()
 
     def send(source, request, resource=None):
         if 'id' in request:
             with PENDING_LOCK: PENDING[(source,str(request['id']))]=(request.get('method'),resource)
         raw=json.dumps(request)
         if source=='local':
-            local.stdin.write(raw+'\n'); local.stdin.flush()
+            bootstrap.send(request)
         else: sessions[source].send(raw)
 
     threading.Thread(target=receive,args=('local',local.stdout),daemon=True).start()
@@ -223,8 +315,8 @@ def main():
             if len(raw)>4*1024*1024: raise ValueError('Native request exceeds frame bound')
             request=json.loads(raw); method=request.get('method')
             if method=='initialize' and not initialized:
-                send('local',request)
-                for alias,owner in owners.items():
+                initialization=bootstrap.initialize(request,system)
+                for alias,owner in (owners.items() if app_session else []):
                     ws=connect('wss://codex-cloud-backend.chatgpt.com/',
                         subprotocols=['codex-app-server','codex-client.desktop','openai-bearer.'+owner['token']],
                         additional_headers={'ChatGPT-Account-Id':owner['account_id'],'X-OpenAI-Product-Sku':'codex',
@@ -240,16 +332,18 @@ def main():
                     event({'owner_alias':alias,'upgrade_status':ws.response.status_code,'initialize_success':True})
                     threading.Thread(target=receive,args=(alias,ws),daemon=True).start()
                 initialized=True
+                emit({'id':request['id'],'result':initialization})
             elif method=='initialized':
                 for alias in sessions: send(alias,request)
-                send('local',request)
+            elif not initialized:
+                fail(request,'Local authentication bootstrap is required')
             elif method in LOCAL_READS:
                 event({'routed_method':method,'owner_alias':'local'})
                 send('local',request)
             elif method in CLOUD_READS:
                 try:
                     resource=thread_id(request.get('params',{}))
-                    if resolve_thread_owner(resource,owners) is None:
+                    if not app_session or resolve_thread_owner(resource,owners) is None:
                         send('local',request)
                         continue
                     alias,resource=select_owner(method,request.get('params',{}),system['alias'])
