@@ -714,6 +714,15 @@ cq service uninstall
 
 </details>
 
+## Dots experiment
+
+[Isolated multi-account Dots](experiments/dots/README.md) is a separate, opt-in
+research runtime for two existing account-owned Dots in one unmodified native
+app. It includes an explicit message relay and ordinary setup messages that
+introduce the peer roster and relay syntax. It is not part of the supported CQ
+CLI or service, and requires private configuration and a qualified native app
+version. See its README for limits, validation and rollback.
+
 ## Development
 
 ```bash
