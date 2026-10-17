@@ -1,0 +1,26 @@
+{
+  "runtime_root": "/Users/example/.local/share/cq-dots/runtime",
+  "app_path": "/Applications/ChatGPT.app",
+  "app_version": "REPLACE_WITH_PINNED_VERSION",
+  "app_build": "REPLACE_WITH_PINNED_BUILD",
+  "asar_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "module_asset": "app-shared-REPLACE_WITH_PINNED_ASSET.js",
+  "account_source": "/Users/example/Library/Application Support/CodexBar",
+  "system_auth": "/Users/example/.codex/auth.json",
+  "system_alias": "11111111",
+  "secondary_alias": "22222222",
+  "secondary_selector": "secondary@example.invalid",
+  "debug_port": 0,
+  "dots": {
+    "Primary": {
+      "owner_alias": "11111111",
+      "profile_id": "primary-profile-example",
+      "root_thread_id": "primary-root-example"
+    },
+    "Secondary": {
+      "owner_alias": "22222222",
+      "profile_id": "secondary-profile-example",
+      "root_thread_id": "secondary-root-example"
+    }
+  }
+}
