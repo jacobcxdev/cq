@@ -120,6 +120,20 @@ class DirectoryAndStableRoutingTests(unittest.TestCase):
 
 
 class RelayFilesystemTests(unittest.TestCase):
+    def test_fresh_runtime_created_private_relay_parent(self):
+        import json,stat,tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            runtime=pathlib.Path(directory)/'runtime';runtime.mkdir(mode=0o700)
+            relay_root=runtime/'null-executor'/'room-relay'
+            with patch.object(relay,'ROOT',relay_root),patch.object(relay,'read_explicit',return_value=[]), \
+                 patch.object(relay.time,'sleep',side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):relay.main()
+            for path in (relay_root.parent,relay_root):
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode),0o700)
+            state=json.loads((relay_root/'state.json').read_text())
+            self.assertFalse(state['active'])
+            self.assertEqual(state['relayed'],[])
+
     def test_symlink_relay_directory_cannot_change_outside_state(self):
         import pathlib,tempfile
         from unittest.mock import patch

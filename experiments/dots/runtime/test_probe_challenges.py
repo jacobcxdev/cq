@@ -1,5 +1,6 @@
 import test_support
 import json, unittest
+from unittest.mock import patch
 import probe
 
 class ChallengeTests(unittest.TestCase):
@@ -22,6 +23,28 @@ class ChallengeTests(unittest.TestCase):
         probe.remember_challenge(self.primary,self.worker,'worker',now=1)
         with self.assertRaises(ValueError): probe.owner_message_body(self.body,'other',now=2)
         with self.assertRaises(ValueError): probe.owner_message_body(self.body,'worker',now=6)
+
+    def test_full_cache_keeps_newest_challenge_without_growing(self):
+        owner=json.dumps({'attestation_challenge':'owner-proof','expire_after':540})
+        with patch.object(probe.settings,'DOT_OWNERS',{'main':'main','worker':'worker'}):
+            for index in range(17):
+                primary=json.dumps({'attestation_challenge':str(index),'expire_after':540})
+                probe.remember_challenge(primary,owner,'worker',now=index)
+        self.assertEqual(len(probe.CHALLENGES),16)
+        self.assertNotIn(('0','worker'),probe.CHALLENGES)
+        self.assertIn(('1','worker'),probe.CHALLENGES)
+        body=json.dumps({'app_attest_challenge':'16'})
+        self.assertEqual(json.loads(probe.owner_message_body(body,'worker',now=17)),
+                         {'app_attest_challenge':'owner-proof'})
+        with self.assertRaises(ValueError):probe.owner_message_body(body,'worker',now=17)
+
+    def test_duplicate_challenge_does_not_evict_existing_entries(self):
+        probe.CHALLENGES.update({(str(index),'worker'):('owner-proof',540) for index in range(16)})
+        original=dict(probe.CHALLENGES)
+        with patch.object(probe.settings,'DOT_OWNERS',{'main':'main','worker':'worker'}):
+            with self.assertRaisesRegex(ValueError,'duplicate native challenge'):
+                probe.remember_challenge(json.dumps({'attestation_challenge':'0'}),self.worker,'worker',now=1)
+        self.assertEqual(probe.CHALLENGES,original)
 
     def test_no_missing_or_malformed_proof_fallback(self):
         for bad in ['{}','[]',json.dumps({'attestation_challenge':''}),

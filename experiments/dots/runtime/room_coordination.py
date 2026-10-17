@@ -65,6 +65,7 @@ def relay_message(state,request,message_id,save):
 
 def main():
     settings.validate_runtime_paths(ROOT.parent.parent)
+    ROOT.parent.mkdir(mode=0o700,exist_ok=True)
     ROOT.mkdir(mode=0o700,exist_ok=True)
     settings.validate_runtime_paths(ROOT.parent.parent)
     lock_fd=os.open(ROOT/'process.lock',os.O_WRONLY|os.O_APPEND|os.O_CREAT|os.O_NOFOLLOW,0o600)

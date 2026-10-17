@@ -318,11 +318,12 @@ def remember_challenge(primary_data, owner_data, owner_alias, now=None):
         for key in list(CHALLENGES):
             if CHALLENGES[key][1] <= now:
                 del CHALLENGES[key]
-        if len(CHALLENGES) >= 16 * max(1, len(set(settings.DOT_OWNERS.values())) - 1):
-            raise ValueError('native challenge cache full')
         key = (primary, owner_alias)
         if key in CHALLENGES:
             raise ValueError('duplicate native challenge')
+        if len(CHALLENGES) >= 16 * max(1, len(set(settings.DOT_OWNERS.values())) - 1):
+            # Background native checks also issue challenges; retain the newest bounded set.
+            del CHALLENGES[min(CHALLENGES, key=lambda key: CHALLENGES[key][1])]
         CHALLENGES[key] = (secondary, now + min(first_expiry, second_expiry))
 
 def owner_message_body(body, owner_alias, now=None):
