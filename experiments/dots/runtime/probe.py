@@ -1069,16 +1069,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     urls={settings.SYSTEM_ALIAS:value['websocket_url']}
                     candidates = [account for alias, account in accounts.items() if alias != settings.SYSTEM_ALIAS]
                     if native_mode:
-                        results = native_owner_results(candidates, lambda account:
-                            catalog.get(account, self.path, owner_headers(headers, account)))
-                        for alias, (success, result) in results.items():
-                            if not success:
-                                raise ValueError('Secondary websocket unavailable')
-                            urls[alias] = result['websocket_url']
+                        request_path, request_headers = self.path, dict(headers)
+                        def resolve_url(alias):
+                            account = accounts[alias]
+                            return catalog.get(account, request_path,
+                                owner_headers(request_headers, account))['websocket_url']
+                        value['websocket_url']=CELSIUS.issue(urls,fixture[2],resolve_url=resolve_url)
                     else:
                         for account in candidates:
                             urls[account['alias']]=catalog.get(account,self.path,owner_headers(headers,account))['websocket_url']
-                    value['websocket_url']=CELSIUS.issue(urls,fixture[2])
+                        value['websocket_url']=CELSIUS.issue(urls,fixture[2])
                     data=json.dumps(value).encode()
                     summary['owner_celsius_fanout']=True
                 except Exception as error:
@@ -1086,6 +1086,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         raise
                     summary['owner_celsius_fanout'] = False
                     summary['secondary_error_type'] = type(error).__name__
+                    # Never report a healthy primary-only stream as a multi-owner
+                    # session. Native retry can wait for catalogue readiness.
+                    event(summary)
+                    self.send_response(503)
+                    self.send_header('Retry-After','1')
+                    self.send_header('Content-Length','0')
+                    self.end_headers()
+                    return
             if path == '/backend-api/ios/attestation_challenge':
                 summary['request_header_names'] = sorted(headers.keys())
                 summary['native_device_proof_present'] = any(

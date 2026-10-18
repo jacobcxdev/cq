@@ -5,18 +5,18 @@ from celsius import Broker,targets,secondary_frame,PRIMARY,SECONDARY
 
 class CelsiusTests(unittest.TestCase):
     def setUp(self):
-        self.owners={'main-room':{'alias':PRIMARY},'worker-room':{'alias':SECONDARY},
+        self.owners={'main-room':{'alias':PRIMARY},'worker-room':{'alias':SECONDARY,'viewer_ids':{'worker-user'}},
                      'main-thread':{'alias':PRIMARY}}
         self.frame={'type':'message','topic_id':'calpico-chatgpt-messaging','offset':'worker-offset',
                     'payload':{'type':'calpico-message-add','payload':{'room_id':'worker-room',
                     'message':{'id':'message','account_user_id':'worker-user','content':{'text':'example'}}}}}
 
-    def handle_scenario(self,steps,mode='native',secondary_error=None,secondary_send_error=None):
+    def handle_scenario(self,steps,mode='native',secondary_error=None,secondary_send_error=None,resolve_url=None):
         broker=Broker.__new__(Broker)
         broker.lock=__import__('threading').Lock();broker.public_tls=None
-        broker.grants={'/test':(1000,{SECONDARY:'worker',PRIMARY:'main'},self.owners)}
+        broker.grants={'/test':(1000,{SECONDARY:'worker',PRIMARY:'main'},self.owners,resolve_url)}
         state={'events':[],'primary':Mock(),'secondary':Mock(),'client':Mock(),
-               'connectors':[],'queued':collections.deque(),'now':100,'reads':0}
+               'connectors':[],'queued':collections.deque(),'now':100,'reads':0,'urls':[]}
         state['secondary'].send.side_effect=secondary_send_error
         broker.event=state['events'].append
         state['client'].request.path='/test'
@@ -40,6 +40,7 @@ class CelsiusTests(unittest.TestCase):
                 result.start.side_effect=lambda:state['connectors'].append((target,args))
             return result
         def connect(url,**kwargs):
+            state['urls'].append(url)
             if url=='main':return state['primary']
             if secondary_error is not None:raise secondary_error
             return state['secondary']
@@ -57,7 +58,7 @@ class CelsiusTests(unittest.TestCase):
 
     def command(self,identifier,kind='subscribe',topic='calpico-chatgpt-messaging'):
         value={'type':kind}
-        if kind=='subscribe':value['topic_id']=topic
+        if kind in {'subscribe','unsubscribe'}:value['topic_id']=topic
         return ('client',json.dumps([{'id':identifier,'command':value}]))
 
     def primary_ack(self,identifier):
@@ -71,6 +72,74 @@ class CelsiusTests(unittest.TestCase):
         self.assertEqual([frame.get('id') for frame in state['frames']],[91,None])
         self.assertEqual(state['frames'][-1],marker)
         self.assertTrue(any(event.get('celsius_owner_unavailable')==SECONDARY for event in state['events']))
+        self.assertFalse(any('celsius_broker_error_type' in event for event in state['events']))
+
+    def test_native_url_lookup_failure_retries_without_reconnecting_primary(self):
+        resolver=Mock(side_effect=[OSError('offline'),'wss://ws.chatgpt.com/worker'])
+        def retry_due(state):
+            state['now']=101
+            raise queue.Empty
+        def primary_still_connected(state):
+            state['primary'].close.assert_not_called()
+            self.start_secondary(state)
+        state=self.handle_scenario([self.command(91,'connect'),self.command(92),
+                                    self.primary_ack(1),self.primary_ack(3),self.start_secondary,
+                                    retry_due,primary_still_connected,(SECONDARY,json.dumps([self.frame]))],
+                                    resolve_url=resolver)
+        self.assertEqual(resolver.call_args_list,[unittest.mock.call(SECONDARY)]*2)
+        self.assertEqual(state['urls'],['main','wss://ws.chatgpt.com/worker'])
+        self.assertEqual([frame.get('id') for frame in state['frames']],[91,92,None])
+        self.assertTrue(state['frames'][-1]['payload']['payload']['message']['is_self'])
+        commands=[json.loads(call.args[0])[0]['command']['type'] for call in state['secondary'].send.call_args_list]
+        self.assertEqual(commands,['connect','subscribe'])
+        self.assertFalse(any('celsius_broker_error_type' in event for event in state['events']))
+
+    def test_native_reconnect_restores_subscriptions_but_not_unsubscribed_rooms(self):
+        def disconnect(state):
+            state['first_secondary']=state['secondary']
+            return ((SECONDARY,state['first_secondary']),None)
+        def retry_due(state):
+            state['now']=101
+            raise queue.Empty
+        def reconnect(state):
+            state['secondary']=Mock()
+            state['primary'].close.assert_not_called()
+            self.start_secondary(state)
+        def old_socket_closed_again(state):
+            return ((SECONDARY,state['first_secondary']),None)
+        def restored_event(state):
+            state['secondary'].close.assert_not_called()
+            return ((SECONDARY,state['secondary']),json.dumps([self.frame]))
+        state=self.handle_scenario([self.start_secondary,self.command(91,'connect'),self.command(92),
+                                    self.primary_ack(1),self.primary_ack(3),
+                                    self.command(93,topic='calpico-room-live:worker-room'),
+                                    (SECONDARY,json.dumps([{'id':5,'reply':{'type':'ok'}}])),
+                                    self.command(94,'unsubscribe',topic='calpico-room-live:worker-room'),
+                                    self.command(95,'presence'),disconnect,retry_due,reconnect,
+                                    old_socket_closed_again,restored_event])
+        commands=[json.loads(call.args[0])[0]['command'] for call in state['secondary'].send.call_args_list]
+        self.assertEqual([command['type'] for command in commands],['connect','subscribe','presence'])
+        self.assertEqual(commands[1]['topic_id'],'calpico-chatgpt-messaging')
+        self.assertEqual(state['urls'].count('main'),1)
+        self.assertEqual(state['frames'][-1]['payload']['type'],'calpico-message-add')
+        self.assertFalse(any('celsius_broker_error_type' in event for event in state['events']))
+
+    def test_native_retries_use_bounded_backoff_and_validate_fresh_origin(self):
+        resolver=Mock(side_effect=['wss://untrusted.invalid/events',OSError('offline'),
+                                  'wss://ws.chatgpt.com/worker'])
+        def advance(now):
+            def action(state):
+                state['now']=now
+                raise queue.Empty
+            return action
+        def no_early_retry(state):
+            self.assertEqual(state['connectors'],[])
+        state=self.handle_scenario([self.command(91),self.primary_ack(1),self.start_secondary,
+                                    advance(101),self.start_secondary,advance(102),no_early_retry,
+                                    advance(103),self.start_secondary],resolve_url=resolver)
+        self.assertEqual(resolver.call_count,3)
+        self.assertEqual(state['urls'],['main','wss://ws.chatgpt.com/worker'])
+        self.assertEqual([frame['id'] for frame in state['frames']],[91])
         self.assertFalse(any('celsius_broker_error_type' in event for event in state['events']))
 
     def test_native_secondary_eof_fails_only_its_own_subscription(self):
@@ -212,6 +281,13 @@ class CelsiusTests(unittest.TestCase):
                     with self.assertRaises(ValueError):broker.issue({**urls,'unconfigured':'wss://ws.chatgpt.com/events'},owners)
                     if len(aliases)>1:
                         with self.assertRaises(ValueError):broker.issue({PRIMARY:urls[PRIMARY]},owners)
+                        resolver=Mock()
+                        issued=broker.issue({PRIMARY:urls[PRIMARY]},owners,resolve_url=resolver)
+                        resolver.assert_not_called()
+                        self.assertIs(broker.grants[issued.removeprefix('wss://ws.chatgpt.com')][3],resolver)
+                        with self.assertRaises(ValueError):broker.issue(urls,owners,resolve_url=resolver)
+                        with self.assertRaises(ValueError):broker.issue({PRIMARY:urls[PRIMARY]},
+                            {'main-room':{'alias':PRIMARY}},resolve_url=resolver)
 
     def test_shared_subscription_ack_and_offsets_cover_each_configured_owner(self):
         for aliases in [[PRIMARY],[PRIMARY,SECONDARY,'33333333']]:
@@ -221,7 +297,7 @@ class CelsiusTests(unittest.TestCase):
                 broker.lock=__import__('threading').Lock();broker.public_tls=None
                 owners={alias+'-room':{'alias':alias} for alias in aliases}
                 urls={alias:'wss://ws.chatgpt.com/'+alias for alias in aliases}
-                broker.grants={'/cq-owner-events/test':(time.monotonic()+60,urls,owners)}
+                broker.grants={'/cq-owner-events/test':(time.monotonic()+60,urls,owners,None)}
                 records=[];broker.event=records.append
                 sockets={alias:Mock() for alias in aliases}
                 client=Mock();client.request.path='/cq-owner-events/test'
@@ -249,7 +325,7 @@ class CelsiusTests(unittest.TestCase):
         broker=Broker.__new__(Broker)
         broker.lock=__import__('threading').Lock()
         broker.grants={'/cq-owner-events/test':(time.monotonic()+60,
-                       {PRIMARY:'main',SECONDARY:'worker'},self.owners)}
+                       {PRIMARY:'main',SECONDARY:'worker'},self.owners,None)}
         broker.public_tls=None
         records=[];broker.event=records.append
         client=Mock();client.request.path='/cq-owner-events/test'
