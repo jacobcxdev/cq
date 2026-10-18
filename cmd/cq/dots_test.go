@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -12,8 +13,69 @@ import (
 	"testing"
 
 	"github.com/alecthomas/kong"
+	"github.com/jacobcxdev/cq/internal/dots"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+func TestDotsPreservedStockCLIExitStatus(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"stock", &dots.CloudStdioExitError{Code: 7}, 7},
+		{"wrapped", errors.Join(errors.New("helper"), &dots.CloudStdioExitError{Code: 42}), 42},
+		{"invalid", &dots.CloudStdioExitError{Code: -1}, 1},
+		{"ordinary", errors.New("configuration unavailable"), 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := dotsExitCode(test.err); got != test.want {
+				t.Fatalf("exit status = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
+func dotsTestRunner(home string, run func(context.Context, dots.Controller, dots.Request) (map[string]any, error)) dotsRunner {
+	return dotsRunner{
+		home:       func() (string, error) { return home, nil },
+		executable: func() (string, error) { return "/usr/local/bin/cq", nil },
+		baseURL:    func() (string, error) { return "http://127.0.0.1:19280", nil },
+		run:        run,
+	}
+}
+
+func TestDotsCanonicalisedInstallationRootBeforeNativeModeRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX installation aliases")
+	}
+	home := t.TempDir()
+	physical := filepath.Join(home, "physical")
+	if err := os.Mkdir(physical, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(home, "alias")
+	if err := os.Symlink(physical, alias); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(alias, "dots")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "settings.json"), []byte(`{"integration_mode":"native"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := canonicalDotsPath(filepath.Join(physical, "dots"))
+	runner := dotsTestRunner(home, func(_ context.Context, controller dots.Controller, request dots.Request) (map[string]any, error) {
+		if controller.Root != want || controller.BaseURL == "" || request.Operation != "start" {
+			t.Fatalf("noncanonical native request: %#v %#v", controller, request)
+		}
+		return nil, nil
+	})
+	if err := runner.execute(context.Background(), &CodexDotsCmd{Root: root}, "start", false, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestDotsLaunchOverridesBaseURLWithoutCodexConfig(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -33,19 +95,24 @@ func TestDotsLaunchOverridesBaseURLWithoutCodexConfig(t *testing.T) {
 	if err := os.WriteFile(paths.ConfigFile, []byte(`{"port":19321,"local_token":"synthetic"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	script := filepath.Join(home, "environment.sh")
-	if err := os.WriteFile(script, []byte("printf '%s' \"$OPENAI_BASE_URL\""), 0o600); err != nil {
+	root := filepath.Join(home, "dots")
+	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	var output strings.Builder
-	if err := os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"integration_mode":"native"}`), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, "settings.json"), []byte(`{"integration_mode":"native"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := defaultDotsRunner().run(context.Background(), "/bin/sh", []string{script, "start", "--root", home}, &output, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	if output.String() != "http://127.0.0.1:19321" {
-		t.Fatalf("base URL %q", output.String())
+	for _, operation := range []string{"install", "start", "sync"} {
+		runner := dotsTestRunner(home, func(_ context.Context, controller dots.Controller, request dots.Request) (map[string]any, error) {
+			if controller.BaseURL != "http://127.0.0.1:19321" || request.Install.BaseURL != controller.BaseURL {
+				t.Fatalf("CQ proxy override was not forwarded: %#v %#v", controller, request)
+			}
+			return nil, nil
+		})
+		runner.baseURL = defaultDotsRunner().baseURL
+		if err := runner.execute(context.Background(), &CodexDotsCmd{Root: root, Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app"}}, operation, false, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); !os.IsNotExist(err) {
 		t.Fatalf("Codex config was read or created: %v", err)
@@ -57,19 +124,28 @@ func TestDotsIsolatedLaunchDoesNotRequireProxyConfig(t *testing.T) {
 		t.Skip("Dots requires POSIX launchers")
 	}
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	root := filepath.Join(home, "dots")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runner := dotsTestRunner(home, func(_ context.Context, controller dots.Controller, _ dots.Request) (map[string]any, error) {
+		if controller.BaseURL != "" {
+			t.Fatal("isolated launch received native proxy override")
+		}
+		return nil, nil
+	})
+	runner.baseURL = func() (string, error) { t.Fatal("isolated launch read proxy config"); return "", nil }
 	for _, mode := range []string{`{"integration_mode":"isolated"}`, `{}`} {
-		if err := os.WriteFile(filepath.Join(home, "settings.json"), []byte(mode), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(root, "settings.json"), []byte(mode), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		for _, operation := range []string{"start", "sync"} {
-			if err := defaultDotsRunner().run(context.Background(), "/usr/bin/true", []string{"controller", operation, "--root", home}, io.Discard, io.Discard); err != nil {
-				t.Fatalf("%s %s: %v", mode, operation, err)
+			if err := runner.execute(context.Background(), &CodexDotsCmd{Root: root}, operation, false, io.Discard, io.Discard); err != nil {
+				t.Fatal(err)
 			}
 		}
 	}
-	if err := defaultDotsRunner().run(context.Background(), "/usr/bin/true", []string{"controller", "install", "--mode", "isolated"}, io.Discard, io.Discard); err != nil {
+	if err := runner.execute(context.Background(), &CodexDotsCmd{Root: root, Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app", Mode: "isolated"}}, "install", false, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -107,27 +183,36 @@ func TestDotsCommandParsing(t *testing.T) {
 }
 
 func TestDotsInstallForwardsStructuredArguments(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Dots requires POSIX launchers")
+	}
 	home := t.TempDir()
 	root := filepath.Join(home, "private dots")
-	var program string
-	var arguments []string
-	var extracted string
-	runner := dotsRunner{home: func() (string, error) { return home, nil }, extract: func(path string) error { extracted = path; return nil }, run: func(_ context.Context, p string, args []string, _, _ io.Writer) error {
-		program = p
-		arguments = args
-		return nil
-	}}
-	options := CodexDotsCmd{Root: root, Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app", Python: "/custom/python3.14", AccountSource: "/private/account store"}}
-	if err := runner.execute(context.Background(), &options, "install", true, io.Discard, io.Discard); err != nil {
+	var controller dots.Controller
+	var request dots.Request
+	runner := dotsTestRunner(home, func(_ context.Context, c dots.Controller, r dots.Request) (map[string]any, error) {
+		controller, request = c, r
+		return map[string]any{"installed": true}, nil
+	})
+	options := CodexDotsCmd{Root: root, Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app", AccountSource: "/private/account store"}}
+	var output strings.Builder
+	if err := runner.execute(context.Background(), &options, "install", true, &output, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{filepath.Join(root, "payload", "cli.py"), "install", "--root", root, "--mode", "native", "--app", "/Applications/ChatGPT.app", "--system-auth", filepath.Join(home, ".codex", "auth.json"), "--cq-accounts", filepath.Join(home, ".codex", "accounts"), "--account-source", "/private/account store", "--json"}
-	if program != "/custom/python3.14" || extracted != root || !reflect.DeepEqual(arguments, want) {
-		t.Fatalf("program %q extract %q args %#v", program, extracted, arguments)
+	want := dots.InstallOptions{Root: canonicalDotsPath(root), App: "/Applications/ChatGPT.app", SystemAuth: filepath.Join(home, ".codex", "auth.json"), CQAccounts: filepath.Join(home, ".codex", "accounts"), AccountSource: "/private/account store", Mode: "native", Executable: "/usr/local/bin/cq", BaseURL: "http://127.0.0.1:19280"}
+	if request.Operation != "install" || !reflect.DeepEqual(request.Install, want) || controller.Root != want.Root || controller.Executable != want.Executable {
+		t.Fatalf("controller %#v request %#v", controller, request)
+	}
+	var value map[string]bool
+	if err := json.Unmarshal([]byte(output.String()), &value); err != nil || !value["installed"] {
+		t.Fatalf("output %q error %v", output.String(), err)
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("CLI extracted a payload or created state: %v", err)
 	}
 }
 
-func TestDotsInstallModeParsing(t *testing.T) {
+func TestDotsInstallModeParsingAndPythonFlagRemoved(t *testing.T) {
 	for _, test := range []struct {
 		args []string
 		want string
@@ -147,63 +232,47 @@ func TestDotsInstallModeParsing(t *testing.T) {
 			t.Fatalf("mode %q, want %q", got, test.want)
 		}
 	}
+	var cli CLI
+	parser, err := kong.New(&cli, kong.Writers(io.Discard, io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.Parse([]string{"codex", "dots", "install", "--python", "/usr/bin/python3"}); err == nil {
+		t.Fatal("removed Python flag still accepted")
+	}
 }
 
-func TestDotsStatusUsesInstalledInterpreterWithoutExtraction(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Dots requires POSIX private file modes")
-	}
+func TestDotsStatusUsesGoControllerWithoutPythonInstallation(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "dots")
-	if err := os.Mkdir(root, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range []string{"payload/runtime", "runtime/venv/bin"} {
-		if err := os.MkdirAll(filepath.Join(root, path), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := os.WriteFile(filepath.Join(root, "payload", "cli.py"), []byte("controller"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	for _, file := range []struct {
-		name string
-		mode os.FileMode
-	}{{"settings.json", 0o600}, {"runtime/venv/bin/python", 0o700}} {
-		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(file.name)), []byte("fixture"), file.mode); err != nil {
-			t.Fatal(err)
-		}
-	}
-	var program string
-	var arguments []string
 	calls := 0
-	runner := dotsRunner{home: func() (string, error) { return home, nil }, extract: func(string) error { t.Fatal("status extracted payload"); return nil }, run: func(_ context.Context, p string, args []string, _, _ io.Writer) error {
+	runner := dotsTestRunner(home, func(_ context.Context, controller dots.Controller, request dots.Request) (map[string]any, error) {
 		calls++
-		program = p
-		arguments = args
-		return nil
-	}}
+		if controller.Root != canonicalDotsPath(root) || request.Operation != "status" {
+			t.Fatalf("controller %#v request %#v", controller, request)
+		}
+		return nil, nil
+	})
+	runner.baseURL = func() (string, error) { t.Fatal("status required launch configuration"); return "", nil }
 	if err := runner.execute(context.Background(), &CodexDotsCmd{Root: root}, "status", true, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 || program != filepath.Join(root, "runtime", "venv", "bin", "python") {
-		t.Fatalf("wrong interpreter %q calls %d", program, calls)
-	}
-	if !reflect.DeepEqual(arguments, []string{filepath.Join(root, "payload", "cli.py"), "status", "--root", root, "--json"}) {
-		t.Fatal(arguments)
+	if calls != 1 {
+		t.Fatalf("controller calls %d", calls)
 	}
 }
 
-func TestDotsInvalidInstallNeverExtractsOrExecutes(t *testing.T) {
+func TestDotsInvalidInstallNeverExecutes(t *testing.T) {
 	home := t.TempDir()
-	calls := 0
-	runner := dotsRunner{home: func() (string, error) { return home, nil }, extract: func(string) error { calls++; return nil }, run: func(context.Context, string, []string, io.Writer, io.Writer) error { calls++; return nil }}
+	runner := dotsTestRunner(home, func(context.Context, dots.Controller, dots.Request) (map[string]any, error) {
+		t.Fatal("invalid install executed")
+		return nil, nil
+	})
 	for _, options := range []CodexDotsCmd{
 		{Root: filepath.Join(home, "dots"), Install: CodexDotsInstallCmd{Mode: "other", App: "/Applications/ChatGPT.app"}},
 		{Root: "relative", Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app"}},
 		{Root: filepath.Join(home, ".codex", "dots"), Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app"}},
 		{Root: filepath.Join(home, "dots"), Install: CodexDotsInstallCmd{App: "relative"}},
-		{Root: filepath.Join(home, "dots"), Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app", Python: "python"}},
 		{Root: filepath.Join(home, "custom-auth", "dots"), Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app", SystemAuth: filepath.Join(home, "custom-auth", "auth.json")}},
 	} {
 		if err := runner.execute(context.Background(), &options, "install", false, io.Discard, io.Discard); err == nil {
@@ -215,161 +284,142 @@ func TestDotsInvalidInstallNeverExtractsOrExecutes(t *testing.T) {
 			t.Fatalf("protected root accepted: %s", root)
 		}
 	}
-	if calls != 0 {
-		t.Fatal("invalid install performed work")
-	}
 }
 
-func TestDotsExtractionFailureNeverExecutes(t *testing.T) {
-	home := t.TempDir()
-	failure := errors.New("extract failed")
-	runner := dotsRunner{home: func() (string, error) { return home, nil }, extract: func(string) error { return failure }, run: func(context.Context, string, []string, io.Writer, io.Writer) error {
-		t.Fatal("executed after extraction failed")
-		return nil
-	}}
-	err := runner.execute(context.Background(), &CodexDotsCmd{Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app"}}, "install", false, io.Discard, io.Discard)
-	if !errors.Is(err, failure) {
-		t.Fatal(err)
-	}
-}
-
-func TestDotsEntryHelpDoesNotInstall(t *testing.T) {
+func TestDotsEntryHelpDoesNotInstallAndHiddenHelperIsIntercepted(t *testing.T) {
 	var output strings.Builder
 	handled, err := runCodexDotsEntry([]string{"--json", "codex", "dots", "--help"}, &output, io.Discard)
 	if !handled || err != nil {
 		t.Fatalf("handled %v error %v", handled, err)
 	}
-	if !strings.Contains(output.String(), "install") {
-		t.Fatalf("missing Dots help: %s", output.String())
+	if !strings.Contains(output.String(), "install") || strings.Contains(output.String(), "python") {
+		t.Fatalf("unexpected Dots help: %s", output.String())
 	}
 	handled, err = runCodexDotsEntry([]string{"codex", "accounts"}, io.Discard, io.Discard)
 	if handled || err != nil {
 		t.Fatalf("intercepted unrelated command: %v %v", handled, err)
 	}
-}
-
-func TestDotsPrimeRequiresExactlyOneTargetBeforeExecuting(t *testing.T) {
-	home := t.TempDir()
-	runner := dotsRunner{home: func() (string, error) { return home, nil }, run: func(context.Context, string, []string, io.Writer, io.Writer) error {
-		t.Fatal("executed invalid prime")
-		return nil
-	}}
-	for _, prime := range []CodexDotsPrimeCmd{{}, {Dot: "Primary", All: true}} {
-		if err := runner.execute(context.Background(), &CodexDotsCmd{Root: filepath.Join(home, "dots"), Prime: prime}, "prime", false, io.Discard, io.Discard); err == nil {
-			t.Fatal("invalid prime accepted")
-		}
+	handled, err = runCodexDotsEntry([]string{"__dots", "native"}, io.Discard, io.Discard)
+	if !handled || err == nil {
+		t.Fatalf("malformed helper command handled=%v error=%v", handled, err)
 	}
 }
 
-func TestDotsBroadcastRejectsInvalidMessageBeforeExecuting(t *testing.T) {
+func TestDotsInvalidActionsNeverExecute(t *testing.T) {
 	home := t.TempDir()
-	runner := dotsRunner{home: func() (string, error) { return home, nil }, run: func(context.Context, string, []string, io.Writer, io.Writer) error {
-		t.Fatal("executed invalid broadcast")
-		return nil
-	}}
-	for _, message := range []string{"", " \n", strings.Repeat("x", 3001)} {
-		options := CodexDotsCmd{Root: filepath.Join(home, "dots"), Broadcast: CodexDotsBroadcastCmd{Message: message}}
-		if err := runner.execute(context.Background(), &options, "broadcast <message>", false, io.Discard, io.Discard); err == nil {
-			t.Fatal("invalid broadcast accepted")
-		}
-	}
-}
-
-func TestDotsBoardRejectedInvalidBindingBeforeExecuting(t *testing.T) {
-	home := t.TempDir()
-	runner := dotsRunner{home: func() (string, error) { return home, nil }, run: func(context.Context, string, []string, io.Writer, io.Writer) error {
-		t.Fatal("executed invalid board binding")
-		return nil
-	}}
-	for _, board := range []CodexDotsBoardCmd{{Thread: "https://example.com/thread"}, {Thread: "../thread"}, {Thread: "01a14c1f-6e3c-7622-b4a3-b279ecb2a822", Clear: true}} {
-		options := CodexDotsCmd{Root: filepath.Join(home, "dots"), Board: board}
-		if err := runner.execute(context.Background(), &options, "board", false, io.Discard, io.Discard); err == nil {
-			t.Fatal("invalid board accepted")
+	runner := dotsTestRunner(home, func(context.Context, dots.Controller, dots.Request) (map[string]any, error) {
+		t.Fatal("invalid action executed")
+		return nil, nil
+	})
+	for _, test := range []struct {
+		op      string
+		options CodexDotsCmd
+	}{
+		{"prime", CodexDotsCmd{}},
+		{"prime", CodexDotsCmd{Prime: CodexDotsPrimeCmd{Dot: "Primary", All: true}}},
+		{"broadcast", CodexDotsCmd{Broadcast: CodexDotsBroadcastCmd{Message: ""}}},
+		{"broadcast", CodexDotsCmd{Broadcast: CodexDotsBroadcastCmd{Message: " \n"}}},
+		{"broadcast", CodexDotsCmd{Broadcast: CodexDotsBroadcastCmd{Message: strings.Repeat("x", 3001)}}},
+		{"board", CodexDotsCmd{Board: CodexDotsBoardCmd{Thread: "https://example.com/thread"}}},
+		{"board", CodexDotsCmd{Board: CodexDotsBoardCmd{Thread: "../thread"}}},
+		{"board", CodexDotsCmd{Board: CodexDotsBoardCmd{Thread: "01a14c1f-6e3c-7622-b4a3-b279ecb2a822", Clear: true}}},
+	} {
+		test.options.Root = filepath.Join(home, "dots")
+		if err := runner.execute(context.Background(), &test.options, test.op, false, io.Discard, io.Discard); err == nil {
+			t.Fatalf("invalid %s accepted: %#v", test.op, test.options)
 		}
 	}
 }
 
-func TestDotsBroadcastForwardsMessageWithoutShellExpansion(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Dots requires POSIX private modes")
-	}
+func TestDotsActionsForwardExactTargets(t *testing.T) {
 	home := t.TempDir()
-	root := filepath.Join(home, "dots")
-	for _, name := range []string{"payload/runtime", "runtime/venv/bin"} {
-		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, file := range []struct {
-		name string
-		mode os.FileMode
-	}{{"settings.json", 0o600}, {"payload/cli.py", 0o600}, {"runtime/venv/bin/python", 0o700}} {
-		if err := os.WriteFile(filepath.Join(root, file.name), []byte("fixture"), file.mode); err != nil {
-			t.Fatal(err)
-		}
-	}
 	message := "--json $(do-not-run) `literal`\nHello, team!"
-	var arguments []string
-	runner := dotsRunner{home: func() (string, error) { return home, nil }, run: func(_ context.Context, _ string, args []string, _, _ io.Writer) error {
-		arguments = args
-		return nil
-	}}
-	options := CodexDotsCmd{Root: root, Broadcast: CodexDotsBroadcastCmd{Message: message}}
-	if err := runner.execute(context.Background(), &options, "broadcast <message>", true, io.Discard, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	want := []string{filepath.Join(root, "payload", "cli.py"), "broadcast", "--root", root, "--json", "--", message}
-	if !reflect.DeepEqual(arguments, want) {
-		t.Fatalf("arguments %#v", arguments)
+	for _, test := range []struct {
+		op      string
+		options CodexDotsCmd
+		want    dots.Request
+	}{
+		{"broadcast", CodexDotsCmd{Broadcast: CodexDotsBroadcastCmd{Message: message}}, dots.Request{Operation: "broadcast", Target: message}},
+		{"broadcast", CodexDotsCmd{Broadcast: CodexDotsBroadcastCmd{Message: strings.Repeat("🐈", 3000)}}, dots.Request{Operation: "broadcast", Target: strings.Repeat("🐈", 3000)}},
+		{"prime", CodexDotsCmd{Prime: CodexDotsPrimeCmd{Dot: "dot-0123456789abcdef01234567"}}, dots.Request{Operation: "prime", Target: "dot-0123456789abcdef01234567"}},
+		{"prime", CodexDotsCmd{Prime: CodexDotsPrimeCmd{All: true}}, dots.Request{Operation: "prime", All: true}},
+		{"board", CodexDotsCmd{Board: CodexDotsBoardCmd{Thread: "codex://threads/01a14c1f-6e3c-7622-b4a3-b279ecb2a822"}}, dots.Request{Operation: "board", Target: "01a14c1f-6e3c-7622-b4a3-b279ecb2a822"}},
+		{"board", CodexDotsCmd{Board: CodexDotsBoardCmd{Clear: true}}, dots.Request{Operation: "board", Clear: true}},
+	} {
+		runner := dotsTestRunner(home, func(_ context.Context, _ dots.Controller, request dots.Request) (map[string]any, error) {
+			request.Install = dots.InstallOptions{}
+			if !reflect.DeepEqual(request, test.want) {
+				t.Fatalf("request %#v, want %#v", request, test.want)
+			}
+			return nil, nil
+		})
+		test.options.Root = filepath.Join(home, "dots")
+		if err := runner.execute(context.Background(), &test.options, test.op, true, io.Discard, io.Discard); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
-func TestDotsReinstallChecksExistingRuntimeBeforeExtraction(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("Dots requires POSIX private modes")
-	}
+func TestDotsControllerFailureRetainsStructuredResult(t *testing.T) {
 	home := t.TempDir()
-	root := filepath.Join(home, "dots")
-	for _, name := range []string{"payload/runtime", "runtime/venv/bin"} {
-		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
-	for _, file := range []struct {
-		name string
-		mode os.FileMode
-	}{{"settings.json", 0o600}, {"payload/cli.py", 0o600}, {"runtime/venv/bin/python", 0o700}} {
-		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(file.name)), []byte("fixture"), file.mode); err != nil {
-			t.Fatal(err)
-		}
-	}
-	stopped := errors.New("live isolated processes")
-	extracted := false
-	calls := 0
-	runner := dotsRunner{home: func() (string, error) { return home, nil }, extract: func(string) error { extracted = true; return nil }, run: func(_ context.Context, python string, args []string, stdout, stderr io.Writer) error {
-		calls++
-		if python != filepath.Join(root, "runtime/venv/bin/python") || !reflect.DeepEqual(args, []string{filepath.Join(root, "payload/cli.py"), "preinstall", "--root", root}) {
-			t.Fatalf("wrong preinstall command %s %#v", python, args)
-		}
-		if stdout != io.Discard {
-			t.Fatal("preinstall output was not suppressed")
-		}
-		return stopped
-	}}
-	options := CodexDotsCmd{Root: root, Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app"}}
-	if err := runner.execute(context.Background(), &options, "install", false, io.Discard, io.Discard); !errors.Is(err, stopped) {
+	failure := errors.New("synthetic controller failure")
+	runner := dotsTestRunner(home, func(context.Context, dots.Controller, dots.Request) (map[string]any, error) {
+		return map[string]any{"error": "synthetic failure"}, failure
+	})
+	var output strings.Builder
+	if err := runner.execute(context.Background(), &CodexDotsCmd{}, "status", false, &output, io.Discard); !errors.Is(err, failure) {
 		t.Fatal(err)
 	}
-	if extracted || calls != 1 {
-		t.Fatalf("live reinstall extracted=%v calls=%d", extracted, calls)
+	var value map[string]string
+	if err := json.Unmarshal([]byte(output.String()), &value); err != nil || value["error"] != "synthetic failure" {
+		t.Fatalf("output %q error %v", output.String(), err)
 	}
-	if err := os.Chmod(filepath.Join(root, "settings.json"), 0o644); err != nil {
+}
+
+func TestDotsExecutablePreservesInstalledSymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Homebrew symlink behaviour requires POSIX")
+	}
+	directory := t.TempDir()
+	version := filepath.Join(directory, "cq-version")
+	if err := os.WriteFile(version, []byte("synthetic"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.execute(context.Background(), &options, "install", false, io.Discard, io.Discard); err == nil {
-		t.Fatal("non-private config accepted")
+	link := filepath.Join(directory, "cq")
+	if err := os.Symlink(version, link); err != nil {
+		t.Fatal(err)
 	}
-	if calls != 1 || extracted {
-		t.Fatal("unsafe installation executed or extracted")
+	t.Setenv("PATH", directory)
+	got, err := dotsExecutable("cq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != link {
+		t.Fatalf("executable %q, want installed symlink %q", got, link)
+	}
+}
+
+func TestDotsPreparationFailureNeverExecutes(t *testing.T) {
+	home := t.TempDir()
+	failure := errors.New("synthetic preparation failure")
+	for _, stage := range []string{"home", "executable", "mode"} {
+		runner := dotsTestRunner(home, func(context.Context, dots.Controller, dots.Request) (map[string]any, error) {
+			t.Fatal("controller ran after preparation failed")
+			return nil, nil
+		})
+		operation := "status"
+		if stage == "home" {
+			runner.home = func() (string, error) { return "", failure }
+		}
+		if stage == "executable" {
+			runner.executable = func() (string, error) { return "", failure }
+		}
+		if stage == "mode" {
+			operation = "start"
+		}
+		err := runner.execute(context.Background(), &CodexDotsCmd{}, operation, false, io.Discard, io.Discard)
+		if err == nil || stage != "mode" && !errors.Is(err, failure) {
+			t.Fatalf("stage %s error %v", stage, err)
+		}
 	}
 }

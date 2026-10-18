@@ -1,8 +1,8 @@
 # Multi-account Dots
 
-`cq codex dots` defaults to the normal native app, using its existing profile, local tasks and signed-in account. Existing account-owned Dots share that app's sidebar. The packaged CQ binary includes its Python controller and runtime; installation creates private adapter state, a Python environment and loopback certificates. It uses the installed app bundle without patching or re-signing it. Account credential sources and CQ services remain unchanged.
+`cq codex dots` defaults to the normal native app, using its existing profile, local tasks and signed-in account. Existing account-owned Dots share that app's sidebar. The packaged CQ binary includes the Go controller and runtime; installation creates private adapter state and loopback certificates. Python, pip and virtual environments are not needed. It uses the installed app bundle without patching or re-signing it. Account credential sources and CQ services remain unchanged.
 
-Native installation creates `~/Applications/ChatGPT via CQ.app` from the controller bundled in CQ. Launch it through Raycast, Spotlight or Finder for new sessions, or run `cq codex dots start`. Both routes preserve OpenAI's original app signature and use the existing profile. CQ sets `OPENAI_BASE_URL` to its configured local proxy even when `~/.codex/config.toml` contains no CQ entry. Direct launches of OpenAI's original app bypass the adapter. CQ does not quit an already-running normal app. Installation and account changes report `restart_required` until the user quits it and starts it through CQ. The Dock launcher shows that instruction in a native alert instead of silently opening an unmanaged app.
+Native installation creates `~/Applications/ChatGPT via CQ.app` from the controller bundled in CQ. Launch it through Raycast, Spotlight or Finder for new sessions, or run `cq codex dots start`. Both routes preserve OpenAI's original app signature and use the existing profile. CQ sets `OPENAI_BASE_URL` to its configured local proxy even when `~/.codex/config.toml` contains no CQ entry. Direct launches of OpenAI's original app bypass the adapter. CQ does not quit an already-running normal app. Installation and account changes report `restart_required` until the user quits it and starts it through CQ. The launcher reports that instruction instead of silently opening an unmanaged app.
 
 Reinstallation retains the declared account source unless `--account-source` replaces it. If launcher startup fails, the signed app reopens for ordinary chats. A detached 40-second watchdog also covers stalled startup without killing the CLI during one-time setup. This recovery does not claim Dots are ready; the startup error still needs resolving. Existing app sessions are never stopped by the launcher.
 
@@ -10,7 +10,7 @@ This remains an optional macOS feature built on private native endpoints. Live q
 
 ## Install
 
-Install Python `3.14` separately if it is unavailable, for example with `brew install python@3.14`. This prerequisite applies only to Dots. Sign in to the accounts you want to use with `cq codex login`, and onboard their Dots through the normal native or web UI before discovery.
+Sign in to the accounts you want to use with `cq codex login`, and onboard their Dots through the normal native or web UI before discovery.
 
 ```sh
 cq codex dots install
@@ -18,7 +18,7 @@ cq codex dots list
 cq codex dots status
 ```
 
-Installation provisions its own virtual environment with `websockets==17.2`, discovers existing Dots, then starts the normal app when it is not already running. The signed-in system account must have an onboarded Dot before the combined catalogue can start. If discovery finds no onboarded Dots, installation keeps account discovery running without starting the app; onboard the system Dot, then run `cq codex dots sync`.
+Installation stages a private copy of the Go CQ executable, discovers existing Dots, then starts the normal app when it is not already running. The signed-in system account must have an onboarded Dot before the combined catalogue can start. If discovery finds no onboarded Dots, installation keeps account discovery running without starting the app; onboard the system Dot, then run `cq codex dots sync`.
 
 For disposable research, use `cq codex dots install --mode isolated`. Only that mode creates a separate app-data directory and Codex home. If its fresh window shows welcome or role onboarding, complete that native flow through the role stage. There is no supported Skip for that stage. The window stays open while CQ setup messages and the relay pause; the watcher resumes them once the native workspace is ready. Existing installations without a mode retain their isolated behaviour until explicitly reinstalled.
 
@@ -31,14 +31,13 @@ cq codex dots --root /absolute/private/dots install \
   --app /Applications/ChatGPT.app \
   --system-auth /absolute/private/system/auth.json \
   --cq-accounts /absolute/private/accounts \
-  --account-source /absolute/private/codexbar \
-  --python /absolute/path/to/python3.14
+  --account-source /absolute/private/codexbar
 cq codex dots --root /absolute/private/dots list --json
 ```
 
-`--account-source` and `--python` are optional. Without `--python`, installation uses `python3.14` from `PATH`; later commands use the installed private virtual environment. The installer generates private configuration, so no hand-written settings file, profile IDs or research directory is needed.
+`--account-source` is optional. Runtime helpers use the staged CQ executable. The installer generates private configuration, so no hand-written settings file, profile IDs or research directory is needed.
 
-The installation root must be private and outside source checkouts, app bundles and production credential or app-data directories. Existing roots must belong to the current user and have mode `0700`; configuration and payload sources use `0600`. Symlink destinations are rejected. The installer accepts only the exact app version, build and renderer pin in [cli.py](cli.py). An app update requires qualification and a compatible CQ build.
+The installation root must be private and outside source checkouts, app bundles and production credential or app-data directories. Existing roots must belong to the current user and have mode `0700`; configuration uses `0600` and staged executables use `0700`. Symlink destinations are rejected. The installer accepts only the exact app version, build and renderer pin in [the Go installer](../../internal/dots/install.go). An app update requires qualification and a compatible CQ build.
 
 The qualified native app permits authenticated local proxy requests on `localhost:8000`. Dots therefore requires loopback port `8000` to be free. If another service owns it, startup stops without terminating that service or choosing an unsupported port.
 
@@ -105,9 +104,9 @@ Quit the normal app and stop the adapter before reinstalling or upgrading its pa
 
 Controls verify process ownership, executable and adapter identity before signalling. Native `stop` refuses while the normal app is alive; quit the app first. Each secondary account gets its own local executor registration and private `CODEX_HOME`; the primary account's executor and credentials remain unchanged. The manager closes only its own child executors, terminating them if graceful shutdown times out.
 
-Normal mode uses a private Chromium debugging pipe and an owner-only Unix socket, with no debugging TCP port. The broker must remain alive for the app session. Ordinary termination and IPC-server failures keep its pipes open until the app exits; forcibly killing the broker or an interpreter crash can close the pipe and cause Electron to quit. The normal updater remains enabled; an updated app needs a newly qualified pin before the next CQ launch.
+Normal mode uses a private Chromium debugging pipe and an owner-only Unix socket, with no debugging TCP port. The broker must remain alive for the app session. Ordinary termination and IPC-server failures keep its pipes open until the app exits; forcibly killing the broker or a runtime crash can close the pipe and cause Electron to quit. The normal updater remains enabled; an updated app needs a newly qualified pin before the next CQ launch.
 
-The pinned renderer gets an in-memory recovery guard for cancelled shared Dot reads. An active reader retries its own GET once when another chat's disposed controller cancelled their shared request. Sends are never retried by this guard. The signed app bundle stays unchanged.
+The pinned renderer gives shared Dot room/history reads their own request lifetime. Closing one chat no longer cancels a shared read still needed by another chat. This adapter neither retries those reads nor changes send behaviour. The signed app bundle stays unchanged.
 
 Native messaging starts its primary WebSocket without waiting for secondary account URL lookups. Each secondary connects independently and reconnects after failures with a delay capped at 30 seconds, restoring active subscriptions and presence. An unavailable broker returns a retryable bootstrap error instead of silently leaving secondary Dots on a primary-only connection. This recovery never retries message sends.
 
@@ -130,3 +129,7 @@ go test -race -count=1 ./...
 ```
 
 Run the Python suites in a development environment with `websockets==17.2` installed.
+
+The Python files in this directory retain the original research implementation and differential test fixtures. The shipped CLI does not import, extract or execute them. Upgrades retain existing private Python payloads for rollback, without requiring them for the Go runtime. Existing setup, relay, board and executor state keeps the same schema and identity hashes.
+
+To migrate an existing Python installation, quit ChatGPT, then run `cq codex dots stop` and `cq codex dots install`. Installation preserves the declared account source and existing setup records. Reopen subsequent sessions through ChatGPT via CQ.
