@@ -60,8 +60,11 @@ func cloudEventSink(root string) func(map[string]any) {
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return
 		}
-		if before != nil && (!before.Mode().IsRegular() || !owned(before) || before.Mode().Perm() != 0o600) {
-			return
+		if before != nil {
+			mode := before.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+			if !before.Mode().IsRegular() || !owned(before) || (mode != 0o600 && mode != 0o644) {
+				return
+			}
 		}
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		if err != nil {
@@ -69,7 +72,14 @@ func cloudEventSink(root string) func(map[string]any) {
 		}
 		defer file.Close()
 		after, err := file.Stat()
-		if err != nil || !after.Mode().IsRegular() || !owned(after) || after.Mode().Perm() != 0o600 || (before != nil && !os.SameFile(before, after)) {
+		if err != nil || !after.Mode().IsRegular() || !owned(after) || (before != nil && !os.SameFile(before, after)) {
+			return
+		}
+		mode := after.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+		if mode != 0o600 && mode != 0o644 {
+			return
+		}
+		if mode == 0o644 && file.Chmod(0o600) != nil {
 			return
 		}
 		row := make(map[string]any, len(value)+2)

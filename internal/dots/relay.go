@@ -99,7 +99,7 @@ func (a *Awareness) readExplicit(ctx context.Context, source string) ([]relayMes
 		return nil, errors.New("Unknown relay source")
 	}
 	labels, _ := a.Names(ctx, false)
-	expression := strings.NewReplacer("ROOT_THREAD", nativeJSON(dot.RootThreadID), "PROFILE_ID", nativeJSON(dot.ProfileID), "RELAY_PATTERN", nativeJSON(relayPattern(a.settings, labels))).Replace(nativeAsset(relayReadJS, a.settings))
+	expression := strings.NewReplacer("PROFILE_ID", nativeJSON(dot.ProfileID), "RELAY_PATTERN", nativeJSON(relayPattern(a.settings, labels))).Replace(nativeAsset(relayReadJS, a.settings))
 	value, e := nativeOne(ctx, a.native, expression)
 	if e != nil {
 		return nil, e

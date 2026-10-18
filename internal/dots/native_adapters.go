@@ -192,7 +192,7 @@ func NativeSend(ctx context.Context, s *Settings, e NativeEvaluator, target, tex
 	if closeErr != nil {
 		return nil, closeErr
 	}
-	expression := fmt.Sprintf(nativeSendJS, nativeJSON(map[string]any{"profile": dot.ProfileID, "root": dot.RootThreadID, "text": text, "request": id}), nativeJSON(system.ProfileID), nativeJSON(system.RootThreadID))
+	expression := fmt.Sprintf(nativeSendJS, nativeJSON(map[string]any{"profile": dot.ProfileID, "text": text, "request": id}), nativeJSON(system.ProfileID))
 	value, evaluateErr := single.Evaluate(ctx, nativeAsset(expression, s))
 	summary["outcome"] = "unknown"
 	if evaluateErr != nil {
@@ -224,7 +224,7 @@ func NativeMatchingReply(ctx context.Context, s *Settings, e NativeEvaluator, ta
 	if excludeID != "" {
 		excluded = excludeID
 	}
-	expression := fmt.Sprintf(nativeMatchingReplyJS, nativeJSON(dot.RootThreadID), nativeJSON(dot.ProfileID), nativeJSON(dot.RootThreadID), nativeJSON(excluded), nativeJSON(marker))
+	expression := fmt.Sprintf(nativeMatchingReplyJS, nativeJSON(dot.ProfileID), nativeJSON(excluded), nativeJSON(marker))
 	value, err := nativeOne(ctx, e, nativeAsset(expression, s))
 	if err != nil {
 		return nil, err

@@ -20,9 +20,18 @@ func openDotsPrivateLog(path string) (*os.File, error) {
 		file.Close()
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || !owned(info) || info.Mode()&(os.ModePerm|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0o600 {
+	mode := info.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+	if !info.Mode().IsRegular() || !owned(info) || (mode != 0o600 && mode != 0o644) {
 		file.Close()
 		return nil, errors.New("Dots log must be owned and mode 0600")
+	}
+	// Older runtimes created diagnostic logs as 0644. Tighten only the
+	// already-open, verified file; never follow a replacement or symlink.
+	if mode == 0o644 {
+		if err := file.Chmod(0o600); err != nil {
+			file.Close()
+			return nil, err
+		}
 	}
 	return file, nil
 }

@@ -1,9 +1,9 @@
 (async()=>{const m=await import('app://-/assets/MODULE_ASSET_PLACEHOLDER');
 const api=m.Ymr;const expected=%s;
 const primary=await api.safeGet('/tbo/primary');
-if(primary.profile?.id!==%s||primary.selection?.thread_id!==%s)throw Error('Native principal changed');
-const p=await api.safeGet('/tbo/by-thread/'+expected.root);
-if(p.id!==expected.profile||p.active_root_thread_id!==expected.root||typeof p.messaging_room_id!=='string')throw Error('Target changed');
+if(primary.profile?.id!==%s||typeof primary.profile?.active_root_thread_id!=='string'||!primary.profile.active_root_thread_id||primary.selection?.thread_id!==primary.profile.active_root_thread_id)throw Error('Native principal changed');
+const p=await api.safeGet('/tbo/{tbo_id}',{parameters:{path:{tbo_id:expected.profile}}});
+if(p.id!==expected.profile||typeof p.active_root_thread_id!=='string'||!p.active_root_thread_id||typeof p.messaging_room_id!=='string'||!p.messaging_room_id)throw Error('Target changed');
 const headers={'X-OpenAI-Attach-DeviceCheck-Token':'1'};
 const challenge=await api.safeGet('/ios/attestation_challenge',{additionalHeaders:headers});
 if(typeof challenge.attestation_challenge!=='string'||!challenge.attestation_challenge)throw Error('Native proof missing');

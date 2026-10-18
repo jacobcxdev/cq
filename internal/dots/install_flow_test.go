@@ -127,13 +127,13 @@ func TestFreshGoInstallationDiscoveredPrimedAndUpgradedWithoutHistoryPollution(t
 				t.Fatal("native setup omitted explicit target")
 			}
 			payload, _, ok = strings.Cut(payload, ";\nconst primary=")
-			var expected struct{ Profile, Root, Text, Request string }
+			var expected struct{ Profile, Text, Request string }
 			if !ok || json.Unmarshal([]byte(payload), &expected) != nil {
 				t.Fatal("native setup target could not be decoded")
 			}
 			handle := ""
 			for h, dot := range s.Dots {
-				if dot.ProfileID == expected.Profile && dot.RootThreadID == expected.Root {
+				if dot.ProfileID == expected.Profile {
 					handle = h
 				}
 			}

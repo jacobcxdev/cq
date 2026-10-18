@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -462,6 +463,83 @@ func TestSecondaryExecutorManagerRejectsDuplicatePrivateInstallationIDs(t *testi
 	}
 	if len(state["failures"].(map[string]any)) != 1 {
 		t.Fatal("duplicate installation failure not persisted")
+	}
+}
+
+func TestSecondaryExecutorManagerSurvivesTransientNativeReadButStopsOnIdentityChange(t *testing.T) {
+	s, c, system, owner := executorTestSetup(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	child := &executorTestChild{running: true}
+	checks := 0
+	defaults := func(_ *Settings, _ *CatalogueClient, _ string) executorDependencies {
+		deps := executorTestDependencies(s, c, system, owner)
+		deps.launch = func(*Settings, string, int, string, string, bool, bool) (executorProcess, error) {
+			return child, nil
+		}
+		return deps
+	}
+	primary := func(context.Context, *Settings, NativeEvaluator) (string, error) {
+		checks++
+		if checks == 2 {
+			return "", errors.New("native debugger request failed")
+		}
+		if checks > 1 && !child.running {
+			t.Fatal("transient native read stopped the owner executor")
+		}
+		if checks == 4 {
+			return "different-primary-environment", nil
+		}
+		return "primary-environment", nil
+	}
+	err := runSecondaryExecutors(ctx, s, c, nil, defaults, primary)
+	if checks != 4 || err == nil || err.Error() != "native executor identity changed" {
+		t.Fatalf("did not recover before rejecting changed identity: checks=%d err=%v", checks, err)
+	}
+	if child.running || child.closed != 1 {
+		t.Fatal("identity change left the owner executor running")
+	}
+}
+
+func TestSecondaryExecutorManagerFailsClosedDuringNativeReadFailure(t *testing.T) {
+	for _, changedAccount := range []bool{false, true} {
+		t.Run(fmt.Sprintf("changed-account-%t", changedAccount), func(t *testing.T) {
+			s, c, system, owner := executorTestSetup(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+			defer cancel()
+			child := &executorTestChild{running: true}
+			checks, inventories := 0, 0
+			defaults := func(_ *Settings, _ *CatalogueClient, _ string) executorDependencies {
+				deps := executorTestDependencies(s, c, system, owner)
+				deps.inventory = func() (Inventory, error) {
+					inventories++
+					principal := system
+					if changedAccount && inventories > 1 {
+						principal = owner
+					}
+					return Inventory{System: principal, Accounts: []Account{system, owner}}, nil
+				}
+				deps.launch = func(*Settings, string, int, string, string, bool, bool) (executorProcess, error) {
+					return child, nil
+				}
+				return deps
+			}
+			primary := func(context.Context, *Settings, NativeEvaluator) (string, error) {
+				checks++
+				if checks == 1 {
+					return "primary-environment", nil
+				}
+				return "", errors.New("native debugger request failed")
+			}
+			err := runSecondaryExecutors(ctx, s, c, nil, defaults, primary)
+			wantChecks, wantError := 16, "native debugger request failed"
+			if changedAccount {
+				wantChecks, wantError = 2, "native account changed"
+			}
+			if err == nil || err.Error() != wantError || checks != wantChecks || child.running || child.closed != 1 {
+				t.Fatalf("unsafe failure handling: checks=%d closed=%d running=%t err=%v", checks, child.closed, child.running, err)
+			}
+		})
 	}
 }
 

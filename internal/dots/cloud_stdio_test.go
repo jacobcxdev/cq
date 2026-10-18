@@ -795,6 +795,13 @@ func TestCloudLocalExitReturnsEvenWithOpenInput(t *testing.T) {
 
 func TestCloudDiagnosticsDoNotPersistCredentials(t *testing.T) {
 	h := newCloudTestHarness(t)
+	path := filepath.Join(h.cfg.RuntimeRoot, "cloud-stdio-events.jsonl")
+	if err := os.WriteFile(path, []byte("legacy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
 	h.deps.event = cloudEventSink(h.cfg.RuntimeRoot)
 	h.start()
 	h.initialize()

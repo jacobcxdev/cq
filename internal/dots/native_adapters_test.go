@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,9 @@ import (
 
 //go:embed native_room_cache_test.js
 var nativeRoomCacheRegressionJS string
+
+//go:embed native_profile_test.js
+var nativeProfileRegressionJS string
 
 type nativeEvaluationFunc func(context.Context, string) ([]any, error)
 
@@ -78,7 +82,7 @@ func TestNativeSendUsesBoundTargetAndPrivateLedger(t *testing.T) {
 	calls := 0
 	e := nativeEvaluationFunc(func(_ context.Context, expression string) ([]any, error) {
 		calls++
-		for _, part := range []string{`"profile":"profile-two"`, `"root":"root-two"`, `"text":"synthetic"`, `primary.profile?.id!=="profile-one"`} {
+		for _, part := range []string{`"profile":"profile-two"`, `"text":"synthetic"`, `primary.profile?.id!=="profile-one"`} {
 			if !strings.Contains(expression, part) {
 				t.Fatalf("expression missing %s", part)
 			}
@@ -109,6 +113,31 @@ func TestNativeSendUsesBoundTargetAndPrivateLedger(t *testing.T) {
 	delete(s.Dots, "one")
 	if _, err = NativeSend(context.Background(), s, e, "two", "synthetic", ledger+"nosystem"); err == nil || calls != 1 {
 		t.Fatal("missing native identity evaluated")
+	}
+}
+
+func TestNativeAdaptersFollowStableProfilesAcrossRootRotation(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node required for native JavaScript regression")
+	}
+	s := &Settings{ModuleAsset: "fixture.js"}
+	sources := map[string]string{
+		"send":  fmt.Sprintf(nativeSendJS, nativeJSON(map[string]any{"profile": "profile-two", "text": "synthetic", "request": "request-id"}), nativeJSON("profile-one")),
+		"relay": strings.NewReplacer("PROFILE_ID", nativeJSON("profile-two"), "RELAY_PATTERN", nativeJSON(`^\[CQ:directory:[a-f0-9]{32}\]\ndirectory\n\[/CQ\]$`)).Replace(relayReadJS),
+		"reply": fmt.Sprintf(nativeMatchingReplyJS, nativeJSON("profile-two"), nativeJSON("excluded"), nativeJSON("directory")),
+	}
+	for key, source := range sources {
+		sources[key] = nativeAsset(source, s)
+	}
+	data, err := json.Marshal(sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(node, "-e", nativeProfileRegressionJS)
+	command.Stdin = strings.NewReader(string(data))
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("native profile regression: %v\n%s", err, output)
 	}
 }
 

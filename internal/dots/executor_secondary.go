@@ -325,12 +325,10 @@ func runSecondaryExecutors(ctx context.Context, s *Settings, c *CatalogueClient,
 	if err := save(); err != nil {
 		return err
 	}
+	nativeReadFailures := 0
 	for waitContext(ctx, 2*time.Second) == nil {
-		current, err := primaryLookup(ctx, s, e)
-		if err != nil {
-			return err
-		}
-		if current != primary {
+		current, lookupErr := primaryLookup(ctx, s, e)
+		if lookupErr == nil && current != primary {
 			return errors.New("native executor identity changed")
 		}
 		inventory, err := common.inventory()
@@ -340,6 +338,16 @@ func runSecondaryExecutors(ctx context.Context, s *Settings, c *CatalogueClient,
 		if inventory.System.Alias != s.SystemAlias {
 			return errors.New("native account changed")
 		}
+		if lookupErr != nil {
+			// A brief native/backend outage must not kill already-bound local work.
+			// Keep checking account ownership; stop after 15 failed rechecks.
+			nativeReadFailures++
+			if nativeReadFailures >= 15 {
+				return lookupErr
+			}
+			continue
+		}
+		nativeReadFailures = 0
 		for _, worker := range workers {
 			refreshSecondaryExecutor(ctx, s, worker, defaults(s, c, worker.owner.Alias))
 		}

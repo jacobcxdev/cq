@@ -404,6 +404,29 @@ func TestRealtimePortAndMetadataStayPrivate(t *testing.T) {
 	if err := os.Remove(file); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(file, []byte("legacy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(file, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	event(map[string]any{"upgraded": true})
+	data, err := os.ReadFile(file)
+	info, statErr := os.Stat(file)
+	if err != nil || statErr != nil || info.Mode().Perm() != 0o600 || !bytes.HasPrefix(data, []byte("legacy\n")) || !bytes.Contains(data, []byte(`"upgraded":true`)) {
+		t.Fatalf("legacy diagnostic log not migrated: %q, %v, %v", data, err, statErr)
+	}
+	if err := os.Chmod(file, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	event(map[string]any{"unsafe_permissions": true})
+	data, err = os.ReadFile(file)
+	if err != nil || bytes.Contains(data, []byte("unsafe_permissions")) {
+		t.Fatal("unsafe diagnostic log accepted")
+	}
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
 	target := filepath.Join(t.TempDir(), "protected")
 	if err := os.WriteFile(target, []byte("untouched"), 0o600); err != nil {
 		t.Fatal(err)
@@ -412,7 +435,7 @@ func TestRealtimePortAndMetadataStayPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	event(map[string]any{"should_not_write": true})
-	data, _ := os.ReadFile(target)
+	data, _ = os.ReadFile(target)
 	if string(data) != "untouched" {
 		t.Fatal("log symlink followed")
 	}
