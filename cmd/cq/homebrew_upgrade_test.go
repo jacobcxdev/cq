@@ -118,6 +118,7 @@ cask = Cask::CaskLoader.load_from_installed_caskfile(files.first, api_fallback: 
 `
 	}
 	script := `require "cask/cask_loader"
+require "cask/installer"
 require "json"
 class CQCommandRecorder
   class << self
@@ -142,6 +143,25 @@ raise "reinstall called removal script" unless CQCommandRecorder.calls.empty?
 artifact.uninstall_phase(command: CQCommandRecorder)
 raise "true uninstall skipped removal" unless CQCommandRecorder.calls.length == 1
 puts JSON.generate(CQCommandRecorder.calls)
+
+# Exercise the installer rather than assuming it still calls uninstall_phase.
+# Newer Homebrew dispatches grouped directives directly on each artifact.
+CQCommandRecorder.calls = []
+installer = Cask::Installer.new(cask, command: CQCommandRecorder, upgrade: true)
+installer.define_singleton_method(:artifacts) { [artifact] }
+installer.send(:uninstall_artifacts, successor: successor)
+raise "installer upgrade called removal script" unless CQCommandRecorder.calls.empty?
+installer = Cask::Installer.new(cask, command: CQCommandRecorder, reinstall: true)
+installer.define_singleton_method(:artifacts) { [artifact] }
+installer.send(:uninstall_artifacts, successor: successor)
+raise "installer reinstall called removal script" unless CQCommandRecorder.calls.empty?
+installer = Cask::Installer.new(cask, command: CQCommandRecorder)
+installer.define_singleton_method(:artifacts) { [artifact] }
+installer.send(:uninstall_artifacts)
+raise "installer true uninstall skipped removal" unless CQCommandRecorder.calls.length == 1
+CQCommandRecorder.calls = []
+installer.send(:uninstall_artifacts, successor: Cask::Cask.new("unrelated") { version "1.0" })
+raise "unrelated successor skipped removal" unless CQCommandRecorder.calls.length == 1
 `
 	path := filepath.Join(t.TempDir(), "homebrew-upgrade.rb")
 	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
@@ -170,6 +190,12 @@ func TestHomebrewUninstallCallbackReceivesSuccessor(t *testing.T) {
 func TestHomebrewUnsupportedCallbackFailsBeforeMutation(t *testing.T) {
 	runGeneratedCQHomebrewArtifacts(t, `class Cask::Artifact::Uninstall
   def uninstall_phase(command:); raise "unexpected removal mutation"; end
+end`, true)
+}
+
+func TestHomebrewUnsupportedGroupedCallbackFailsBeforeMutation(t *testing.T) {
+	runGeneratedCQHomebrewArtifacts(t, `class Cask::Artifact::Uninstall
+  def dispatch_uninstall_directive(directive, command:); raise "unexpected removal mutation"; end
 end`, true)
 }
 
