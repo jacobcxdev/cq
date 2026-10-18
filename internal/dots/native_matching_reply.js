@@ -1,0 +1,4 @@
+(async()=>{const m=await import('app://-/assets/MODULE_ASSET_PLACEHOLDER');const expected=%s;const p=await m.Ymr.safeGet('/tbo/{tbo_id}',{parameters:{path:{tbo_id:expected}}});
+if(p.id!==expected||typeof p.active_root_thread_id!=='string'||!p.active_root_thread_id||typeof p.messaging_room_id!=='string'||!p.messaging_room_id)throw Error('Target changed');
+const room=await m.Ymr.safeGet('/messaging/rooms/{room_id}',{parameters:{path:{room_id:p.messaging_room_id}}});const actors=room.members.filter(x=>x.aeon_id===p.id);if(actors.length!==1)throw Error('Dot actor ambiguous');const v=await m.Ymr.safeGet('/messaging/rooms/{room_id}/messages',{parameters:{path:{room_id:p.messaging_room_id},query:{limit:20}}});
+return {keys:Object.keys(v),match:(v.items??[]).filter(x=>x.id!==%s&&x.account_user_id===actors[0].account_user_id&&(x.content?.text??'').includes(%s)).map(x=>({id:x.id,content:x.content,role:x.role,created_at:x.created_at}))};})()

@@ -98,7 +98,7 @@ var commandDispatcherSpecs = []commandDispatcherSpec{
 }
 
 var commandDispatcherCoverageOnly = []commandDispatcherCoverage{
-	{commandDispatcherKey{"dots.go", "dotsNativeLaunch", "args[1]"}, []string{"install", "start", "sync"}},
+	{commandDispatcherKey{"dots.go", "dotsNativeLaunch", "command"}, []string{"install", "start", "sync"}},
 	{commandDispatcherKey{"proxy_upgrade_darwin.go", "runDarwinRuntimeUpgradeEntry", "args[0]"}, []string{"proxy"}},
 	{commandDispatcherKey{"proxy_upgrade_darwin.go", "runDarwinRuntimeUpgradeEntry", "args[1]"}, []string{"start"}},
 	{commandDispatcherKey{"help.go", "interceptedZeroArgumentUsage", "args[1]"}, []string{"overlay", "prime"}},

@@ -234,7 +234,7 @@ func main() {
 	if handled, err := runCodexDotsEntry(os.Args[1:], os.Stdout, os.Stderr); handled {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: %v\n", err)
-			os.Exit(1)
+			os.Exit(dotsExitCode(err))
 		}
 		return
 	}

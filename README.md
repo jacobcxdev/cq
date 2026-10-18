@@ -727,8 +727,8 @@ cq service uninstall
 
 `cq codex dots install` defaults to the normal native app and its existing
 profile, tasks and signed-in account. Dots discovered from your CQ accounts
-share that app's sidebar. CQ keeps adapter state, its Python environment and
-loopback certificates in a separate private directory. It does not patch or
+share that app's sidebar. CQ runs its Go adapter from a separate private directory
+alongside installation state and loopback certificates. It does not patch or
 re-sign the installed app bundle. Native app qualification is version-pinned;
 unsupported app updates fail before launch.
 
@@ -772,9 +772,9 @@ immediate reconciliation. A changed normal-profile catalogue requires an app
 restart through CQ; the watcher does not interrupt existing work. Roles and
 current work remain unknown unless reported.
 
-This optional macOS feature requires Python 3.14 (`brew install python@3.14`),
-websockets 17.2 in its private environment, valid read-only account credentials,
-and already-onboarded Dots. It does not add empty-account onboarding slots,
+This optional macOS feature uses the CQ binary without Python, pip or a virtual
+environment. It requires valid read-only account credentials and already-onboarded
+Dots. It does not add empty-account onboarding slots,
 native cross-account `@` selection or persistent secondary Reboot. Secondary Dots
 use separate local executors with private account state and native task sandboxing.
 Local MCP configuration is not copied between accounts. See [Dots installation details](experiments/dots/README.md)

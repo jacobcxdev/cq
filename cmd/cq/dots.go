@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -14,7 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/alecthomas/kong"
-	dotspayload "github.com/jacobcxdev/cq/experiments/dots"
+	"github.com/jacobcxdev/cq/internal/dots"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
@@ -38,7 +39,6 @@ type CodexDotsInstallCmd struct {
 	SystemAuth    string `help:"Read-only native Codex authentication path" placeholder:"ABS_PATH"`
 	CQAccounts    string `help:"Read-only CQ Codex accounts directory" placeholder:"ABS_PATH"`
 	AccountSource string `help:"Optional read-only CodexBar account directory" placeholder:"ABS_PATH"`
-	Python        string `help:"Python 3.14 interpreter (default python3.14)" placeholder:"ABS_PATH"`
 }
 type CodexDotsActionCmd struct{}
 type CodexDotsPrimeCmd struct {
@@ -53,100 +53,78 @@ type CodexDotsBoardCmd struct {
 	Clear  bool   `help:"Remove the shared message board binding"`
 }
 
+func dotsExitCode(err error) int {
+	var child *dots.CloudStdioExitError
+	if errors.As(err, &child) && child.Code > 0 && child.Code <= 255 {
+		return child.Code
+	}
+	return 1
+}
+
 var dotsBoardThread = regexp.MustCompile(`^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$`)
 
 type dotsRunner struct {
-	home    func() (string, error)
-	extract func(string) error
-	run     func(context.Context, string, []string, io.Writer, io.Writer) error
+	home       func() (string, error)
+	executable func() (string, error)
+	baseURL    func() (string, error)
+	run        func(context.Context, dots.Controller, dots.Request) (map[string]any, error)
 }
 
 func defaultDotsRunner() dotsRunner {
-	return dotsRunner{home: os.UserHomeDir, extract: dotspayload.Extract,
-		run: func(ctx context.Context, python string, args []string, stdout, stderr io.Writer) error {
-			command := exec.CommandContext(ctx, python, args...)
-			command.Stdout, command.Stderr = stdout, stderr
-			baseURL, cqPath := "", ""
-			native, err := dotsNativeLaunch(args)
+	return dotsRunner{
+		home: os.UserHomeDir,
+		executable: func() (string, error) {
+			return dotsExecutable(os.Args[0])
+		},
+		baseURL: func() (string, error) {
+			cfg, err := proxy.LoadExistingConfig()
 			if err != nil {
-				return err
+				return "", fmt.Errorf("CQ proxy configuration unavailable: %w", err)
 			}
-			if native {
-				cfg, err := proxy.LoadExistingConfig()
-				if err != nil {
-					return fmt.Errorf("CQ proxy configuration unavailable: %w", err)
-				}
-				baseURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
-				cqPath, err = exec.LookPath(os.Args[0])
-				if err != nil {
-					return fmt.Errorf("CQ launcher executable unavailable: %w", err)
-				}
-				cqPath, err = filepath.Abs(cqPath)
-				if err != nil {
-					return err
-				}
-			}
-			command.Env = dotsProcessEnvironment(os.Environ(), baseURL, cqPath)
-			if err := command.Run(); err != nil {
-				return fmt.Errorf("Dots controller failed: %w", err)
-			}
-			return nil
-		}}
+			return "http://127.0.0.1:" + strconv.Itoa(cfg.Port), nil
+		},
+		run: func(ctx context.Context, controller dots.Controller, request dots.Request) (map[string]any, error) {
+			return controller.Execute(ctx, request)
+		},
+	}
 }
 
-func dotsNativeLaunch(args []string) (bool, error) {
-	if len(args) < 2 {
-		return false, nil
+func dotsExecutable(invoked string) (string, error) {
+	path, err := exec.LookPath(invoked)
+	if err != nil {
+		return "", err
 	}
-	switch args[1] {
+	return filepath.Abs(path)
+}
+
+func dotsNativeLaunch(command, root, mode string) (bool, error) {
+	switch command {
 	case "install":
-		for index := 2; index+1 < len(args); index++ {
-			if args[index] == "--mode" {
-				return args[index+1] == "native", nil
-			}
-		}
-		return true, nil
+		return mode == "native", nil
 	case "start", "sync":
-		for index := 2; index+1 < len(args); index++ {
-			if args[index] != "--root" {
-				continue
-			}
-			file, err := os.Open(filepath.Join(args[index+1], "settings.json"))
-			if err != nil {
-				return false, err
-			}
-			defer file.Close()
-			var settings struct {
-				Mode string `json:"integration_mode"`
-			}
-			if err := json.NewDecoder(io.LimitReader(file, 1<<20)).Decode(&settings); err != nil {
-				return false, fmt.Errorf("invalid Dots integration mode: %w", err)
-			}
-			return settings.Mode == "native", nil
+		data, err := dots.ReadOwned(filepath.Join(root, "settings.json"), "")
+		if err != nil {
+			return false, err
 		}
-		return false, fmt.Errorf("Dots launch requires an installation root")
+		var settings struct {
+			Mode string `json:"integration_mode"`
+		}
+		if err := json.Unmarshal(data, &settings); err != nil {
+			return false, fmt.Errorf("invalid Dots integration mode: %w", err)
+		}
+		return settings.Mode == "native", nil
 	default:
 		return false, nil
 	}
 }
 
-func dotsProcessEnvironment(inherited []string, baseURL, cqPath string) []string {
-	environment := make([]string, 0, len(inherited)+3)
-	for _, value := range inherited {
-		key, _, _ := strings.Cut(value, "=")
-		if key == "PYTHONPATH" || key == "PYTHONHOME" || key == "CQ_DOTS_CONFIG" || key == "PYTHONDONTWRITEBYTECODE" || key == "CQ_DOTS_CQ_PATH" || baseURL != "" && key == "OPENAI_BASE_URL" {
-			continue
-		}
-		environment = append(environment, value)
-	}
-	environment = append(environment, "PYTHONDONTWRITEBYTECODE=1")
-	if baseURL != "" {
-		environment = append(environment, "OPENAI_BASE_URL="+baseURL, "CQ_DOTS_CQ_PATH="+cqPath)
-	}
-	return environment
-}
-
 func runCodexDotsEntry(args []string, stdout, stderr io.Writer) (bool, error) {
+	if len(args) > 0 && args[0] == "__dots" {
+		if len(args) < 3 {
+			return true, fmt.Errorf("Dots helper requires a role and installation root")
+		}
+		return true, dots.RunHelper(context.Background(), args[1], args[2], args[3:], os.Stdin, stdout, stderr)
+	}
 	filtered := make([]string, 0, len(args))
 	jsonOutput := false
 	positional := false
@@ -197,7 +175,7 @@ func runCodexDotsEntry(args []string, stdout, stderr io.Writer) (bool, error) {
 	return true, defaultDotsRunner().execute(context.Background(), &options.CodexDotsCmd, parsed.Command(), jsonOutput, stdout, stderr)
 }
 
-func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, command string, jsonOutput bool, stdout, stderr io.Writer) error {
+func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, command string, _ bool, stdout, stderr io.Writer) error {
 	home, err := runner.home()
 	if err != nil {
 		return err
@@ -221,6 +199,7 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 			return fmt.Errorf("Dots root overlaps an app or credential path")
 		}
 	}
+	root = canonicalDotsPath(root)
 	operation := strings.Fields(command)
 	if len(operation) == 0 {
 		return fmt.Errorf("missing Dots command")
@@ -240,8 +219,7 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 			return fmt.Errorf("board must be an exact local thread ID or codex://threads/ID link")
 		}
 	}
-	args := []string{filepath.Join(root, "payload", "cli.py"), op, "--root", root}
-	python := filepath.Join(root, "runtime", "venv", "bin", "python")
+	request := dots.Request{Operation: op}
 	if op == "install" {
 		install := options.Install
 		if install.Mode == "" {
@@ -272,62 +250,48 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 				return fmt.Errorf("Dots root overlaps an app or credential path")
 			}
 		}
-		python = install.Python
-		if python == "" {
-			python = "python3.14"
-		} else if !filepath.IsAbs(python) {
-			return fmt.Errorf("Dots Python path must be absolute")
-		}
-		args = append(args, "--mode", install.Mode, "--app", install.App, "--system-auth", install.SystemAuth, "--cq-accounts", install.CQAccounts)
-		if install.AccountSource != "" {
-			args = append(args, "--account-source", install.AccountSource)
-		}
-		if _, err := os.Lstat(filepath.Join(root, "settings.json")); err == nil {
-			if err := dotspayload.ValidateInstallation(root); err != nil {
-				return err
-			}
-			if err := runner.run(ctx, filepath.Join(root, "runtime", "venv", "bin", "python"),
-				[]string{filepath.Join(root, "payload", "cli.py"), "preinstall", "--root", root}, io.Discard, stderr); err != nil {
-				return err
-			}
-		} else if !os.IsNotExist(err) {
-			return err
-		}
-		if err := runner.extract(root); err != nil {
-			return err
-		}
-	} else {
-		if err := dotspayload.ValidateInstallation(root); err != nil {
-			return fmt.Errorf("Dots installation unavailable: %w", err)
-		}
+		request.Install = dots.InstallOptions{Root: root, App: install.App, SystemAuth: install.SystemAuth,
+			CQAccounts: install.CQAccounts, AccountSource: install.AccountSource, Mode: install.Mode}
 	}
-
 	if op == "prime" {
-		if options.Prime.All && options.Prime.Dot != "" {
-			return fmt.Errorf("choose a Dot or --all")
-		}
-		if options.Prime.Dot != "" {
-			args = append(args, options.Prime.Dot)
-		}
-		if options.Prime.All {
-			args = append(args, "--all")
-		}
-	}
-	if jsonOutput {
-		args = append(args, "--json")
+		request.Target, request.All = options.Prime.Dot, options.Prime.All
 	}
 	if op == "broadcast" {
-		args = append(args, "--", options.Broadcast.Message)
+		request.Target = options.Broadcast.Message
 	}
 	if op == "board" {
-		if options.Board.Thread != "" {
-			args = append(args, options.Board.Thread)
-		}
-		if options.Board.Clear {
-			args = append(args, "--clear")
+		request.Target, request.Clear = strings.TrimPrefix(options.Board.Thread, "codex://threads/"), options.Board.Clear
+	}
+	native, err := dotsNativeLaunch(op, root, request.Install.Mode)
+	if err != nil {
+		return err
+	}
+	baseURL := ""
+	if native {
+		baseURL, err = runner.baseURL()
+		if err != nil {
+			return err
 		}
 	}
-	return runner.run(ctx, python, args, stdout, stderr)
+	executable, err := runner.executable()
+	if err != nil {
+		return fmt.Errorf("CQ launcher executable unavailable: %w", err)
+	}
+	executable, err = filepath.Abs(executable)
+	if err != nil {
+		return err
+	}
+	request.Install.Executable, request.Install.BaseURL = executable, baseURL
+	controller := dots.Controller{Root: root, Executable: executable, BaseURL: baseURL, Stdout: stdout, Stderr: stderr}
+	result, runErr := runner.run(ctx, controller, request)
+	if result != nil {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(result); err != nil {
+			return err
+		}
+	}
+	return runErr
 }
 
 func canonicalDotsPath(value string) string {
