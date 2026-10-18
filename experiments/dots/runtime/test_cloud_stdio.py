@@ -384,6 +384,36 @@ class NativeRootSnapshotTests(AdapterFixture):
 
 
 class NativeProfileTests(AdapterFixture):
+    def test_native_app_server_receives_environment_base_override(self):
+        requests=[{'id':17,'method':'initialize','params':{}},{'method':'initialized'}]
+        with patch.dict(cloud_stdio.os.environ,{'OPENAI_BASE_URL':'http://127.0.0.1:19321'}):
+            *_,popen=self.run_adapter(ScriptedProcess(),marked=True,native=True,requests=requests)
+        self.assertEqual(popen.call_args.args[0][-2:],['-c','openai_base_url="http://127.0.0.1:19321"'])
+
+    def test_unmarked_native_app_server_receives_same_environment_override(self):
+        class Executed(Exception): pass
+        with patch.object(cloud_stdio.sys,'argv',['adapter','app-server']), \
+             patch.object(cloud_stdio.settings,'INTEGRATION_MODE','native',create=True), \
+             patch.dict(cloud_stdio.os.environ,{'OPENAI_BASE_URL':'http://127.0.0.1:19321'}), \
+             patch.object(cloud_stdio.os,'execve',side_effect=Executed) as execute:
+            with self.assertRaises(Executed): cloud_stdio.main()
+        self.assertEqual(execute.call_args.args[1],
+                         [cloud_stdio.REAL,'app-server','-c','openai_base_url="http://127.0.0.1:19321"'])
+
+    def test_launch_environment_overrides_model_base_without_file_config(self):
+        arguments=['app-server','-c','openai_base_url="https://example.invalid"']
+        routed=cloud_stdio.native_arguments(arguments,{'OPENAI_BASE_URL':'http://127.0.0.1:19321'})
+        self.assertEqual(routed,[*arguments,'-c','openai_base_url="http://127.0.0.1:19321"'])
+        self.assertEqual(arguments,['app-server','-c','openai_base_url="https://example.invalid"'])
+        self.assertIs(cloud_stdio.native_arguments(arguments,{}),arguments)
+
+    def test_invalid_proxy_environment_stops_before_native_launch(self):
+        for base in ['', 'https://127.0.0.1:19321', 'http://localhost:19321',
+                     'http://127.0.0.1', 'http://user@127.0.0.1:19321',
+                     'http://127.0.0.1:19321?token=bad', 'http://127.0.0.1:99999']:
+            with self.subTest(base=base),self.assertRaises(ValueError):
+                cloud_stdio.native_arguments(['app-server'],{'OPENAI_BASE_URL':base})
+
     def test_native_primary_rpcs_keep_original_arguments_and_stock_authentication(self):
         requests=[{'id':17,'method':'initialize','params':{'clientInfo':{'name':'test'}}},
                   {'method':'initialized'},

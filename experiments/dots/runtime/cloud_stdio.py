@@ -253,6 +253,21 @@ def local_arguments(arguments):
     return [REAL,'-c','cli_auth_credentials_store="ephemeral"',*clean]
 
 
+def native_arguments(arguments, environment):
+    # This pinned CLI does not consume OPENAI_BASE_URL itself. Apply CQ's
+    # launch environment through its process-local config override instead.
+    base = environment.get('OPENAI_BASE_URL')
+    if base is None:
+        return arguments
+    parsed = urllib.parse.urlsplit(base)
+    if (parsed.scheme != 'http' or parsed.hostname != '127.0.0.1'
+            or parsed.username is not None or parsed.password is not None
+            or parsed.path not in {'', '/'} or parsed.query or parsed.fragment
+            or parsed.port is None):
+        raise ValueError('Native CQ model proxy must be a loopback HTTP endpoint')
+    return [*arguments, '-c', 'openai_base_url=' + json.dumps(base)]
+
+
 def main():
     arguments=sys.argv[1:]
     env=dict(os.environ); env['CODEX_CLI_PATH']=REAL
@@ -261,6 +276,8 @@ def main():
     # Desktop supplies this override even when the app-tools plugin is unavailable.
     app_session=any(marker in arguments for marker in APP_MARKERS)
     native=getattr(settings,'INTEGRATION_MODE','isolated')=='native'
+    if native:
+        arguments=native_arguments(arguments,env)
     if native and not app_session:
         os.execve(REAL,[REAL,*arguments],env)
     event({'app_stdio_adapter_started':True,'read_only':not native,'app_session':app_session,

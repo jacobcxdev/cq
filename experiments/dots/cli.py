@@ -254,9 +254,16 @@ def install(args):
         shutil.rmtree(old)
     prepared = candidate(root)
     release.activate(prepared)
+    launcher = None
+    if args.mode == 'native':
+        import dock
+        launcher = str(dock.install(root, pathlib.Path(args.app)))
     save(root / 'installation.json', {'schema': 1, 'installed': True, 'app': pin,
                                     'installed_at': time.time(), 'system_app_modified': False})
-    return start(root)
+    result = start(root)
+    if launcher:
+        result['dock_launcher'] = launcher
+    return result
 
 
 def native_restart_required(root, settings):

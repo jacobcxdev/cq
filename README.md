@@ -732,11 +732,14 @@ loopback certificates in a separate private directory. It does not patch or
 re-sign the installed app bundle. Native app qualification is version-pinned;
 unsupported app updates fail before launch.
 
-Normal-profile support is under qualification. After quitting the app, use
-`cq codex dots start` as the CQ launcher. This preserves the original app signature
-and opens the existing profile with CQ routing. Opening the app directly from
-Dock or Applications bypasses the adapter. Installation never quits an
-already-running normal app; it reports that a restart is required.
+Native installation also creates `~/Applications/ChatGPT via CQ.app`, bundled
+with CQ. Drag it from Finder into the Dock and use it to open ChatGPT with Dots.
+The launcher preserves the original app signature and opens the existing profile.
+It sets `OPENAI_BASE_URL` to CQ's configured local proxy, independently of any CQ
+entry in `~/.codex/config.toml`. `cq codex dots start` provides the same routing
+from the terminal. Opening OpenAI's original app directly bypasses the adapter.
+Neither launcher quits an already-running app; if it needs a fresh launch,
+quit ChatGPT and open **ChatGPT via CQ** again.
 The previous isolated research mode remains available with `install --mode isolated`.
 
 ```sh

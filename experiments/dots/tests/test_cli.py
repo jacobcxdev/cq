@@ -79,9 +79,11 @@ class InstallationTests(unittest.TestCase):
              mock.patch.object(cli,'refresh'), \
              mock.patch.object(cli,'candidate',return_value='/candidate'), \
              mock.patch.object(cli,'start',return_value={'restart_required':True}), \
-             mock.patch.dict(sys.modules,{'release':release}):
+             mock.patch.dict(sys.modules,{'release':release,'dock':types.SimpleNamespace(
+                 install=mock.Mock(return_value='/Applications/ChatGPT via CQ.app'))}):
             result=cli.install(args)
         self.assertTrue(result['restart_required'])
+        self.assertEqual(result['dock_launcher'],'/Applications/ChatGPT via CQ.app')
         self.assertEqual(json.loads((self.root/'settings.json').read_text())['integration_mode'],'native')
         provision.assert_called_once_with(self.root,mode='native')
         release.activate.assert_called_once_with('/candidate')

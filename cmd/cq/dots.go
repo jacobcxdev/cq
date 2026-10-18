@@ -14,6 +14,7 @@ import (
 
 	"github.com/alecthomas/kong"
 	dotspayload "github.com/jacobcxdev/cq/experiments/dots"
+	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
 // CodexDotsCmd manages the Dots adapter and its private state.
@@ -64,17 +65,44 @@ func defaultDotsRunner() dotsRunner {
 		run: func(ctx context.Context, python string, args []string, stdout, stderr io.Writer) error {
 			command := exec.CommandContext(ctx, python, args...)
 			command.Stdout, command.Stderr = stdout, stderr
-			for _, value := range os.Environ() {
-				if !strings.HasPrefix(value, "PYTHONPATH=") && !strings.HasPrefix(value, "PYTHONHOME=") && !strings.HasPrefix(value, "CQ_DOTS_CONFIG=") && !strings.HasPrefix(value, "PYTHONDONTWRITEBYTECODE=") {
-					command.Env = append(command.Env, value)
+			baseURL, cqPath := "", ""
+			if len(args) > 1 && (args[1] == "install" || args[1] == "start" || args[1] == "sync") {
+				cfg, err := proxy.LoadExistingConfig()
+				if err != nil {
+					return fmt.Errorf("CQ proxy configuration unavailable: %w", err)
+				}
+				baseURL = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
+				cqPath, err = exec.LookPath(os.Args[0])
+				if err != nil {
+					return fmt.Errorf("CQ launcher executable unavailable: %w", err)
+				}
+				cqPath, err = filepath.Abs(cqPath)
+				if err != nil {
+					return err
 				}
 			}
-			command.Env = append(command.Env, "PYTHONDONTWRITEBYTECODE=1")
+			command.Env = dotsProcessEnvironment(os.Environ(), baseURL, cqPath)
 			if err := command.Run(); err != nil {
 				return fmt.Errorf("Dots controller failed: %w", err)
 			}
 			return nil
 		}}
+}
+
+func dotsProcessEnvironment(inherited []string, baseURL, cqPath string) []string {
+	environment := make([]string, 0, len(inherited)+3)
+	for _, value := range inherited {
+		key, _, _ := strings.Cut(value, "=")
+		if key == "PYTHONPATH" || key == "PYTHONHOME" || key == "CQ_DOTS_CONFIG" || key == "PYTHONDONTWRITEBYTECODE" || key == "CQ_DOTS_CQ_PATH" || baseURL != "" && key == "OPENAI_BASE_URL" {
+			continue
+		}
+		environment = append(environment, value)
+	}
+	environment = append(environment, "PYTHONDONTWRITEBYTECODE=1")
+	if baseURL != "" {
+		environment = append(environment, "OPENAI_BASE_URL="+baseURL, "CQ_DOTS_CQ_PATH="+cqPath)
+	}
+	return environment
 }
 
 func runCodexDotsEntry(args []string, stdout, stderr io.Writer) (bool, error) {
