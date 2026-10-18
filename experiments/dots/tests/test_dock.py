@@ -100,6 +100,9 @@ class DockTests(unittest.TestCase):
              mock.patch.object(dock.subprocess, 'run', return_value=started) as run:
             self.assertEqual(dock.controller(str(self.root), str(self.cq)), (0, ''))
         self.assertEqual(run.call_args_list[0].args[0], [str(self.cq), 'codex', 'dots', '--root', str(self.root), 'start', '--json'])
+        # Native warm-up and one-time setup have their own bounds; do not kill
+        # a healthy CLI startup partway through those sequential operations.
+        self.assertNotIn('timeout', run.call_args_list[0].kwargs)
         self.assertEqual(run.call_args_list[1], mock.call(['/usr/bin/open', '-a', str(self.app)], check=True, timeout=15))
 
     def test_launch_never_opens_stock_app_when_restart_or_onboarding_needed(self):

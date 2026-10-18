@@ -79,7 +79,7 @@ def controller(root, cq):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
     import cli
     started = subprocess.run([cq, 'codex', 'dots', '--root', root, 'start', '--json'],
-                             capture_output=True, text=True, timeout=180)
+                             capture_output=True, text=True)
     if started.returncode:
         try:
             message = json.loads(started.stderr)['error']
