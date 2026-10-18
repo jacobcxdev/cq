@@ -155,8 +155,8 @@ func AppCheck(settings *Settings) error {
 	return nil
 }
 
-// Provision creates only private Go runtime state. Existing certificates and
-// legacy Python payloads are retained unchanged for rollback.
+// Provision creates only private Go runtime state and preserves existing
+// certificates and account state.
 func Provision(root, mode string) (string, error) {
 	if mode != "native" && mode != "isolated" {
 		return "", fmt.Errorf("invalid Dots integration mode")

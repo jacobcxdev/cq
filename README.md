@@ -777,8 +777,8 @@ environment. It requires valid read-only account credentials and already-onboard
 Dots. It does not add empty-account onboarding slots,
 native cross-account `@` selection or persistent secondary Reboot. Secondary Dots
 use separate local executors with private account state and native task sandboxing.
-Local MCP configuration is not copied between accounts. See [Dots installation details](experiments/dots/README.md)
-for qualification, explicit paths and rollback.
+Local MCP configuration is not copied between accounts. See [Dots installation details](docs/dots.md)
+for qualification, explicit paths and lifecycle controls.
 
 ## Development
 
