@@ -14,6 +14,8 @@ const (
 	geminiWeeklyBucketID   = "gemini-weekly"
 )
 
+var errGeminiQuotaUnavailable = errors.New("Gemini quota not reported by Antigravity")
+
 type quotaSummary struct {
 	Groups []usageGroup `json:"groups"`
 }
@@ -39,6 +41,7 @@ func parseQuotaSummary(data []byte) (quota.Result, error) {
 		geminiFiveHourBucketID: 0,
 		geminiWeeklyBucketID:   0,
 	}
+	thirdPartyQuota := false
 	for _, group := range summary.Groups {
 		for _, bucket := range group.Buckets {
 			var name quota.WindowName
@@ -47,6 +50,9 @@ func parseQuotaSummary(data []byte) (quota.Result, error) {
 				name = quota.Window5Hour
 			case geminiWeeklyBucketID:
 				name = quota.Window7Day
+			case "3p-5h", "3p-weekly":
+				thirdPartyQuota = true
+				continue
 			default:
 				continue
 			}
@@ -60,6 +66,9 @@ func parseQuotaSummary(data []byte) (quota.Result, error) {
 				ResetAtUnix:  quota.ParseResetTime(bucket.ResetTime),
 			}
 		}
+	}
+	if counts[geminiFiveHourBucketID] == 0 && counts[geminiWeeklyBucketID] == 0 && thirdPartyQuota {
+		return quota.Result{}, errGeminiQuotaUnavailable
 	}
 	if counts[geminiFiveHourBucketID] != 1 || counts[geminiWeeklyBucketID] != 1 {
 		return quota.Result{}, errors.New("missing or duplicate Gemini quota bucket")

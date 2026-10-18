@@ -288,6 +288,7 @@ func TestProviderFetchClassifiesHTTPFailures(t *testing.T) {
 		{name: "unauthorized", status: http.StatusUnauthorized, body: "{\"error\":\"private-token\"}", wantCode: "auth_expired", wantStatus: http.StatusUnauthorized},
 		{name: "api error", status: http.StatusTooManyRequests, body: "{\"error\":\"private-token\"}", wantCode: "api_error", wantStatus: http.StatusTooManyRequests},
 		{name: "malformed quota", status: http.StatusOK, body: "{\"groups\":[]}", wantCode: "parse_error"},
+		{name: "third party quota only", status: http.StatusOK, body: `{"groups":[{"buckets":[{"bucketId":"3p-weekly","remainingFraction":1},{"bucketId":"3p-5h","remainingFraction":1}]}]}`, wantCode: "api_error"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -300,6 +301,11 @@ func TestProviderFetchClassifiesHTTPFailures(t *testing.T) {
 			p := testProvider(t, doer, credentialFixture("access", "refresh", now.Add(time.Hour).Format(time.RFC3339)), "project", true, "client-secret")
 			result := fetchSingleResult(t, p, context.Background(), now)
 			assertResultError(t, result, tt.wantCode, tt.wantStatus)
+			if tt.name == "third party quota only" {
+				if result.Error.Message != "Gemini quota not reported by Antigravity" || len(result.Windows) != 0 {
+					t.Fatalf("Fetch() = %#v, want unavailable Gemini quota without third-party windows", result)
+				}
+			}
 			if strings.Contains(result.Error.Message, "private-token") {
 				t.Fatalf("error message exposed private data: %q", result.Error.Message)
 			}
