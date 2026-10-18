@@ -464,40 +464,41 @@ class NativeProbeTests(unittest.TestCase):
         self.assertIs(probe.CATALOG_FIXTURE, self.fixture)
         self.assertFalse((self.root / 'native-roots.json').exists())
 
-    def test_native_celsius_secondary_failure_preserves_primary_success(self):
+    def test_native_celsius_bootstrap_defers_secondary_lookup_and_pins_owner(self):
         data = b'{"websocket_url":"wss://ws.chatgpt.com/primary"}'
-        for fixture in [self.fixture, None]:
-            with self.subTest(catalog_present=fixture is not None):
-                handler = self.handler('/backend-api/celsius/ws/user', 'GET', b'')
-                broker = MagicMock()
-                with patch.object(probe, 'CELSIUS', broker), patch.object(probe, 'CATALOG_FIXTURE', fixture), \
-                        patch('probe.http.client.HTTPSConnection', return_value=self.connection(data)), \
-                        patch('probe.catalog.get', side_effect=ValueError('Secondary unavailable')):
-                    handler.handle_request()
-                handler.send_response.assert_called_once_with(200)
-                self.assertEqual(handler.wfile.getvalue(), data)
-                broker.issue.assert_not_called()
-
-    def test_native_celsius_deadline_preserves_primary_and_discards_late_result(self):
-        data = b'{"websocket_url":"wss://ws.chatgpt.com/primary"}'
-        release = threading.Event(); finished = threading.Event(); broker = MagicMock()
-        def slow(*args):
-            release.wait(2)
-            finished.set()
-            return {'websocket_url': 'wss://ws.chatgpt.com/worker'}
         handler = self.handler('/backend-api/celsius/ws/user', 'GET', b'')
-        try:
-            with patch.object(probe, 'NATIVE_OWNER_TIMEOUT', 0.03), patch.object(probe, 'CELSIUS', broker), \
+        broker = MagicMock(); broker.issue.return_value = 'wss://ws.chatgpt.com/cq-owner-events/test'
+        with patch.object(probe, 'CELSIUS', broker), \
+                patch('probe.http.client.HTTPSConnection', return_value=self.connection(data)), \
+                patch('probe.catalog.get', return_value={'websocket_url': 'wss://ws.chatgpt.com/worker'}) as get:
+            handler.handle_request()
+            handler.send_response.assert_called_once_with(200)
+            self.assertEqual(json.loads(handler.wfile.getvalue())['websocket_url'], broker.issue.return_value)
+            get.assert_not_called()
+            self.assertEqual(broker.issue.call_args.args, ({self.main['alias']: 'wss://ws.chatgpt.com/primary'}, self.owners))
+            resolve = broker.issue.call_args.kwargs['resolve_url']
+            self.assertEqual(resolve(self.worker['alias']), 'wss://ws.chatgpt.com/worker')
+            account, path, headers = get.call_args.args
+            self.assertEqual(account, self.worker)
+            self.assertEqual(path, handler.path)
+            self.assertEqual(headers['Authorization'], 'Bearer stored-worker')
+            self.assertEqual(headers['ChatGPT-Account-Id'], 'worker')
+            self.assertNotIn('Cookie', headers)
+            with self.assertRaises(KeyError): resolve('unconfigured')
+
+    def test_native_celsius_never_returns_misleading_primary_only_session(self):
+        data = b'{"websocket_url":"wss://ws.chatgpt.com/primary"}'
+        for fixture in [None, self.fixture]:
+            handler = self.handler('/backend-api/celsius/ws/user', 'GET', b'')
+            broker = MagicMock(); broker.issue.side_effect = ValueError('Broker unavailable')
+            with patch.object(probe, 'CELSIUS', broker), patch.object(probe, 'CATALOG_FIXTURE', fixture), \
                     patch('probe.http.client.HTTPSConnection', return_value=self.connection(data)), \
-                    patch('probe.catalog.get', side_effect=slow):
-                started = time.monotonic(); handler.handle_request()
-                self.assertLess(time.monotonic() - started, 0.5)
-                handler.send_response.assert_called_once_with(200)
-                self.assertEqual(handler.wfile.getvalue(), data)
-                release.set(); self.assertTrue(finished.wait(1))
-                broker.issue.assert_not_called()
-        finally:
-            release.set()
+                    patch('probe.catalog.get') as get:
+                handler.handle_request()
+            handler.send_response.assert_called_once_with(503)
+            handler.send_header.assert_any_call('Retry-After', '1')
+            self.assertEqual(handler.wfile.getvalue(), b'')
+            get.assert_not_called()
 
     def test_native_challenge_deadline_does_not_publish_late_challenge(self):
         release = threading.Event(); finished = threading.Event()

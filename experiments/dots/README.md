@@ -109,6 +109,8 @@ Normal mode uses a private Chromium debugging pipe and an owner-only Unix socket
 
 The pinned renderer gets an in-memory recovery guard for cancelled shared Dot reads. An active reader retries its own GET once when another chat's disposed controller cancelled their shared request. Sends are never retried by this guard. The signed app bundle stays unchanged.
 
+Native messaging starts its primary WebSocket without waiting for secondary account URL lookups. Each secondary connects independently and reconnects after failures with a delay capped at 30 seconds, restoring active subscriptions and presence. An unavailable broker returns a retryable bootstrap error instead of silently leaving secondary Dots on a primary-only connection. This recovery never retries message sends.
+
 ## Current limits
 
 Discovery includes each available owner’s existing primary Dot. Empty accounts do not gain onboarding slots. Native cross-account `@` selection and persistent secondary Reboot remain unsupported. Secondary local execution uses native task sandboxing and separate account state; a synthetic file-read task has been verified end to end. Local MCP configuration is not copied between accounts. Connection status comes from the owning account's backend, including offline and permission states.

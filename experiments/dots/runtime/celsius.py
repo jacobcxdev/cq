@@ -36,6 +36,12 @@ def event_room(payload):
     if room is None and isinstance(payload.get('room'),dict):room=payload['room'].get('id')
     return room
 
+def validate_url(url):
+    parsed=urllib.parse.urlsplit(url)
+    if parsed.scheme!='wss' or parsed.hostname!='ws.chatgpt.com' or parsed.port not in {None,443}:
+        raise ValueError('Unexpected Celsius service origin')
+    return url
+
 def secondary_frame(frame, owners, viewer_ids, source=None):
     source=SECONDARY if source is None else source
     if source==PRIMARY: return None
@@ -78,20 +84,19 @@ class Broker:
         threading.Thread(target=self.server.serve_forever,daemon=True).start()
         self.event({'celsius_broker_port':self.port})
 
-    def issue(self,urls,owners):
+    def issue(self,urls,owners,resolve_url=None):
         aliases=set(owner_aliases(owners))
-        if aliases!=set(settings.DOT_OWNERS.values())|{PRIMARY} or set(urls)!=aliases:
+        expected={PRIMARY} if resolve_url is not None else aliases
+        if aliases!=set(settings.DOT_OWNERS.values())|{PRIMARY} or set(urls)!=expected:
             raise ValueError('Configured owner URLs required')
         for url in urls.values():
-            parsed=urllib.parse.urlsplit(url)
-            if parsed.scheme!='wss' or parsed.hostname!='ws.chatgpt.com' or parsed.port not in {None,443}:
-                raise ValueError('Unexpected Celsius service origin')
+            validate_url(url)
         token=secrets.token_urlsafe(32)
         with self.lock:
             now=time.monotonic()
             self.grants={k:v for k,v in self.grants.items() if v[0]>now}
             if len(self.grants)>=16:raise ValueError('Celsius URL grant limit')
-            self.grants['/cq-owner-events/'+token]=(now+1500,dict(urls),dict(owners))
+            self.grants['/cq-owner-events/'+token]=(now+1500,dict(urls),dict(owners),resolve_url)
         return 'wss://ws.chatgpt.com/cq-owner-events/'+token
 
     def handle(self,client):
@@ -99,13 +104,16 @@ class Broker:
             grant=self.grants.get(client.request.path)
         if grant is None or grant[0]<=time.monotonic():
             client.close(1008,'Unknown or expired local session');return
-        _,urls,owners=grant
+        _,urls,owners,resolve_url=grant
         native=settings.INTEGRATION_MODE=='native'
         sockets={}
         socket_lock=threading.Lock()
         ready=set()
         unavailable=set()
-        deferred={alias:[] for alias in urls if alias!=PRIMARY}
+        desired={alias:{} for alias in owner_aliases(owners) if alias!=PRIMARY}
+        connecting=set()
+        retries={}
+        retry_delay={alias:1 for alias in desired}
         connected=object()
         connect_error=object()
         stopped=threading.Event()
@@ -125,7 +133,7 @@ class Broker:
                         'reply_type':reply.get('type') if isinstance(reply,dict) else None})
             return {'id':native_id,'reply':reply}
         def retire(alias):
-            unavailable.add(alias);ready.discard(alias);deferred.pop(alias,None)
+            unavailable.add(alias);ready.discard(alias)
             with socket_lock:socket=sockets.pop(alias,None)
             if socket is not None:
                 try:socket.close()
@@ -136,6 +144,9 @@ class Broker:
                     forwarded.append(complete(native_id,{'type':'error','code':'cq_owner_unavailable'}))
             for key in list(pending):
                 if key[0]==alias:del pending[key]
+            if native and alias not in connecting and alias not in retries:
+                retries[alias]=time.monotonic()+retry_delay[alias]
+                retry_delay[alias]=min(30,retry_delay[alias]*2)
             self.event({'celsius_owner_unavailable':alias})
             if forwarded:client.send(json.dumps(forwarded))
         def receive(source,socket):
@@ -144,20 +155,25 @@ class Broker:
                     if stopped.is_set():break
                     incoming.put((source,data),timeout=5)
             except Exception as error:
-                self.event({'celsius_receive_error_type':type(error).__name__,'source':source})
+                alias=source[0] if isinstance(source,tuple) else source
+                close=getattr(error,'rcvd',None)
+                self.event({'celsius_receive_error_type':type(error).__name__,'source':alias,
+                            'close_code':getattr(close,'code',None)})
             finally:
                 try:incoming.put((source,None),timeout=5)
                 except queue.Full:pass
         def connect_secondary(alias,url):
             socket=None
             try:
+                if resolve_url is not None:
+                    url=validate_url(resolve_url(alias))
                 socket=connect(url,ssl=self.public_tls,proxy=None,compression=None,legacy=True,
                     max_size=2*1024*1024,open_timeout=20,close_timeout=3)
                 with socket_lock:
-                    if not stopped.is_set() and alias not in unavailable:sockets[alias]=socket
-                if stopped.is_set() or alias in unavailable:socket.close();return
+                    if not stopped.is_set():sockets[alias]=socket
+                if stopped.is_set():socket.close();return
                 incoming.put((connected,alias),timeout=5)
-                threading.Thread(target=receive,args=(alias,socket),daemon=True).start()
+                threading.Thread(target=receive,args=((alias,socket),socket),daemon=True).start()
             except Exception as error:
                 if socket is not None:
                     try:socket.close()
@@ -166,8 +182,9 @@ class Broker:
                 except queue.Full:pass
         try:
             for alias in owner_aliases(owners) if native else urls:
-                url=urls[alias]
+                url=urls.get(alias)
                 if native and alias!=PRIMARY:
+                    connecting.add(alias)
                     threading.Thread(target=connect_secondary,args=(alias,url),daemon=True).start()
                     continue
                 sockets[alias]=connect(url,ssl=self.public_tls,proxy=None,compression=None,legacy=True,
@@ -178,6 +195,10 @@ class Broker:
             threading.Thread(target=receive,args=('client',client),daemon=True).start()
             while not stopped.is_set():
                 if native:
+                    for alias,deadline in list(retries.items()):
+                        if deadline<=time.monotonic() and alias not in connecting:
+                            del retries[alias];connecting.add(alias)
+                            threading.Thread(target=connect_secondary,args=(alias,urls.get(alias)),daemon=True).start()
                     for native_id,state in list(awaiting.items()):
                         if state['deadline'] is not None and state['deadline']<=time.monotonic():
                             for alias in list(state['remaining']):retire(alias)
@@ -187,17 +208,23 @@ class Broker:
                     continue
                 if source is connected:
                     alias=data
-                    if alias in unavailable:continue
+                    connecting.discard(alias);unavailable.discard(alias);retries.pop(alias,None)
+                    retry_delay[alias]=1
                     ready.add(alias)
                     self.event({'celsius_owner_connected':alias,'upgrade_status':101})
                     try:
-                        for message in deferred.pop(alias,[]):sockets[alias].send(message)
+                        for message in desired[alias].values():sockets[alias].send(message)
                     except Exception:retire(alias)
                     continue
                 if source is connect_error:
                     alias,error_type=data
+                    connecting.discard(alias)
                     self.event({'celsius_receive_error_type':error_type,'source':alias})
                     retire(alias);continue
+                if isinstance(source,tuple):
+                    alias,socket=source
+                    if sockets.get(alias) is not socket:continue
+                    source=alias
                 if data is None:
                     if native and source not in {'client',PRIMARY}:retire(source);continue
                     break
@@ -217,16 +244,23 @@ class Broker:
                                              'owner_count':len(destinations),
                                              'deadline':time.monotonic()+20 if native and PRIMARY not in destinations else None}
                         for alias in destinations:
-                            if native and alias in unavailable:
-                                if alias in required:retire(alias)
-                                continue
                             upstream_command=copy.deepcopy(command)
                             if alias!=PRIMARY:upstream_command.pop('offset',None)
                             pending[(alias,next_id)]=native_id
                             message=json.dumps([{'id':next_id,'command':upstream_command}])
-                            if native and alias not in ready:
-                                if len(deferred[alias])>=128:retire(alias)
-                                else:deferred[alias].append(message)
+                            if native and alias!=PRIMARY:
+                                if sum(alias in state['remaining'] for state in awaiting.values())>128:
+                                    retire(alias);next_id+=1;continue
+                                key=(command.get('type'),command.get('topic_id'))
+                                if command.get('type')=='unsubscribe':
+                                    desired[alias].pop(('subscribe',command.get('topic_id')),None)
+                                elif key not in desired[alias] and len(desired[alias])>=128:
+                                    retire(alias);next_id+=1;continue
+                                else:desired[alias][key]=message
+                            if native and alias in unavailable:
+                                if alias in required:retire(alias)
+                            elif native and alias not in ready:
+                                pass
                             else:
                                 try:sockets[alias].send(message)
                                 except Exception:
