@@ -2,6 +2,7 @@ package dots
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -378,11 +379,23 @@ func TestProbeAttestationFanoutPreservesNativeProofAndBindsEachOwner(t *testing.
 				t.Error("owner attestation identity leaked")
 			}
 		}
-		return probeSuccess(`{"attestation_challenge":"` + challenge + `"}`), nil
+		response := probeSuccess(`{"attestation_challenge":"` + challenge + `"}`)
+		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			var compressed bytes.Buffer
+			writer := gzip.NewWriter(&compressed)
+			_, _ = writer.Write([]byte(`{"attestation_challenge":"` + challenge + `"}`))
+			if err := writer.Close(); err != nil {
+				t.Error(err)
+			}
+			response.Header.Set("Content-Encoding", "gzip")
+			response.Body = io.NopCloser(&compressed)
+		}
+		return response, nil
 	})
 	r := probeRequest("GET", "/backend-api/ios/attestation_challenge", "")
 	r.Header.Set("X-Sentinel-Dc", "native-device-proof")
 	r.Header.Set("Cookie", "native-cookie")
+	r.Header.Set("Accept-Encoding", "gzip, deflate, br")
 	w := httptest.NewRecorder()
 	p.ServeHTTP(w, r)
 	if w.Code != 200 || calls["system"] != 1 || calls[owner.AccountID] != 1 {

@@ -166,6 +166,75 @@ func TestProvisionRejectsSymlinkAndSharedCertificates(t *testing.T) {
 	}
 }
 
+func TestProvisionMigratesLegacyProxyPorts(t *testing.T) {
+	root := t.TempDir()
+	runtimeRoot, err := Provision(root, "native")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"realtime-port", "celsius-port"} {
+		path := filepath.Join(runtimeRoot, name)
+		if err := os.WriteFile(path, []byte("53753\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := Provision(root, "native"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"realtime-port", "celsius-port"} {
+		path := filepath.Join(runtimeRoot, name)
+		port, err := realtimePort(path, runtimeRoot, false)
+		if err != nil || port != 53753 {
+			t.Fatalf("legacy %s unavailable after upgrade: %d, %v", name, port, err)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || string(data) != "53753\n" {
+			t.Fatalf("legacy port changed: %q, %v", data, err)
+		}
+	}
+}
+
+func TestProvisionRejectsUnsafeLegacyProxyPorts(t *testing.T) {
+	for _, variant := range []string{"symlink", "shared-write", "invalid", "oversized", "directory"} {
+		t.Run(variant, func(t *testing.T) {
+			root := t.TempDir()
+			runtimeRoot, err := Provision(root, "native")
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(runtimeRoot, "realtime-port")
+			switch variant {
+			case "symlink":
+				err = os.Symlink(filepath.Join(runtimeRoot, "port"), path)
+			case "directory":
+				err = os.Mkdir(path, 0o700)
+			default:
+				data, mode := "53753", os.FileMode(0o644)
+				if variant == "shared-write" {
+					mode = 0o664
+				} else if variant == "invalid" {
+					data = "65536"
+				} else if variant == "oversized" {
+					data = strings.Repeat("1", 9)
+				}
+				err = os.WriteFile(path, []byte(data), mode)
+				if err == nil {
+					err = os.Chmod(path, mode)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Provision(root, "native"); err == nil {
+				t.Fatal("unsafe legacy proxy port accepted")
+			}
+		})
+	}
+}
+
 func TestFreshInstallAndLegacyReinstallPreserveIdentityAndAwareness(t *testing.T) {
 	options, pin := installationFixture(t)
 	if err := AppCheck(&pin); err != nil {

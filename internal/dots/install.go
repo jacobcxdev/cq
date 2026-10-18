@@ -18,9 +18,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/httputil"
 )
 
 const (
@@ -220,7 +223,56 @@ func Provision(root, mode string) (string, error) {
 	} else if _, err := readPrivate(port, "", true); err != nil {
 		return "", fmt.Errorf("Proxy port must be an owned private regular file")
 	}
+	for _, name := range []string{"realtime-port", "celsius-port"} {
+		if err := migrateLegacyProxyPort(filepath.Join(runtimeRoot, name)); err != nil {
+			return "", err
+		}
+	}
 	return runtimeRoot, nil
+}
+
+// Python wrote these non-secret ports as 0644. Preserve their values while
+// adopting the private file mode required by the Go runtime.
+func migrateLegacyProxyPort(path string) error {
+	file, err := (fsutil.OSFileSystem{}).OpenNoFollow(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	mode := before.Mode() & (os.ModePerm | os.ModeSetuid | os.ModeSetgid | os.ModeSticky)
+	if !before.Mode().IsRegular() || !owned(before) || before.Size() > 8 || (mode != 0o600 && mode != 0o644) {
+		return fmt.Errorf("Legacy proxy port must be an owned regular file with safe permissions")
+	}
+	data, err := httputil.ReadBody(file)
+	if err != nil {
+		return err
+	}
+	port, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || port < 1 || port > 65535 {
+		return fmt.Errorf("Legacy proxy port invalid")
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if revision(before) != revision(after) {
+		return fmt.Errorf("Legacy proxy port changed during migration")
+	}
+	if mode == 0o644 {
+		file, ok := file.(interface{ Chmod(os.FileMode) error })
+		if !ok {
+			return fmt.Errorf("Legacy proxy port permission migration unavailable")
+		}
+		return file.Chmod(0o600)
+	}
+	return nil
 }
 
 // Install prepares an installation. Starting its workers remains a separate

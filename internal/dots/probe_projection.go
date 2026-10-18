@@ -526,6 +526,8 @@ func (p *Probe) transform(r *http.Request, response *http.Response, data []byte,
 				return nil, err
 			}
 			req.Header = OwnerHeaders(probeHeaders(r.Header), account)
+			req.Header.Del("Content-Length")
+			req.Header.Set("Accept-Encoding", "identity")
 			res, err := p.options.HTTP.Do(req)
 			if err != nil {
 				return nil, err
