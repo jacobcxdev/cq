@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -66,7 +67,11 @@ func defaultDotsRunner() dotsRunner {
 			command := exec.CommandContext(ctx, python, args...)
 			command.Stdout, command.Stderr = stdout, stderr
 			baseURL, cqPath := "", ""
-			if len(args) > 1 && (args[1] == "install" || args[1] == "start" || args[1] == "sync") {
+			native, err := dotsNativeLaunch(args)
+			if err != nil {
+				return err
+			}
+			if native {
 				cfg, err := proxy.LoadExistingConfig()
 				if err != nil {
 					return fmt.Errorf("CQ proxy configuration unavailable: %w", err)
@@ -87,6 +92,42 @@ func defaultDotsRunner() dotsRunner {
 			}
 			return nil
 		}}
+}
+
+func dotsNativeLaunch(args []string) (bool, error) {
+	if len(args) < 2 {
+		return false, nil
+	}
+	switch args[1] {
+	case "install":
+		for index := 2; index+1 < len(args); index++ {
+			if args[index] == "--mode" {
+				return args[index+1] == "native", nil
+			}
+		}
+		return true, nil
+	case "start", "sync":
+		for index := 2; index+1 < len(args); index++ {
+			if args[index] != "--root" {
+				continue
+			}
+			file, err := os.Open(filepath.Join(args[index+1], "settings.json"))
+			if err != nil {
+				return false, err
+			}
+			defer file.Close()
+			var settings struct {
+				Mode string `json:"integration_mode"`
+			}
+			if err := json.NewDecoder(io.LimitReader(file, 1<<20)).Decode(&settings); err != nil {
+				return false, fmt.Errorf("invalid Dots integration mode: %w", err)
+			}
+			return settings.Mode == "native", nil
+		}
+		return false, fmt.Errorf("Dots launch requires an installation root")
+	default:
+		return false, nil
+	}
 }
 
 func dotsProcessEnvironment(inherited []string, baseURL, cqPath string) []string {
