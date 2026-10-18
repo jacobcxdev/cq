@@ -131,10 +131,20 @@ func (runtime *CodexLeaseRuntime) validateRedistributionPlan(restored CodexResto
 	if restored.Classification == CodexRestoredLaneUnseen {
 		current, found = runtime.restoredRecord(restored, restored.Fence.Last)
 	}
+	safeSource := found && codexLeaseSafeRedistributionSource(current.Record)
+	if found && !safeSource && restored.Classification == CodexRestoredLaneUnseen {
+		// Retention can expire the last turn without consuming redistribution.
+		// A fresh turn must pass the same checks as an ordinary successor.
+		var err error
+		safeSource, err = runtime.canReserveSuccessor(restored)
+		if err != nil {
+			return false, err
+		}
+	}
 	_, failedHead := codexRestoredLaneRestartableFailedHead(restored)
 	if !found || (restored.Classification != CodexRestoredLaneCurrent && restored.Classification != CodexRestoredLaneUnseen && !failedHead) || plan.RedistributionGeneration != codexLaneRedistributionPending(restored.Lane) ||
 		plan.RequestKind != CodexRequestTurn || plan.Evidence.PreviousResponseID != "" || plan.Evidence.HasTurnState || plan.RequiresAccountContinuity || plan.authenticatedCallerContinuity ||
-		!codexLeaseSafeRedistributionSource(current.Record) {
+		!safeSource {
 		return false, fmt.Errorf("%w: unsafe redistribution request", ErrCodexLeaseInvalidMutation)
 	}
 	return true, nil

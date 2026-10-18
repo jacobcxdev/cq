@@ -2,10 +2,87 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+func TestCodexRedistributionResumesAfterPredecessorExpires(t *testing.T) {
+	t.Parallel()
+	coordinator, _, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn-1", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+	first, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first, err = first.MarkDispatched(); err != nil {
+		t.Fatal(err)
+	}
+	if first, err = first.AdmitHTTP2xxContext(context.Background(), CodexHTTPAdmissionEvidence{TurnState: "old-state", HasTurnState: true}); err != nil {
+		t.Fatal(err)
+	}
+	if first, err = first.ProviderCompleted(CodexHTTPCompletionEvidence{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = first.Drain(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.RedistributeTaskAffinities(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(25 * time.Hour)
+	if err := coordinator.Store().Compact(time.Time{}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if records := coordinator.Store().v2.Records; len(records) != 1 || records[0].State != LeaseExpired {
+		t.Fatalf("retained predecessor = %#v, want one expired lease", records)
+	}
+	plan.Key.Turn = "turn-2"
+	plan.Accounts = []codex.AccountKey{"account-a", "account-b"}
+	plan.Slots = []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect}}
+	plan.Evidence.HasEncryptedState = true
+	snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, plan.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Classification != CodexRestoredLaneUnseen || snapshot.RedistributionGeneration == 0 {
+		t.Fatalf("resumed route = %+v, want unseen turn with pending redistribution", snapshot)
+	}
+	plan.RedistributionGeneration = snapshot.RedistributionGeneration
+	for _, evidence := range []CodexLeaseRequestEvidence{
+		{PreviousResponseID: "old-response"},
+		{TurnState: "old-state", HasTurnState: true},
+	} {
+		unsafe := plan
+		unsafe.Evidence = evidence
+		before := coordinator.Store().Generation()
+		if _, err := runtimeLease.BeginRequest(unsafe); !errors.Is(err, ErrCodexLeaseInvalidMutation) {
+			t.Fatalf("account-bound redistribution error = %v, want invalid mutation", err)
+		}
+		if coordinator.Store().Generation() != before {
+			t.Fatal("rejected account-bound request mutated journal")
+		}
+	}
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatalf("resumed redistribution: %v", err)
+	}
+	if snapshot, err = coordinator.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, plan.Authority); err != nil || snapshot.RedistributionGeneration == 0 {
+		t.Fatalf("redistribution consumed before admission: %+v, %v", snapshot, err)
+	}
+	if handle, err = handle.MarkDispatched(); err != nil {
+		t.Fatal(err)
+	}
+	if handle, err = handle.AdmitHTTP2xx(); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot, err = coordinator.LoadRouteSnapshot(context.Background(), plan.Key, plan.Accounts, plan.Authority); err != nil || snapshot.RedistributionGeneration != 0 || snapshot.BoundAccountKey != "account-b" {
+		t.Fatalf("admitted redistribution = %+v, %v, want account-b with no pending redistribution", snapshot, err)
+	}
+}
 
 func TestCodexRedistributionSchedulesLatchedChatWithoutInterruptingStream(t *testing.T) {
 	coordinator, fsys, now := openCodexLeaseRuntimeTestCoordinator(t)
