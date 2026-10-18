@@ -52,6 +52,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(set(manifest['files']), set(release.FILES))
         self.assertIn('settings.py', manifest['files'])
         self.assertIn('awareness.py', manifest['files'])
+        self.assertIn('board.py', manifest['files'])
         self.assertFalse((self.candidate / 'private.json').exists())
         self.assertEqual((self.candidate / 'manifest.json').stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.candidate / 'cloud_stdio.py').stat().st_mode & 0o777, 0o700)
@@ -223,6 +224,47 @@ class ReleaseTests(unittest.TestCase):
         self.assertIsNone(self.identity(str(self.root / 'venv/bin/python') + ' -c probe.py'))
         self.assertIsNone(self.identity(str(self.root / 'venv/bin/python') + ' ' + str(self.base / 'probe.py')))
 
+    def framework_python(self):
+        version = self.base / 'Cellar/python@3.14/3.14.8/Frameworks/Python.framework/Versions/3.14'
+        interpreter = version / 'bin/python3.14'
+        interpreter.parent.mkdir(parents=True)
+        interpreter.write_text('framework launcher fixture')
+        executable = version / 'Resources/Python.app/Contents/MacOS/Python'
+        executable.parent.mkdir(parents=True)
+        executable.write_text('framework executable fixture')
+        configured = self.root / 'venv/bin/python'
+        configured.parent.mkdir(parents=True)
+        configured.symlink_to(interpreter)
+        return executable
+
+    def test_framework_python_identity_kept_owner_script_and_cwd_checks(self):
+        executable = self.framework_python()
+        command = str(executable) + ' -u account_watch.py'
+        self.assertEqual(self.identity(command), 'account_watch.py')
+        self.assertIsNone(self.identity(command, uid=os.getuid() + 1))
+        self.assertIsNone(self.identity(command, cwd=self.base))
+        self.assertIsNone(self.identity(str(executable) + ' -c account_watch.py'))
+        self.assertIsNone(self.identity(str(executable) + ' ' + str(self.base / 'account_watch.py')))
+        unrelated = self.base / 'other/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python'
+        self.assertIsNone(self.identity(str(unrelated) + ' -u account_watch.py'))
+        (self.root / 'account_watch.py').symlink_to(self.source / 'runtime/account_watch.py')
+        self.assertIsNone(self.identity(command))
+
+    def test_process_inventory_included_configured_framework_python(self):
+        executable = self.framework_python()
+        commands = {123: str(executable) + ' -u account_watch.py',
+                    124: '/other/Python -u probe.py',
+                    125: str(self.root / 'venv/bin/python') + ' -u probe.py'}
+        inventory = '\n'.join(str(pid) + ' ' + command for pid, command in commands.items())
+        def inspect(command, **kwargs):
+            if command[0] == '/bin/ps':
+                pid = int(command[2])
+                return subprocess.CompletedProcess([], 0, str(os.getuid()) + ' ' + commands[pid])
+            return subprocess.CompletedProcess([], 0, 'p123\nn' + str(self.root) + '\n')
+        with mock.patch.object(release.subprocess, 'check_output', return_value=inventory), \
+                mock.patch.object(release.subprocess, 'run', side_effect=inspect):
+            self.assertEqual(release.isolated_processes(), [123, 125])
+
     def test_app_identity_requires_exact_executable_and_single_isolated_data_dir(self):
         app = str(self.app / 'Contents/MacOS/ChatGPT')
         data = '--user-data-dir=' + str(self.root / 'user-data')
@@ -230,6 +272,19 @@ class ReleaseTests(unittest.TestCase):
         self.assertIsNone(self.identity(app + ' ' + data + ' ' + data))
         self.assertIsNone(self.identity(app + ' --user-data-dir=' + str(self.base)))
         self.assertIsNone(self.identity('/other/ChatGPT ' + data))
+
+    def test_native_app_identity_requires_runtime_marker_and_private_pipe(self):
+        release.settings.INTEGRATION_MODE = 'native'
+        (self.root / 'native-debug.json').write_text(json.dumps({'app_pid': 123}))
+        app = str(self.app / 'Contents/MacOS/ChatGPT')
+        marker = '--cq-dots-runtime=' + str(self.root)
+        args = app + ' ' + marker + ' --remote-debugging-pipe'
+        self.assertEqual(self.identity(args), 'app')
+        for bad in (args.replace(marker, ''), args.replace(marker, marker+'-other'),
+                    args.replace('--remote-debugging-pipe','--remote-debugging-port=9999'),
+                    args + ' --user-data-dir=/other', args + ' ' + marker):
+            with self.subTest(args=bad):
+                self.assertIsNone(self.identity(bad))
 
 
 if __name__ == '__main__':

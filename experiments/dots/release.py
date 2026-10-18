@@ -1,4 +1,4 @@
-"""Prepare and install the configured isolated Dots experiment."""
+"""Prepare and install the configured Dots adapter."""
 import argparse
 import hashlib
 import json
@@ -21,7 +21,8 @@ FILES = ('catalog.py', 'self_projection.py', 'celsius.py', 'probe.py',
          'native_dot_transport.py', 'native_executor_reuse.py',
          'native_null_executor.py', 'local_executor.py', 'launch.py',
          'stop_isolated.py', 'room_coordination.py', 'native_gate.py',
-         'settings.py', 'awareness.py', 'account_watch.py')
+         'settings.py', 'awareness.py', 'board.py', 'account_watch.py', 'native_debug.py',
+         'native_room_cache.py', 'secondary_executors.py')
 EXECUTABLES = {'cloud_stdio.py', 'native_null_executor.py'}
 PYTHON_VERSION = '3.14'
 WEBSOCKETS_VERSION = '17.2'
@@ -54,11 +55,12 @@ def app_check():
 
 
 def identity():
-    return {'schema': 1, 'kind': 'isolated-dots-experiment',
+    return {'schema': 1, 'kind': 'cq-dots-adapter',
             'target': str(settings.ROOT), 'app_path': str(settings.APP),
             'app_version': settings.APP_VERSION, 'app_build': settings.APP_BUILD,
             'app_sha256': settings.ASAR_SHA256, 'module_asset': settings.MODULE_ASSET,
-            'python': PYTHON_VERSION, 'websockets': WEBSOCKETS_VERSION}
+            'python': PYTHON_VERSION, 'websockets': WEBSOCKETS_VERSION,
+            'integration_mode': getattr(settings, 'INTEGRATION_MODE', 'isolated')}
 
 
 def prepare(output):
@@ -88,7 +90,7 @@ def prepare(output):
                 'limitations': ['No native cross-account @ picker',
                                 'Persistent secondary Reboot unsupported',
                                 'No additional onboarding slots',
-                                'Fresh local-task sandbox remains unqualified']}
+                                'Local MCP configuration is not copied between accounts']}
     path = output / 'manifest.json'
     path.write_text(json.dumps(manifest, indent=2) + '\n')
     path.chmod(0o600)
@@ -111,6 +113,24 @@ def verify(candidate):
     return manifest
 
 
+def python_executables():
+    configured = settings.ROOT / 'venv/bin/python'
+    executables = {str(configured)}
+    try:
+        base = configured.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return executables
+    version = base.parent.parent
+    if (base.name == 'python' + PYTHON_VERSION and base.parent.name == 'bin'
+            and version.name == PYTHON_VERSION and version.parent.name == 'Versions'
+            and version.parent.parent.name == 'Python.framework'):
+        # Framework Python re-execs this exact binary while preserving the venv.
+        framework = version / 'Resources/Python.app/Contents/MacOS/Python'
+        if framework.is_file():
+            executables.add(str(framework))
+    return executables
+
+
 def process_identity(pid):
     """Match an owned process to the configured app or an exact runtime script."""
     result = subprocess.run(['/bin/ps', '-p', str(pid), '-o', 'uid=,command='],
@@ -128,11 +148,22 @@ def process_identity(pid):
         return None
     root = settings.ROOT
     if args[0] == str(settings.APP / 'Contents/MacOS/ChatGPT'):
+        if getattr(settings, 'INTEGRATION_MODE', 'isolated') == 'native':
+            try:
+                state = json.loads(regular(root / 'native-debug.json').read_text())
+            except (OSError, ValueError):
+                return None
+            if (state.get('app_pid') == pid
+                    and not any(a.startswith('--user-data-dir') for a in args)
+                    and [a for a in args if a.startswith('--cq-dots-runtime=')] == ['--cq-dots-runtime='+str(root)]
+                    and [a for a in args if a.startswith('--remote-debugging-')] == ['--remote-debugging-pipe']):
+                return 'app'
+            return None
         directories = [a.split('=', 1)[1] for a in args if a.startswith('--user-data-dir=')]
         if len(directories) == 1 and pathlib.Path(directories[0]).resolve() == root / 'user-data':
             return 'app'
         return None
-    if args[0] != str(root / 'venv/bin/python'):
+    if args[0] not in python_executables():
         return None
     remaining = args[1:]
     if remaining and remaining[0] == '-u':
@@ -152,10 +183,26 @@ def process_identity(pid):
     return script.name
 
 
+def normal_app_running():
+    """Identify the user's official app without attaching to it or stopping it."""
+    rows = subprocess.check_output(['/bin/ps', '-axo', 'uid=,command='], text=True).splitlines()
+    executable = str(settings.APP / 'Contents/MacOS/ChatGPT')
+    for row in rows:
+        parts = row.strip().split(maxsplit=1)
+        if len(parts) != 2 or parts[0] != str(os.getuid()):
+            continue
+        try:
+            args = shlex.split(parts[1])
+        except ValueError:
+            continue
+        if args and args[0] == executable and not any(arg.startswith('--user-data-dir') for arg in args):
+            return True
+    return False
+
+
 def isolated_processes():
     lines = subprocess.check_output(['/bin/ps', '-axo', 'pid=,command='], text=True).splitlines()
-    executables = {str(settings.APP / 'Contents/MacOS/ChatGPT'),
-                   str(settings.ROOT / 'venv/bin/python')}
+    executables = {str(settings.APP / 'Contents/MacOS/ChatGPT')} | python_executables()
     matches = []
     for line in lines:
         parts = line.strip().split(maxsplit=1)

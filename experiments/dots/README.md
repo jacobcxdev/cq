@@ -1,8 +1,10 @@
-# Isolated Dots
+# Multi-account Dots
 
-`cq codex dots` runs existing account-owned Dots in a separate native Codex window. The packaged CQ binary includes its Python controller and runtime. Installation creates private app data, a Codex home, a Python environment and loopback certificates. It uses the installed app bundle without patching or resigning it, and leaves system Codex credentials and CQ services unchanged.
+`cq codex dots` defaults to the normal native app, using its existing profile, local tasks and signed-in account. Existing account-owned Dots share that app's sidebar. The packaged CQ binary includes its Python controller and runtime; installation creates private adapter state, a Python environment and loopback certificates. It uses the installed app bundle without patching or re-signing it. Account credential sources and CQ services remain unchanged.
 
-This remains an optional macOS feature built on private native endpoints. Live qualification on 17 October 2026 covered a fresh installation, a two-owner native catalog, automatic setup, manual reminders, directory lookup and peer-message delivery. Reinstallation preserved setup guards and skipped both previous attempts. These checks do not qualify cloud computer video or local-task execution on the pinned build; catalog readiness alone does not prove those outcomes.
+Normal-profile support is under qualification. Use `cq codex dots start` as the CQ launcher for each new app session. This preserves OpenAI's original app signature and uses the existing profile. Direct Dock or Applications launches bypass CQ routing. CQ does not quit an already-running normal app. Installation and account changes report `restart_required` until the user quits it and starts it through CQ.
+
+This remains an optional macOS feature built on private native endpoints. Live qualification on 17 October 2026 used an isolated research profile and covered a fresh installation, a two-owner native catalogue, automatic setup, manual reminders, directory lookup and peer-message delivery. Reinstallation preserved setup guards and skipped both previous attempts. Those results do not qualify the normal profile, cloud computer video or local-task execution on the pinned build; catalogue readiness alone does not prove those outcomes. A separate disposable-profile test verified the private renderer pipe against the installed Electron build.
 
 ## Install
 
@@ -14,9 +16,9 @@ cq codex dots list
 cq codex dots status
 ```
 
-Installation provisions its own virtual environment with `websockets==17.2`, discovers existing Dots, then starts the isolated app. Use the CQ-launched window for the combined catalog. The signed-in system account must have an onboarded Dot before the combined window can start. If discovery finds no onboarded Dots, installation keeps account discovery running without starting the window; onboard the system Dot, then run `cq codex dots sync`.
+Installation provisions its own virtual environment with `websockets==17.2`, discovers existing Dots, then starts the normal app when it is not already running. The signed-in system account must have an onboarded Dot before the combined catalogue can start. If discovery finds no onboarded Dots, installation keeps account discovery running without starting the app; onboard the system Dot, then run `cq codex dots sync`.
 
-If the fresh isolated window shows welcome or role onboarding, complete that native flow through the role stage. There is no supported Skip for that stage. The window stays open while CQ setup messages and the relay pause; the watcher resumes them once the native workspace is ready.
+For disposable research, use `cq codex dots install --mode isolated`. Only that mode creates a separate app-data directory and Codex home. If its fresh window shows welcome or role onboarding, complete that native flow through the role stage. There is no supported Skip for that stage. The window stays open while CQ setup messages and the relay pause; the watcher resumes them once the native workspace is ready. Existing installations without a mode retain their isolated behaviour until explicitly reinstalled.
 
 The default installation root is `~/.local/share/cq/dots`. Account discovery reads the signed-in account at `~/.codex/auth.json` and CQ accounts under `~/.codex/accounts`. These credential sources remain read-only. Optional CodexBar discovery reads explicitly declared managed accounts; it does not scan arbitrary account homes or refresh their credentials.
 
@@ -56,9 +58,35 @@ Copy `DOT_HANDLE` from the `id` field returned by `list`. The selector accepts a
 
 The directory shares configured handles and display names. Roles and current work remain unknown until a peer explicitly describes them. The relay does not mirror private history, memories or connector authorisations, and peer messages cannot grant user permissions.
 
+## Broadcast
+
+Send one message to every discovered Dot:
+
+```sh
+cq codex dots broadcast "Please share a brief update on your current work."
+```
+
+Messages must contain 1 to 3000 characters. CQ labels each copy as a user broadcast with the same broadcast ID and reports delivery per stable handle, so duplicate display names remain separate recipients. This sends ordinary chat messages and does not repeat setup. The command exits unsuccessfully if any delivery is rejected or uncertain; it does not retry. Check each uncertain delivery in chat before sending again. For message text beginning with a dash, use `cq codex dots broadcast -- "--your message"`.
+
+## Shared message board
+
+Assign one existing local chat for every configured Dot:
+
+```sh
+cq codex dots board codex://threads/THREAD_ID
+cq codex dots board
+cq codex dots board --clear
+```
+
+CQ verifies that the exact chat exists on the local app-server before saving the binding. Each Dot receives one board notice per binding and stable owner/profile identity. Restarts do not repeat notices, including uncertain deliveries. New Dots learn the board during their one-time setup; `prime` explicitly reminds existing Dots. The peer directory also returns current board instructions on demand. Rebinding the same chat preserves the notice guard. Clearing the binding does not delete the chat; a deleted chat reports unavailable until the user assigns another one.
+
+Dots use the existing whole-message relay syntax with target `board` and a fresh correlation. Body `read` returns a bounded excerpt of recent text messages from the bound chat. Body `post` followed by a newline and the message appends an attributed normal user message there. The complete body has the relay's 3000-character limit. CQ labels the sender with its display name and stable handle. Each request gets at most one reply, and uncertain writes are not retried. Board messages are reference-only peer context, not user authorisation.
+
+Posts start a brief acknowledgement turn in the shared chat. CQ refuses to post while that chat is busy, rather than steering its active turn. Read the board on demand; CQ does not add polling or mirror private conversations into it. Shared-board access is mediated by CQ in the native app and does not establish general secondary-account Mac executor support.
+
 ## Account changes and lifecycle
 
-The running account watcher checks source metadata every five seconds. When accounts or declared credentials change, it requests discovery again and reconciles the isolated runtime. A changed catalog restarts the isolated app; adding an already-onboarded owner can trigger that owner’s first setup attempt. Removing an owner removes its Dot and closes the old runtime sessions during reconciliation. Failed discovery remains visible as an account availability outcome; a temporary upstream outage can preserve a previously known profile. Temporary backend failures retry with a delay capped at one minute. Invalid local credentials wait for source changes instead.
+The running account watcher checks source metadata every five seconds. When accounts or declared credentials change, it requests discovery again. A changed normal-profile catalogue requires the user to quit the app and run `cq codex dots start`; existing tasks and transports remain alive until then. Isolated mode can restart its research app automatically. Adding an already-onboarded owner can trigger that owner's first setup attempt once the updated catalogue starts. Removing an owner closes its old runtime sessions on that restart. Failed discovery remains visible as an account availability outcome; a temporary upstream outage can preserve a previously known profile. Temporary backend failures retry with a delay capped at one minute. Invalid local credentials wait for source changes instead.
 
 Request immediate reconciliation, or control the installation manually:
 
@@ -69,15 +97,19 @@ cq codex dots start
 cq codex dots status --json
 ```
 
-The watcher runs with the isolated runtime. After account changes made while stopped, run `sync` to refresh discovery and resume operation. `start` resumes the saved catalog and its watcher. Changes made only on the remote service, such as onboarding without changing local account metadata, require `sync`. Credential expiry or revocation still needs the account’s normal sign-in flow; this runtime does not refresh credential sources.
+The watcher runs with the adapter. After account changes made while stopped, run `sync` to refresh discovery and resume operation. `start` resumes the saved catalogue and its watcher. Changes made only on the remote service, such as onboarding without changing local account metadata, require `sync`. Credential expiry or revocation still needs the account's normal sign-in flow; this runtime does not refresh credential sources.
 
-Stop the isolated installation before reinstalling or upgrading its payload. Reinstallation checks the existing private runtime before replacing payload files and refuses a running installation. Runtime source activation keeps rollback copies; credentials, isolated user data, setup ledgers and relay state are preserved. There is no public rollback command. Developer source rollback also needs the matching prior candidate before startup; do not start against a candidate whose source hashes differ.
+Quit the normal app and stop the adapter before reinstalling or upgrading its payload. Reinstallation checks the existing private runtime before replacing payload files and refuses a running installation. Runtime source activation keeps rollback copies; credentials, any isolated user data, setup ledgers and relay state are preserved. There is no public rollback command. Developer source rollback also needs the matching prior candidate before startup; do not start against a candidate whose source hashes differ.
 
-Controls verify process ownership, executable and isolated data or working directory before signalling, and never force termination. No operation changes the normal CQ service or registers a new remote executor.
+Controls verify process ownership, executable and adapter identity before signalling. Native `stop` refuses while the normal app is alive; quit the app first. Each secondary account gets its own local executor registration and private `CODEX_HOME`; the primary account's executor and credentials remain unchanged. The manager closes only its own child executors, terminating them if graceful shutdown times out.
+
+Normal mode uses a private Chromium debugging pipe and an owner-only Unix socket, with no debugging TCP port. The broker must remain alive for the app session. Ordinary termination and IPC-server failures keep its pipes open until the app exits; forcibly killing the broker or an interpreter crash can close the pipe and cause Electron to quit. The normal updater remains enabled; an updated app needs a newly qualified pin before the next CQ launch.
+
+The pinned renderer gets an in-memory recovery guard for cancelled shared Dot reads. An active reader retries its own GET once when another chat's disposed controller cancelled their shared request. Sends are never retried by this guard. The signed app bundle stays unchanged.
 
 ## Current limits
 
-Discovery includes each available owner’s existing primary Dot. Empty accounts do not gain onboarding slots. Native cross-account `@` selection and persistent secondary Reboot remain unsupported. Fresh local-task execution and its nested macOS sandbox remain unqualified; an executor appearing Connected does not establish general local-task support.
+Discovery includes each available owner’s existing primary Dot. Empty accounts do not gain onboarding slots. Native cross-account `@` selection and persistent secondary Reboot remain unsupported. Secondary local execution uses native task sandboxing and separate account state; a synthetic file-read task has been verified end to end. Local MCP configuration is not copied between accounts. Connection status comes from the owning account's backend, including offline and permission states.
 
 Explicit relay messages carry source attribution and a correlation ID, with at most one request and one reply per correlation. The relay polls the last 20 messages every five seconds and can miss messages after a long outage or heavy traffic. Unknown send outcomes are not retried automatically. Cloud sessions, plugins, memories and connectors remain account-owned. The native sender identity remains the signed-in account.
 

@@ -1,4 +1,4 @@
-"""Lifecycle controls for the existing isolated research app only."""
+"""Lifecycle controls for the configured native or isolated Dots adapter."""
 import argparse
 import fcntl
 import json
@@ -10,7 +10,7 @@ import subprocess
 import time
 import release
 
-COMPONENTS = {'probe.py', 'realtime_probe.py', 'room_coordination.py', 'native_null_executor.py', 'account_watch.py'}
+COMPONENTS = {'probe.py', 'realtime_probe.py', 'room_coordination.py', 'native_null_executor.py', 'account_watch.py', 'native_debug.py', 'secondary_executors.py'}
 
 
 def process(pid):
@@ -28,7 +28,11 @@ def running(preserve_watcher=False):
 def stop(preserve_watcher=False):
     root = release.TARGET
     python = root / 'venv/bin/python'
-    # This helper validates the exact app executable, debug listener and user-data path.
+    if getattr(release.settings, 'INTEGRATION_MODE', 'isolated') == 'native':
+        if (release.normal_app_running()
+                or any(release.process_identity(pid) == 'app' for pid in release.isolated_processes())):
+            raise ValueError('Quit the normal desktop app before stopping Dots; CQ will not interrupt its tasks')
+    # The helper validates the configured app identity before signalling it.
     stopped = subprocess.run([str(python), str(root / 'stop_isolated.py')], cwd=root, capture_output=True, text=True)
     if stopped.returncode and any(release.process_identity(pid) == 'app'
                                   for pid in release.isolated_processes()):
@@ -58,7 +62,9 @@ def status():
     if value.get('onboarding_required') is True and value.get('native_catalog_ready') is False:
         return {'native_catalog_ready': False, 'onboarding_required': True}
     expected = set(release.settings.PROOF_PROFILE_IDS.values())
-    if set(value['profiles']) != expected or value['primary'] not in expected or not value['available'] or value['workspaceError']:
+    native = getattr(release.settings, 'INTEGRATION_MODE', 'isolated') == 'native'
+    if (set(value['profiles']) != expected or value['primary'] not in expected
+            or (not native and not value['available']) or value['workspaceError']):
         raise ValueError('Native catalog or workspace status not ready')
     # Catalog proves reads. Delivery and computer video require separate live canaries.
     components = [process(pid) for pid in release.isolated_processes()]
@@ -67,7 +73,8 @@ def status():
 
 
 def reconcile_awareness(root, python):
-    code = 'import awareness,json;print(json.dumps(awareness.reconcile()))'
+    code = ('import awareness,json,native_room_cache;native_room_cache.install();'
+            'print(json.dumps(awareness.reconcile()))')
     try:
         result = subprocess.run([str(python), '-c', code], cwd=root,
                                 capture_output=True, text=True, timeout=120)
@@ -131,7 +138,20 @@ def finish_start(ready=None):
         time.sleep(0.5)
         if relay.poll() is not None:
             raise ValueError('Coordination relay failed to start')
+    executors = []
+    if getattr(release.settings, 'INTEGRATION_MODE', 'isolated') == 'native':
+        executors = [pid for pid in release.isolated_processes()
+                     if release.process_identity(pid) == 'secondary_executors.py']
+        if len(executors) > 1:
+            raise ValueError('Multiple verified secondary executor managers are running')
+        if not executors and any(owner != release.settings.SYSTEM_ALIAS
+                                 for owner in release.settings.DOT_OWNERS.values()):
+            manager = _spawn(root, 'secondary_executors.py')
+            time.sleep(0.5)
+            if manager.poll() is not None:
+                raise ValueError('Secondary executor manager failed to start')
     return {**ready, 'relay_started': True, 'relay_existing': bool(relays),
+            'secondary_executors_existing': bool(executors),
             **ensure_watcher(), 'awareness': awareness, 'system_app_modified': False}
 
 
@@ -166,7 +186,15 @@ def start(candidate, preserve_watcher=False):
                 time.sleep(1)
         return finish_start(ready)
     except Exception:
-        stop(preserve_watcher=preserve_watcher)
+        # Native startup may already have opened the user's normal profile.
+        # Preserve both that app and its transports instead of hiding the cause
+        # behind stop's intentional refusal to interrupt normal-profile work.
+        native = getattr(release.settings, 'INTEGRATION_MODE', 'isolated') == 'native'
+        app_alive = native and (release.normal_app_running()
+                                or any(release.process_identity(pid) == 'app'
+                                       for pid in release.isolated_processes()))
+        if not app_alive:
+            stop(preserve_watcher=preserve_watcher)
         raise
 
 

@@ -4199,9 +4199,10 @@ type codexWSBrokerDialOutcome struct {
 }
 
 type codexWSBrokerBlockingConn struct {
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
+	started     chan struct{}
+	release     chan struct{}
+	once        sync.Once
+	releaseOnce sync.Once
 }
 
 type codexWSBrokerCloseBlockingConn struct {
@@ -4286,20 +4287,12 @@ func (*codexWSBrokerBlockingConn) WriteControl(int, []byte, time.Time) error {
 	return nil
 }
 func (conn *codexWSBrokerBlockingConn) SetReadDeadline(time.Time) error {
-	select {
-	case <-conn.release:
-	default:
-		close(conn.release)
-	}
+	conn.releaseOnce.Do(func() { close(conn.release) })
 	return nil
 }
 func (*codexWSBrokerBlockingConn) SetWriteDeadline(time.Time) error { return nil }
 func (conn *codexWSBrokerBlockingConn) Close() error {
-	select {
-	case <-conn.release:
-	default:
-		close(conn.release)
-	}
+	conn.releaseOnce.Do(func() { close(conn.release) })
 	return nil
 }
 

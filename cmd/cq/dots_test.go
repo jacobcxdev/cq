@@ -24,6 +24,10 @@ func TestDotsCommandParsing(t *testing.T) {
 		{[]string{"codex", "dots", "prime", "Secondary"}, "codex dots prime <dot>"},
 		{[]string{"codex", "dots", "prime", "--all"}, "codex dots prime"},
 		{[]string{"codex", "dots", "sync"}, "codex dots sync"},
+		{[]string{"codex", "dots", "broadcast", "Hello, team!"}, "codex dots broadcast <message>"},
+		{[]string{"codex", "dots", "board", "codex://threads/01a14c1f-6e3c-7622-b4a3-b279ecb2a822"}, "codex dots board <thread>"},
+		{[]string{"codex", "dots", "board"}, "codex dots board"},
+		{[]string{"codex", "dots", "board", "--clear"}, "codex dots board"},
 	} {
 		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
 			var cli CLI
@@ -57,9 +61,31 @@ func TestDotsInstallForwardsStructuredArguments(t *testing.T) {
 	if err := runner.execute(context.Background(), &options, "install", true, io.Discard, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	want := []string{filepath.Join(root, "payload", "cli.py"), "install", "--root", root, "--app", "/Applications/ChatGPT.app", "--system-auth", filepath.Join(home, ".codex", "auth.json"), "--cq-accounts", filepath.Join(home, ".codex", "accounts"), "--account-source", "/private/account store", "--json"}
+	want := []string{filepath.Join(root, "payload", "cli.py"), "install", "--root", root, "--mode", "native", "--app", "/Applications/ChatGPT.app", "--system-auth", filepath.Join(home, ".codex", "auth.json"), "--cq-accounts", filepath.Join(home, ".codex", "accounts"), "--account-source", "/private/account store", "--json"}
 	if program != "/custom/python3.14" || extracted != root || !reflect.DeepEqual(arguments, want) {
 		t.Fatalf("program %q extract %q args %#v", program, extracted, arguments)
+	}
+}
+
+func TestDotsInstallModeParsing(t *testing.T) {
+	for _, test := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"codex", "dots", "install"}, "native"},
+		{[]string{"codex", "dots", "install", "--mode", "isolated"}, "isolated"},
+	} {
+		var cli CLI
+		parser, err := kong.New(&cli, kong.Writers(io.Discard, io.Discard))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := parser.Parse(test.args); err != nil {
+			t.Fatal(err)
+		}
+		if got := cli.Codex.Dots.Install.Mode; got != test.want {
+			t.Fatalf("mode %q, want %q", got, test.want)
+		}
 	}
 }
 
@@ -113,6 +139,7 @@ func TestDotsInvalidInstallNeverExtractsOrExecutes(t *testing.T) {
 	calls := 0
 	runner := dotsRunner{home: func() (string, error) { return home, nil }, extract: func(string) error { calls++; return nil }, run: func(context.Context, string, []string, io.Writer, io.Writer) error { calls++; return nil }}
 	for _, options := range []CodexDotsCmd{
+		{Root: filepath.Join(home, "dots"), Install: CodexDotsInstallCmd{Mode: "other", App: "/Applications/ChatGPT.app"}},
 		{Root: "relative", Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app"}},
 		{Root: filepath.Join(home, ".codex", "dots"), Install: CodexDotsInstallCmd{App: "/Applications/ChatGPT.app"}},
 		{Root: filepath.Join(home, "dots"), Install: CodexDotsInstallCmd{App: "relative"}},
@@ -171,6 +198,69 @@ func TestDotsPrimeRequiresExactlyOneTargetBeforeExecuting(t *testing.T) {
 		if err := runner.execute(context.Background(), &CodexDotsCmd{Root: filepath.Join(home, "dots"), Prime: prime}, "prime", false, io.Discard, io.Discard); err == nil {
 			t.Fatal("invalid prime accepted")
 		}
+	}
+}
+
+func TestDotsBroadcastRejectsInvalidMessageBeforeExecuting(t *testing.T) {
+	home := t.TempDir()
+	runner := dotsRunner{home: func() (string, error) { return home, nil }, run: func(context.Context, string, []string, io.Writer, io.Writer) error {
+		t.Fatal("executed invalid broadcast")
+		return nil
+	}}
+	for _, message := range []string{"", " \n", strings.Repeat("x", 3001)} {
+		options := CodexDotsCmd{Root: filepath.Join(home, "dots"), Broadcast: CodexDotsBroadcastCmd{Message: message}}
+		if err := runner.execute(context.Background(), &options, "broadcast <message>", false, io.Discard, io.Discard); err == nil {
+			t.Fatal("invalid broadcast accepted")
+		}
+	}
+}
+
+func TestDotsBoardRejectedInvalidBindingBeforeExecuting(t *testing.T) {
+	home := t.TempDir()
+	runner := dotsRunner{home: func() (string, error) { return home, nil }, run: func(context.Context, string, []string, io.Writer, io.Writer) error {
+		t.Fatal("executed invalid board binding")
+		return nil
+	}}
+	for _, board := range []CodexDotsBoardCmd{{Thread: "https://example.com/thread"}, {Thread: "../thread"}, {Thread: "01a14c1f-6e3c-7622-b4a3-b279ecb2a822", Clear: true}} {
+		options := CodexDotsCmd{Root: filepath.Join(home, "dots"), Board: board}
+		if err := runner.execute(context.Background(), &options, "board", false, io.Discard, io.Discard); err == nil {
+			t.Fatal("invalid board accepted")
+		}
+	}
+}
+
+func TestDotsBroadcastForwardsMessageWithoutShellExpansion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Dots requires POSIX private modes")
+	}
+	home := t.TempDir()
+	root := filepath.Join(home, "dots")
+	for _, name := range []string{"payload/runtime", "runtime/venv/bin"} {
+		if err := os.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range []struct {
+		name string
+		mode os.FileMode
+	}{{"settings.json", 0o600}, {"payload/cli.py", 0o600}, {"runtime/venv/bin/python", 0o700}} {
+		if err := os.WriteFile(filepath.Join(root, file.name), []byte("fixture"), file.mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	message := "--json $(do-not-run) `literal`\nHello, team!"
+	var arguments []string
+	runner := dotsRunner{home: func() (string, error) { return home, nil }, run: func(_ context.Context, _ string, args []string, _, _ io.Writer) error {
+		arguments = args
+		return nil
+	}}
+	options := CodexDotsCmd{Root: root, Broadcast: CodexDotsBroadcastCmd{Message: message}}
+	if err := runner.execute(context.Background(), &options, "broadcast <message>", true, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{filepath.Join(root, "payload", "cli.py"), "broadcast", "--root", root, "--json", "--", message}
+	if !reflect.DeepEqual(arguments, want) {
+		t.Fatalf("arguments %#v", arguments)
 	}
 }
 

@@ -51,6 +51,41 @@ class InstallationTests(unittest.TestCase):
         self.assertEqual((runtime / 'port').read_text(), '8000')
         self.assertTrue(any('websockets==17.2' in args for args in commands))
 
+    def test_native_provision_does_not_create_another_desktop_profile(self):
+        self.root.mkdir(mode=0o700)
+        runtime=self.root/'runtime';runtime.mkdir(mode=0o700)
+        (runtime/'venv').mkdir(mode=0o700)
+        for name in ('leaf-key.pem','leaf-cert.pem','probe-cert.pem','realtime-cert.pem'):
+            (runtime/name).write_text('synthetic')
+        with mock.patch.object(cli,'run_checked'):
+            cli.provision(self.root, mode='native')
+        for name in ('user-data','codex-home','null-executor'):
+            self.assertFalse((runtime/name).exists())
+
+    def test_fresh_install_records_native_mode_before_activation(self):
+        import base64
+        auth=self.base/'credentials'/'auth.json';auth.parent.mkdir(mode=0o700)
+        claims={'https://api.openai.com/auth':{'chatgpt_account_id':'synthetic'}}
+        token='header.'+base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=')+'.signature'
+        auth.write_text(json.dumps({'tokens':{'account_id':'synthetic','id_token':token}}));auth.chmod(0o600)
+        args=types.SimpleNamespace(root=self.root,app=str(self.base/'app'),system_auth=str(auth),
+            cq_accounts=str(self.base/'accounts'),account_source=None,mode='native')
+        release=types.SimpleNamespace(activate=mock.Mock())
+        settings=types.SimpleNamespace(validate_runtime_paths=mock.Mock(),reload=mock.Mock())
+        with mock.patch.object(cli.sys,'platform','darwin'), \
+             mock.patch.object(cli,'app_pin',return_value=cli.PIN), \
+             mock.patch.object(cli,'configure',return_value=settings), \
+             mock.patch.object(cli,'provision') as provision, \
+             mock.patch.object(cli,'refresh'), \
+             mock.patch.object(cli,'candidate',return_value='/candidate'), \
+             mock.patch.object(cli,'start',return_value={'restart_required':True}), \
+             mock.patch.dict(sys.modules,{'release':release}):
+            result=cli.install(args)
+        self.assertTrue(result['restart_required'])
+        self.assertEqual(json.loads((self.root/'settings.json').read_text())['integration_mode'],'native')
+        provision.assert_called_once_with(self.root,mode='native')
+        release.activate.assert_called_once_with('/candidate')
+
     def test_provision_rejects_shared_python_and_partial_certificate_state(self):
         self.root.mkdir(mode=0o700)
         runtime = self.root / 'runtime'
@@ -217,6 +252,43 @@ class EmptyCatalogueWatcherTests(unittest.TestCase):
         self.assertEqual(pids,[123])
 
 
+class NativeLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.settings=types.SimpleNamespace(INTEGRATION_MODE='native',DOTS={'main':('profile','thread')},
+            SYSTEM_ALIAS='main',DOT_OWNERS={'main':'main'})
+        self.release=types.SimpleNamespace(normal_app_running=mock.Mock(return_value=True),
+            isolated_processes=mock.Mock(return_value=[]),process_identity=lambda pid:'app')
+        self.control=types.SimpleNamespace(ensure_watcher=mock.Mock(return_value={'account_watcher_started':True}),
+            start=mock.Mock(),finish_start=mock.Mock(),stop=mock.Mock())
+        for item in (mock.patch.object(cli,'configure',return_value=self.settings),
+                     mock.patch.dict(sys.modules,{'release':self.release,'control':self.control})):
+            item.start();self.addCleanup(item.stop)
+
+    def test_running_stock_app_waits_for_user_restart_without_spawning_or_stopping(self):
+        with mock.patch.object(cli,'candidate') as candidate:
+            result=cli.start(pathlib.Path('/private/install'))
+        self.assertTrue(result['restart_required'])
+        self.control.start.assert_not_called();self.control.stop.assert_not_called();candidate.assert_not_called()
+
+    def test_account_change_does_not_restart_managed_normal_app(self):
+        self.release.isolated_processes.return_value=[123]
+        with mock.patch.object(cli,'refresh',return_value=(True,[{'status':'ready'}])):
+            result=cli.sync(pathlib.Path('/private/install'))
+        self.assertTrue(result['restart_required']);self.assertTrue(result['catalogue_changed'])
+        self.control.stop.assert_not_called();self.control.start.assert_not_called()
+        self.control.finish_start.assert_not_called()
+
+    def test_quit_normal_app_allows_sidecar_cleanup_and_same_profile_start(self):
+        self.release.normal_app_running.return_value=False
+        self.release.isolated_processes.return_value=[123]
+        self.control.start.return_value={'started':True}
+        with mock.patch.object(cli,'candidate',return_value='/candidate'):
+            result=cli.start(pathlib.Path('/private/install'))
+        self.assertTrue(result['started'])
+        self.control.stop.assert_called_once_with(preserve_watcher=True)
+        self.control.start.assert_called_once_with('/candidate',preserve_watcher=True)
+
+
 class DiscoveryRetryTests(unittest.TestCase):
     def test_sync_classifies_transient_remote_and_terminal_source_failures(self):
         cases=[([{'status':'ready'}],True,False),
@@ -300,6 +372,48 @@ class ConcurrentOperationTests(unittest.TestCase):
         self.assertEqual(json.loads(output.getvalue())['error'],
                          'Another Dots operation is in progress; try again shortly')
         awareness.prime.assert_not_called()
+
+    def test_broadcast_waits_for_watcher_and_preserves_message(self):
+        def release_watcher(_seconds):fcntl.flock(self.lock,fcntl.LOCK_UN)
+        awareness=types.SimpleNamespace(broadcast=mock.Mock(return_value={'id':'test','deliveries':[{'outcome':'accepted'}]}))
+        message='--json $(literal) `literal`\nHello, team!'
+        with mock.patch.dict(sys.modules,{'awareness':awareness}), \
+             mock.patch.object(cli.time,'sleep',side_effect=release_watcher), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli.main(['broadcast','--root',str(self.root),'--json','--',message]),0)
+        awareness.broadcast.assert_called_once_with(message)
+        self.assertEqual(json.loads(output.getvalue())['broadcast']['id'],'test')
+
+    def test_broadcast_partial_delivery_returns_failure_without_retry(self):
+        fcntl.flock(self.lock,fcntl.LOCK_UN)
+        awareness=types.SimpleNamespace(broadcast=mock.Mock(return_value={'deliveries':[{'outcome':'accepted'},{'outcome':'unknown'}]}))
+        with mock.patch.dict(sys.modules,{'awareness':awareness}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(['broadcast','Hello','--root',str(self.root)]),1)
+        awareness.broadcast.assert_called_once_with('Hello')
+
+    def test_board_bind_announces_once_and_status_never_sends(self):
+        fcntl.flock(self.lock,fcntl.LOCK_UN)
+        board=types.SimpleNamespace(bind=mock.Mock(return_value={'thread_id':'local-thread'}),
+                                    announce=mock.Mock(return_value=[{'outcome':'accepted'}]),
+                                    configuration=mock.Mock(return_value={'thread_id':'local-thread'}),
+                                    clear=mock.Mock(return_value={'bound':False}))
+        with mock.patch.dict(sys.modules,{'board':board}),contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(['board','codex://threads/local-thread','--root',str(self.root)]),0)
+            self.assertEqual(cli.main(['board','--root',str(self.root)]),0)
+            self.assertEqual(cli.main(['board','--clear','--root',str(self.root)]),0)
+        board.bind.assert_called_once_with('codex://threads/local-thread')
+        board.announce.assert_called_once_with()
+        board.configuration.assert_called_once_with()
+        board.clear.assert_called_once_with()
+
+    def test_board_unknown_notice_delivery_is_not_reported_successful(self):
+        fcntl.flock(self.lock,fcntl.LOCK_UN)
+        board=types.SimpleNamespace(bind=mock.Mock(return_value={'thread_id':'local-thread'}),
+                                    announce=mock.Mock(return_value=[{'outcome':'unknown'}]))
+        with mock.patch.dict(sys.modules,{'board':board}),contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(['board','local-thread','--root',str(self.root)]),1)
+        board.bind.assert_called_once()
+        board.announce.assert_called_once()
 
     def test_watcher_mutation_remains_nonblocking_and_serialized(self):
         with mock.patch.object(cli,'sync') as sync, \

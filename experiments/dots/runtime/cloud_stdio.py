@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Task-only read-only adapter for stock Codex's explicit CLI override seam."""
+"""Owner-routed Dot reads through stock Codex's explicit CLI override seam."""
 import http.client, json, os, pathlib, queue, ssl, subprocess, sys, threading, time, urllib.parse
 from websockets.sync.client import connect
 import catalog
@@ -85,6 +85,39 @@ def resolve_thread_owner(resource,owners):
         refresh_thread_owners(owners)
         with THREAD_OWNER_LOCK:alias=THREAD_OWNERS.get(resource)
     return alias
+
+def native_thread_owner(resource):
+    if resource is None:return None
+    with THREAD_OWNER_LOCK:
+        alias=THREAD_OWNERS.get(resource)
+    if alias is not None:return alias
+    try:
+        snapshot=json.loads(catalog.read_owned(ROOT/'native-roots.json',ROOT))
+        expected=settings.PROOF_PROFILE_IDS
+        if (not isinstance(snapshot,dict) or set(snapshot)!={'version','roots'}
+                or type(snapshot['version']) is not int or snapshot['version']!=1
+                or not isinstance(snapshot['roots'],list) or len(snapshot['roots'])!=len(expected)):
+            raise ValueError('Native root snapshot invalid')
+        roots={}; aliases=set()
+        for row in snapshot['roots']:
+            if not isinstance(row,dict) or set(row)!={'owner_alias','profile_id','root_thread_id'}:
+                raise ValueError('Native root entry invalid')
+            alias=row['owner_alias'];root=row['root_thread_id']
+            if (not isinstance(alias,str) or alias not in expected or alias in aliases
+                    or row['profile_id']!=expected[alias] or not isinstance(root,str)
+                    or not root or len(root)>128 or root in roots):
+                raise ValueError('Native root owner/profile mismatch')
+            aliases.add(alias);roots[root]=alias
+        with THREAD_OWNER_LOCK:
+            if any(root in THREAD_OWNERS and THREAD_OWNERS[root]!=alias for root,alias in roots.items()):
+                raise ValueError('Native root owner changed')
+            # Keep previously verified roots for open chats; stale snapshots cannot remove them.
+            THREAD_OWNERS.update(roots)
+            return THREAD_OWNERS.get(resource)
+    except FileNotFoundError:return None
+    except Exception as error:
+        event({'native_root_snapshot_failure_type':type(error).__name__})
+        return None
 
 def owner_thread_status(owner, resource, public_tls):
     with THREAD_OWNER_LOCK:
@@ -227,26 +260,48 @@ def main():
         os.execve(REAL,[REAL,*arguments],env)
     # Desktop supplies this override even when the app-tools plugin is unavailable.
     app_session=any(marker in arguments for marker in APP_MARKERS)
-    event({'app_stdio_adapter_started':True,'read_only':True,'app_session':app_session})
-    system,accounts=catalog.inventory()
-    aliases=set(settings.DOT_OWNERS.values())|{settings.SYSTEM_ALIAS}
-    owners={a['alias']:a for a in accounts if a['alias'] in aliases}
-    if system['alias']!=settings.SYSTEM_ALIAS or set(owners)!=aliases or system['alias'] not in owners:
-        raise ValueError('Frozen proof owner identity changed')
-    if app_session: refresh_thread_owners(owners)
-    local=subprocess.Popen(local_arguments(arguments),env=env,stdin=subprocess.PIPE,
-                           stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,bufsize=1)
+    native=getattr(settings,'INTEGRATION_MODE','isolated')=='native'
+    if native and not app_session:
+        os.execve(REAL,[REAL,*arguments],env)
+    event({'app_stdio_adapter_started':True,'read_only':not native,'app_session':app_session,
+           'integration_mode':'native' if native else 'isolated'})
+    system={'alias':settings.SYSTEM_ALIAS}
+    owners={}
+    try:
+        system,accounts=catalog.inventory()
+        aliases=set(settings.DOT_OWNERS.values())|{settings.SYSTEM_ALIAS}
+        owners={a['alias']:a for a in accounts if a['alias'] in aliases}
+        if system['alias']!=settings.SYSTEM_ALIAS or set(owners)!=aliases or system['alias'] not in owners:
+            raise ValueError('Frozen proof owner identity changed')
+        if app_session and not native: refresh_thread_owners(owners)
+    except Exception as error:
+        if not native: raise
+        owners={}
+        event({'owner_inventory_failure_type':type(error).__name__})
+    local=subprocess.Popen([REAL,*arguments] if native else local_arguments(arguments),env=env,stdin=subprocess.PIPE,
+                           stdout=subprocess.PIPE,stderr=None if native else subprocess.DEVNULL,text=True,bufsize=1)
     bootstrap=LocalBootstrap(local.stdin)
     sessions={}
+    session_locks={alias:threading.Lock() for alias in owners}
+    sessions_lock=threading.Lock()
+    native_queues={}
+    native_workers=[]
     initialized=False
+    native_initialize=None
     stopping=threading.Event()
+    local_closed=threading.Event()
     status_watches=set()
     status_seen={}
     status_lock=threading.Lock()
-    public_ca_file=ssl.get_default_verify_paths().openssl_cafile
-    if not pathlib.Path(public_ca_file).is_file():
-        raise ValueError('Public upstream CA roots unavailable')
-    public_tls=ssl.create_default_context(cafile=public_ca_file)
+    public_tls=None
+    try:
+        public_ca_file=ssl.get_default_verify_paths().openssl_cafile
+        if not public_ca_file or not pathlib.Path(public_ca_file).is_file():
+            raise ValueError('Public upstream CA roots unavailable')
+        public_tls=ssl.create_default_context(cafile=public_ca_file)
+    except Exception as error:
+        if not native: raise
+        event({'owner_tls_failure_type':type(error).__name__})
 
     def http_read(alias,request,resource):
         method=request['method']; owner=owners[alias]
@@ -302,13 +357,19 @@ def main():
                 raw=stream.readline() if source=='local' else stream.recv()
                 if not raw: break
                 value=json.loads(raw)
+                if native and source=='local':
+                    # Preserve stock responses, notifications and server-initiated RPCs,
+                    # including authentication refresh and approval requests.
+                    emit(value)
+                    continue
                 if source=='local' and bootstrap.accept(value): continue
                 if 'id' in value:
                     identifier=str(value['id'])
                     if identifier.startswith('cq-internal-'): continue
-                    with PENDING_LOCK: expected=PENDING.pop((source,identifier),None)
+                    key=(source,identifier,stream) if native and source!='local' else (source,identifier)
+                    with PENDING_LOCK: expected=PENDING.pop(key,None)
                     if expected is None: continue
-                    method,resource=expected
+                    method,resource=expected[:2]
                     result=value.get('result',{})
                     returned=thread_id(result)
                     if resource is not None and returned is not None and returned!=resource:
@@ -335,38 +396,156 @@ def main():
         except Exception as error:
             event({'owner_alias':source,'receive_failure_type':type(error).__name__})
         finally:
-            if source=='local': bootstrap.closed()
+            if source=='local':
+                bootstrap.closed()
+                if native:local_closed.set()
+            elif native:
+                with sessions_lock:
+                    if sessions.get(source) is stream:del sessions[source]
+                    with PENDING_LOCK:
+                        lost=[(key,value) for key,value in PENDING.items()
+                              if len(key)==3 and key[0]==source and key[2] is stream]
+                        for key,_ in lost:del PENDING[key]
+                if not stopping.is_set():
+                    for _,expected in lost:
+                        fail({'id':expected[2]},'Owner cloud session closed before responding')
+                try:stream.close()
+                except Exception as error:
+                    event({'owner_alias':source,'close_failure_type':type(error).__name__})
 
     def send(source, request, resource=None):
-        if 'id' in request:
+        if native and source!='local':
+            key=None
+            with sessions_lock:
+                ws=sessions.get(source)
+                if ws is None:raise ValueError('Owner cloud session closed')
+                if 'id' in request:
+                    key=(source,str(request['id']),ws)
+                    with PENDING_LOCK:PENDING[key]=(request.get('method'),resource,request['id'])
+            try:ws.send(json.dumps(request))
+            except Exception:
+                if key is not None:
+                    with PENDING_LOCK:expected=PENDING.pop(key,None)
+                    if expected is None:return # The reader already delivered its response or close error.
+                raise
+            return
+        if 'id' in request and not (native and source=='local'):
             with PENDING_LOCK: PENDING[(source,str(request['id']))]=(request.get('method'),resource)
         raw=json.dumps(request)
         if source=='local':
             bootstrap.send(request)
         else: sessions[source].send(raw)
 
-    threading.Thread(target=receive,args=('local',local.stdout),daemon=True).start()
+    def open_owner_session(alias, request):
+        with session_locks[alias]:
+            with sessions_lock:
+                if alias in sessions: return
+            if public_tls is None: raise ValueError('Public upstream CA roots unavailable')
+            owner=owners[alias]
+            ws=connect('wss://codex-cloud-backend.chatgpt.com/',
+                subprotocols=['codex-app-server','codex-client.desktop','openai-bearer.'+owner['token']],
+                additional_headers={'ChatGPT-Account-Id':owner['account_id'],'X-OpenAI-Product-Sku':'codex',
+                                    'X-OpenAI-Allow-Environmentless-Fallback':'true'},
+                proxy=None,ssl=public_tls,open_timeout=20,max_size=16*1024*1024,legacy=True)
+            try:
+                internal={**request,'id':'cq-internal-initialize-'+alias}
+                ws.send(json.dumps(internal))
+                while True:
+                    response=json.loads(ws.recv(timeout=30))
+                    if response.get('id')==internal['id']: break
+                if 'error' in response: raise ValueError('Cloud initialize rejected')
+                if native: ws.send(json.dumps({'method':'initialized'}))
+                with sessions_lock:
+                    if stopping.is_set(): raise ValueError('Owner cloud session is shutting down')
+                    sessions[alias]=ws
+                event({'owner_alias':alias,'upgrade_status':ws.response.status_code,'initialize_success':True})
+                threading.Thread(target=receive,args=(alias,ws),daemon=True).start()
+            except Exception:
+                ws.close()
+                raise
+
+    def native_owner_worker(alias, requests):
+        while not stopping.is_set():
+            try: request,resource,initialization=requests.get(timeout=0.1)
+            except queue.Empty: continue
+            try:
+                open_owner_session(alias,initialization)
+                method=request['method']
+                event({'routed_method':method,'owner_alias':alias})
+                if method in {'thread/read','thread/turns/list','thread/items/list'}:
+                    http_read(alias,request,resource)
+                else: send(alias,request,resource)
+            except Exception as error:
+                event({'owner_routing_failure_type':type(error).__name__})
+                if not stopping.is_set():fail(request,'Owner cloud routing verification unavailable')
+            finally: requests.task_done()
+
+    def native_requests():
+        incoming=queue.Queue(maxsize=1)
+        def read_stdin():
+            def put(value):
+                while not stopping.is_set():
+                    try:incoming.put(value,timeout=0.1);return
+                    except queue.Full:pass
+            try:
+                for raw in sys.stdin:
+                    if stopping.is_set():return
+                    put(('request',raw))
+                put(('eof',None))
+            except Exception as error:put(('error',error))
+        threading.Thread(target=read_stdin,daemon=True).start()
+        while True:
+            if local_closed.is_set():
+                try:code=local.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:code=1
+                raise SystemExit(code if code>=0 else 128-code)
+            try:kind,value=incoming.get(timeout=0.1)
+            except queue.Empty:continue
+            if kind=='eof':return
+            if kind=='error':raise value
+            yield value
+
+    local_reader=threading.Thread(target=receive,args=('local',local.stdout),daemon=True)
+    local_reader.start()
     try:
-        for raw in sys.stdin:
-            if len(raw)>4*1024*1024: raise ValueError('Native request exceeds frame bound')
+        for raw in native_requests() if native else sys.stdin:
+            if not native and len(raw)>4*1024*1024: raise ValueError('Native request exceeds frame bound')
             request=json.loads(raw); method=request.get('method')
+            if native:
+                if method=='initialize':
+                    native_initialize=request
+                if method=='initialized':
+                    initialized=True
+                resource=thread_id(request.get('params',{}))
+                alias=native_thread_owner(resource)
+                # Ordinary tasks and primary auth retain the exact stock RPC path.
+                # Only verified Dot roots may cross to an owner cloud session.
+                if method in CLOUD_READS and alias is not None:
+                    try:
+                        if not initialized or native_initialize is None or alias not in owners:
+                            raise ValueError('Owner cloud session unavailable')
+                        if alias not in native_queues:
+                            requests=queue.Queue(maxsize=32)
+                            worker=threading.Thread(target=native_owner_worker,args=(alias,requests),daemon=True)
+                            native_queues[alias]=requests
+                            native_workers.append(worker)
+                            worker.start()
+                        native_queues[alias].put_nowait((request,resource,native_initialize))
+                    except queue.Full:
+                        fail(request,'Owner cloud request queue is full')
+                    except Exception as error:
+                        event({'owner_routing_failure_type':type(error).__name__})
+                        fail(request,'Owner cloud routing verification unavailable')
+                elif method is not None and alias is not None and alias!=settings.SYSTEM_ALIAS:
+                    event({'blocked_method':method,'owner_alias':alias})
+                    fail(request,'Secondary Dot operation is not supported')
+                else:
+                    send('local',request)
+                continue
             if method=='initialize' and not initialized:
                 initialization=bootstrap.initialize(request,system)
-                for alias,owner in (owners.items() if app_session else []):
-                    ws=connect('wss://codex-cloud-backend.chatgpt.com/',
-                        subprotocols=['codex-app-server','codex-client.desktop','openai-bearer.'+owner['token']],
-                        additional_headers={'ChatGPT-Account-Id':owner['account_id'],'X-OpenAI-Product-Sku':'codex',
-                                            'X-OpenAI-Allow-Environmentless-Fallback':'true'},
-                        proxy=None,ssl=public_tls,open_timeout=20,max_size=16*1024*1024,legacy=True)
-                    sessions[alias]=ws
-                    internal={**request,'id':'cq-internal-initialize-'+alias}
-                    ws.send(json.dumps(internal))
-                    while True:
-                        response=json.loads(ws.recv(timeout=30))
-                        if response.get('id')==internal['id']: break
-                    if 'error' in response: raise ValueError('Cloud initialize rejected')
-                    event({'owner_alias':alias,'upgrade_status':ws.response.status_code,'initialize_success':True})
-                    threading.Thread(target=receive,args=(alias,ws),daemon=True).start()
+                for alias in (owners if app_session else []):
+                    open_owner_session(alias,request)
                 initialized=True
                 emit({'id':request['id'],'result':initialization})
             elif method=='initialized':
@@ -395,10 +574,15 @@ def main():
                 fail(request,'Read-only cloud-session proof blocks this operation')
     finally:
         stopping.set()
-        for ws in sessions.values(): ws.close()
+        with sessions_lock: closing=list(sessions.values())
+        for ws in closing: ws.close()
         local.terminate()
         try: local.wait(timeout=5)
         except subprocess.TimeoutExpired: local.kill()
+        if native:
+            local_reader.join(timeout=5)
+            deadline=time.monotonic()+0.5
+            for worker in native_workers:worker.join(timeout=max(0,deadline-time.monotonic()))
 
 if __name__=='__main__':
     try: main()

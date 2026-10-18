@@ -7,6 +7,26 @@ DOTS=settings.DOTS
 SYSTEM_DOT=next((value for target,value in DOTS.items() if settings.DOT_OWNERS[target]==settings.SYSTEM_ALIAS),None)
 
 
+def display_names():
+    """Read current labels from the native catalogue; routing stays profile-bound."""
+    expression = """(async()=>{const m=await import('app://-/assets/MODULE_ASSET_PLACEHOLDER');
+const value=await m.Ymr.safeGet('/tbo');
+return (value.items??[]).map(p=>({id:p.id,name:p.display_name}));})()"""
+    rows = native.evaluate(expression.replace('MODULE_ASSET_PLACEHOLDER', settings.MODULE_ASSET))
+    expected = {profile: handle for handle, (profile, _) in DOTS.items()}
+    if (not isinstance(rows, list) or len(rows) != len(expected)
+            or any(not isinstance(row, dict) or not isinstance(row.get('id'), str) for row in rows)
+            or {row.get('id') for row in rows} != set(expected)):
+        raise ValueError('Native catalogue identity changed')
+    result = {}
+    for row in rows:
+        name = row.get('name')
+        if not isinstance(name, str) or not 0 < len(name) <= 80 or any(ord(c) < 32 for c in name):
+            raise ValueError('Native catalogue name invalid')
+        result[expected[row['id']]] = name
+    return result
+
+
 def send(target,text,ledger):
     if SYSTEM_DOT is None: raise ValueError('System Dot unavailable')
     if target not in DOTS or not isinstance(text,str) or not 0<len(text)<=4000:

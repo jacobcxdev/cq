@@ -29,6 +29,7 @@ class Settings:
     DOT_NAMES: dict
     PROOF_PROFILE_IDS: dict
     DEBUG_PORT: int
+    INTEGRATION_MODE: str = 'isolated'
 
 
 def _text(data, name, limit=256):
@@ -107,7 +108,8 @@ def load(path=None):
         raise ValueError('Dots configuration must be valid JSON') from None
     fields = {'runtime_root', 'app_path', 'app_version', 'app_build', 'asar_sha256',
               'module_asset', 'account_source', 'system_auth', 'system_alias',
-              'secondary_alias', 'secondary_selector', 'dots', 'debug_port', 'cq_accounts', 'system_account_id'}
+              'secondary_alias', 'secondary_selector', 'dots', 'debug_port', 'cq_accounts', 'system_account_id',
+              'integration_mode'}
     if not isinstance(data, dict) or set(data) - fields:
         raise ValueError('unsupported Dots configuration fields')
     root = _path(data, 'runtime_root')
@@ -152,6 +154,9 @@ def load(path=None):
     port = data.get('debug_port', 0)
     if type(port) is not int or not 0 <= port <= 65535:
         raise ValueError('invalid Dots setting: debug_port')
+    mode = data.get('integration_mode', 'isolated')
+    if mode not in ('isolated', 'native'):
+        raise ValueError('invalid Dots setting: integration_mode')
     dots = data.get('dots', {})
     if not isinstance(dots, dict):
         raise ValueError('invalid Dots profile configuration')
@@ -162,7 +167,7 @@ def load(path=None):
                 or any(ord(c) < 32 for c in name) or not isinstance(dot, dict)
                 or not {'owner_alias', 'profile_id', 'root_thread_id'} <= set(dot)
                 or set(dot) - {'owner_alias', 'profile_id', 'root_thread_id', 'display_name', 'owner_account_id'}
-                or name == 'directory'):
+                or name in ('directory', 'board')):
             raise ValueError('invalid Dots profile configuration')
         alias = _text(dot, 'owner_alias')
         profile = _text(dot, 'profile_id', 128)
@@ -184,7 +189,7 @@ def load(path=None):
     validate_runtime_paths(root)
     return Settings(resolved_root, app, _text(data, 'app_version'), _text(data, 'app_build'),
                     digest, asset, source, cq_accounts, system, system_alias, system_account_id, secondary_alias,
-                    secondary_selector, targets, owners, names, profiles, port)
+                    secondary_selector, targets, owners, names, profiles, port, mode)
 
 
 def stable_handle(account_id, profile_id):
@@ -205,3 +210,9 @@ def __getattr__(name):
     if name in Settings.__dataclass_fields__:
         return getattr(get_settings(), name)
     raise AttributeError(name)
+
+
+def catalogue_revision():
+    value = get_settings()
+    payload = {'dots': value.DOTS, 'owners': value.DOT_OWNERS, 'names': value.DOT_NAMES}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()

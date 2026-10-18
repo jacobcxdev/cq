@@ -20,6 +20,13 @@ class NativeGate:
             system=self.system_loader()
             if system['alias']!=settings.SYSTEM_ALIAS or account!=system['account_id']:
                 raise ValueError('Native principal mismatch')
+            if settings.INTEGRATION_MODE == 'native':
+                # Ordinary primary traffic passes through unchanged. Owner substitution
+                # needs the actual native credential, independent of Dot availability.
+                if not hmac.compare_digest(token[7:].encode(), system['token'].encode()):
+                    raise ValueError('Native bearer mismatch')
+                self.cached=(fingerprint,self.clock()+60)
+                return
             native={**system,'token':token[7:]}
             value=self.upstream(native,'/backend-api/tbo/primary',headers)
             profile=value.get('profile',{});selection=value.get('selection',{})

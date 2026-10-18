@@ -37,8 +37,11 @@ def null_credential():
         raise ValueError('Secondary credential owner mismatch')
     return owner
 
-def owner_headers(owner):
-    if owner['alias'] != ALIAS or catalog.claims(owner['token'])['exp'] <= time.time() + 60:
+def owner_headers(owner, expected_alias=None):
+    alias = ALIAS if expected_alias is None else expected_alias
+    if (owner['alias'] != alias or alias == settings.SYSTEM_ALIAS
+            or alias not in settings.DOT_OWNERS.values()
+            or catalog.claims(owner['token'])['exp'] <= time.time() + 60):
         raise ValueError('Secondary credential unavailable; refresh forbidden')
     return {'Authorization': 'Bearer ' + owner['token'],
             'ChatGPT-Account-Id': owner['account_id'], 'Content-Type': 'application/json',
@@ -48,12 +51,12 @@ def owner_headers(owner):
 def public_tls():
     return ssl.create_default_context(cafile=ssl.get_default_verify_paths().openssl_cafile)
 
-def owner_request(owner, host, method, path, body=None):
+def owner_request(owner, host, method, path, body=None, *, expected_alias=None):
     if host not in {'chatgpt.com', REGISTRY}:
         raise ValueError('Host outside research transport')
     connection = http.client.HTTPSConnection(host, context=public_tls(), timeout=25)
     try:
-        connection.request(method, path, body=body, headers=owner_headers(owner))
+        connection.request(method, path, body=body, headers=owner_headers(owner, expected_alias))
         response = connection.getresponse()
         data = response.read(MAX_BODY + 1)
         if len(data) > MAX_BODY:
@@ -119,8 +122,10 @@ def validate_registry_response(data, environment_id):
         raise ValueError('Registry rendezvous authority invalid')
 
 class RegistryBroker:
-    def __init__(self, owner, environment_id, request=owner_request):
-        if owner['alias'] != ALIAS:
+    def __init__(self, owner, environment_id, request=owner_request, expected_alias=None):
+        alias = ALIAS if expected_alias is None else expected_alias
+        if (owner['alias'] != alias or alias == settings.SYSTEM_ALIAS
+                or alias not in settings.DOT_OWNERS.values()):
             raise ValueError('Executor principal outside Secondary proof')
         self.owner, self.environment_id, self.request = owner, environment_id, request
         self.capability = secrets.token_urlsafe(32)
