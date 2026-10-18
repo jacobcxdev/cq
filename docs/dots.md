@@ -37,7 +37,7 @@ cq codex dots --root /absolute/private/dots list --json
 
 `--account-source` is optional. Runtime helpers use the staged CQ executable. The installer generates private configuration, so no hand-written settings file, profile IDs or research directory is needed.
 
-The installation root must be private and outside source checkouts, app bundles and production credential or app-data directories. Existing roots must belong to the current user and have mode `0700`; configuration uses `0600` and staged executables use `0700`. Symlink destinations are rejected. The installer accepts only the exact app version, build and renderer pin in [the Go installer](../../internal/dots/install.go). An app update requires qualification and a compatible CQ build.
+The installation root must be private and outside source checkouts, app bundles and production credential or app-data directories. Existing roots must belong to the current user and have mode `0700`; configuration uses `0600` and staged executables use `0700`. Symlink destinations are rejected. The installer accepts only the exact app version, build and renderer pin in [the Go installer](../internal/dots/install.go). An app update requires qualification and a compatible CQ build.
 
 The qualified native app permits authenticated local proxy requests on `localhost:8000`. Dots therefore requires loopback port `8000` to be free. If another service owns it, startup stops without terminating that service or choosing an unsupported port.
 
@@ -100,7 +100,7 @@ cq codex dots status --json
 
 The watcher runs with the adapter. After account changes made while stopped, run `sync` to refresh discovery and resume operation. `start` resumes the saved catalogue and its watcher. Changes made only on the remote service, such as onboarding without changing local account metadata, require `sync`. Credential expiry or revocation still needs the account's normal sign-in flow; this runtime does not refresh credential sources.
 
-Quit the normal app and stop the adapter before reinstalling or upgrading its payload. Reinstallation checks the existing private runtime before replacing payload files and refuses a running installation. Runtime source activation keeps rollback copies; credentials, any isolated user data, setup ledgers and relay state are preserved. There is no public rollback command. Developer source rollback also needs the matching prior candidate before startup; do not start against a candidate whose source hashes differ.
+Quit the normal app and stop the adapter before reinstalling or upgrading its staged executable. Reinstallation checks the existing private runtime and refuses a running installation. Credentials, any isolated user data, setup ledgers and relay state are preserved. The runtime uses only the staged Go executable; no Python sources or virtual environment are installed.
 
 Controls verify process ownership, executable and adapter identity before signalling. Native `stop` refuses while the normal app is alive; quit the app first. Each secondary account gets its own local executor registration and private `CODEX_HOME`; the primary account's executor and credentials remain unchanged. The manager closes only its own child executors, terminating them if graceful shutdown times out.
 
@@ -121,15 +121,11 @@ Explicit relay messages carry source attribution and a correlation ID, with at m
 These tests use temporary state and fake processes or upstream responses. They do not establish live installation or delivery readiness.
 
 ```sh
-python3.14 -m unittest discover -s experiments/dots/runtime -q
-python3.14 -m unittest discover -s experiments/dots/tests -q
 go build ./...
 go vet ./...
 go test -race -count=1 ./...
 ```
 
-Run the Python suites in a development environment with `websockets==17.2` installed.
-
-The Python files in this directory retain the original research implementation and differential test fixtures. The shipped CLI does not import, extract or execute them. Upgrades retain existing private Python payloads for rollback, without requiring them for the Go runtime. Existing setup, relay, board and executor state keeps the same schema and identity hashes.
+The retired Python implementation and its tests have been removed. Existing setup, relay, board and executor state keeps the same schema and identity hashes.
 
 To migrate an existing Python installation, quit ChatGPT, then run `cq codex dots stop` and `cq codex dots install`. Installation preserves the declared account source and existing setup records. Reopen subsequent sessions through ChatGPT via CQ.
