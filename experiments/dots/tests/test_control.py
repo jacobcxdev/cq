@@ -26,7 +26,7 @@ class ControlTests(unittest.TestCase):
         mock.patch.object(release, 'normal_app_running', return_value=False).start()
 
     def test_process_only_allows_verified_lifecycle_components(self):
-        for identity, expected in [('probe.py', 'probe.py'), ('app', None),
+        for identity, expected in [('probe.py', 'probe.py'), ('secondary_executors.py', 'secondary_executors.py'), ('app', None),
                                    ('launch.py', None), (None, None)]:
             with mock.patch.object(release, 'process_identity', return_value=identity):
                 self.assertEqual(control.process(123), expected)
@@ -168,6 +168,21 @@ class ControlTests(unittest.TestCase):
             self.assertTrue(control.finish_start(ready)['relay_existing'])
         spawn.assert_called_once_with(release.TARGET,'room_coordination.py')
         self.assertEqual(awareness.call_count,2)  # Persisted awareness guards decide whether a send is needed.
+
+    def test_native_completion_starts_one_secondary_manager_and_reuses_it(self):
+        release.settings.INTEGRATION_MODE='native'
+        release.settings.SYSTEM_ALIAS='first'
+        release.settings.DOT_OWNERS={'dot-first':'first','dot-second':'second'}
+        identities={123:'room_coordination.py',456:'secondary_executors.py'}
+        with mock.patch.object(release,'isolated_processes',side_effect=[[123],[],[123,456],[123,456]]), \
+             mock.patch.object(release,'process_identity',side_effect=identities.get), \
+             mock.patch.object(control,'ensure_watcher',return_value={}), \
+             mock.patch.object(control,'reconcile_awareness',return_value=[]), \
+             mock.patch.object(control,'_spawn',return_value=types.SimpleNamespace(poll=lambda:None)) as spawn, \
+             mock.patch.object(control.time,'sleep'):
+            self.assertFalse(control.finish_start({})['secondary_executors_existing'])
+            self.assertTrue(control.finish_start({})['secondary_executors_existing'])
+        spawn.assert_called_once_with(release.TARGET,'secondary_executors.py')
 
     def test_sync_continues_pending_onboarding_without_metadata_change(self):
         import cli

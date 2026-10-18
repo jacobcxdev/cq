@@ -5,6 +5,9 @@ from local_executor import RegistryBroker, ALIAS, cli_environment, validate_regi
 class ExecutorBoundaryTests(unittest.TestCase):
     def test_rejects_main_owner(self):
         with self.assertRaises(ValueError): RegistryBroker({'alias': test_support.CONFIG['system_alias']}, 'test')
+        for alias in [test_support.CONFIG['system_alias'], 'foreign']:
+            with self.assertRaises(ValueError):
+                RegistryBroker({'alias': alias}, 'test', expected_alias=alias)
 
     def test_child_has_no_inherited_credentials_or_plugin_pipe(self):
         env = cli_environment('local-only')

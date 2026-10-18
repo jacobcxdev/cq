@@ -5,6 +5,18 @@ import native_dot_transport as transport
 
 
 class NativeTargetTests(unittest.TestCase):
+    def test_display_names_use_current_profile_metadata(self):
+        dots = {'dot-one': ('profile-a', 'root-a'), 'dot-two': ('profile-b', 'root-b')}
+        rows = [{'id': 'profile-a', 'name': 'Renamed'}, {'id': 'profile-b', 'name': 'Renamed'}]
+        with patch.object(transport, 'DOTS', dots), patch.object(transport.native, 'evaluate', return_value=rows):
+            self.assertEqual(transport.display_names(), {'dot-one': 'Renamed', 'dot-two': 'Renamed'})
+        for invalid in (None, [], rows + rows, [dict(rows[0], id='foreign'), rows[1]],
+                        [dict(rows[0], name='bad\nname'), rows[1]],
+                        [dict(rows[0], id=[]), rows[1]]):
+            with self.subTest(invalid=invalid), patch.object(transport, 'DOTS', dots), \
+                 patch.object(transport.native, 'evaluate', return_value=invalid), self.assertRaises(ValueError):
+                transport.display_names()
+
     def test_single_owner_target_uses_its_verified_profile_and_root(self):
         self.assert_targets({'dot-one':('one-profile','one-root')})
 

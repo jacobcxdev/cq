@@ -52,6 +52,7 @@ class ReleaseTests(unittest.TestCase):
         self.assertEqual(set(manifest['files']), set(release.FILES))
         self.assertIn('settings.py', manifest['files'])
         self.assertIn('awareness.py', manifest['files'])
+        self.assertIn('board.py', manifest['files'])
         self.assertFalse((self.candidate / 'private.json').exists())
         self.assertEqual((self.candidate / 'manifest.json').stat().st_mode & 0o777, 0o600)
         self.assertEqual((self.candidate / 'cloud_stdio.py').stat().st_mode & 0o777, 0o700)

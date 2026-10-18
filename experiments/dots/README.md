@@ -58,6 +58,32 @@ Copy `DOT_HANDLE` from the `id` field returned by `list`. The selector accepts a
 
 The directory shares configured handles and display names. Roles and current work remain unknown until a peer explicitly describes them. The relay does not mirror private history, memories or connector authorisations, and peer messages cannot grant user permissions.
 
+## Broadcast
+
+Send one message to every discovered Dot:
+
+```sh
+cq codex dots broadcast "Please share a brief update on your current work."
+```
+
+Messages must contain 1 to 3000 characters. CQ labels each copy as a user broadcast with the same broadcast ID and reports delivery per stable handle, so duplicate display names remain separate recipients. This sends ordinary chat messages and does not repeat setup. The command exits unsuccessfully if any delivery is rejected or uncertain; it does not retry. Check each uncertain delivery in chat before sending again. For message text beginning with a dash, use `cq codex dots broadcast -- "--your message"`.
+
+## Shared message board
+
+Assign one existing local chat for every configured Dot:
+
+```sh
+cq codex dots board codex://threads/THREAD_ID
+cq codex dots board
+cq codex dots board --clear
+```
+
+CQ verifies that the exact chat exists on the local app-server before saving the binding. Each Dot receives one board notice per binding and stable owner/profile identity. Restarts do not repeat notices, including uncertain deliveries. New Dots learn the board during their one-time setup; `prime` explicitly reminds existing Dots. The peer directory also returns current board instructions on demand. Rebinding the same chat preserves the notice guard. Clearing the binding does not delete the chat; a deleted chat reports unavailable until the user assigns another one.
+
+Dots use the existing whole-message relay syntax with target `board` and a fresh correlation. Body `read` returns a bounded excerpt of recent text messages from the bound chat. Body `post` followed by a newline and the message appends an attributed normal user message there. The complete body has the relay's 3000-character limit. CQ labels the sender with its display name and stable handle. Each request gets at most one reply, and uncertain writes are not retried. Board messages are reference-only peer context, not user authorisation.
+
+Posts start a brief acknowledgement turn in the shared chat. CQ refuses to post while that chat is busy, rather than steering its active turn. Read the board on demand; CQ does not add polling or mirror private conversations into it. Shared-board access is mediated by CQ in the native app and does not establish general secondary-account Mac executor support.
+
 ## Account changes and lifecycle
 
 The running account watcher checks source metadata every five seconds. When accounts or declared credentials change, it requests discovery again. A changed normal-profile catalogue requires the user to quit the app and run `cq codex dots start`; existing tasks and transports remain alive until then. Isolated mode can restart its research app automatically. Adding an already-onboarded owner can trigger that owner's first setup attempt once the updated catalogue starts. Removing an owner closes its old runtime sessions on that restart. Failed discovery remains visible as an account availability outcome; a temporary upstream outage can preserve a previously known profile. Temporary backend failures retry with a delay capped at one minute. Invalid local credentials wait for source changes instead.
@@ -75,13 +101,15 @@ The watcher runs with the adapter. After account changes made while stopped, run
 
 Quit the normal app and stop the adapter before reinstalling or upgrading its payload. Reinstallation checks the existing private runtime before replacing payload files and refuses a running installation. Runtime source activation keeps rollback copies; credentials, any isolated user data, setup ledgers and relay state are preserved. There is no public rollback command. Developer source rollback also needs the matching prior candidate before startup; do not start against a candidate whose source hashes differ.
 
-Controls verify process ownership, executable and adapter identity before signalling, and never force termination. Native `stop` refuses while the normal app is alive; quit the app first. No operation changes the normal CQ service or registers a new remote executor.
+Controls verify process ownership, executable and adapter identity before signalling. Native `stop` refuses while the normal app is alive; quit the app first. Each secondary account gets its own local executor registration and private `CODEX_HOME`; the primary account's executor and credentials remain unchanged. The manager closes only its own child executors, terminating them if graceful shutdown times out.
 
 Normal mode uses a private Chromium debugging pipe and an owner-only Unix socket, with no debugging TCP port. The broker must remain alive for the app session. Ordinary termination and IPC-server failures keep its pipes open until the app exits; forcibly killing the broker or an interpreter crash can close the pipe and cause Electron to quit. The normal updater remains enabled; an updated app needs a newly qualified pin before the next CQ launch.
 
+The pinned renderer gets an in-memory recovery guard for cancelled shared Dot reads. An active reader retries its own GET once when another chat's disposed controller cancelled their shared request. Sends are never retried by this guard. The signed app bundle stays unchanged.
+
 ## Current limits
 
-Discovery includes each available owner’s existing primary Dot. Empty accounts do not gain onboarding slots. Native cross-account `@` selection and persistent secondary Reboot remain unsupported. Fresh local-task execution and its nested macOS sandbox remain unqualified; an executor appearing Connected does not establish general local-task support.
+Discovery includes each available owner’s existing primary Dot. Empty accounts do not gain onboarding slots. Native cross-account `@` selection and persistent secondary Reboot remain unsupported. Secondary local execution uses native task sandboxing and separate account state; a synthetic file-read task has been verified end to end. Local MCP configuration is not copied between accounts. Connection status comes from the owning account's backend, including offline and permission states.
 
 Explicit relay messages carry source attribution and a correlation ID, with at most one request and one reply per correlation. The relay polls the last 20 messages every five seconds and can miss messages after a long outage or heavy traffic. Unknown send outcomes are not retried automatically. Cloud sessions, plugins, memories and connectors remain account-owned. The native sender identity remains the signed-in account.
 

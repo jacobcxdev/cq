@@ -612,6 +612,8 @@ cq codex canary
 cq codex canary start
 cq codex canary status
 cq codex canary stop
+cq codex dots board
+cq codex dots broadcast
 cq codex dots install
 cq codex dots list
 cq codex dots prime
@@ -743,6 +745,8 @@ cq codex dots list
 cq codex dots status
 cq codex dots prime DOT_ID
 cq codex dots prime --all
+cq codex dots broadcast "Please share a brief update on your current work."
+cq codex dots board codex://threads/THREAD_ID
 cq codex dots stop
 ```
 
@@ -750,7 +754,13 @@ Each discovered Dot receives one automatic setup attempt per installation,
 teaching the explicit relay and on-demand peer directory. Restarts, upgrades,
 renames, reboots and removing/re-adding an account do not repeat it. Unknown send
 outcomes are not automatically retried. `prime` explicitly sends a fresh reminder.
+`broadcast "MESSAGE"` sends one CQ-labelled user message to every discovered Dot
+and reports delivery per stable ID. It does not repeat setup or retry uncertain sends.
 Display names can repeat; use the stable ID from `list` when a name is ambiguous.
+`board THREAD_ID` assigns one existing local chat as a shared message board and
+notifies each Dot once. CQ mediates explicit board reads and attributed posts;
+Dots do not need separate local tasks. Run `board` to inspect or `board --clear`
+to remove the binding. Board posts start a brief acknowledgement turn in that chat.
 Account changes are watched automatically; `cq codex dots sync` requests an
 immediate reconciliation. A changed normal-profile catalogue requires an app
 restart through CQ; the watcher does not interrupt existing work. Roles and
@@ -759,8 +769,9 @@ current work remain unknown unless reported.
 This optional macOS feature requires Python 3.14 (`brew install python@3.14`),
 websockets 17.2 in its private environment, valid read-only account credentials,
 and already-onboarded Dots. It does not add empty-account onboarding slots,
-native cross-account `@` selection or persistent secondary Reboot. Fresh local
-task execution remains unqualified. See [Dots installation details](experiments/dots/README.md)
+native cross-account `@` selection or persistent secondary Reboot. Secondary Dots
+use separate local executors with private account state and native task sandboxing.
+Local MCP configuration is not copied between accounts. See [Dots installation details](experiments/dots/README.md)
 for qualification, explicit paths and rollback.
 
 ## Development

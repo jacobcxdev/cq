@@ -393,6 +393,55 @@ def valid_read_receipt(body):
     except (ValueError, TypeError):
         return False
 
+def valid_name_update(path, body, fixture):
+    match = re.fullmatch(r'/backend-api/tbo/([^/?]+)', path)
+    if match is None or resource_owner(path, fixture) is None:
+        return False
+    try:
+        value = json.loads(body)
+        name = value.get('display_name') if isinstance(value, dict) else None
+        return (set(value) == {'display_name'} and isinstance(name, str)
+                and 0 < len(name) <= 24 and bool(name.strip())
+                and '\\' not in name and not any(ord(char) < 32 for char in name))
+    except (ValueError, TypeError):
+        return False
+
+def local_computer_target(path, body, fixture):
+    parsed = urllib.parse.urlsplit(path)
+    match = re.fullmatch(r'/backend-api/tbo/([^/]+)/computers/([^/]+)/(connect|connect-and-replace|disconnect)', parsed.path)
+    if match is None or body:
+        return None
+    owner = resource_owner(parsed.path, fixture)
+    if owner is None or owner['alias'] == settings.SYSTEM_ALIAS:
+        return None
+    import secondary_executors
+    row = secondary_executors.mapping(owner['alias'])
+    profile_id = urllib.parse.unquote(match[1])
+    profiles = [p for p in fixture[1] if p['id'] == profile_id]
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    if len(profiles) != 1 or query != {'expected_thread_id': [profiles[0]['active_root_thread_id']]}:
+        return None
+    if row is not None and row['profile_id'] == profile_id and match[2] in {
+            row['environment_id'], row['primary_environment_id']}:
+        environment = row['environment_id']
+    elif match[3] == 'disconnect' and secondary_executors.valid_environment(match[2]):
+        # Revoking an older computer must not depend on the current CQ worker.
+        # Confirm the exact environment belongs to this Dot and is revocable.
+        try:
+            computers = catalog.get(owner, '/backend-api/tbo/' + match[1] + '/computers')['computers']
+            if not isinstance(computers, list) or any(not isinstance(c, dict) for c in computers):
+                return None
+            matches = [c for c in computers if c.get('kind') == 'user'
+                       and c.get('environment_id') == match[2] and c.get('can_disconnect') is True]
+            if len(matches) != 1:
+                return None
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        environment = match[2]
+    else:
+        return None
+    return (f'/backend-api/tbo/{match[1]}/computers/{environment}/{match[3]}'
+            + '?' + parsed.query)
 def valid_text_message(body):
     try:
         value = json.loads(body)
@@ -631,10 +680,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             or path.endswith('/messages') and valid_text_message(body))
         if not native_mode and STATE['primary_probe_owner'] is not None:
             message_write = False
+        name_write = (self.command == 'PATCH' and not parsed.query
+                      and valid_name_update(path, body, runtime_fixture))
+        computer_target = (local_computer_target(self.path, body, runtime_fixture)
+                           if native_mode and self.command == 'POST' else None)
         allowed = self.command == 'GET' or runtime_owner is not None or message_write or receipt_write or watch_request or (
             self.command == 'POST' and (path.endswith('/wham/statsig/bootstrap') or path == '/backend-api/devicecheck'))
         if native_mode:
-            allowed = not secondary or self.command in ['GET', 'HEAD'] or runtime_owner is not None or message_write or receipt_write or watch_request
+            allowed = not secondary or self.command in ['GET', 'HEAD'] or runtime_owner is not None or message_write or receipt_write or watch_request or name_write or computer_target is not None
         if not allowed:
             event({'method': self.command, 'path': path, 'blocked': True})
             self.send_response(503)
@@ -683,12 +736,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         connection = http.client.HTTPSConnection('chatgpt.com', timeout=25)
         response_started = False
         try:
-            connection.request(self.command, self.path, body=body or None, headers=headers)
+            connection.request(self.command, computer_target or self.path, body=body or None, headers=headers)
             response = connection.getresponse()
-            if watch_request and path.endswith('/live') and response.status == 200:
+            activity_stream = (self.command == 'GET' and secondary
+                               and re.fullmatch(r'/backend-api/tbo/[^/]+/activity/stream', path))
+            if response.status == 200 and (watch_request and path.endswith('/live') or activity_stream):
                 if not response.getheader('Content-Type','').startswith('text/event-stream'):
                     raise ValueError('Unexpected native room live response type')
-                event({'operation':'owner_room_live','routed_owner_alias':owner['alias'],
+                event({'operation':'owner_activity_stream' if activity_stream else 'owner_room_live','routed_owner_alias':owner['alias'],
                        'status':response.status,'streaming':True})
                 self.send_response(response.status)
                 response_started = True
@@ -712,6 +767,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                        'has_authorization': bool(self.headers.get('Authorization'))}
             if owner is not None:
                 summary['routed_owner_alias'] = owner['alias']
+            if computer_target is not None:
+                summary['owner_local_computer_operation'] = path.rsplit('/', 1)[1]
+            if secondary and self.command == 'GET' and response.status == 200:
+                computers = re.fullmatch(r'/backend-api/tbo/([^/]+)/computers', path)
+                if computers:
+                    import secondary_executors
+                    data = secondary_executors.project_computers(owner['alias'],
+                        urllib.parse.unquote(computers[1]), data)
             if runtime_owner is not None:
                 summary['owner_runtime_operation']=path.rsplit('/',1)[1]
                 if response.status>=400:summary.update(error_summary(data,dict(response.getheaders())))

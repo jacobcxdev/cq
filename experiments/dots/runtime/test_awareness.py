@@ -19,6 +19,10 @@ with mock.patch.dict('sys.modules', {'settings': CONFIG}):
 
 class AwarenessTests(unittest.TestCase):
     def setUp(self):
+        import board
+        board_config = mock.patch.object(board, 'settings', CONFIG)
+        board_config.start()
+        self.addCleanup(board_config.stop)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = pathlib.Path(self.temporary.name)
@@ -26,7 +30,7 @@ class AwarenessTests(unittest.TestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
         self.sender = mock.Mock(return_value={'outcome': 'accepted', 'message_id': 'synthetic'})
-        self.transport = mock.patch.dict('sys.modules', {'native_dot_transport': types.SimpleNamespace(send=self.sender)})
+        self.transport = mock.patch.dict('sys.modules', {'native_dot_transport': types.SimpleNamespace(send=self.sender, display_names=lambda:dict(CONFIG.DOT_NAMES))})
         self.transport.start()
         self.addCleanup(self.transport.stop)
 
@@ -49,6 +53,24 @@ class AwarenessTests(unittest.TestCase):
         self.assertEqual(list((self.root/'awareness').iterdir()),[])
         self.sender.assert_not_called()
 
+    def test_live_names_refresh_labels_without_changing_handles(self):
+        live = {'dot-one': 'Renamed', 'dot-two': 'Renamed'}
+        with mock.patch.dict('sys.modules', {'native_dot_transport':
+                types.SimpleNamespace(display_names=mock.Mock(return_value=live))}):
+            self.assertEqual(awareness.names(live=True), live)
+        self.assertEqual(CONFIG.DOTS, DOTS)
+        self.assertEqual(awareness.resolve('dot-one'), 'dot-one')
+
+    def test_offline_names_use_snapshot_and_live_name_resolves_after_rename(self):
+        with mock.patch.dict('sys.modules', {'native_dot_transport':
+                types.SimpleNamespace(display_names=mock.Mock(side_effect=ValueError('app offline')))}):
+            self.assertEqual(awareness.names(live=True), CONFIG.DOT_NAMES)
+        with mock.patch.dict('sys.modules', {'native_dot_transport':
+                types.SimpleNamespace(display_names=lambda: {'dot-one': 'Renamed', 'dot-two': 'Other'})}):
+            self.assertEqual(awareness.resolve('Renamed'), 'dot-one')
+            with self.assertRaises(ValueError):
+                awareness.resolve('Same')
+
     def test_names_can_collide_but_handles_route_exactly(self):
         self.assertEqual(awareness.resolve('dot-one'), 'dot-one')
         for invalid in ('Same', 'missing', None):
@@ -59,6 +81,21 @@ class AwarenessTests(unittest.TestCase):
         with mock.patch.object(CONFIG, 'DOT_NAMES', {'dot-one': 'dot-two', 'dot-two': 'Other'}):
             self.assertEqual(awareness.resolve('dot-two'), 'dot-two')
 
+    def test_new_dot_setup_teaches_bound_board_without_second_notice(self):
+        import board
+        thread='01a14c1f-6e3c-7622-b4a3-b279ecb2a822'
+        with mock.patch.object(board,'_request',return_value={'thread':{'id':thread}}):
+            board.bind(thread)
+        awareness.reconcile()
+        self.assertEqual(self.sender.call_count,2)
+        self.assertTrue(all('[CQ:board:' in call.args[1] for call in self.sender.call_args_list))
+        awareness.reconcile()
+        self.assertEqual(self.sender.call_count,2)
+        self.assertIn('codex://threads/'+thread,awareness.directory_message('f'*32))
+        awareness.prime('dot-one',manual=True)
+        self.assertEqual(self.sender.call_count,3)
+        self.assertIn('[CQ:board:',self.sender.call_args.args[1])
+
     def test_directory_has_both_handles_and_unknown_work_without_history(self):
         message = awareness.directory_message('a' * 32)
         self.assertEqual(message.count('"display_name": "Same"'), 2)
@@ -66,6 +103,49 @@ class AwarenessTests(unittest.TestCase):
             self.assertIn('"handle": "' + handle + '"', message)
         self.assertIn('"role": "unknown", "current_work": "unknown"', message)
         self.sender.assert_not_called()
+
+    def test_broadcast_sends_once_per_handle_without_repriming(self):
+        result = awareness.broadcast('Hello, team!')
+        self.assertEqual([row['target'] for row in result['deliveries']], list(DOTS))
+        self.assertTrue(all(row['outcome'] == 'accepted' for row in result['deliveries']))
+        self.assertEqual(self.sender.call_count, 2)
+        ledgers = []
+        for call in self.sender.call_args_list:
+            handle, message, ledger = call.args
+            self.assertIn(handle, DOTS)
+            self.assertTrue(message.startswith('CQ broadcast. Sender: user, delivered through the native account.'))
+            self.assertTrue(message.endswith('\n\nHello, team!'))
+            self.assertIn(result['id'], message)
+            self.assertEqual(ledger.parent.stat().st_mode & 0o777, 0o700)
+            ledgers.append(ledger)
+        self.assertEqual(len(set(ledgers)), 2)
+        self.assertFalse((self.root / 'awareness').exists())
+        self.assertNotIn('Hello, team!', ''.join(path.read_text() for path in (self.root / 'broadcasts').rglob('*.json')))
+
+    def test_broadcast_reports_partial_failure_without_retry(self):
+        self.sender.side_effect = [TimeoutError('private upstream body'), {'outcome': 'rejected'}]
+        result = awareness.broadcast('Test')
+        self.assertEqual([row['outcome'] for row in result['deliveries']], ['unknown', 'rejected'])
+        self.assertEqual(self.sender.call_count, 2)
+        self.assertNotIn('private upstream body', json.dumps(result))
+
+    def test_broadcast_rejects_invalid_message_or_empty_catalogue_before_sending(self):
+        for message in (None, '', ' \n', 'x' * 3001):
+            with self.subTest(message=type(message).__name__), self.assertRaises(ValueError):
+                awareness.broadcast(message)
+        with mock.patch.object(CONFIG, 'DOTS', {}), self.assertRaises(ValueError):
+            awareness.broadcast('Hello')
+        self.sender.assert_not_called()
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_broadcast_rejects_symlink_state_before_sending(self):
+        outside = self.root / 'outside'
+        outside.mkdir(mode=0o700)
+        (self.root / 'broadcasts').symlink_to(outside)
+        with self.assertRaises(ValueError):
+            awareness.broadcast('Hello')
+        self.sender.assert_not_called()
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_pending_saved_before_send_and_per_restart_skip(self):
         def send(*args):

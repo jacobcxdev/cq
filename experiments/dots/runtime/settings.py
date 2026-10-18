@@ -167,7 +167,7 @@ def load(path=None):
                 or any(ord(c) < 32 for c in name) or not isinstance(dot, dict)
                 or not {'owner_alias', 'profile_id', 'root_thread_id'} <= set(dot)
                 or set(dot) - {'owner_alias', 'profile_id', 'root_thread_id', 'display_name', 'owner_account_id'}
-                or name == 'directory'):
+                or name in ('directory', 'board')):
             raise ValueError('invalid Dots profile configuration')
         alias = _text(dot, 'owner_alias')
         profile = _text(dot, 'profile_id', 128)

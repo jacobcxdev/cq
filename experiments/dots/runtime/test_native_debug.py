@@ -102,6 +102,26 @@ class NativeDebugTests(unittest.TestCase):
             pipe.evaluate('nativeApi()')
         self.assertEqual([request['method'] for request in requests], ['Target.getTargets'])
 
+    def test_all_renderers_visits_only_native_windows_and_tolerates_startup(self):
+        def handler(request):
+            method=request['method']
+            if method=='Target.getTargets':
+                result={'targetInfos':[
+                    {'type':'page','url':'https://evil.invalid','targetId':'0'},
+                    {'type':'page','url':'app://-/index.html','targetId':'b'},
+                    {'type':'page','url':'app://-/index.html','targetId':'a'}]}
+            elif method=='Target.attachToTarget':result={'sessionId':request['params']['targetId']}
+            elif method=='Runtime.evaluate':
+                result=({'exceptionDetails':{}} if request['sessionId']=='a'
+                        else {'result':{'value':{'installed':True}}})
+                if request['sessionId']=='a':result={'exceptionDetails':{'text':'starting'}}
+            else:result={}
+            return {'id':request['id'],'result':result}
+        pipe,requests=self.pipe(handler)
+        self.assertEqual(pipe.evaluate('guard()',all_renderers=True),[{'installed':False},{'installed':True}])
+        self.assertEqual([r['params']['targetId'] for r in requests if r['method']=='Target.attachToTarget'],['a','b'])
+        self.assertEqual(sum(r['method']=='Target.detachFromTarget' for r in requests),2)
+
     def test_exception_is_generic_and_session_is_detached(self):
         def handler(request):
             result = {'targetInfos': [{'type': 'page', 'url': 'app://-/index.html', 'targetId': 'a'}]}

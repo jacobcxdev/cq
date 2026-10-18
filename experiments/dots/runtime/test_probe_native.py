@@ -96,6 +96,84 @@ class NativeProbeTests(unittest.TestCase):
         research.assert_not_called(); handler.send_response.assert_called_once_with(202)
         self.assertEqual(connection.request.call_args.kwargs['headers']['Authorization'], 'Bearer native-desktop')
 
+    def test_secondary_activity_stream_is_not_buffered_until_eof(self):
+        handler = self.handler('/backend-api/tbo/worker-dot/activity/stream', 'GET', b'')
+        frames = b'event: ready\ndata: {}\n\n'
+        connection = self.connection(frames, headers=[('Content-Type', 'text/event-stream'),
+                                                      ('Set-Cookie', 'owner-cookie')])
+        with patch('probe.http.client.HTTPSConnection', return_value=connection):
+            handler.handle_request()
+        connection.getresponse.return_value.read.assert_not_called()
+        self.assertEqual(handler.wfile.getvalue(), frames)
+        self.assertTrue(handler.close_connection)
+        self.assertEqual(connection.request.call_args.kwargs['headers']['Authorization'], 'Bearer stored-worker')
+        self.assertFalse(any(call.args[0].lower() == 'set-cookie' for call in handler.send_header.call_args_list))
+
+    def test_secondary_computer_controls_translate_only_managed_owner_environment(self):
+        row = dict(profile_id='worker-dot', environment_id='worker-environment',
+                   primary_environment_id='main-environment')
+        for operation in ['connect', 'connect-and-replace', 'disconnect']:
+            path = f'/backend-api/tbo/worker-dot/computers/main-environment/{operation}?expected_thread_id=worker-root'
+            handler = self.handler(path, body=b''); connection = self.connection(b'', status=204)
+            with patch('secondary_executors.mapping', return_value=row), \
+                 patch('probe.http.client.HTTPSConnection', return_value=connection):
+                handler.handle_request()
+            handler.send_response.assert_called_once_with(204)
+            self.assertEqual(connection.request.call_args.args[1], path.replace('/main-environment/', '/worker-environment/'))
+            self.assertEqual(connection.request.call_args.kwargs['headers']['Authorization'], 'Bearer stored-worker')
+        with patch('secondary_executors.mapping', return_value=row):
+            for path, body in [('/backend-api/tbo/worker-dot/computers/foreign/connect?expected_thread_id=worker-root', b''),
+                               ('/backend-api/tbo/worker-dot/computers/main-environment/connect?expected_thread_id=foreign', b''),
+                               ('/backend-api/tbo/worker-dot/computers/main-environment/connect?expected_thread_id=worker-root', b'{}')]:
+                self.assertIsNone(probe.local_computer_target(path, body, self.fixture))
+
+    def test_secondary_old_computer_can_be_revoked_without_managed_worker(self):
+        path='/backend-api/tbo/worker-dot/computers/old-research/disconnect?expected_thread_id=worker-root'
+        row={'kind':'user','environment_id':'old-research','can_disconnect':True}
+        handler=self.handler(path,body=b'');connection=self.connection(b'',status=204)
+        with patch('secondary_executors.mapping',return_value=None), \
+             patch('probe.catalog.get',return_value={'computers':[row]}) as lookup, \
+             patch('probe.http.client.HTTPSConnection',return_value=connection):
+            handler.handle_request()
+        lookup.assert_called_once_with(self.worker, '/backend-api/tbo/worker-dot/computers')
+        handler.send_response.assert_called_once_with(204)
+        self.assertEqual(connection.request.call_args.args[1],path)
+        self.assertEqual(connection.request.call_args.kwargs['headers']['Authorization'],'Bearer stored-worker')
+        for computer in [dict(row,kind='openai_cloud'),dict(row,can_disconnect=False),dict(row,environment_id='foreign')]:
+            with patch('secondary_executors.mapping',return_value=None), \
+                 patch('probe.catalog.get',return_value={'computers':[computer]}):
+                self.assertIsNone(probe.local_computer_target(path,b'',self.fixture))
+
+    def test_secondary_name_edit_uses_own_account(self):
+        body = json.dumps({'display_name': 'Same name'}).encode()
+        handler = self.handler('/backend-api/tbo/worker-dot', 'PATCH', body)
+        connection = self.connection(b'{"id":"worker-dot","display_name":"Same name"}')
+        with patch('probe.http.client.HTTPSConnection', return_value=connection): handler.handle_request()
+        handler.send_response.assert_called_once_with(200)
+        self.assertEqual(connection.sent_body, body)
+        headers = connection.request.call_args.kwargs['headers']
+        self.assertEqual(headers['Authorization'], 'Bearer stored-worker')
+        self.assertEqual(headers['ChatGPT-Account-Id'], 'worker')
+        self.assertNotIn('Cookie', headers)
+        self.assertNotIn('X-OpenAI-Orbit-Selection', headers)
+
+    def test_secondary_name_edit_rejects_other_writes(self):
+        for path, value in [
+                ('/backend-api/tbo/worker-dot', {}),
+                ('/backend-api/tbo/worker-dot', {'display_name': ''}),
+                ('/backend-api/tbo/worker-dot', {'display_name': 'x' * 25}),
+                ('/backend-api/tbo/worker-dot', {'display_name': 'bad\\name'}),
+                ('/backend-api/tbo/worker-dot', {'display_name': 'bad\nname'}),
+                ('/backend-api/tbo/worker-dot', {'display_name': 42}),
+                ('/backend-api/tbo/worker-dot', {'display_name': 'Name', 'status': 'paused'}),
+                ('/backend-api/tbo/worker-dot?other=1', {'display_name': 'Name'}),
+                ('/backend-api/tbo/worker-dot/other', {'display_name': 'Name'})]:
+            with self.subTest(path=path, value=value):
+                handler = self.handler(path, 'PATCH', json.dumps(value).encode())
+                with patch('probe.http.client.HTTPSConnection') as connect: handler.handle_request()
+                handler.send_response.assert_called_once_with(503)
+                connect.assert_not_called()
+
     def test_primary_requests_work_when_dot_gate_is_unavailable(self):
         self.gate.side_effect = ValueError('No available primary Dot')
         for path in ['/backend-api/ordinary/resource', '/backend-api/tbo/primary']:

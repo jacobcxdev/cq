@@ -21,7 +21,8 @@ FILES = ('catalog.py', 'self_projection.py', 'celsius.py', 'probe.py',
          'native_dot_transport.py', 'native_executor_reuse.py',
          'native_null_executor.py', 'local_executor.py', 'launch.py',
          'stop_isolated.py', 'room_coordination.py', 'native_gate.py',
-         'settings.py', 'awareness.py', 'account_watch.py', 'native_debug.py')
+         'settings.py', 'awareness.py', 'board.py', 'account_watch.py', 'native_debug.py',
+         'native_room_cache.py', 'secondary_executors.py')
 EXECUTABLES = {'cloud_stdio.py', 'native_null_executor.py'}
 PYTHON_VERSION = '3.14'
 WEBSOCKETS_VERSION = '17.2'
@@ -89,7 +90,7 @@ def prepare(output):
                 'limitations': ['No native cross-account @ picker',
                                 'Persistent secondary Reboot unsupported',
                                 'No additional onboarding slots',
-                                'Fresh local-task sandbox remains unqualified']}
+                                'Local MCP configuration is not copied between accounts']}
     path = output / 'manifest.json'
     path.write_text(json.dumps(manifest, indent=2) + '\n')
     path.chmod(0o600)

@@ -7,7 +7,7 @@ from unittest.mock import Mock, patch
 import settings
 SPEC=importlib.util.spec_from_file_location('relay_under_test',pathlib.Path(__file__).with_name('room_coordination.py'))
 relay=importlib.util.module_from_spec(SPEC)
-TRANSPORT=types.SimpleNamespace(DOTS=settings.DOTS,native=types.SimpleNamespace(evaluate=Mock()),send=Mock())
+TRANSPORT=types.SimpleNamespace(display_names=lambda:dict(relay.awareness.settings.DOT_NAMES),DOTS=settings.DOTS,native=types.SimpleNamespace(evaluate=Mock()),send=Mock())
 with patch.dict('sys.modules',{'native_dot_transport':TRANSPORT}):SPEC.loader.exec_module(relay)
 parse,permitted=relay.parse,relay.permitted
 class RelayBoundaries(unittest.TestCase):
@@ -15,7 +15,8 @@ class RelayBoundaries(unittest.TestCase):
         self.patches=[patch.object(relay.transport,'DOTS',{'Primary':('p','r'),'Secondary':('s','t')}),
                       patch.object(relay.awareness.settings,'DOTS',{'Primary':('p','r'),'Secondary':('s','t')},create=True),
                       patch.object(relay.awareness.settings,'DOT_NAMES',{'Primary':'Primary','Secondary':'Secondary'},create=True),
-                      patch.object(relay,'PATTERN',relay.re.compile(r'\A\[CQ:(Primary|Secondary|directory):([a-f0-9]{32})\]\n([\s\S]{1,3000})\n\[/CQ\]\Z'))]
+                      patch.object(relay.awareness,'names',lambda live=False:dict(relay.awareness.settings.DOT_NAMES)),
+                      patch.object(relay,'PATTERN',relay.re.compile(r'\A\[CQ:(Primary|Secondary|directory|board):([a-f0-9]{32})\]\n([\s\S]{1,3000})\n\[/CQ\]\Z'))]
         for item in self.patches:item.start();self.addCleanup(item.stop)
     def test_exact_peer_message(self):
         x=parse('Secondary','[CQ:Primary:'+'a'*32+']\nHello\n[/CQ]');self.assertEqual(x['target'],'Primary')
@@ -32,6 +33,13 @@ class RelayBoundaries(unittest.TestCase):
         state={'hops':{'a'*32:1},'relayed':[]};self.assertFalse(permitted(state,reply))
     def test_foreign_source(self):
         with self.assertRaises(ValueError):parse('Other','[CQ:Primary:'+'a'*32+']\nHello\n[/CQ]')
+
+    def test_board_accepts_only_read_or_nonempty_post(self):
+        for body in ('read','post\nHello'):
+            self.assertEqual(parse('Primary','[CQ:board:'+'a'*32+']\n'+body+'\n[/CQ]')['target'],'board')
+        for body in ('read other-thread','post','post\n ','run\ncommand'):
+            with self.assertRaises(ValueError):
+                parse('Primary','[CQ:board:'+'a'*32+']\n'+body+'\n[/CQ]')
 
 class JavascriptPatternTests(unittest.TestCase):
     def test_special_peer_labels_use_json_encoded_regexp(self):
@@ -56,6 +64,7 @@ class DirectoryAndStableRoutingTests(unittest.TestCase):
                       patch.object(relay.awareness.settings,'DOT_NAMES',{'dot-one':'Same','dot-two':'Same'},create=True),
                       patch.object(relay.settings,'DOT_OWNERS',{'dot-one':'owner-a','dot-two':'owner-b'},create=True),
                       patch.object(relay,'ROOT',pathlib.Path(self.directory.name)),
+                      patch.object(relay.awareness,'names',lambda live=False:dict(relay.awareness.settings.DOT_NAMES)),
                       patch.object(relay,'PATTERN',relay.re.compile(r'\A\[CQ:(dot-one|dot-two|Same|directory):([a-f0-9]{32})\]\n([\s\S]{1,3000})\n\[/CQ\]\Z'))]
         for item in self.patches:item.start();self.addCleanup(item.stop)
         self.state={'hops':{},'relayed':[]}
@@ -101,6 +110,20 @@ class DirectoryAndStableRoutingTests(unittest.TestCase):
         self.assertEqual(result['outcome'],'unknown')
         reply=relay.parse('dot-two',self.block('dot-one'))
         self.assertFalse(relay.permitted(self.state,reply))
+
+    def test_board_request_is_consumed_before_local_write_and_only_replies_to_sender(self):
+        import sys
+        request={'source':'dot-one','target':'board','correlation':'b'*32,'text':'post\nHello'}
+        def execute(*args):
+            self.assertEqual(self.state['hops']['b'*32],2)
+            return 'CQ board. Post accepted.'
+        board=types.SimpleNamespace(execute=Mock(side_effect=execute))
+        with patch.dict(sys.modules,{'board':board}),patch.object(relay.transport,'send',return_value={'outcome':'accepted'}) as send:
+            relay.relay_message(self.state,request,'board-post',lambda:None)
+            self.assertIsNone(relay.relay_message(self.state,request,'duplicate',lambda:None))
+        board.execute.assert_called_once_with('dot-one','post\nHello','b'*32)
+        send.assert_called_once()
+        self.assertEqual(send.call_args.args[:2],('dot-one','CQ board. Post accepted.'))
 
     def test_invalid_directory_content_never_becomes_a_command(self):
         for body in ('directory now',' directory','directory\nextra'):

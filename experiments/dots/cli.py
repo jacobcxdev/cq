@@ -330,7 +330,8 @@ def list_dots(root):
     settings = configure(root)
     import awareness
     states = {row['target']: row for row in awareness.summary()}
-    return {'dots': [{'id': handle, 'name': settings.DOT_NAMES.get(handle, handle),
+    labels = awareness.names(live=True)
+    return {'dots': [{'id': handle, 'name': labels[handle],
                       'account': settings.DOT_OWNERS[handle],
                       'setup': states.get(handle, {}).get('outcome', 'not_attempted')}
                      for handle in settings.DOTS]}
@@ -358,7 +359,7 @@ def operation_lock(root, wait_seconds=0):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('operation', choices=('install', 'preinstall', 'start', 'stop', 'status', 'sync', 'list', 'prime'))
+    parser.add_argument('operation', choices=('install', 'preinstall', 'start', 'stop', 'status', 'sync', 'list', 'prime', 'broadcast', 'board'))
     parser.add_argument('target', nargs='?')
     parser.add_argument('--root', type=pathlib.Path, required=True)
     parser.add_argument('--app', default='/Applications/ChatGPT.app')
@@ -367,9 +368,10 @@ def main(argv=None):
     parser.add_argument('--cq-accounts', default=str(pathlib.Path.home() / '.codex/accounts'))
     parser.add_argument('--account-source')
     parser.add_argument('--all', action='store_true')
+    parser.add_argument('--clear', action='store_true')
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--watcher', action='store_true', help=argparse.SUPPRESS)
-    args = parser.parse_args(argv)
+    args = parser.parse_intermixed_args(argv)
     try:
         if args.root.is_symlink():
             raise ValueError('Installation root must not be a symlink')
@@ -383,7 +385,7 @@ def main(argv=None):
         # Atomic snapshots let reads proceed while the watcher reconciles mutations.
         private_directory(root)
         lock = (contextlib.nullcontext() if args.operation in ('list', 'status') else
-                operation_lock(root, wait_seconds=45 if args.operation == 'prime' else 0))
+                operation_lock(root, wait_seconds=45 if args.operation in ('prime', 'broadcast', 'board') else 0))
         with lock:
             if args.operation == 'preinstall':
                 import release
@@ -401,11 +403,30 @@ def main(argv=None):
             elif args.operation == 'prime':
                 import awareness
                 result = {'priming': awareness.prime(args.target, all=args.all, manual=True)}
+            elif args.operation == 'broadcast':
+                if args.all:
+                    raise ValueError('Broadcast already targets all discovered Dots; omit --all')
+                import awareness
+                result = {'broadcast': awareness.broadcast(args.target)}
+            elif args.operation == 'board':
+                if args.all or args.clear and args.target:
+                    raise ValueError('Choose a board thread, --clear, or no argument to inspect')
+                import board
+                if args.clear:
+                    result = {'board': board.clear()}
+                elif args.target:
+                    result = {'board': board.bind(args.target), 'notices': board.announce()}
+                else:
+                    result = {'board': board.configuration()}
             else:
                 import control
                 result = {'stop': control.stop, 'status': control.status}[args.operation]()
         print(json.dumps(result))
         if args.operation == 'prime' and any(row['outcome'] != 'accepted' for row in result['priming']):
+            return 1
+        if args.operation == 'broadcast' and any(row['outcome'] != 'accepted' for row in result['broadcast']['deliveries']):
+            return 1
+        if args.operation == 'board' and any(row['outcome'] not in ('accepted', 'included_in_setup') for row in result.get('notices', [])):
             return 1
         return 0
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as error:

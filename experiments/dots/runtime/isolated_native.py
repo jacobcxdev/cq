@@ -109,6 +109,13 @@ def evaluate(expression):
                 if value.get('error') or result.get('exceptionDetails'):raise ValueError('Native API invocation failed')
                 return result['result'].get('value')
 
+def evaluate_all(expression):
+    app_check()
+    if settings.INTEGRATION_MODE != 'native':
+        raise ValueError('All-window evaluation requires native integration')
+    import native_debug
+    return native_debug.evaluate(expression, isolated_pid(), ROOT, all_renderers=True)
+
 if __name__=='__main__':
     expression="(async()=>{const m=await import('app://-/assets/"+settings.MODULE_ASSET+"');return {nativeApi:typeof m.Ymr?.safeGet==='function'};})()"
     print(json.dumps(evaluate(expression)))

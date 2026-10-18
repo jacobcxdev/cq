@@ -373,6 +373,48 @@ class ConcurrentOperationTests(unittest.TestCase):
                          'Another Dots operation is in progress; try again shortly')
         awareness.prime.assert_not_called()
 
+    def test_broadcast_waits_for_watcher_and_preserves_message(self):
+        def release_watcher(_seconds):fcntl.flock(self.lock,fcntl.LOCK_UN)
+        awareness=types.SimpleNamespace(broadcast=mock.Mock(return_value={'id':'test','deliveries':[{'outcome':'accepted'}]}))
+        message='--json $(literal) `literal`\nHello, team!'
+        with mock.patch.dict(sys.modules,{'awareness':awareness}), \
+             mock.patch.object(cli.time,'sleep',side_effect=release_watcher), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli.main(['broadcast','--root',str(self.root),'--json','--',message]),0)
+        awareness.broadcast.assert_called_once_with(message)
+        self.assertEqual(json.loads(output.getvalue())['broadcast']['id'],'test')
+
+    def test_broadcast_partial_delivery_returns_failure_without_retry(self):
+        fcntl.flock(self.lock,fcntl.LOCK_UN)
+        awareness=types.SimpleNamespace(broadcast=mock.Mock(return_value={'deliveries':[{'outcome':'accepted'},{'outcome':'unknown'}]}))
+        with mock.patch.dict(sys.modules,{'awareness':awareness}), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(['broadcast','Hello','--root',str(self.root)]),1)
+        awareness.broadcast.assert_called_once_with('Hello')
+
+    def test_board_bind_announces_once_and_status_never_sends(self):
+        fcntl.flock(self.lock,fcntl.LOCK_UN)
+        board=types.SimpleNamespace(bind=mock.Mock(return_value={'thread_id':'local-thread'}),
+                                    announce=mock.Mock(return_value=[{'outcome':'accepted'}]),
+                                    configuration=mock.Mock(return_value={'thread_id':'local-thread'}),
+                                    clear=mock.Mock(return_value={'bound':False}))
+        with mock.patch.dict(sys.modules,{'board':board}),contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(['board','codex://threads/local-thread','--root',str(self.root)]),0)
+            self.assertEqual(cli.main(['board','--root',str(self.root)]),0)
+            self.assertEqual(cli.main(['board','--clear','--root',str(self.root)]),0)
+        board.bind.assert_called_once_with('codex://threads/local-thread')
+        board.announce.assert_called_once_with()
+        board.configuration.assert_called_once_with()
+        board.clear.assert_called_once_with()
+
+    def test_board_unknown_notice_delivery_is_not_reported_successful(self):
+        fcntl.flock(self.lock,fcntl.LOCK_UN)
+        board=types.SimpleNamespace(bind=mock.Mock(return_value={'thread_id':'local-thread'}),
+                                    announce=mock.Mock(return_value=[{'outcome':'unknown'}]))
+        with mock.patch.dict(sys.modules,{'board':board}),contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.main(['board','local-thread','--root',str(self.root)]),1)
+        board.bind.assert_called_once()
+        board.announce.assert_called_once()
+
     def test_watcher_mutation_remains_nonblocking_and_serialized(self):
         with mock.patch.object(cli,'sync') as sync, \
              mock.patch.object(cli.time,'sleep') as sleep, \

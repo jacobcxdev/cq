@@ -10,7 +10,7 @@ import subprocess
 import time
 import release
 
-COMPONENTS = {'probe.py', 'realtime_probe.py', 'room_coordination.py', 'native_null_executor.py', 'account_watch.py', 'native_debug.py'}
+COMPONENTS = {'probe.py', 'realtime_probe.py', 'room_coordination.py', 'native_null_executor.py', 'account_watch.py', 'native_debug.py', 'secondary_executors.py'}
 
 
 def process(pid):
@@ -73,7 +73,8 @@ def status():
 
 
 def reconcile_awareness(root, python):
-    code = 'import awareness,json;print(json.dumps(awareness.reconcile()))'
+    code = ('import awareness,json,native_room_cache;native_room_cache.install();'
+            'print(json.dumps(awareness.reconcile()))')
     try:
         result = subprocess.run([str(python), '-c', code], cwd=root,
                                 capture_output=True, text=True, timeout=120)
@@ -137,7 +138,20 @@ def finish_start(ready=None):
         time.sleep(0.5)
         if relay.poll() is not None:
             raise ValueError('Coordination relay failed to start')
+    executors = []
+    if getattr(release.settings, 'INTEGRATION_MODE', 'isolated') == 'native':
+        executors = [pid for pid in release.isolated_processes()
+                     if release.process_identity(pid) == 'secondary_executors.py']
+        if len(executors) > 1:
+            raise ValueError('Multiple verified secondary executor managers are running')
+        if not executors and any(owner != release.settings.SYSTEM_ALIAS
+                                 for owner in release.settings.DOT_OWNERS.values()):
+            manager = _spawn(root, 'secondary_executors.py')
+            time.sleep(0.5)
+            if manager.poll() is not None:
+                raise ValueError('Secondary executor manager failed to start')
     return {**ready, 'relay_started': True, 'relay_existing': bool(relays),
+            'secondary_executors_existing': bool(executors),
             **ensure_watcher(), 'awareness': awareness, 'system_app_modified': False}
 
 

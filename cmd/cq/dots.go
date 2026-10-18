@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/alecthomas/kong"
 	dotspayload "github.com/jacobcxdev/cq/experiments/dots"
@@ -16,14 +18,16 @@ import (
 
 // CodexDotsCmd manages the Dots adapter and its private state.
 type CodexDotsCmd struct {
-	Root    string              `help:"Private Dots installation directory (default ~/.local/share/cq/dots)" placeholder:"ABS_PATH"`
-	Install CodexDotsInstallCmd `cmd:"" help:"Install multi-account Dots for the normal native app"`
-	Start   CodexDotsActionCmd  `cmd:"" help:"Start Dots in the configured native app"`
-	Stop    CodexDotsActionCmd  `cmd:"" help:"Stop the Dots adapter after quitting the app"`
-	Status  CodexDotsActionCmd  `cmd:"" help:"Show Dots status"`
-	Sync    CodexDotsActionCmd  `cmd:"" help:"Refresh Dots account discovery"`
-	List    CodexDotsActionCmd  `cmd:"" help:"List discovered Dots"`
-	Prime   CodexDotsPrimeCmd   `cmd:"" help:"Prime a Dot or all discovered Dots"`
+	Root      string                `help:"Private Dots installation directory (default ~/.local/share/cq/dots)" placeholder:"ABS_PATH"`
+	Install   CodexDotsInstallCmd   `cmd:"" help:"Install multi-account Dots for the normal native app"`
+	Start     CodexDotsActionCmd    `cmd:"" help:"Start Dots in the configured native app"`
+	Stop      CodexDotsActionCmd    `cmd:"" help:"Stop the Dots adapter after quitting the app"`
+	Status    CodexDotsActionCmd    `cmd:"" help:"Show Dots status"`
+	Sync      CodexDotsActionCmd    `cmd:"" help:"Refresh Dots account discovery"`
+	List      CodexDotsActionCmd    `cmd:"" help:"List discovered Dots"`
+	Prime     CodexDotsPrimeCmd     `cmd:"" help:"Prime a Dot or all discovered Dots"`
+	Broadcast CodexDotsBroadcastCmd `cmd:"" help:"Send a user message to every discovered Dot"`
+	Board     CodexDotsBoardCmd     `cmd:"" help:"Show or assign one local chat as the shared Dot message board"`
 }
 
 type CodexDotsInstallCmd struct {
@@ -39,6 +43,15 @@ type CodexDotsPrimeCmd struct {
 	Dot string `arg:"" optional:"" help:"Stable Dot handle or exact unambiguous display name"`
 	All bool   `help:"Prime all discovered Dots"`
 }
+type CodexDotsBroadcastCmd struct {
+	Message string `arg:"" help:"Message to send once to every discovered Dot (1 to 3000 characters)"`
+}
+type CodexDotsBoardCmd struct {
+	Thread string `arg:"" optional:"" help:"Existing local thread ID or codex://threads/ID link"`
+	Clear  bool   `help:"Remove the shared message board binding"`
+}
+
+var dotsBoardThread = regexp.MustCompile(`^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$`)
 
 type dotsRunner struct {
 	home    func() (string, error)
@@ -67,7 +80,17 @@ func defaultDotsRunner() dotsRunner {
 func runCodexDotsEntry(args []string, stdout, stderr io.Writer) (bool, error) {
 	filtered := make([]string, 0, len(args))
 	jsonOutput := false
+	positional := false
 	for _, arg := range args {
+		if positional {
+			filtered = append(filtered, arg)
+			continue
+		}
+		if arg == "--" {
+			positional = true
+			filtered = append(filtered, arg)
+			continue
+		}
 		if arg == "--json" || arg == "-j" {
 			jsonOutput = true
 		} else if strings.HasPrefix(arg, "--json=") || strings.HasPrefix(arg, "-j=") {
@@ -91,8 +114,13 @@ func runCodexDotsEntry(args []string, stdout, stderr io.Writer) (bool, error) {
 		return true, err
 	}
 	parsed, err := parser.Parse(filtered[2:])
-	if helpRequested(filtered[2:]) {
-		return true, nil
+	for index, arg := range filtered[2:] {
+		if arg == "--" {
+			break
+		}
+		if arg == "--help" || arg == "-h" || index == 0 && arg == "help" {
+			return true, nil
+		}
 	}
 	if err != nil {
 		return true, err
@@ -131,6 +159,17 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 	op := operation[0]
 	if op == "prime" && (options.Prime.All == (options.Prime.Dot != "")) {
 		return fmt.Errorf("choose a stable Dot handle, an unambiguous name, or --all")
+	}
+	if op == "broadcast" && (strings.TrimSpace(options.Broadcast.Message) == "" || utf8.RuneCountInString(options.Broadcast.Message) > 3000) {
+		return fmt.Errorf("broadcast message must contain 1 to 3000 characters")
+	}
+	if op == "board" {
+		if options.Board.Clear && options.Board.Thread != "" {
+			return fmt.Errorf("choose a board thread or --clear")
+		}
+		if options.Board.Thread != "" && !dotsBoardThread.MatchString(strings.TrimPrefix(options.Board.Thread, "codex://threads/")) {
+			return fmt.Errorf("board must be an exact local thread ID or codex://threads/ID link")
+		}
 	}
 	args := []string{filepath.Join(root, "payload", "cli.py"), op, "--root", root}
 	python := filepath.Join(root, "runtime", "venv", "bin", "python")
@@ -207,6 +246,17 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 	}
 	if jsonOutput {
 		args = append(args, "--json")
+	}
+	if op == "broadcast" {
+		args = append(args, "--", options.Broadcast.Message)
+	}
+	if op == "board" {
+		if options.Board.Thread != "" {
+			args = append(args, options.Board.Thread)
+		}
+		if options.Board.Clear {
+			args = append(args, "--clear")
+		}
 	}
 	return runner.run(ctx, python, args, stdout, stderr)
 }

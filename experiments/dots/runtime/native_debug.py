@@ -175,7 +175,7 @@ class Pipe:
                 with self.condition:
                     self.pending, self.reply = None, None
 
-    def evaluate(self, expression):
+    def evaluate(self, expression, all_renderers=False):
         if not isinstance(expression, str) or not expression:
             raise ValueError('Native debugger expression invalid')
         deadline = time.monotonic() + TIMEOUT
@@ -187,7 +187,19 @@ class Pipe:
                    and isinstance(target.get('targetId'), str) and target['targetId']]
         if not matches:
             raise ValueError('Native renderer unavailable')
-        target = min(matches, key=lambda item: item['targetId'])
+        matches.sort(key=lambda item: item['targetId'])
+        if all_renderers:
+            values = []
+            for target in matches:
+                try:
+                    values.append(self._evaluate_target(target, expression, deadline))
+                except ValueError:
+                    # A newly opened window may not have its account scope yet.
+                    values.append({'installed': False})
+            return values
+        return self._evaluate_target(matches[0], expression, deadline)
+
+    def _evaluate_target(self, target, expression, deadline):
         session = self.call('Target.attachToTarget', {'targetId': target['targetId'], 'flatten': True},
                             deadline=deadline).get('sessionId')
         if not isinstance(session, str) or not session:
@@ -271,10 +283,13 @@ class Broker:
                 if request == {'operation': 'identity'}:
                     response = {'app_pid': self.app_pid, 'broker_pid': os.getpid()}
                 elif (set(request) == {'operation', 'app_pid', 'expression'}
-                      and request['operation'] == 'evaluate'
+                      and request['operation'] in ('evaluate', 'evaluate_all')
                       and type(request['app_pid']) is int and request['app_pid'] == self.app_pid
                       and isinstance(request['expression'], str) and request['expression']):
-                    response = {'app_pid': self.app_pid, 'value': self.evaluator(request['expression'])}
+                    value = (self.evaluator(request['expression'], all_renderers=True)
+                             if request['operation'] == 'evaluate_all'
+                             else self.evaluator(request['expression']))
+                    response = {'app_pid': self.app_pid, 'value': value}
                 else:
                     raise ValueError('Native debugger request invalid')
                 _send(connection, {'ok': True, **response}, MAX_FRAME)
@@ -319,10 +334,11 @@ def identity(root=None):
     return {name: response[name] for name in ('app_pid', 'broker_pid')}
 
 
-def evaluate(expression, expected_pid, root=None):
+def evaluate(expression, expected_pid, root=None, all_renderers=False):
     if type(expected_pid) is not int or expected_pid <= 0:
         raise ValueError('Native debugger app identity invalid')
-    response = _request({'operation': 'evaluate', 'app_pid': expected_pid, 'expression': expression}, root)
+    operation = 'evaluate_all' if all_renderers else 'evaluate'
+    response = _request({'operation': operation, 'app_pid': expected_pid, 'expression': expression}, root)
     if response.get('app_pid') != expected_pid:
         raise ValueError('Native debugger app identity changed')
     return response.get('value')
