@@ -177,6 +177,9 @@ func (p *Provider) Fetch(ctx context.Context, now time.Time) (results []quota.Re
 
 	result, err := parseQuotaSummary(body)
 	if err != nil {
+		if errors.Is(err, errGeminiQuotaUnavailable) {
+			return singleError("api_error", "Gemini quota not reported by Antigravity", 0), nil
+		}
 		return singleError("parse_error", "invalid Gemini quota response", 0), nil
 	}
 	return []quota.Result{result}, nil

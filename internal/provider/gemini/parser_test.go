@@ -1,6 +1,7 @@
 package gemini
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -129,5 +130,30 @@ func TestParseQuotaSummaryUsesZeroForInvalidResetTime(t *testing.T) {
 	}
 	if result.Windows[quota.Window7Day].ResetAtUnix != 0 || result.Windows[quota.Window5Hour].ResetAtUnix != 0 {
 		t.Fatalf("reset times = %#v, want zero values", result.Windows)
+	}
+}
+
+func TestParseQuotaSummaryDistinguishesUnreportedGeminiQuota(t *testing.T) {
+	tests := []struct {
+		name        string
+		body        string
+		unavailable bool
+	}{
+		{name: "third party only", body: `{"groups":[{"buckets":[{"bucketId":"3p-weekly","remainingFraction":1},{"bucketId":"3p-5h","remainingFraction":1}]}]}`, unavailable: true},
+		{name: "disabled third party only", body: `{"groups":[{"buckets":[{"bucketId":"3p-weekly"}]}]}`, unavailable: true},
+		{name: "empty groups", body: `{"groups":[]}`},
+		{name: "unknown buckets", body: `{"groups":[{"buckets":[{"bucketId":"unknown","remainingFraction":1}]}]}`},
+		{name: "partial Gemini", body: string(quotaFixture(`{"bucketId":"gemini-5h","remainingFraction":0.5}`))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseQuotaSummary([]byte(tt.body))
+			if err == nil || errors.Is(err, errGeminiQuotaUnavailable) != tt.unavailable {
+				t.Fatalf("parseQuotaSummary() error = %v, want unavailable %v", err, tt.unavailable)
+			}
+			if len(result.Windows) != 0 {
+				t.Fatalf("windows = %#v, want no inferred Gemini quota", result.Windows)
+			}
+		})
 	}
 }
