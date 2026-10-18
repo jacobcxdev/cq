@@ -1,9 +1,9 @@
-"""Recover one cancelled shared Dot read inside the pinned native renderer.
+"""Give shared Dot reads the cache's lifetime in the pinned native renderer.
 
 The native cache can reuse a producer bound to a disposed chat controller.
-Its cancellation must not fail a different, still-current consumer. Only GET
-room/history cache reads are covered; the caller still checks its own lifetime
-and account in its original fetch closure. No send is retried.
+Its cancellation must not fail a different, still-current consumer. Only the
+cache's room and first history page GETs are covered. The native client still
+checks its own lifetime before consuming the result. No send is retried.
 """
 import json
 
@@ -11,30 +11,34 @@ import isolated_native
 import settings
 
 
-GUARD = r"""(cache, rooms) => {
+GUARD = r"""(cache, rooms, api) => {
     const proto = Object.getPrototypeOf(cache);
-    const key = Symbol.for('cq.dot-read-recovery.v1');
+    const key = Symbol.for('cq.dot-read-ownership.v2');
     if (proto[key]) return proto[key];
     const original = proto.read;
     const allowed = new Set(rooms);
     const account = cache.accountId, user = cache.userId;
-    const state = {recovered: 0};
+    const state = {ownedReads: 0};
     const wrapped = function(map, room, fetch, signal) {
-        const pending = Reflect.apply(original, this, arguments);
-        if (!allowed.has(room) || this.accountId !== account || this.userId !== user)
-            return pending;
-        const entry = map.get(room);
-        return pending.catch(error => {
-            if (!entry || error?.name !== 'AbortError' || signal?.aborted || this.disposed
-                    || !this.isCurrentAccount() || entry?.aborted) throw error;
-            // A disposed caller's original closure rejects before doing I/O.
-            // A current caller gets its own read instead of the cancelled producer.
-            return fetch(this.abort.signal).then(value => {
-                this.assertCurrent();
-                state.recovered++;
-                return value;
+        if (!allowed.has(room) || this.accountId !== account || this.userId !== user
+                || (map !== this.rooms && map !== this.history))
+            return Reflect.apply(original, this, arguments);
+        const history = map === this.history;
+        // A shared producer must not close over the first chat controller.
+        // The native cache supplies its own signal and cancels unused entries.
+        const producer = async signal => {
+            this.assertCurrent();
+            state.ownedReads++;
+            const value = await api.safeGet(history
+                ? '/messaging/rooms/{room_id}/messages' : '/messaging/rooms/{room_id}', {
+                additionalHeaders: {'ChatGPT-Account-Id': account},
+                expectedErrorStatuses: [401, 403, 404], retry: false, signal,
+                parameters: {path: {room_id: room}, ...(history ? {query: {limit: 20}} : {})}
             });
-        });
+            this.assertCurrent();
+            return value;
+        };
+        return Reflect.apply(original, this, [map, room, producer, signal]);
     };
     state.restore = () => {
         if (proto.read === wrapped) proto.read = original;
@@ -52,8 +56,8 @@ def install():
         return {'installed': False}
     expression = r"""(async()=>{
         const m = await import('app://-/assets/MODULE');
-        const key = Symbol.for('cq.dot-read-recovery.v1');
-        if (globalThis[key]) return {installed:true,recovered:globalThis[key].recovered};
+        const key = Symbol.for('cq.dot-read-ownership.v2');
+        if (globalThis[key]) return {installed:true,ownedReads:globalThis[key].ownedReads};
         const root = document.getElementById('root');
         const property = root && Object.keys(root).find(k=>k.startsWith('__reactContainer$'));
         const container = property && root[property];
@@ -94,9 +98,9 @@ def install():
         if (profiles.length !== expected.size || profiles.some(p=>!expected.delete(p.id)
                 || typeof p.messaging_room_id !== 'string' || !p.messaging_room_id) || expected.size)
             throw Error('Native catalogue identity changed');
-        const state = (GUARD)(cache, profiles.map(p=>p.messaging_room_id));
+        const state = (GUARD)(cache, profiles.map(p=>p.messaging_room_id), m.Ymr);
         globalThis[key] = state;
-        return {installed:true,recovered:state.recovered};
+        return {installed:true,ownedReads:state.ownedReads};
     })()"""
     expression = expression.replace('MODULE', settings.MODULE_ASSET)
     expression = expression.replace('PROFILES', json.dumps([p for p, _ in settings.DOTS.values()]))
@@ -106,4 +110,4 @@ def install():
              if isinstance(results, list) else [])
     if not ready:
         raise ValueError('Native Dot read recovery unavailable')
-    return {'installed': True, 'windows': len(ready), 'recovered': sum(value.get('recovered', 0) for value in ready)}
+    return {'installed': True, 'windows': len(ready), 'ownedReads': sum(value.get('ownedReads', 0) for value in ready)}

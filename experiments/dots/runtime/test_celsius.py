@@ -180,6 +180,62 @@ class CelsiusTests(unittest.TestCase):
         self.assertEqual(sent['command']['topic_id'],'calpico-room-live:worker-room')
         self.assertEqual(state['frames'],[{'id':91,'reply':{'type':'ok'}}])
 
+    def test_native_pending_repeated_room_subscriptions_each_receive_their_reply(self):
+        state=self.handle_scenario([self.command(91,topic='calpico-room-live:worker-room'),
+                                    self.command(92,topic='calpico-room-live:worker-room'),
+                                    self.start_secondary,
+                                    (SECONDARY,json.dumps([{'id':1,'reply':{'type':'ok'}},
+                                                           {'id':2,'reply':{'type':'ok'}}]))])
+        sent=[json.loads(call.args[0])[0] for call in state['secondary'].send.call_args_list]
+        self.assertEqual([command['id'] for command in sent],[1,2])
+        self.assertEqual(state['frames'],[{'id':91,'reply':{'type':'ok'}},
+                                          {'id':92,'reply':{'type':'ok'}}])
+
+    def test_native_pending_room_unsubscribe_is_sent_after_connect(self):
+        state=self.handle_scenario([self.command(91,topic='calpico-room-live:worker-room'),
+                                    self.command(92,'unsubscribe',topic='calpico-room-live:worker-room'),
+                                    self.start_secondary,
+                                    (SECONDARY,json.dumps([{'id':1,'reply':{'type':'ok'}},
+                                                           {'id':2,'reply':{'type':'ok'}}]))])
+        sent=[json.loads(call.args[0])[0] for call in state['secondary'].send.call_args_list]
+        self.assertEqual([command['command']['type'] for command in sent],['subscribe','unsubscribe'])
+        self.assertEqual([frame['id'] for frame in state['frames']],[91,92])
+
+    def test_native_pending_connect_is_sent_before_completed_subscription(self):
+        state=self.handle_scenario([self.command(91,'connect'),self.command(92),
+                                    self.primary_ack(3),self.start_secondary,self.primary_ack(1)])
+        sent=[json.loads(call.args[0])[0]['command']['type']
+              for call in state['secondary'].send.call_args_list]
+        self.assertEqual(sent,['connect','subscribe'])
+        self.assertEqual([frame['id'] for frame in state['frames']],[92,91])
+
+    def test_native_secondary_ack_deadline_starts_when_queued_command_is_sent(self):
+        def connection_delay(state):
+            state['now']=121
+            raise queue.Empty
+        state=self.handle_scenario([self.command(91,topic='calpico-room-live:worker-room'),
+                                    connection_delay,self.start_secondary,
+                                    (SECONDARY,json.dumps([{'id':1,'reply':{'type':'ok'}}]))])
+        self.assertEqual(state['frames'],[{'id':91,'reply':{'type':'ok'}}])
+        self.assertFalse(any('celsius_owner_unavailable' in event for event in state['events']))
+
+    def test_native_replayed_subscription_cannot_complete_retired_requests_again(self):
+        resolver=Mock(side_effect=[OSError('offline'),'wss://ws.chatgpt.com/worker'])
+        def retry_due(state):
+            state['now']=101
+            raise queue.Empty
+        state=self.handle_scenario([self.command(91,topic='calpico-room-live:worker-room'),
+                                    self.command(92,topic='calpico-room-live:worker-room'),
+                                    self.start_secondary,retry_due,self.start_secondary,
+                                    self.command(93,topic='calpico-room-live:worker-room'),
+                                    (SECONDARY,json.dumps([{'id':2,'reply':{'type':'ok'}},
+                                                           {'id':3,'reply':{'type':'ok'}}]))],
+                                    resolve_url=resolver)
+        self.assertEqual(state['frames'],[
+            {'id':91,'reply':{'type':'error','code':'cq_owner_unavailable'}},
+            {'id':92,'reply':{'type':'error','code':'cq_owner_unavailable'}},
+            {'id':93,'reply':{'type':'ok'}}])
+
     def test_native_secondary_ack_timeout_preserves_primary(self):
         marker={'type':'message','topic_id':'conversations','payload':{'type':'primary-update'}}
         def timeout(state):

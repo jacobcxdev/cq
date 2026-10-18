@@ -213,7 +213,17 @@ class Broker:
                     ready.add(alias)
                     self.event({'celsius_owner_connected':alias,'upgrade_status':101})
                     try:
-                        for message in desired[alias].values():sockets[alias].send(message)
+                        replay={json.loads(message)[0]['id']:(message,None)
+                                for message in desired[alias].values()}
+                        for (owner,identifier),native_id in pending.items():
+                            if owner!=alias:continue
+                            state=awaiting[native_id]
+                            command=copy.deepcopy(state['command']);command.pop('offset',None)
+                            replay[identifier]=(json.dumps([{'id':identifier,'command':command}]),native_id)
+                        for _,(message,native_id) in sorted(replay.items()):
+                            sockets[alias].send(message)
+                            if native_id is not None and alias in awaiting[native_id]['remaining']:
+                                awaiting[native_id]['deadline']=time.monotonic()+20
                     except Exception:retire(alias)
                     continue
                 if source is connect_error:
@@ -242,7 +252,7 @@ class Broker:
                         required={PRIMARY} if native and PRIMARY in destinations else set(destinations)
                         awaiting[native_id]={'remaining':required,'replies':{},'command':command,
                                              'owner_count':len(destinations),
-                                             'deadline':time.monotonic()+20 if native and PRIMARY not in destinations else None}
+                                             'deadline':None}
                         for alias in destinations:
                             upstream_command=copy.deepcopy(command)
                             if alias!=PRIMARY:upstream_command.pop('offset',None)
@@ -262,7 +272,10 @@ class Broker:
                             elif native and alias not in ready:
                                 pass
                             else:
-                                try:sockets[alias].send(message)
+                                try:
+                                    sockets[alias].send(message)
+                                    if native and PRIMARY not in destinations:
+                                        awaiting[native_id]['deadline']=time.monotonic()+20
                                 except Exception:
                                     if not native or alias==PRIMARY:raise
                                     retire(alias)
