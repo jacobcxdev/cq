@@ -33,6 +33,7 @@ class NativeProbeTests(unittest.TestCase):
             setting.start(); self.addCleanup(setting.stop)
         for name, value in [('CATALOG_FIXTURE', self.fixture), ('event', MagicMock()),
                             ('ROOT', self.root), ('CATALOG_GENERATION', 0), ('CHALLENGES', {}),
+                            ('FILE_OWNERS', {}),
                             ('STATE', dict(probe.STATE, primary_probe_owner=None))]:
             setting = patch.object(probe, name, value)
             setting.start(); self.addCleanup(setting.stop)
@@ -87,6 +88,110 @@ class NativeProbeTests(unittest.TestCase):
             handler.send_response.assert_called_once_with(200)
             self.assertEqual(connection.request.call_args.kwargs['headers']['Authorization'], 'Bearer native-desktop')
             self.assertEqual(connection.sent_body, body)
+
+    def test_secondary_file_uploads_keep_binary_body_and_use_room_owner(self):
+        body = b'--cq-boundary\r\nContent-Disposition: form-data; name="file"; filename="proof.txt"\r\n\r\n' + b'x' * (1024 * 1024 + 1) + b'\r\n--cq-boundary--\r\n'
+        for suffix in ['files', 'files/uploads/upload-1/complete']:
+            handler = self.handler('/backend-api/messaging/rooms/worker-room/' + suffix, body=body)
+            handler.headers['Content-Type'] = 'multipart/form-data; boundary=cq-boundary'
+            connection = self.connection(b'{"id":"attachment-1","status":"ready"}')
+            with patch('probe.http.client.HTTPSConnection', return_value=connection): handler.handle_request()
+            handler.send_response.assert_called_once_with(200)
+            self.assertEqual(connection.sent_body, body)
+            headers = connection.request.call_args.kwargs['headers']
+            self.assertEqual(headers['Authorization'], 'Bearer stored-worker')
+            self.assertEqual(headers['ChatGPT-Account-Id'], 'worker')
+            self.assertNotIn('Cookie', headers)
+            self.assertNotIn('X-OpenAI-Orbit-Selection', headers)
+
+    def test_secondary_upload_reservation_uses_room_owner(self):
+        body = b'{"name":"proof.txt","size_bytes":10,"mime_type":"text/plain"}'
+        handler = self.handler('/backend-api/messaging/rooms/worker-room/files/uploads', body=body)
+        handler.headers['Content-Type'] = 'application/json'
+        connection = self.connection(b'{"id":"upload-1"}')
+        with patch('probe.http.client.HTTPSConnection', return_value=connection): handler.handle_request()
+        handler.send_response.assert_called_once_with(200)
+        self.assertEqual(connection.sent_body, body)
+        self.assertEqual(connection.request.call_args.kwargs['headers']['Authorization'], 'Bearer stored-worker')
+
+    def test_secondary_attachment_only_send_preserves_ids_and_owner_challenge(self):
+        body = json.dumps({'content': {'text': '', 'attachments': [{'type': 'file', 'file_id': 'attachment-1'}]},
+                           'request_id': 'request-1', 'idempotency_token': 'request-1',
+                           'app_attest_challenge': 'native-challenge'}).encode()
+        handler = self.handler('/backend-api/messaging/rooms/worker-room/messages', body=body)
+        connection = self.connection(b'{"id":"message-1","account_user_id":"worker-viewer","content":{"text":""}}')
+        probe.remember_challenge(b'{"attestation_challenge":"native-challenge"}',
+                                 b'{"attestation_challenge":"worker-challenge"}', self.worker['alias'])
+        with patch('probe.http.client.HTTPSConnection', return_value=connection): handler.handle_request()
+        handler.send_response.assert_called_once_with(200)
+        sent = json.loads(connection.sent_body)
+        self.assertEqual(sent['content'], json.loads(body)['content'])
+        self.assertEqual(sent['app_attest_challenge'], 'worker-challenge')
+        self.assertEqual(connection.request.call_args.kwargs['headers']['Authorization'], 'Bearer stored-worker')
+
+    def test_secondary_upload_limit_and_unrelated_operations_stay_blocked(self):
+        path = '/backend-api/messaging/rooms/worker-room/files'
+        handler = self.handler(path, body=b'')
+        handler.headers.update({'Content-Type': 'multipart/form-data; boundary=cq',
+                               'Content-Length': str(probe.NATIVE_UPLOAD_LIMIT + 1)})
+        with patch('probe.http.client.HTTPSConnection') as connect: handler.handle_request()
+        handler.send_response.assert_called_once_with(413)
+        connect.assert_not_called()
+        for suffix in ['files/delete', 'files/uploads/upload-1/cancel']:
+            handler = self.handler('/backend-api/messaging/rooms/worker-room/' + suffix)
+            handler.headers['Content-Type'] = 'multipart/form-data; boundary=cq'
+            with patch('probe.http.client.HTTPSConnection') as connect: handler.handle_request()
+            handler.send_response.assert_called_once_with(503)
+            connect.assert_not_called()
+        handler = self.handler(path, body=b'file')
+        handler.headers['Content-Type'] = 'multipart/form-data; boundary=cq'
+        with patch.object(probe.NATIVE_GATE, 'require', side_effect=ValueError('unauthorised')), \
+                patch('probe.http.client.HTTPSConnection') as connect: handler.handle_request()
+        handler.send_response.assert_called_once_with(401)
+        connect.assert_not_called()
+
+    def test_secondary_file_metadata_pins_streamed_download_to_owner(self):
+        url = 'https://chatgpt.com/backend-api/files/download/file_worker?token=opaque'
+        handler = self.handler('/backend-api/messaging/rooms/worker-room/files/attachment-1', 'GET', b'')
+        connection = self.connection(json.dumps({'id': 'attachment-1', 'download_url': url}).encode())
+        with patch('probe.http.client.HTTPSConnection', return_value=connection): handler.handle_request()
+        handler.send_response.assert_called_once_with(200)
+        download = self.handler('/backend-api/files/download/file_worker?token=opaque', 'GET', b'')
+        stream = self.connection(b'binary-file\x00', headers=[('Content-Type', 'application/octet-stream')])
+        with patch('probe.http.client.HTTPSConnection', return_value=stream): download.handle_request()
+        download.send_response.assert_called_once_with(200)
+        stream.getresponse.return_value.read.assert_not_called()
+        self.assertEqual(download.wfile.getvalue(), b'binary-file\x00')
+        self.assertEqual(stream.request.call_args.kwargs['headers']['Authorization'], 'Bearer stored-worker')
+        self.assertNotIn('Cookie', stream.request.call_args.kwargs['headers'])
+        self.assertIs(probe.download_owner('/backend-api/files/download/file_worker?inline=true', self.fixture), self.worker)
+
+    def test_secondary_cdn_metadata_binds_native_file_lookup_without_rewriting_signed_url(self):
+        value = {'id': 'attachment-1', 'file_id': 'attachment-1', 'asset_pointer': 'sediment://file_worker',
+                 'download_url': 'https://files.oaiusercontent.com/synthetic?signature=opaque'}
+        handler = self.handler('/backend-api/messaging/rooms/worker-room/files/attachment-1', 'GET', b'')
+        connection = self.connection(json.dumps(value).encode())
+        with patch('probe.http.client.HTTPSConnection', return_value=connection): handler.handle_request()
+        handler.send_response.assert_called_once_with(200)
+        self.assertEqual(json.loads(handler.wfile.getvalue()), value)
+        self.assertIs(probe.download_owner('/backend-api/files/download/file_worker?inline=true', self.fixture), self.worker)
+        self.assertNotIn('signature', repr(probe.FILE_OWNERS))
+
+    def test_download_grants_expire_and_reject_wrong_origin_or_owner(self):
+        path = '/backend-api/files/download/file_worker'
+        url = 'https://chatgpt.com' + path
+        probe.remember_download(url, self.worker, now=100)
+        self.assertIs(probe.download_owner(path, self.fixture, now=101), self.worker)
+        self.assertIsNone(probe.download_owner(path, self.fixture, now=1600))
+        for value in ['https://other.example' + path, 'http://chatgpt.com' + path,
+                      'https://chatgpt.com/backend-api/other', 'https://chatgpt.com:444' + path]:
+            probe.remember_download(value, self.worker, now=100)
+        self.assertFalse(probe.FILE_OWNERS)
+        probe.remember_download(url, self.worker, now=100)
+        with self.assertRaises(ValueError): probe.remember_download(url, self.main, now=101)
+        changed = dict(self.worker, account_id='another-account')
+        fixture = (self.main, self.profiles, {**self.owners, 'worker-dot': changed}, [])
+        self.assertIsNone(probe.download_owner(path, fixture, now=102))
 
     def test_primary_reboot_does_not_use_research_gate(self):
         handler = self.handler('/backend-api/cloud-aeons/primary/reboot', body=b'')

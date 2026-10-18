@@ -37,4 +37,16 @@ class MessageBoundaryTests(unittest.TestCase):
             self.assertFalse(valid_text_message(json.dumps(invalid)))
         self.assertFalse(valid_text_message(b'invalid json'))
 
+    def test_native_file_messages_keep_idempotency_and_attachment_schema(self):
+        value = {'content': {'text': '', 'attachments': [{'type': 'file', 'file_id': 'CalpicoFile_proof'}]},
+                 'request_id': 'request', 'idempotency_token': 'request'}
+        self.assertTrue(valid_text_message(json.dumps(value), allow_attachments=True))
+        for content in [{'text': '', 'attachments': []},
+                        {'text': '', 'attachments': [{'type': 'file'}]},
+                        {'text': '', 'attachments': [{'type': 'file', 'file_id': '../foreign'}]},
+                        {'text': '', 'attachments': [{'type': 'thread', 'file_id': 'foreign'}]}]:
+            self.assertFalse(valid_text_message(json.dumps({**value, 'content': content}), allow_attachments=True))
+        self.assertFalse(valid_text_message(json.dumps({**value, 'idempotency_token': 'other'}), allow_attachments=True))
+        self.assertFalse(valid_text_message(json.dumps(value)))
+
 if __name__ == '__main__': unittest.main()

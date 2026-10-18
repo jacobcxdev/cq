@@ -733,7 +733,7 @@ re-sign the installed app bundle. Native app qualification is version-pinned;
 unsupported app updates fail before launch.
 
 Native installation also creates `~/Applications/ChatGPT via CQ.app`, bundled
-with CQ. Drag it from Finder into the Dock and use it to open ChatGPT with Dots.
+with CQ. Launch it through Raycast, Spotlight or Finder to open ChatGPT with Dots.
 The launcher preserves the original app signature and opens the existing profile.
 It sets `OPENAI_BASE_URL` to CQ's configured local proxy, independently of any CQ
 entry in `~/.codex/config.toml`. `cq codex dots start` provides the same routing

@@ -28,6 +28,9 @@ CHALLENGES = {}
 NATIVE_OWNER_TIMEOUT = 3
 NATIVE_OWNER_WORKERS = threading.BoundedSemaphore(8)
 CATALOG_GENERATION = 0
+NATIVE_UPLOAD_LIMIT = 20 * 1024 * 1024 + 65536  # Native file limit plus multipart framing.
+FILE_LOCK = threading.Lock()
+FILE_OWNERS = {}
 
 
 def owner_headers(headers, owner):
@@ -382,6 +385,44 @@ def resource_owner(path, fixture):
         raise ValueError('Resource ownership differs from current catalog')
     return owner
 
+def remember_download(url, owner, now=None):
+    if not isinstance(url, str) or len(url) > 8192:
+        return
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.scheme != 'https' or parsed.netloc != 'chatgpt.com' or parsed.fragment
+            or re.fullmatch(r'/backend-api/files/download/[A-Za-z0-9_-]+', parsed.path) is None):
+        return
+    target = parsed.path
+    principal = (owner['alias'], owner['account_id'])
+    now = time.monotonic() if now is None else now
+    with FILE_LOCK:
+        for key in list(FILE_OWNERS):
+            if FILE_OWNERS[key][1] <= now:
+                del FILE_OWNERS[key]
+        previous = FILE_OWNERS.get(target)
+        if previous is not None and previous[0] != principal:
+            raise ValueError('File download owner collision')
+        if len(FILE_OWNERS) >= 2048:
+            del FILE_OWNERS[next(iter(FILE_OWNERS))]
+        FILE_OWNERS[target] = (principal, now + 1500)
+
+def download_owner(target, fixture, now=None):
+    now = time.monotonic() if now is None else now
+    target = urllib.parse.urlsplit(target).path
+    with FILE_LOCK:
+        grant = FILE_OWNERS.get(target)
+        if grant is None:
+            return None
+        if grant[1] <= now:
+            del FILE_OWNERS[target]
+            return None
+    if fixture is not None:
+        # Resolve fresh credentials through the current catalogue, never the URL.
+        return next((fixture[2].get(profile['id']) for profile in fixture[1]
+                     if (fixture[2].get(profile['id'], {}).get('alias'),
+                         fixture[2].get(profile['id'], {}).get('account_id')) == grant[0]), None)
+    return None
+
 def valid_read_receipt(body):
     try:
         value = json.loads(body)
@@ -443,13 +484,29 @@ def local_computer_target(path, body, fixture):
         return None
     return (f'/backend-api/tbo/{match[1]}/computers/{environment}/{match[3]}'
             + '?' + parsed.query)
-def valid_text_message(body):
+def native_file_upload(path, content_type):
+    match = re.fullmatch(r'/backend-api/messaging/rooms/[A-Za-z0-9_-]+/files(?:/uploads(?:/[A-Za-z0-9_-]+/complete)?)?', path)
+    if match is None:
+        return False
+    if path.endswith('/uploads'):
+        return content_type.split(';', 1)[0].strip().lower() == 'application/json'
+    return content_type.lower().startswith('multipart/form-data;')
+
+def valid_text_message(body, allow_attachments=False):
     try:
         value = json.loads(body)
         content = value['content']
+        if not isinstance(content, dict):
+            return False
+        attachments = content.get('attachments')
+        files = (allow_attachments and isinstance(attachments, list) and bool(attachments)
+                 and all(isinstance(item, dict) and item.get('type') == 'file'
+                         and isinstance(item.get('file_id'), str)
+                         and re.fullmatch(r'[A-Za-z0-9_-]{1,256}', item['file_id']) is not None
+                         for item in attachments))
         return (isinstance(value, dict) and isinstance(content, dict)
-                and isinstance(content.get('text'), str) and bool(content['text'].strip())
-                and not content.get('attachments')
+                and isinstance(content.get('text'), str) and (bool(content['text'].strip()) or files)
+                and (not attachments or files)
                 and isinstance(value.get('request_id'), str) and bool(value['request_id'])
                 and value.get('idempotency_token') == value['request_id'])
     except (ValueError, TypeError, KeyError):
@@ -599,7 +656,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if sender is not None:
                 sender.join(timeout=1)
 
-    def forward_primary(self, size, chunked):
+    def forward_primary(self, size, chunked, owner=None):
         connection = http.client.HTTPSConnection('chatgpt.com', timeout=25)
         response_started = False
         try:
@@ -607,6 +664,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             excluded = hop_headers | {'host'}
             excluded.update(value.strip().lower() for value in self.headers.get('Connection', '').split(','))
             headers = {key: value for key, value in self.headers.items() if key.lower() not in excluded}
+            if owner is not None:
+                headers = owner_headers(headers, owner)
             observe_primary = self.command == 'GET' and urllib.parse.urlsplit(self.path).path == '/backend-api/tbo/primary'
             if observe_primary:
                 headers = {key: value for key, value in headers.items() if key.lower() != 'accept-encoding'}
@@ -635,6 +694,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             for key, value in response.getheaders():
                 if key.lower() not in excluded:
                     if key.lower() == 'set-cookie':
+                        if owner is not None:
+                            continue
                         value = re.sub(r';\s*Domain=[^;]+', '', value, flags=re.I)
                     self.send_header(key, value)
             self.send_header('Connection', 'close')
@@ -651,7 +712,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(data)
                     self.wfile.flush()
             event({'method': self.command, 'path': urllib.parse.urlsplit(self.path).path,
-                   'status': response.status, 'native_primary_passthrough': True})
+                   'status': response.status, 'native_primary_passthrough': owner is None,
+                   **({'owner_file_download': True, 'routed_owner_alias': owner['alias']} if owner else {})})
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as error:
@@ -671,10 +733,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(400);self.end_headers();return
         native_mode = getattr(settings, 'INTEGRATION_MODE', 'isolated') == 'native'
         owner = None
+        file_download = False
         if native_mode:
             try:
                 with CATALOG_LOCK:
                     owner = resource_owner(path, CATALOG_FIXTURE)
+                    if owner is None and self.command in ['GET', 'HEAD']:
+                        owner = download_owner(self.path, CATALOG_FIXTURE)
+                        file_download = owner is not None
                     catalog_generation = CATALOG_GENERATION
             except ValueError:
                 self.send_response(409);self.end_headers();return
@@ -683,6 +749,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             '/backend-api/tbo', '/backend-api/celsius/ws/user', '/backend-api/ios/attestation_challenge']
             or self.command in ['GET', 'POST'] and path.endswith('/wham/statsig/bootstrap'))
         primary_passthrough = native_mode and not secondary and not inspected_response and path != '/probe/state'
+        file_upload = (native_mode and secondary and self.command == 'POST' and not parsed.query
+                       and native_file_upload(path, self.headers.get('Content-Type', '')))
         transfer_encoding = self.headers.get('Transfer-Encoding', '')
         chunked = transfer_encoding.lower().strip() == 'chunked'
         lengths = [value for key, value in self.headers.items() if key.lower() == 'content-length']
@@ -690,7 +758,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(400);self.end_headers();return
         try:
             size=int(self.headers.get('Content-Length','0'))
-            if size < 0 or not primary_passthrough and size > 1024*1024:
+            limit = NATIVE_UPLOAD_LIMIT if file_upload and not path.endswith('/uploads') else 1024 * 1024
+            if size < 0 or not primary_passthrough and size > limit:
                 raise ValueError('Request exceeds bound')
         except ValueError:
             self.send_response(413);self.end_headers();return
@@ -719,6 +788,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 event({'native_request_rejected':True,'method':self.command})
                 self.send_response(401);self.end_headers();self.wfile.write(b'{"error":"Native authentication required"}');return
+        if file_download:
+            self.forward_primary(size, chunked, owner=owner)
+            return
         if not native_mode and self.command == 'POST' and path == '/backend-api/flora/cca/executor' and (ROOT/'native-secondary-executor.enabled').exists():
             try:
                 if parsed.query:raise ValueError('Unexpected registration query')
@@ -763,7 +835,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         watch_request = watch_owner is not None and not body
         message_write = send_owner is not None and (
             path.endswith('/aeon/prepare') and not body
-            or path.endswith('/messages') and valid_text_message(body))
+            or path.endswith('/messages') and valid_text_message(body, allow_attachments=native_mode))
         if not native_mode and STATE['primary_probe_owner'] is not None:
             message_write = False
         name_write = (self.command == 'PATCH' and not parsed.query
@@ -773,7 +845,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         allowed = self.command == 'GET' or runtime_owner is not None or message_write or receipt_write or watch_request or (
             self.command == 'POST' and (path.endswith('/wham/statsig/bootstrap') or path == '/backend-api/devicecheck'))
         if native_mode:
-            allowed = not secondary or self.command in ['GET', 'HEAD'] or runtime_owner is not None or message_write or receipt_write or watch_request or name_write or computer_target is not None
+            allowed = not secondary or self.command in ['GET', 'HEAD'] or runtime_owner is not None or message_write or receipt_write or watch_request or name_write or computer_target is not None or file_upload
         if not allowed:
             event({'method': self.command, 'path': path, 'blocked': True})
             self.send_response(503)
@@ -853,6 +925,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                        'has_authorization': bool(self.headers.get('Authorization'))}
             if owner is not None:
                 summary['routed_owner_alias'] = owner['alias']
+            if (secondary and self.command == 'GET' and response.status == 200
+                    and re.fullmatch(r'/backend-api/messaging/rooms/[^/]+/files/[^/]+', path)):
+                file = json.loads(data)
+                remember_download(file.get('download_url'), owner)
+                asset = file.get('asset_pointer')
+                match = re.fullmatch(r'sediment://(file[_-][A-Za-z0-9_-]{1,256})', asset) if isinstance(asset, str) else None
+                if match:
+                    remember_download('https://chatgpt.com/backend-api/files/download/' + match[1], owner)
             if computer_target is not None:
                 summary['owner_local_computer_operation'] = path.rsplit('/', 1)[1]
             if secondary and self.command == 'GET' and response.status == 200:
