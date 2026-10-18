@@ -96,6 +96,38 @@ class InstallationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'must not be a symlink'):
             cli.provision(self.root)
 
+    def test_reinstall_preserves_declared_account_source(self):
+        import base64
+        auth=self.base/'credentials'/'auth.json';auth.parent.mkdir(mode=0o700)
+        claims={'https://api.openai.com/auth':{'chatgpt_account_id':'synthetic'}}
+        token='header.'+base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip('=')+'.signature'
+        auth.write_text(json.dumps({'tokens':{'account_id':'synthetic','id_token':token}}));auth.chmod(0o600)
+        self.root.mkdir(mode=0o700)
+        source=str(self.base/'declared-accounts')
+        cli.save(self.root/'settings.json',{'account_source':source,'system_account_id':'synthetic'})
+        args=types.SimpleNamespace(root=self.root,app=str(self.base/'app'),system_auth=str(auth),
+            cq_accounts=str(self.base/'accounts'),account_source=None,mode='native')
+        release=types.SimpleNamespace(activate=mock.Mock(),isolated_processes=lambda:[])
+        settings=types.SimpleNamespace(validate_runtime_paths=mock.Mock(),reload=mock.Mock())
+        with mock.patch.object(cli.sys,'platform','darwin'), \
+             mock.patch.object(cli,'app_pin',return_value=cli.PIN), \
+             mock.patch.object(cli,'configure',return_value=settings), \
+             mock.patch.object(cli,'provision'),mock.patch.object(cli,'refresh'), \
+             mock.patch.object(cli,'candidate',return_value='/candidate'), \
+             mock.patch.object(cli,'start',return_value={'started':True}), \
+             mock.patch.dict(sys.modules,{'release':release,'dock':types.SimpleNamespace(install=mock.Mock())}):
+            cli.install(args)
+            self.assertEqual(json.loads((self.root/'settings.json').read_text())['account_source'],source)
+            args.account_source=str(self.base/'replacement-accounts')
+            cli.install(args)
+            self.assertEqual(json.loads((self.root/'settings.json').read_text())['account_source'],args.account_source)
+            args.account_source=None
+            cli.save(self.root/'settings.json',{'account_source':str(self.root/'unsafe-accounts')})
+            before=(self.root/'settings.json').read_bytes()
+            with self.assertRaisesRegex(ValueError,'overlaps'):
+                cli.install(args)
+            self.assertEqual((self.root/'settings.json').read_bytes(),before)
+
     def test_generated_certificate_is_server_leaf_for_native_tls(self):
         self.root.mkdir(mode=0o700)
         runtime = self.root / 'runtime'

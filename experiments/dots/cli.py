@@ -206,6 +206,8 @@ def install(args):
         prior = json.loads(existing.read_text())
     else:
         prior = {}
+    account_source = args.account_source or prior.get('account_source')
+    validate_location(root, args.app, args.system_auth, args.cq_accounts, account_source)
     # Credential claims are read in memory only. No credential material enters config.
     sys.path.insert(0, str(HERE / 'runtime'))
     # catalog requires settings at import time; write a bootstrap snapshot before reading it.
@@ -214,8 +216,8 @@ def install(args):
               'cq_accounts': str(pathlib.Path(args.cq_accounts).resolve()),
               'system_alias': prior.get('system_alias', '00000000'), 'dots': prior.get('dots', {}),
               'debug_port': 0, 'integration_mode': args.mode}
-    if args.account_source:
-        config['account_source'] = str(pathlib.Path(args.account_source).resolve())
+    if account_source:
+        config['account_source'] = str(pathlib.Path(account_source).resolve())
     # Derive system identity directly without loading the not-yet-complete runtime settings.
     import base64
     import stat as stat_module
