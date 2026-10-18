@@ -6,6 +6,7 @@ import hashlib
 import os
 import queue
 import tempfile
+import socket
 import catalog
 import settings
 import self_projection
@@ -520,6 +521,84 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if chunked and self.rfile.read(2) != b'\r\n':
                 raise ValueError('Invalid native request chunk terminator')
 
+    def forward_remote_control(self):
+        # Only the native primary remote-control upgrade uses this opaque seam.
+        # Native peers retain masking, ping/pong, close and authentication policy.
+        upstream = None
+        raw = None
+        sender = None
+        started = False
+        self.close_connection = True
+        try:
+            context = ssl.create_default_context(cafile=ssl.get_default_verify_paths().openssl_cafile)
+            raw = socket.create_connection(('chatgpt.com', 443), timeout=25)
+            upstream = context.wrap_socket(raw, server_hostname='chatgpt.com')
+            items = self.headers.raw_items() if hasattr(self.headers, 'raw_items') else self.headers.items()
+            headers = []
+            for key, value in items:
+                if any(char in key or char in value for char in '\r\n'):
+                    raise ValueError('Invalid remote control header')
+                headers.append(f'{key}: {"chatgpt.com" if key.lower() == "host" else value}\r\n'.encode('latin-1'))
+            upstream.sendall(self.raw_requestline + b''.join(headers) + b'\r\n')
+            response = bytearray()
+            while b'\r\n\r\n' not in response:
+                if len(response) >= 65536:
+                    raise ValueError('Remote control handshake exceeds bound')
+                data = upstream.recv(65536 - len(response))
+                if not data:
+                    raise ValueError('Remote control handshake closed')
+                response.extend(data)
+            status = int(response.split(b'\r\n', 1)[0].split(b' ')[1])
+            self.wfile.write(response)
+            self.wfile.flush()
+            started = True
+            event({'operation': 'native_remote_control_websocket', 'status': status})
+            # A rejected handshake has no WebSocket stream; do not leave it open.
+            if status != 101:
+                return
+            self.connection.settimeout(None)
+            upstream.settimeout(None)
+
+            def send_frames():
+                try:
+                    while True:
+                        data = self.rfile.read1(65536)
+                        if not data:
+                            break
+                        upstream.sendall(data)
+                except (OSError, ssl.SSLError):
+                    pass
+                finally:
+                    try: upstream.shutdown(socket.SHUT_RDWR)
+                    except OSError: pass
+
+            sender = threading.Thread(target=send_frames, daemon=True)
+            sender.start()
+            while True:
+                data = upstream.recv(65536)
+                if not data:
+                    break
+                self.wfile.write(data)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception as error:
+            event({'operation': 'native_remote_control_websocket', 'error_type': type(error).__name__})
+            if not started:
+                self.send_response(502)
+                self.end_headers()
+        finally:
+            if upstream is not None:
+                try: upstream.shutdown(socket.SHUT_RDWR)
+                except OSError: pass
+                upstream.close()
+            elif raw is not None:
+                raw.close()
+            try: self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError: pass
+            if sender is not None:
+                sender.join(timeout=1)
+
     def forward_primary(self, size, chunked):
         connection = http.client.HTTPSConnection('chatgpt.com', timeout=25)
         response_started = False
@@ -617,7 +696,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(413);self.end_headers();return
         self.connection.settimeout(30)
         if primary_passthrough:
-            self.forward_primary(size, chunked)
+            if (self.command == 'GET' and path == '/backend-api/wham/remote/control/server'
+                    and not parsed.query and not parsed.fragment
+                    and self.headers.get('Upgrade', '').lower() == 'websocket'):
+                if size or chunked:
+                    self.send_response(400);self.end_headers();return
+                self.forward_remote_control()
+            else:
+                self.forward_primary(size, chunked)
             return
         body=self.rfile.read(size)
         if len(body)!=size:self.send_response(400);self.end_headers();return

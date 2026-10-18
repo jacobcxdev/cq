@@ -12,7 +12,67 @@ import (
 	"testing"
 
 	"github.com/alecthomas/kong"
+	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+func TestDotsLaunchOverridesBaseURLWithoutCodexConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Dots requires POSIX launchers")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	t.Setenv("OPENAI_BASE_URL", "https://example.invalid")
+	paths, err := proxy.ResolveDefaultPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.ConfigFile, []byte(`{"port":19321,"local_token":"synthetic"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(home, "environment.sh")
+	if err := os.WriteFile(script, []byte("printf '%s' \"$OPENAI_BASE_URL\""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var output strings.Builder
+	if err := os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"integration_mode":"native"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := defaultDotsRunner().run(context.Background(), "/bin/sh", []string{script, "start", "--root", home}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "http://127.0.0.1:19321" {
+		t.Fatalf("base URL %q", output.String())
+	}
+	if _, err := os.Stat(filepath.Join(home, ".codex", "config.toml")); !os.IsNotExist(err) {
+		t.Fatalf("Codex config was read or created: %v", err)
+	}
+}
+
+func TestDotsIsolatedLaunchDoesNotRequireProxyConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Dots requires POSIX launchers")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "config"))
+	for _, mode := range []string{`{"integration_mode":"isolated"}`, `{}`} {
+		if err := os.WriteFile(filepath.Join(home, "settings.json"), []byte(mode), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, operation := range []string{"start", "sync"} {
+			if err := defaultDotsRunner().run(context.Background(), "/usr/bin/true", []string{"controller", operation, "--root", home}, io.Discard, io.Discard); err != nil {
+				t.Fatalf("%s %s: %v", mode, operation, err)
+			}
+		}
+	}
+	if err := defaultDotsRunner().run(context.Background(), "/usr/bin/true", []string{"controller", "install", "--mode", "isolated"}, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestDotsCommandParsing(t *testing.T) {
 	for _, test := range []struct {
