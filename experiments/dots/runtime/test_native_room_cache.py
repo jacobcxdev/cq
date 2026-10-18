@@ -10,56 +10,92 @@ import native_room_cache as recovery
 
 class NativeRoomCacheTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which('node'), 'Node required for native JavaScript regression')
-    def test_shared_cancellation_recovers_only_current_bound_reads_once(self):
+    def test_shared_producer_outlives_first_chat_without_retry(self):
         script = r"""
 const assert = require('node:assert/strict');
 const install = GUARD;
-const abort = () => new DOMException('signal is aborted without reason', 'AbortError');
 class Cache {
     constructor() {
         this.accountId='account';this.userId='user';this.abort=new AbortController();
-        this.current=true;this.calls=0;
+        this.current=true;this.rooms=new Map();this.history=new Map();
     }
     get disposed() {return this.abort.signal.aborted;}
     isCurrentAccount() {return this.current;}
-    assertCurrent() {this.abort.signal.throwIfAborted();if(!this.current)throw abort();}
-    read(map,key,fetch) {
+    assertCurrent() {
+        this.abort.signal.throwIfAborted();
+        if (!this.current) throw new DOMException('Account changed','AbortError');
+    }
+    read(map,key,fetch,signal) {
+        this.assertCurrent();signal?.throwIfAborted();
         let entry=map.get(key);
-        if(!entry) {entry={aborted:false};entry.promise=fetch(this.abort.signal);map.set(key,entry);}
+        if (!entry || entry.invalidated) {
+            entry={promise:fetch(this.abort.signal)};map.set(key,entry);
+        }
         return entry.promise;
     }
 }
-(async()=>{
-    const original=Cache.prototype.read, cache=new Cache(), map=new Map();
-    const a=new AbortController(), b=new AbortController();
+async function shared(cache, map, setup) {
+    const first=new AbortController(), current=new AbortController();
     let release;const gate=new Promise(r=>release=r);
-    const producer=async()=>{await gate;a.signal.throwIfAborted();return 'producer';};
-    const current=async()=>{cache.calls++;b.signal.throwIfAborted();return 'current';};
-    const state=install(cache,['room']);
-    assert.equal(install(cache,['room']),state);
-    const old=cache.read(map,'room',producer,a.signal).catch(e=>e);
-    const active=cache.read(map,'room',current,b.signal);
-    a.abort();release();
-    assert.equal((await old).name,'AbortError');
-    assert.equal(await active,'current');assert.equal(cache.calls,1);assert.equal(state.recovered,1);
-    for(const variant of ['foreign-room','foreign-account','foreign-user','caller-aborted',
-                          'cache-aborted','account-changed','entry-aborted','ordinary-error','retry-aborted']) {
-        const c=new Cache(), signal=new AbortController();let attempts=0;
-        const error=variant==='ordinary-error'?new Error('HTTP failure'):abort();
-        const key=variant==='foreign-room'?'other':'room';
-        const entry={aborted:variant==='entry-aborted',promise:Promise.reject(error)};
-        const entries=new Map([[key,entry]]);
+    let requests=0;
+    const api={safeGet:async(path, options)=>{
+        requests++;await gate;options.signal.throwIfAborted();
+        assert.equal(options.additionalHeaders['ChatGPT-Account-Id'],'account');
+        assert.equal(options.retry,false);
+        assert.equal(options.parameters.path.room_id,'room');
+        assert.equal(path.endsWith('/messages'),map===cache.history);
+        assert.deepEqual(options.parameters.query,map===cache.history?{limit:20}:undefined);
+        return 'shared';
+    }};
+    const state=setup?.(cache,['room'],api);
+    const producer=async signal=>{
+        const value=await api.safeGet('/unused',{signal});
+        first.signal.throwIfAborted();return value;
+    };
+    // Baseline mimics the native client's controller-bound request closure.
+    const stale=async signal=>{requests++;await gate;signal.throwIfAborted();
+        first.signal.throwIfAborted();return 'shared';};
+    const old=cache.read(map,'room',stale,first.signal).catch(e=>e);
+    const active=cache.read(map,'room',()=>assert.fail('shared cache missed'),current.signal).catch(e=>e);
+    first.abort();release();
+    const results=await Promise.all([old,active]);
+    assert.equal(requests,1,'must not retry shared GET');
+    if (state) {
+        assert.deepEqual(results,['shared','shared']);
+        assert.equal(state.ownedReads,1);
+        assert.equal(await cache.read(map,'room',producer),'shared');
+        assert.equal(requests,1,'cached result must stay cached');
+    } else assert.equal(results[1].name,'AbortError','baseline must reproduce shared cancellation');
+    return state;
+}
+(async()=>{
+    const original=Cache.prototype.read;
+    let c=new Cache();await shared(c,c.rooms);
+    for (const kind of ['rooms','history']) {
+        c=new Cache();const state=await shared(c,c[kind],install);
+        assert.equal(install(c,['room'],{}),state);state.restore();
+    }
+    for (const variant of ['foreign-room','foreign-account','foreign-user','other-map']) {
+        c=new Cache();let attempts=0;
+        const state=install(c,['room'],{safeGet:()=>assert.fail('unbound read')});
         if(variant==='foreign-account')c.accountId='other';
         if(variant==='foreign-user')c.userId='other';
-        if(variant==='caller-aborted')signal.abort();
+        const key=variant==='foreign-room'?'other':'room';
+        assert.equal(await c.read(variant==='other-map'?new Map():c.rooms,key,async()=>{attempts++;return 'original';}),'original');
+        assert.equal(attempts,1);state.restore();
+    }
+    for(const variant of ['cache-aborted','account-changed','caller-aborted','HTTP-error','network-abort']) {
+        c=new Cache();let attempts=0;const signal=new AbortController();
+        const failure=variant==='HTTP-error'?new Error('HTTP failure'):new DOMException('cancelled','AbortError');
+        const state=install(c,['room'],{safeGet:async()=>{attempts++;throw failure;}});
         if(variant==='cache-aborted')c.abort.abort();
         if(variant==='account-changed')c.current=false;
-        await assert.rejects(c.read(entries,key,async()=>{attempts++;throw error;},signal.signal),e=>e===error);
-        assert.equal(attempts,variant==='retry-aborted'?1:0,variant);
+        if(variant==='caller-aborted')signal.abort();
+        await assert.rejects(async()=>c.read(c.rooms,'room',()=>assert.fail('controller closure'),signal.signal));
+        assert.equal(attempts,['HTTP-error','network-abort'].includes(variant)?1:0);
+        state.restore();
     }
-    const success=new Cache(), entries=new Map([['room',{aborted:false,promise:Promise.resolve('cached')}]]);
-    assert.equal(await success.read(entries,'room',()=>assert.fail('unneeded fetch')),'cached');
-    state.restore();assert.equal(Cache.prototype.read,original);
+    assert.equal(Cache.prototype.read,original);
 })().catch(e=>{console.error(e);process.exitCode=1;});
 """.replace('GUARD', recovery.GUARD)
         result = subprocess.run(['node', '-e', script], capture_output=True, text=True, timeout=10)
@@ -68,8 +104,8 @@ class Cache {
     def test_install_uses_only_configured_profiles_and_pinned_module(self):
         config = recovery.settings
         with patch.object(config, 'INTEGRATION_MODE', 'native', create=True), \
-             patch.object(recovery.isolated_native, 'evaluate_all', return_value=[{'installed': True, 'recovered': 0}, {'installed':False}]) as evaluate:
-            self.assertEqual(recovery.install(), {'installed': True, 'windows': 1, 'recovered': 0})
+             patch.object(recovery.isolated_native, 'evaluate_all', return_value=[{'installed': True, 'ownedReads': 0}, {'installed':False}]) as evaluate:
+            self.assertEqual(recovery.install(), {'installed': True, 'windows': 1, 'ownedReads': 0})
         expression = evaluate.call_args.args[0]
         self.assertIn(config.MODULE_ASSET, expression)
         self.assertIn(json.dumps([p for p, _ in config.DOTS.values()]), expression)
