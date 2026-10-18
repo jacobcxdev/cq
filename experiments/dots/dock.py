@@ -8,8 +8,10 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 IDENTIFIER = 'dev.jacobcx.cq.chatgpt-launcher'
+RECOVERY_DELAY = 40
 
 
 def owned(path, directory=False):
@@ -75,31 +77,67 @@ def install(root, app):
     return bundle
 
 
-def controller(root, cq):
+def configuration(root):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
     import cli
-    started = subprocess.run([cq, 'codex', 'dots', '--root', root, 'start', '--json'],
-                             capture_output=True, text=True)
-    if started.returncode:
-        try:
-            message = json.loads(started.stderr)['error']
-        except (ValueError, KeyError):
-            message = 'CQ could not start Dots. Run cq codex dots status for details.'
-        return started.returncode, message
-    result = json.loads(started.stdout)
-    if result.get('restart_required'):
-        return 1, 'Quit ChatGPT, then reopen ChatGPT via CQ. Active work has not been interrupted.'
-    if result.get('started') is False:
-        return 1, result['reason']
-    settings = cli.configure(pathlib.Path(root))
+    return cli.configure(pathlib.Path(root))
+
+
+def recover_app(settings):
+    import release
+    if not release.normal_app_running():
+        subprocess.run(['/usr/bin/open', '-a', str(settings.APP)], check=True, timeout=10)
+
+
+def controller(root, cq):
+    settings = configuration(root)
     if getattr(settings, 'INTEGRATION_MODE', 'isolated') != 'native':
         return 1, 'Dock launcher requires a native Dots installation.'
-    subprocess.run(['/usr/bin/open', '-a', str(settings.APP)], check=True, timeout=15)
-    return 0, ''
+    # Independent of this process and the CLI: setup may continue after the app
+    # has opened, but must never leave the user's other chats inaccessible.
+    watchdog = None
+    try:
+        watchdog = subprocess.Popen([sys.executable, '-I', '-B', str(pathlib.Path(__file__).resolve()),
+                                     '--recover', root], start_new_session=True,
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL)
+        started = subprocess.run([cq, 'codex', 'dots', '--root', root, 'start', '--json'],
+                                 capture_output=True, text=True)
+        if started.returncode:
+            recover_app(settings)
+            try:
+                message = json.loads(started.stderr)['error']
+            except (ValueError, KeyError):
+                message = 'CQ could not start Dots. Run cq codex dots status for details.'
+            return started.returncode, message
+        result = json.loads(started.stdout)
+        if result.get('restart_required'):
+            return 1, 'Quit ChatGPT, then reopen ChatGPT via CQ. Active work has not been interrupted.'
+        if result.get('started') is False:
+            return 1, result['reason']
+        subprocess.run(['/usr/bin/open', '-a', str(settings.APP)], check=True, timeout=15)
+        return 0, ''
+    except (ValueError, OSError, KeyError, subprocess.SubprocessError):
+        recover_app(settings)
+        raise
+    finally:
+        if watchdog is not None and watchdog.poll() is None:
+            watchdog.terminate()
+            watchdog.wait(timeout=5)
 
 
 def main(argv=None):
     args = sys.argv[1:] if argv is None else argv
+    if len(args) == 2 and args[0] == '--recover':
+        time.sleep(RECOVERY_DELAY)
+        try:
+            settings = configuration(args[1])
+            if settings.INTEGRATION_MODE != 'native':
+                return 1
+            recover_app(settings)
+            return 0
+        except (ValueError, OSError, subprocess.SubprocessError):
+            return 1
     try:
         code, message = controller(args[0], args[1])
     except (ValueError, OSError, KeyError, subprocess.SubprocessError):

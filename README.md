@@ -740,6 +740,9 @@ entry in `~/.codex/config.toml`. `cq codex dots start` provides the same routing
 from the terminal. Opening OpenAI's original app directly bypasses the adapter.
 Neither launcher quits an already-running app; if it needs a fresh launch,
 quit ChatGPT and open **ChatGPT via CQ** again.
+If adapter startup fails, the launcher reopens the signed app so other chats remain
+available. An independent 40-second watchdog also covers stalled startup; Dots
+remain unavailable until the reported startup error is resolved.
 The previous isolated research mode remains available with `install --mode isolated`.
 
 ```sh

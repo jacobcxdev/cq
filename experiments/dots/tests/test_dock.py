@@ -97,7 +97,9 @@ class DockTests(unittest.TestCase):
         settings = mock.Mock(INTEGRATION_MODE='native', APP=self.app)
         started = subprocess.CompletedProcess([], 0, json.dumps({'native_catalog_ready': True}), '')
         with mock.patch.object(cli, 'configure', return_value=settings), \
+             mock.patch.object(dock.subprocess, 'Popen') as spawn, \
              mock.patch.object(dock.subprocess, 'run', return_value=started) as run:
+            spawn.return_value.poll.return_value = None
             self.assertEqual(dock.controller(str(self.root), str(self.cq)), (0, ''))
         self.assertEqual(run.call_args_list[0].args[0], [str(self.cq), 'codex', 'dots', '--root', str(self.root), 'start', '--json'])
         # Native warm-up and one-time setup have their own bounds; do not kill
@@ -108,9 +110,52 @@ class DockTests(unittest.TestCase):
     def test_launch_never_opens_stock_app_when_restart_or_onboarding_needed(self):
         for result in ({'restart_required': True}, {'started': False, 'reason': 'No onboarded Dots found'}):
             started = subprocess.CompletedProcess([], 0, json.dumps(result), '')
-            with mock.patch.object(dock.subprocess, 'run', return_value=started) as run:
+            with mock.patch.object(dock, 'configuration', return_value=mock.Mock(INTEGRATION_MODE='native')), \
+                 mock.patch.object(dock.subprocess, 'Popen'), \
+                 mock.patch.object(dock.subprocess, 'run', return_value=started) as run:
                 self.assertEqual(dock.controller(str(self.root), str(self.cq))[0], 1)
                 self.assertEqual(run.call_count, 1)
+
+    def test_start_failure_reopens_app_before_reporting_error(self):
+        settings = mock.Mock(INTEGRATION_MODE='native', APP=self.app)
+        for result in (subprocess.CompletedProcess([], 1, '', '{"error":"Transport unavailable"}'),
+                       subprocess.CompletedProcess([], 0, 'invalid-json', '')):
+            with self.subTest(result=result.returncode), \
+                 mock.patch.object(dock, 'configuration', return_value=settings), \
+                 mock.patch.object(dock.subprocess, 'Popen') as spawn, \
+                 mock.patch.object(dock.subprocess, 'run', return_value=result), \
+                 mock.patch.object(dock, 'recover_app') as recover:
+                spawn.return_value.poll.return_value = None
+                try:
+                    code, message = dock.controller(str(self.root), str(self.cq))
+                    self.assertEqual(code, 1)
+                    self.assertEqual(message, 'Transport unavailable')
+                except ValueError:
+                    self.assertEqual(result.returncode, 0)
+                recover.assert_called_once_with(settings)
+        spawn.return_value.terminate.assert_called()
+        self.assertTrue(spawn.call_args.kwargs['start_new_session'])
+        self.assertEqual(spawn.call_args.args[0][-2:], ['--recover', str(self.root)])
+
+    def test_watchdog_opens_missing_app_after_bounded_delay(self):
+        settings = mock.Mock(INTEGRATION_MODE='native', APP=self.app)
+        with mock.patch.object(dock, 'configuration', return_value=settings), \
+             mock.patch.object(dock.time, 'sleep') as sleep, \
+             mock.patch.object(dock, 'recover_app') as recover:
+            self.assertEqual(dock.main(['--recover', str(self.root)]), 0)
+        sleep.assert_called_once_with(40)
+        recover.assert_called_once_with(settings)
+
+    def test_recovery_never_stops_or_relaunches_running_app(self):
+        settings = mock.Mock(APP=self.app)
+        for running in (True, False):
+            with mock.patch.dict(sys.modules, {'release': mock.Mock(normal_app_running=lambda: running)}), \
+                 mock.patch.object(dock.subprocess, 'run') as run:
+                dock.recover_app(settings)
+            if running:
+                run.assert_not_called()
+            else:
+                run.assert_called_once_with(['/usr/bin/open', '-a', str(self.app)], check=True, timeout=10)
 
     def test_desktop_failure_uses_literal_dialog_argument(self):
         with mock.patch.object(dock, 'controller', return_value=(1, 'Quit ChatGPT, then reopen ChatGPT via CQ.')), \
