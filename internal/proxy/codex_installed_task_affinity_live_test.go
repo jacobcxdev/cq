@@ -1195,7 +1195,10 @@ func runCodexTaskAffinityAcceptancePromptForTransport(
 	output string,
 ) error {
 	outputPath := filepath.Join(isolation.root, strings.ToLower(output)+".txt")
-	args := codexAcceptanceExecArgumentsForTransport(baseURL, isolation.work, outputPath, webSocket)
+	args, err := codexLiveAcceptanceExecArguments(baseURL, isolation.work, outputPath, webSocket)
+	if err != nil {
+		return err
+	}
 	if allowTools {
 		args = slices.Insert(args, 1, "--json")
 		args = slices.Insert(args, len(args)-1, "-c", "features.apps=false")
@@ -1309,7 +1312,10 @@ func runCodexCompactionAcceptanceTurn(
 	output string,
 ) error {
 	outputPath := filepath.Join(isolation.root, "compaction-"+strings.ToLower(output)+".txt")
-	args := codexAcceptanceExecArguments(baseURL, isolation.work, outputPath)
+	args, err := codexLiveAcceptanceExecArguments(baseURL, isolation.work, outputPath, false)
+	if err != nil {
+		return err
+	}
 	args = slices.DeleteFunc(args, func(value string) bool { return value == "--ephemeral" })
 	args = slices.Insert(args, len(args)-1,
 		"-c", "model_context_window=4096",
@@ -1326,7 +1332,7 @@ func runCodexCompactionAcceptanceTurn(
 		"NO_PROXY=127.0.0.1,localhost",
 		"no_proxy=127.0.0.1,localhost",
 	)
-	_, err := runner.Run(ctx, codexAcceptanceCommand{
+	_, err = runner.Run(ctx, codexAcceptanceCommand{
 		executable:         client.path,
 		expectedExecutable: client,
 		args:               args,
