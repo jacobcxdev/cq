@@ -86,10 +86,20 @@ func RunHelper(ctx context.Context, role, root string, args []string, stdin io.R
 		return RunLocalExecutor(worker, settings, catalogue, args)
 	case "native-executor":
 		return RunNativeExecutorIO(worker, settings, catalogue, args, stdin, stdout, stderr)
-	case "cloud-stdio":
+	case "cloud-stdio", "cloud-stdio-bridge":
 		inventory, err := catalogue.Inventory()
 		if err != nil {
 			inventory = Inventory{}
+		}
+		if role == "cloud-stdio-bridge" {
+			local, err := cloudBridgeLocal()
+			if err != nil {
+				return err
+			}
+			defer local.stop()
+			deps := cloudStdioDefaults(settings)
+			deps.launch = func(context.Context, string, []string, []string, io.Writer) (*cloudLocal, error) { return local, nil }
+			return runCloudStdio(worker, settings, inventory.Accounts, args, stdin, stdout, stderr, deps)
 		}
 		return RunCloudStdio(worker, settings, inventory.Accounts, args, stdin, stdout, stderr, native)
 	case "account-watch":

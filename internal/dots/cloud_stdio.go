@@ -114,6 +114,9 @@ func startCloudLocal(ctx context.Context, path string, arguments, environment []
 }
 
 func cloudStock(ctx context.Context, path string, arguments, environment []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	if handled, err := cloudStockExec(path, arguments, environment, stdin, stdout, stderr); handled {
+		return err
+	}
 	command := exec.CommandContext(ctx, path, arguments...)
 	command.Env, command.Stdin, command.Stdout, command.Stderr = environment, stdin, stdout, stderr
 	if err := command.Run(); err != nil {
@@ -168,7 +171,25 @@ func RunCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 	if cfg == nil {
 		return errors.New("Dots settings unavailable")
 	}
+	if handled, err := nativeCloudBridge(ctx, cfg, arguments, stdin, stdout, stderr); handled {
+		return err
+	}
 	return runCloudStdio(ctx, cfg, accounts, arguments, stdin, stdout, stderr, cloudStdioDefaults(cfg))
+}
+
+func cloudInvocation(cfg *Settings, arguments, environment []string) (string, []string, []string, bool, error) {
+	path := filepath.Join(cfg.AppPath, "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex")
+	environment = setEnvironment(environment, "CODEX_CLI_PATH", path)
+	appServer, appSession := false, false
+	for _, argument := range arguments {
+		appServer = appServer || argument == "app-server"
+		appSession = appSession || argument == cloudAppMarker+"true" || argument == cloudAppMarker+"false"
+	}
+	var err error
+	if appServer {
+		arguments, err = nativeCloudArguments(arguments, environment)
+	}
+	return path, arguments, environment, appServer && appSession, err
 }
 
 type cloudPending struct {
@@ -219,21 +240,11 @@ type cloudBridge struct {
 }
 
 func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, arguments []string, stdin io.Reader, stdout, stderr io.Writer, deps cloudStdioDependencies) error {
-	path := filepath.Join(cfg.AppPath, "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex")
-	environment := setEnvironment(deps.environment, "CODEX_CLI_PATH", path)
-	appServer, appSession := false, false
-	for _, argument := range arguments {
-		appServer = appServer || argument == "app-server"
-		appSession = appSession || argument == cloudAppMarker+"true" || argument == cloudAppMarker+"false"
+	path, arguments, environment, appSession, err := cloudInvocation(cfg, arguments, deps.environment)
+	if err != nil {
+		return err
 	}
-	var err error
-	if appServer {
-		arguments, err = nativeCloudArguments(arguments, environment)
-		if err != nil {
-			return err
-		}
-	}
-	if !appServer || !appSession {
+	if !appSession {
 		return deps.stock(ctx, path, arguments, environment, stdin, stdout, stderr)
 	}
 	ctx, cancel := context.WithCancel(ctx)
