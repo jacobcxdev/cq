@@ -239,21 +239,16 @@ func LaunchNativeBroker(ctx context.Context, s *Settings, executable string, arg
 	}
 	defer parentRead.Close()
 	args = append(append([]string{}, args...), "--remote-debugging-pipe")
-	command := exec.Command(executable, args...)
-	command.Env = env
-	command.ExtraFiles = []*os.File{childRead, childWrite}
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
-	err = command.Start()
+	app, err := startNativeApp(executable, args, env, childRead, childWrite)
 	_ = childRead.Close()
 	_ = childWrite.Close()
 	if err != nil {
 		return err
 	}
-	b.appPID = command.Process.Pid
+	b.appPID = app.Pid
 	b.pipe = newNativePipe(parentRead, parentWrite)
 	// Reap exactly this child. This goroutine never cancels or kills it.
 	exited := make(chan error, 1)
@@ -263,7 +258,8 @@ func LaunchNativeBroker(ctx context.Context, s *Settings, executable string, arg
 				exited <- errors.New("native app wait failed")
 			}
 		}()
-		exited <- command.Wait()
+		_, err := app.Wait()
+		exited <- err
 	}()
 	statePath := filepath.Join(s.RuntimeRoot, nativeStateName)
 	stateErr := SaveJSON(statePath, map[string]any{"app_pid": b.appPID, "broker_pid": os.Getpid()})

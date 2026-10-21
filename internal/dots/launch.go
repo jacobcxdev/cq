@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -94,6 +95,12 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 	if err := ValidateRuntimePaths(s.RuntimeRoot); err != nil {
 		return nil, nil, err
 	}
+	// These describe the Spotlight/Raycast launcher, not the signed desktop app.
+	// Let AppKit discover the launched app's own bundle and process identity.
+	env = slices.DeleteFunc(slices.Clone(env), func(entry string) bool {
+		key, _, _ := strings.Cut(entry, "=")
+		return key == "__CFBundleIdentifier" || key == "XPC_SERVICE_NAME" || key == "XPC_FLAGS"
+	})
 	native := s.IntegrationMode == "native"
 	if native {
 		if baseURL == "" {

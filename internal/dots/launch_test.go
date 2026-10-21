@@ -167,6 +167,26 @@ func TestPrepareLaunchPreservedNormalProfileTrustAndCQRouting(t *testing.T) {
 	}
 }
 
+func TestPrepareLaunchRemovedLauncherApplicationIdentity(t *testing.T) {
+	_, s := preparedInstallationFixture(t)
+	input, _, _ := launchFixtureEnvironment(t, s)
+	input = append(input, "__CFBundleIdentifier=dev.jacobcx.cq.chatgpt-launcher", "XPC_SERVICE_NAME=application.dev.jacobcx.cq.chatgpt-launcher.123", "XPC_FLAGS=0x0")
+	before := slices.Clone(input)
+	_, env, err := prepareLaunch(s, "http://127.0.0.1:12345", "/stable/cq", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(before, input) {
+		t.Fatal("input environment mutated")
+	}
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if slices.Contains([]string{"__CFBundleIdentifier", "XPC_SERVICE_NAME", "XPC_FLAGS"}, key) {
+			t.Fatalf("launcher application identity inherited: %s", key)
+		}
+	}
+}
+
 func TestPrepareLaunchCloudHelperPreservedLiteralArgumentsWithoutPython(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX helper script")
