@@ -43,11 +43,14 @@ sha=$(git rev-parse HEAD)
 repo=$(gh repo view --json nameWithOwner --jq .nameWithOwner)
 codexbar_root=${CQ_CODEXBAR_LIVE_ROOT:-$HOME/Library/Application Support/CodexBar}
 [ "${codexbar_root#/}" != "$codexbar_root" ] || fail "CodexBar root must be absolute"
-desktop_codex=/Applications/ChatGPT.app/Contents/Resources/codex
+desktop_codex=/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
+legacy_desktop_codex=/Applications/ChatGPT.app/Contents/Resources/codex
 if [ -n "${CQ_CODEX_ACCEPTANCE_EXECUTABLE:-}" ]; then
 	codex_executable=$CQ_CODEX_ACCEPTANCE_EXECUTABLE
 elif [ -x "$desktop_codex" ]; then
 	codex_executable=$desktop_codex
+elif [ -x "$legacy_desktop_codex" ]; then
+	codex_executable=$legacy_desktop_codex
 else
 	codex_executable=$(command -v codex) || fail "Codex executable is required"
 fi
