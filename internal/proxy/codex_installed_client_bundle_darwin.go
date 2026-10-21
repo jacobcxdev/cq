@@ -6,6 +6,7 @@ import "os"
 
 func resolveCodexInstalledBundledClientExecutable() (string, bool) {
 	for _, path := range []string{
+		"/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
 		"/Applications/ChatGPT.app/Contents/Resources/codex",
 		"/Applications/Codex.app/Contents/Resources/codex",
 	} {

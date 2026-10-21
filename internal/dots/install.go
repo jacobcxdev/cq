@@ -33,6 +33,30 @@ const (
 	QualifiedModuleAsset = "app-initial-90eb42395b7d.js"
 )
 
+var qualifiedAppPins = []Settings{
+	{AppVersion: QualifiedAppVersion, AppBuild: QualifiedAppBuild, ASARSHA256: QualifiedASARSHA256, ModuleAsset: QualifiedModuleAsset},
+	{AppVersion: "26.1016.51333", AppBuild: "21161", ASARSHA256: "9d0260dd37f9c45546d5a89d9d782b8362c9957b70b992e2c3f91df60a046b07", ModuleAsset: "app-initial-f3e281fb9a71.js"},
+}
+
+// qualifiedAppPin accepts only a reviewed build and its exact renderer archive.
+func qualifiedAppPin(app string, pins []Settings) (Settings, error) {
+	info, err := readAppPlist(filepath.Join(app, "Contents", "Info.plist"))
+	if err != nil {
+		return Settings{}, err
+	}
+	for _, pin := range pins {
+		if pin.AppVersion != info["CFBundleShortVersionString"] || pin.AppBuild != info["CFBundleVersion"] {
+			continue
+		}
+		pin.AppPath = app
+		if err := AppCheck(&pin); err != nil {
+			return Settings{}, err
+		}
+		return pin, nil
+	}
+	return Settings{}, fmt.Errorf("Native app %s (build %s) is not supported by this CQ version; update CQ before enabling Dots", info["CFBundleShortVersionString"], info["CFBundleVersion"])
+}
+
 // InstallOptions declares credential sources; their contents are never persisted.
 type InstallOptions struct {
 	Root, App, SystemAuth, CQAccounts, AccountSource string
@@ -281,8 +305,8 @@ func Install(ctx context.Context, options InstallOptions) (map[string]any, error
 	if runtime.GOOS != "darwin" {
 		return nil, fmt.Errorf("Native Dots installation currently requires macOS")
 	}
-	pin := Settings{AppPath: options.App, AppVersion: QualifiedAppVersion, AppBuild: QualifiedAppBuild, ASARSHA256: QualifiedASARSHA256, ModuleAsset: QualifiedModuleAsset}
-	if err := AppCheck(&pin); err != nil {
+	pin, err := qualifiedAppPin(options.App, qualifiedAppPins)
+	if err != nil {
 		return nil, err
 	}
 	return installPrepared(ctx, options, pin)

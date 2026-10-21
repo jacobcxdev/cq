@@ -179,7 +179,7 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 	if native {
 		transport = "pipe"
 	}
-	if err = SaveJSON(filepath.Join(s.RuntimeRoot, "launch.json"), map[string]any{"debug_transport": transport, "debug_port": debug, "proxy_port": port, "catalogue_revision": s.CatalogueRevision()}); err != nil {
+	if err = SaveJSON(filepath.Join(s.RuntimeRoot, "launch.json"), map[string]any{"debug_transport": transport, "debug_port": debug, "proxy_port": port, "catalogue_revision": s.CatalogueRevision(), "asar_sha256": s.ASARSHA256}); err != nil {
 		return nil, nil, err
 	}
 	args = append(args, "--ignore-certificate-errors-spki-list="+spki, "--proxy-server=http://127.0.0.1:"+strconv.Itoa(realtime), "--proxy-bypass-list=localhost;127.0.0.1")

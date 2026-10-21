@@ -38,6 +38,26 @@ func (c Controller) settings() (*Settings, error) {
 	return s, nil
 }
 
+// refreshAppPin preserves account and runtime state when a reviewed app update
+// replaces the installed bundle. Callers hold the installation operation lock.
+func (c Controller) refreshAppPin(s *Settings, pins []Settings) error {
+	if AppCheck(s) == nil {
+		return nil
+	}
+	pin, err := qualifiedAppPin(s.AppPath, pins)
+	if err != nil {
+		return err
+	}
+	next := *s
+	next.AppVersion, next.AppBuild = pin.AppVersion, pin.AppBuild
+	next.ASARSHA256, next.ModuleAsset = pin.ASARSHA256, pin.ModuleAsset
+	if err := SaveJSON(filepath.Join(c.Root, "settings.json"), &next); err != nil {
+		return err
+	}
+	*s = next
+	return nil
+}
+
 func (c Controller) client(s *Settings) *CatalogueClient {
 	if c.Catalogue != nil {
 		return c.Catalogue
@@ -207,8 +227,9 @@ func (c Controller) restartRequired(s *Settings) bool {
 	}
 	var launch struct {
 		Revision string `json:"catalogue_revision"`
+		Archive  string `json:"asar_sha256"`
 	}
-	return json.Unmarshal(data, &launch) != nil || launch.Revision != s.CatalogueRevision()
+	return json.Unmarshal(data, &launch) != nil || launch.Revision != s.CatalogueRevision() || launch.Archive != s.ASARSHA256
 }
 
 func (c Controller) pending(ctx context.Context, s *Settings) (map[string]any, error) {
@@ -230,6 +251,9 @@ func (c Controller) pending(ctx context.Context, s *Settings) (map[string]any, e
 func (c Controller) Sync(ctx context.Context, preserveWatcher bool) (map[string]any, error) {
 	s, err := c.settings()
 	if err != nil {
+		return nil, err
+	}
+	if err := c.refreshAppPin(s, qualifiedAppPins); err != nil {
 		return nil, err
 	}
 	processes, err := RuntimeProcesses(ctx, s)

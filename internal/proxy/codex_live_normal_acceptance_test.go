@@ -202,7 +202,7 @@ func newCodexLiveNormalAcceptanceServerWithCallers(t *testing.T, credential code
 
 func newCodexLiveNormalAcceptanceServerWithInventory(t *testing.T, credential codexLiveAcceptanceCredential, callers []NormalCallerCredentialV1) (*httptest.Server, *RuntimeSupervisor, *codexLiveNormalTraffic, *codexLiveRotatingInventory, *codexRuntimeSupervisorAcceptanceCallerRotation) {
 	t.Helper()
-	modelSnapshot, err := codexLiveAcceptanceModelSnapshot(os.Getenv("CQ_CODEX_LIVE_AUTH_FILE"), "gpt-5.6-sol")
+	selection, err := codexLiveAcceptanceSelectedModel()
 	if err != nil {
 		t.Fatalf("load live Codex model catalogue: %v", err)
 	}
@@ -282,7 +282,7 @@ func newCodexLiveNormalAcceptanceServerWithInventory(t *testing.T, credential co
 		},
 		CodexNativeHTTP:      httpHandler,
 		CodexWebSocketBroker: webSocketBroker,
-		Catalog:              modelregistry.NewCatalog(modelSnapshot),
+		Catalog:              modelregistry.NewCatalog(selection.snapshot),
 	}
 	handler, err := server.RuntimeHandler()
 	if err != nil {
@@ -296,25 +296,11 @@ func newCodexLiveNormalAcceptanceServerWithInventory(t *testing.T, credential co
 }
 
 func codexLiveAcceptanceModelSnapshot(authPath, model string) (modelregistry.Snapshot, error) {
-	cachePath := filepath.Join(filepath.Dir(authPath), "models_cache.json")
-	before, err := os.Lstat(cachePath)
-	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
-		return modelregistry.Snapshot{}, errors.New("live Codex model cache is unavailable")
-	}
-	file, err := os.Open(cachePath)
+	body, err := readCodexLiveAcceptanceModelCache(authPath)
 	if err != nil {
-		return modelregistry.Snapshot{}, errors.New("open live Codex model cache")
-	}
-	body, readErr := io.ReadAll(io.LimitReader(file, (4<<20)+1))
-	closeErr := file.Close()
-	if readErr != nil || closeErr != nil || len(body) == 0 || len(body) > 4<<20 {
-		return modelregistry.Snapshot{}, errors.New("read live Codex model cache")
+		return modelregistry.Snapshot{}, err
 	}
 	defer clearBytes(body)
-	after, err := os.Lstat(cachePath)
-	if err != nil || !os.SameFile(before, after) {
-		return modelregistry.Snapshot{}, errors.New("live Codex model cache changed during read")
-	}
 	var envelope struct {
 		Models []json.RawMessage `json:"models"`
 	}
@@ -347,6 +333,30 @@ func codexLiveAcceptanceModelSnapshot(authPath, model string) (modelregistry.Sna
 	return modelregistry.Snapshot{}, errors.New("live Codex model is unavailable")
 }
 
+func readCodexLiveAcceptanceModelCache(authPath string) ([]byte, error) {
+	cachePath := filepath.Join(filepath.Dir(authPath), "models_cache.json")
+	before, err := os.Lstat(cachePath)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return nil, errors.New("live Codex model cache is unavailable")
+	}
+	file, err := os.Open(cachePath)
+	if err != nil {
+		return nil, errors.New("open live Codex model cache")
+	}
+	body, readErr := io.ReadAll(io.LimitReader(file, (4<<20)+1))
+	closeErr := file.Close()
+	if readErr != nil || closeErr != nil || len(body) == 0 || len(body) > 4<<20 {
+		clearBytes(body)
+		return nil, errors.New("read live Codex model cache")
+	}
+	after, err := os.Lstat(cachePath)
+	if err != nil || !os.SameFile(before, after) {
+		clearBytes(body)
+		return nil, errors.New("live Codex model cache changed during read")
+	}
+	return body, nil
+}
+
 func runCodexAppServerContinuityAcceptance(
 	ctx context.Context,
 	client codexInstalledExecutableProof,
@@ -355,6 +365,10 @@ func runCodexAppServerContinuityAcceptance(
 	webSocket bool,
 ) (returnErr error) {
 	const initialText = "LIVE-APP-SERVER-STARTING"
+	model, err := codexLiveAcceptanceModel()
+	if err != nil {
+		return err
+	}
 	nonce, err := newCodexInstalledHTTPValidationToken()
 	if err != nil {
 		return errors.New("generate Codex app-server tool input")
@@ -442,7 +456,7 @@ func runCodexAppServerContinuityAcceptance(
 			"approvalPolicy": "never", "cwd": isolation.work, "ephemeral": true,
 			// The app-server process is already confined by the outer sandbox-exec
 			// profile. A nested Codex sandbox fails with sandbox_apply EPERM on macOS.
-			"model": "gpt-5.6-sol", "modelProvider": "cq_acceptance", "sandbox": "danger-full-access",
+			"model": model, "modelProvider": "cq_acceptance", "sandbox": "danger-full-access",
 			"developerInstructions": "When asked to read a file, use the shell tool before answering. Never guess file contents.",
 		},
 	}); err != nil {

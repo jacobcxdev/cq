@@ -416,7 +416,7 @@ func TestCodexInstalledRescuePassesThroughLiveUpstream(t *testing.T) {
 	}
 	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
 
-	isolation := newCodexTaskAffinityAcceptanceIsolation(t, localToken)
+	isolation := newCodexLiveAcceptanceIsolation(t, localToken)
 	isolationAuth := filepath.Join(isolation.codexHome, "auth.json")
 	if err := os.WriteFile(isolationAuth, auth, 0o600); err != nil {
 		t.Fatal(err)
@@ -455,7 +455,7 @@ func TestCodexInstalledNormalPassesThroughLiveUpstream(t *testing.T) {
 		t.Fatal("live Codex normal acceptance did not use isolated normal proxy")
 	}
 
-	isolation := newCodexTaskAffinityAcceptanceIsolation(t, credential.localToken)
+	isolation := newCodexLiveAcceptanceIsolation(t, credential.localToken)
 	runner := codexTaskAffinityAcceptanceRunner{}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
@@ -533,7 +533,7 @@ func TestCodexInstalledNormalContinuesAfterLiveToolCall(t *testing.T) {
 		t.Fatal("live Codex tool acceptance did not use isolated normal proxy")
 	}
 
-	isolation := newCodexTaskAffinityAcceptanceIsolation(t, credential.material.AccessToken)
+	isolation := newCodexLiveAcceptanceIsolation(t, credential.material.AccessToken)
 	if err := os.WriteFile(filepath.Join(isolation.codexHome, "auth.json"), auth, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +637,7 @@ func TestCodexInstalledLiveRescueTaskResumesInNormal(t *testing.T) {
 	rescueControlRequest(t, listener.URL, RuntimeRescueEnterPath, credential.localToken)
 	waitForRuntimeMode(t, supervisor, TrafficModeRescue)
 
-	isolation := newCodexTaskAffinityAcceptanceIsolation(t, credential.material.AccessToken)
+	isolation := newCodexLiveAcceptanceIsolation(t, credential.material.AccessToken)
 	isolationAuth := filepath.Join(isolation.codexHome, "auth.json")
 	if err := os.WriteFile(isolationAuth, auth, 0o600); err != nil {
 		t.Fatal(err)
@@ -1099,6 +1099,7 @@ type codexTaskAffinityAcceptanceIsolation struct {
 	cache     string
 	config    string
 	data      string
+	liveModel bool
 }
 
 func newCodexTaskAffinityAcceptanceIsolation(t *testing.T, localToken string) codexTaskAffinityAcceptanceIsolation {
@@ -1196,6 +1197,13 @@ func runCodexTaskAffinityAcceptancePromptForTransport(
 ) error {
 	outputPath := filepath.Join(isolation.root, strings.ToLower(output)+".txt")
 	args := codexAcceptanceExecArgumentsForTransport(baseURL, isolation.work, outputPath, webSocket)
+	if isolation.liveModel {
+		var err error
+		args, err = codexLiveAcceptanceExecArguments(baseURL, isolation.work, outputPath, webSocket)
+		if err != nil {
+			return err
+		}
+	}
 	if allowTools {
 		args = slices.Insert(args, 1, "--json")
 		args = slices.Insert(args, len(args)-1, "-c", "features.apps=false")

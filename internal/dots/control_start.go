@@ -2,7 +2,6 @@ package dots
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net"
 	"path/filepath"
@@ -17,8 +16,13 @@ func (c Controller) Status(ctx context.Context) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	asset, _ := json.Marshal("app://-/assets/" + s.ModuleAsset)
-	expression := `(async()=>{if(document.querySelector('[data-testid="onboarding-progress-bar"]'))return {native_catalog_ready:false,onboarding_required:true};const m=await import(` + string(asset) + `);const c=await m.Ymr.safeGet('/tbo');const p=await m.Ymr.safeGet('/tbo/primary');return {profiles:c.items.map(x=>x.id),primary:p.profile?.id,available:p.selection?.available,workspaceError:[...document.querySelectorAll('aside[role="status"][aria-live="polite"] h3')].some(el=>el.textContent.trim().replace(/’/g,"'")==="Couldn't load workspace settings")};})()`
+	if err := AppCheck(s); err != nil {
+		if _, err := qualifiedAppPin(s.AppPath, qualifiedAppPins); err != nil {
+			return nil, err
+		}
+		return nil, errors.New("Native app updated; quit it when ready, then run cq codex dots start to refresh compatibility")
+	}
+	expression := nativeAsset(`(async()=>{if(document.querySelector('[data-testid="onboarding-progress-bar"]'))return {native_catalog_ready:false,onboarding_required:true};const m=await import('app://-/assets/MODULE_ASSET_PLACEHOLDER');const c=await m.Ymr.safeGet('/tbo');const p=await m.Ymr.safeGet('/tbo/primary');return {profiles:c.items.map(x=>x.id),primary:p.profile?.id,available:p.selection?.available,workspaceError:[...document.querySelectorAll('aside[role="status"][aria-live="polite"] h3')].some(el=>el.textContent.trim().replace(/’/g,"'")==="Couldn't load workspace settings")};})()`, s)
 	values, err := c.evaluator(s).EvaluateAll(ctx, expression)
 	if err != nil {
 		return nil, errors.New("Native Dot status unavailable")
@@ -158,7 +162,7 @@ func (c Controller) Start(ctx context.Context, preserveWatcher bool) (result map
 	if err != nil {
 		return nil, err
 	}
-	if err = AppCheck(s); err != nil {
+	if err = c.refreshAppPin(s, qualifiedAppPins); err != nil {
 		return nil, err
 	}
 	if len(s.Dots) == 0 {
