@@ -1,5 +1,5 @@
 (async()=>{
-        const m = await import('app://-/assets/MODULE');
+        const m = await import('app://-/assets/MODULE_ASSET_PLACEHOLDER');
         const key = Symbol.for('cq.dot-read-ownership.v2');
         if (globalThis[key]) return {installed:true,ownedReads:globalThis[key].ownedReads};
         const root = document.getElementById('root');

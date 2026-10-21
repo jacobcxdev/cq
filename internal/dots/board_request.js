@@ -1,4 +1,4 @@
-(async()=>{const bus=(await import(BUS_ASSET)).gPt;
+(async()=>{const bus=(await import(BUS_ASSET)).BUS_EXPORT;
 const host=window.electronBridge?.getSharedObjectSnapshotValue?.('host_config')?.id??'local';
 if(host!=='local')throw Error('Board requires local app-server');
 const method=BOARD_METHOD,params=BOARD_PARAMS,id='cq-board-'+crypto.randomUUID();

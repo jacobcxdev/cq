@@ -121,7 +121,16 @@ func TestNativeAdaptersFollowStableProfilesAcrossRootRotation(t *testing.T) {
 	if err != nil {
 		t.Skip("Node required for native JavaScript regression")
 	}
-	s := &Settings{ModuleAsset: "fixture.js"}
+	for _, asset := range []string{QualifiedModuleAsset, "app-initial-f3e281fb9a71.js"} {
+		t.Run(asset, func(t *testing.T) {
+			testNativeAdaptersRootRotation(t, node, asset)
+		})
+	}
+}
+
+func testNativeAdaptersRootRotation(t *testing.T, node, asset string) {
+	t.Helper()
+	s := &Settings{ModuleAsset: asset}
 	sources := map[string]string{
 		"send":  fmt.Sprintf(nativeSendJS, nativeJSON(map[string]any{"profile": "profile-two", "text": "synthetic", "request": "request-id"}), nativeJSON("profile-one")),
 		"relay": strings.NewReplacer("PROFILE_ID", nativeJSON("profile-two"), "RELAY_PATTERN", nativeJSON(`^\[CQ:directory:[a-f0-9]{32}\]\ndirectory\n\[/CQ\]$`)).Replace(relayReadJS),

@@ -31,7 +31,13 @@ var nativeMatchingReplyJS string
 
 func nativeJSON(v any) string { data, _ := json.Marshal(v); return string(data) }
 func nativeAsset(source string, s *Settings) string {
-	return strings.ReplaceAll(source, "MODULE_ASSET_PLACEHOLDER", s.ModuleAsset)
+	source = strings.ReplaceAll(source, "MODULE_ASSET_PLACEHOLDER", s.ModuleAsset)
+	if s.ModuleAsset == "app-initial-f3e281fb9a71.js" {
+		module := "import('app://-/assets/" + s.ModuleAsset + "')"
+		// Adapt the import namespace, never identifiers inside user message text.
+		source = strings.Replace(source, module, module+".then(m=>({...m,Ymr:m.iRr,GMr:m.zRr,XMr:m.BRr,JMr:m.yLr,Lpr:m.B_r,VAn:m.lPn}))", 1)
+	}
+	return source
 }
 func nativeOne(ctx context.Context, e NativeEvaluator, expression string) (any, error) {
 	if single, ok := e.(interface {
@@ -84,7 +90,7 @@ func InstallNativeRoomCache(ctx context.Context, s *Settings, e NativeEvaluator)
 		profiles = append(profiles, dot.ProfileID)
 	}
 	sort.Strings(profiles)
-	expression := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(nativeRoomCacheJS, "MODULE", s.ModuleAsset), "PROFILES", nativeJSON(profiles)), "GUARD", nativeRoomCacheGuardJS)
+	expression := nativeAsset(strings.ReplaceAll(strings.ReplaceAll(nativeRoomCacheJS, "PROFILES", nativeJSON(profiles)), "GUARD", nativeRoomCacheGuardJS), s)
 	values, err := e.EvaluateAll(ctx, expression)
 	if err != nil {
 		return nil, err

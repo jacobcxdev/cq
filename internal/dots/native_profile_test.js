@@ -36,7 +36,7 @@ const sources = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
                     return {id: 'sent-id', content: options.requestBody.content};
                 },
             };
-            const run = () => eval(source.replace(/await import\([^)]*\)/, '({Ymr:fakeApi})'));
+            const run = () => eval(source.replace(/import\([^)]*\)/, 'Promise.resolve({Ymr:fakeApi,iRr:fakeApi})'));
             if (invalid) {
                 await assert.rejects(run, /Target changed|Native principal changed/);
                 assert.equal(writes, 0);
