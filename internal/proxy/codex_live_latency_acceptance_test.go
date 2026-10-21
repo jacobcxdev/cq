@@ -55,7 +55,7 @@ func TestCodexLiveProxyLatencyMatchesDirect(t *testing.T) {
 			}
 			direct = append(direct, time.Since(started))
 
-			proxyIsolation := newCodexTaskAffinityAcceptanceIsolation(t, credential.localToken)
+			proxyIsolation := newCodexLiveAcceptanceIsolation(t, credential.localToken)
 			beforeWebSockets, beforeResponses, _ := traffic.snapshot()
 			started = time.Now()
 			if err := runCodexTaskAffinityAcceptanceTurnForTransport(ctx, codexTaskAffinityAcceptanceRunner{}, client, listener.URL, proxyIsolation, false, webSocket, output); err != nil {

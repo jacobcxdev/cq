@@ -29,20 +29,15 @@ type codexLiveAcceptanceModelSelection struct {
 var codexLiveAcceptanceSelectedModel = sync.OnceValues(discoverCodexLiveAcceptanceModel)
 
 func codexLiveAcceptanceModel() (string, error) {
-	// Synthetic acceptance tests keep their reviewed fixture model and never
-	// consult installed clients, credentials or the network.
-	live := false
-	for _, key := range []string{
-		"CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE", "CQ_RUN_CODEX_LIVE_LATENCY_ACCEPTANCE",
-		"CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE", "CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE",
-	} {
-		live = live || os.Getenv(key) == "1"
-	}
-	if !live {
-		return "gpt-5.6-sol", nil
-	}
 	selection, err := codexLiveAcceptanceSelectedModel()
 	return selection.model, err
+}
+
+func newCodexLiveAcceptanceIsolation(t *testing.T, localToken string) codexTaskAffinityAcceptanceIsolation {
+	t.Helper()
+	isolation := newCodexTaskAffinityAcceptanceIsolation(t, localToken)
+	isolation.liveModel = true
+	return isolation
 }
 
 func codexLiveAcceptanceExecArguments(baseURL, work, outputPath string, webSocket bool) ([]string, error) {
@@ -229,6 +224,28 @@ func TestCodexLiveAcceptanceDefaultModel(t *testing.T) {
 				t.Fatalf("selected model = %q, %v; want %q", model, err, test.want)
 			}
 		})
+	}
+}
+
+func TestCodexLiveAcceptanceModelKeepsInstalledFixturesOffline(t *testing.T) {
+	for _, key := range []string{
+		"CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE", "CQ_RUN_CODEX_LIVE_LATENCY_ACCEPTANCE",
+		"CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE", "CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE",
+	} {
+		t.Setenv(key, "1")
+	}
+	t.Setenv("CQ_CODEX_LIVE_AUTH_FILE", "")
+	isolation := codexTaskAffinityAcceptanceIsolation{root: t.TempDir(), work: t.TempDir()}
+	runner := testCodexAcceptanceRunner(func(_ context.Context, command codexAcceptanceCommand) ([]byte, error) {
+		for index, argument := range command.args {
+			if argument == "--model" && index+1 < len(command.args) && command.args[index+1] == "gpt-5.6-sol" {
+				return nil, os.WriteFile(command.outputPath, []byte("PONG\n"), 0o600)
+			}
+		}
+		return nil, errors.New("synthetic check did not retain its reviewed model")
+	})
+	if err := runCodexTaskAffinityAcceptanceTurn(context.Background(), runner, codexInstalledExecutableProof{}, "http://127.0.0.1:29280", isolation, false, "PONG"); err != nil {
+		t.Fatal(err)
 	}
 }
 
