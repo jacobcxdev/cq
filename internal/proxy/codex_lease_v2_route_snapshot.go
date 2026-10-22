@@ -173,16 +173,8 @@ func (coordinator *CodexContinuityCoordinator) beginCodexLeasePersistenceContext
 	lifecycle := coordinator.leases.lifecycle
 	finishWait := codexProcessRuntimeObservability.beginPersistenceWait()
 	defer finishWait()
-	for !lifecycle.persistence.TryLock() {
-		timer := time.NewTimer(time.Millisecond)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
+	if err := lifecycle.persistence.LockContext(ctx); err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		lifecycle.persistence.Unlock()
