@@ -1232,7 +1232,9 @@ func captureCodexReleaseSystemProxySnapshot() (codexReleaseSystemProxySnapshot, 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
+	// The installed proxy may be serving large turns while validation runs.
+	// Allow its health response to complete without relaxing snapshot equality.
+	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
 	response, err := client.Get("http://127.0.0.1:" + strconv.Itoa(DefaultPort) + "/health")
 	if err != nil {
 		return snapshot, errors.New("read system proxy health")
