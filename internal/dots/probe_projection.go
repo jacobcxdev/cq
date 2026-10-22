@@ -439,12 +439,20 @@ func (p *Probe) transform(r *http.Request, response *http.Response, data []byte,
 			gates = map[string]any{}
 			payload["feature_gates"] = gates
 		}
-		gate, _ := gates["2929219922"].(map[string]any)
-		if gate == nil {
-			gate = map[string]any{"name": "2929219922", "rule_id": "cq-local-catalog-proof", "secondary_exposures": []any{}, "id_type": "userID"}
-			gates["2929219922"] = gate
+		values := map[string]bool{"2929219922": true}
+		if native {
+			// Sparkle uses the API base for backend appcasts, but cannot trust
+			// CQ's loopback certificate. Keep its packaged vendor feed enabled.
+			values["4263582812"] = false
 		}
-		gate["value"] = true
+		for id, value := range values {
+			gate, _ := gates[id].(map[string]any)
+			if gate == nil {
+				gate = map[string]any{"name": id, "rule_id": "cq-local-catalog-proof", "secondary_exposures": []any{}, "id_type": "userID"}
+				gates[id] = gate
+			}
+			gate["value"] = value
+		}
 		encoded, err := json.Marshal(payload)
 		if err != nil {
 			return nil, err

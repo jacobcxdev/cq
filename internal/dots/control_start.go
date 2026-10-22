@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -245,6 +246,15 @@ func (c Controller) Start(ctx context.Context, preserveWatcher bool) (result map
 	args, env, err := PrepareLaunch(s, c.BaseURL, c.Executable)
 	if err != nil {
 		return nil, err
+	}
+	if s.IntegrationMode == "native" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		if err := prepareNativeAppcast(filepath.Join(home, "Library", "Application Support", "com.openai.codex", "production-appcast-bootstrap.json")); err != nil {
+			return nil, err
+		}
 	}
 	_, err = SpawnHelper(s, helperExecutable(s), "native-broker", args, env)
 	if err != nil {

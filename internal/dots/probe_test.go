@@ -312,6 +312,38 @@ func TestProbeStatsigPreservesIdentityAndOtherEvaluations(t *testing.T) {
 	}
 }
 
+func TestProbeStatsigKeepsNativeUpdaterOnPackagedFeed(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprint(existing), func(t *testing.T) {
+			p, _, _ := probeFixtureForTest(t)
+			gates := map[string]any{"other": map[string]any{"value": true}}
+			if existing {
+				gates["4263582812"] = map[string]any{"name": "4263582812", "value": true, "rule_id": "upstream", "secondary_exposures": []any{}}
+			}
+			payload, _ := json.Marshal(map[string]any{"feature_gates": gates})
+			envelope, _ := json.Marshal(map[string]any{"statsigPayload": string(payload)})
+			r := probeRequest("GET", "/backend-api/wham/statsig/bootstrap", "")
+			data, err := p.transform(r, probeSuccess(""), envelope, nil, nil, 0, false, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			outer, _ := probeObject(data)
+			inner, _ := probeObject([]byte(probeString(outer["statsigPayload"])))
+			gates = inner["feature_gates"].(map[string]any)
+			updater, _ := gates["4263582812"].(map[string]any)
+			if updater["value"] != false {
+				t.Fatal("native updater still uses CQ's local API base")
+			}
+			if existing && updater["rule_id"] != "upstream" {
+				t.Fatal("upstream gate metadata changed")
+			}
+			if gates["other"].(map[string]any)["value"] != true || gates["2929219922"].(map[string]any)["value"] != true {
+				t.Fatal("unrelated gate or Dot catalogue changed")
+			}
+		})
+	}
+}
+
 func TestProbeCatalogueVerifiedFallbackAndChangedPrimaryPassthrough(t *testing.T) {
 	for _, changed := range []bool{false, true} {
 		t.Run(fmt.Sprint(changed), func(t *testing.T) {
