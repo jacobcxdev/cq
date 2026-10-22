@@ -102,6 +102,7 @@ type Server struct {
 	// CodexWebSocketBroker owns readiness-gated terminating WebSocket routing.
 	// Nil fails closed when WebSocket enforcement is effective.
 	CodexWebSocketBroker CodexWebSocketRoutingHandler
+	codexWSHTTPFallback  codexWSHTTPFallback
 	// CodexNativeHTTP may claim readiness-gated or retained-fence native traffic.
 	// Nil or a declined untouched request preserves the off/observe path below.
 	CodexNativeHTTP CodexNativeHTTPRoutingHandler
@@ -1234,6 +1235,13 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		s.emitDiagnostics(event)
 	}()
 
+	fallbackKey := codexWSHTTPFallbackKey(r.Header)
+	if webSocketEnforcing && s.codexWSHTTPFallback.required(fallbackKey) {
+		statusCode = http.StatusUpgradeRequired
+		diagError = diagnosticsErrorCode("invalid_request_error", "Codex WebSocket request requires HTTP")
+		writeError(w, statusCode, "invalid_request_error", "Codex WebSocket request requires HTTP")
+		return
+	}
 	if webSocketEnforcing && s.CodexWebSocketBroker == nil {
 		statusCode = http.StatusServiceUnavailable
 		diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing unavailable")
@@ -1298,6 +1306,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "cq: Codex route trace transport=websocket session=%s event=%s stage=%s reason=%s origin=%s frame_type=%s frame_size=%s frame_detail=%s event_type=%s error_status=%s error_type=%s error_code=%s\n", sessionKey, decision, failure.Stage, failure.Reason, failure.Origin, failure.FrameType, failure.FrameSize, failure.FrameDetail, failure.EventType, failure.ErrorStatus, failure.ErrorType, failure.ErrorCode)
 			closeCode, closeReason := websocket.CloseInternalServerErr, "upstream error"
 			if failure.FrameSize == codexWSFrameSizeOversize || failure.Reason == codexWebSocketFailureReasonMessageTooBig {
+				s.codexWSHTTPFallback.remember(fallbackKey)
 				closeCode, closeReason = websocket.CloseMessageTooBig, "message too big"
 				diagError = diagnosticsErrorCode("invalid_request_error", "Codex WebSocket request exceeded upstream size limit")
 			} else {
