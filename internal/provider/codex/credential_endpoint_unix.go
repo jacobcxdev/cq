@@ -324,15 +324,20 @@ func probeCredentialOwnerWithDial(path string, timeout time.Duration, dial crede
 }
 
 func probeCredentialOwnerAttempt(path string, timeout time.Duration, dial credentialEndpointDialer) (*rpc.Client, credentialOwnerProtocol, string, error) {
-	conn, err := dial("unix", path, timeout)
+	return probeCredentialOwnerAttemptWithContext(context.Background(), path, time.Now().Add(timeout), dial)
+}
+
+func probeCredentialOwnerAttemptWithContext(ctx context.Context, path string, deadline time.Time, dial credentialEndpointDialer) (*rpc.Client, credentialOwnerProtocol, string, error) {
+	conn, err := dial("unix", path, time.Until(deadline))
 	if err != nil {
 		if errors.Is(err, syscall.ECONNREFUSED) {
 			return nil, credentialOwnerRefused, "", err
 		}
 		return nil, credentialOwnerUnavailable, "", err
 	}
-	deadline := time.Now().Add(timeout)
 	_ = conn.SetDeadline(deadline)
+	stopCancellation := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancellation()
 	client := rpc.NewClient(conn)
 	var reply CredentialEndpointPingReply
 	pingErr := client.Call("CredentialEndpoint.Ping", CredentialEndpointPingArgs{ProtocolVersion: credentialEndpointProtocolVersion}, &reply)
@@ -341,11 +346,22 @@ func probeCredentialOwnerAttempt(path string, timeout time.Duration, dial creden
 			_ = client.Close()
 			return nil, credentialOwnerUnavailable, "", ErrCredentialEndpointIncompatible
 		}
+		if !stopCancellation() {
+			_ = client.Close()
+			return nil, credentialOwnerUnavailable, "", ctx.Err()
+		}
 		_ = conn.SetDeadline(time.Time{})
 		return client, credentialOwnerVersioned, reply.Generation, nil
 	}
 	_ = client.Close()
-	return nil, credentialOwnerUnavailable, "", errors.Join(ErrCredentialEndpointIncompatible, pingErr)
+	if err := ctx.Err(); err != nil {
+		return nil, credentialOwnerUnavailable, "", errors.Join(err, pingErr)
+	}
+	var serverErr rpc.ServerError
+	if errors.As(pingErr, &serverErr) {
+		return nil, credentialOwnerUnavailable, "", errors.Join(ErrCredentialEndpointIncompatible, pingErr)
+	}
+	return nil, credentialOwnerUnavailable, "", pingErr
 }
 
 func generateCredentialEndpointGeneration() (string, error) {
@@ -1250,6 +1266,9 @@ func (e *credentialEndpoint) waitForLiveOwner(ctx context.Context, timeout time.
 	if hasContextDeadline {
 		deadline = contextDeadline
 	}
+	dial := func(network, address string, timeout time.Duration) (net.Conn, error) {
+		return (&net.Dialer{Timeout: timeout}).DialContext(ctx, network, address)
+	}
 	deadlineError := func() error {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -1297,7 +1316,7 @@ func (e *credentialEndpoint) waitForLiveOwner(ctx context.Context, timeout time.
 				if remaining <= 0 {
 					return nil, errors.Join(ErrCredentialOwnerStale, ErrCredentialEndpointLockHeld, deadlineError(), lastErr)
 				}
-				client, protocol, generation, probeErr := probeCredentialOwnerAttempt(e.path, min(remaining, 25*time.Millisecond), net.DialTimeout)
+				client, protocol, generation, probeErr := probeCredentialOwnerAttemptWithContext(ctx, e.path, deadline, dial)
 				lastErr = probeErr
 				if client != nil {
 					if protocol != credentialOwnerVersioned {

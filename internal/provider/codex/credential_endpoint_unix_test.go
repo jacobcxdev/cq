@@ -14,6 +14,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -159,6 +160,163 @@ func TestCredentialEndpointProbeRetriesConnectionRefusal(t *testing.T) {
 	defer client.Close()
 	if attempts != 2 || protocol != credentialOwnerVersioned || generation != "generation-1" {
 		t.Fatalf("probe = attempts %d, protocol %d, generation %q", attempts, protocol, generation)
+	}
+}
+
+type credentialEndpointPingFixture struct {
+	generation string
+	delay      time.Duration
+	started    chan<- struct{}
+	release    <-chan struct{}
+	err        error
+}
+
+func (endpoint *credentialEndpointPingFixture) Ping(_ CredentialEndpointPingArgs, reply *CredentialEndpointPingReply) error {
+	if endpoint.started != nil {
+		select {
+		case endpoint.started <- struct{}{}:
+		default:
+		}
+	}
+	if endpoint.release != nil {
+		<-endpoint.release
+	}
+	time.Sleep(endpoint.delay)
+	reply.ProtocolVersion = 1
+	reply.Generation = endpoint.generation
+	return endpoint.err
+}
+
+func serveCredentialEndpointPingFixture(t *testing.T, fixture *credentialEndpointPingFixture) string {
+	t.Helper()
+	path := filepath.Join(shortEndpointDir(t), "credential.sock")
+	endpoint, client, err := openCredentialEndpoint(path, false, nil)
+	if err != nil || client != nil {
+		t.Fatalf("publish endpoint = %v, %v", client, err)
+	}
+	fixture.generation = endpoint.generation
+	server := rpc.NewServer()
+	if err := server.RegisterName("CredentialEndpoint", fixture); err != nil {
+		_ = endpoint.Close()
+		t.Fatal(err)
+	}
+	var connections sync.WaitGroup
+	acceptDone := make(chan struct{})
+	go func() {
+		defer close(acceptDone)
+		defer func() { _ = recover() }()
+		for {
+			conn, err := endpoint.listener.Accept()
+			if err != nil {
+				return
+			}
+			connections.Add(1)
+			go func() {
+				defer connections.Done()
+				defer conn.Close()
+				defer func() { _ = recover() }()
+				server.ServeConn(conn)
+			}()
+		}
+	}()
+	t.Cleanup(func() {
+		_ = endpoint.Close()
+		<-acceptDone
+		connections.Wait()
+	})
+	return path
+}
+
+func TestCredentialEndpointDelegateAcceptsSlowPingWithinDeadline(t *testing.T) {
+	path := serveCredentialEndpointPingFixture(t, &credentialEndpointPingFixture{delay: 75 * time.Millisecond})
+	coordinator, _ := testCoordinator(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	control, err := OpenCredentialControlPrepared(ctx, path, coordinator, nil)
+	if err != nil {
+		t.Fatalf("delegate to responsive owner: %v", err)
+	}
+	defer control.Close()
+	if control.Owner() {
+		t.Fatal("delegate unexpectedly acquired ownership")
+	}
+}
+
+func TestCredentialEndpointPingTimeoutIsNotProtocolIncompatibility(t *testing.T) {
+	path := serveCredentialEndpointPingFixture(t, &credentialEndpointPingFixture{delay: 75 * time.Millisecond})
+	client, _, _, err := probeCredentialOwnerAttempt(path, 25*time.Millisecond, net.DialTimeout)
+	if client != nil {
+		defer client.Close()
+		t.Fatal("timed-out Ping returned a client")
+	}
+	var timeout net.Error
+	if !errors.As(err, &timeout) || !timeout.Timeout() {
+		t.Fatalf("Ping error = %v, want transport timeout", err)
+	}
+	if errors.Is(err, ErrCredentialEndpointIncompatible) {
+		t.Fatalf("transport timeout classified as incompatible protocol: %v", err)
+	}
+}
+
+func TestCredentialEndpointProbeSharesDialAndPingDeadline(t *testing.T) {
+	path := serveCredentialEndpointPingFixture(t, &credentialEndpointPingFixture{delay: 75 * time.Millisecond})
+	dial := func(network, address string, timeout time.Duration) (net.Conn, error) {
+		time.Sleep(75 * time.Millisecond)
+		return net.DialTimeout(network, address, timeout)
+	}
+	client, _, _, err := probeCredentialOwnerAttempt(path, 100*time.Millisecond, dial)
+	if client != nil {
+		defer client.Close()
+		t.Fatal("dial and Ping exceeded their shared deadline")
+	}
+	var timeout net.Error
+	if !errors.As(err, &timeout) || !timeout.Timeout() {
+		t.Fatalf("Ping error = %v, want shared deadline timeout", err)
+	}
+}
+
+func TestCredentialEndpointPingServerErrorRemainsIncompatible(t *testing.T) {
+	path := serveCredentialEndpointPingFixture(t, &credentialEndpointPingFixture{err: ErrCredentialEndpointIncompatible})
+	client, _, _, err := probeCredentialOwnerAttempt(path, time.Second, net.DialTimeout)
+	if client != nil {
+		defer client.Close()
+		t.Fatal("incompatible Ping returned a client")
+	}
+	if !errors.Is(err, ErrCredentialEndpointIncompatible) {
+		t.Fatalf("Ping error = %v, want incompatible protocol", err)
+	}
+}
+
+func TestCredentialEndpointDelegateCancelsBlockedPing(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	path := serveCredentialEndpointPingFixture(t, &credentialEndpointPingFixture{started: started, release: release})
+	defer close(release)
+	coordinator, _ := testCoordinator(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result := make(chan error, 1)
+	go func() {
+		defer func() { _ = recover() }()
+		control, err := OpenCredentialControlPrepared(ctx, path, coordinator, nil)
+		if control != nil {
+			_ = control.Close()
+		}
+		result <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Ping did not start")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled Ping error = %v, want context cancellation", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("blocked Ping did not honour cancellation")
 	}
 }
 
