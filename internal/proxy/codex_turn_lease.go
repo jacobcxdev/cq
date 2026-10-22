@@ -196,7 +196,7 @@ type codexManagedLease struct {
 
 type codexTurnLeaseManagerLifecycle struct {
 	closed      bool
-	persistence sync.Mutex
+	persistence codexLeasePersistenceGate
 }
 
 type CodexTurnLeaseManager struct {
