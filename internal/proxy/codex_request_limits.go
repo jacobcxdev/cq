@@ -3,10 +3,9 @@ package proxy
 const (
 	codexHTTPRequestMaxBytes      = 0
 	codexWebSocketMessageMaxBytes = 64 << 20
-	// OpenAI rejected an observed 40.9 MiB Codex request with WebSocket close
-	// 1009. Bound CQ at 32 MiB before lease admission so Codex can fall back to
-	// HTTP safely without repeatedly sending an already-large request.
-	codexWebSocketUpstreamRequestMaxBytes = 32 << 20
+	// OpenAI rejected observed 17.6 MB and 19.0 MB requests with close 1009.
+	// Reject above 16 MiB before lease admission, then require HTTP on reconnect.
+	codexWebSocketUpstreamRequestMaxBytes = 16 << 20
 	codexDiagnosticLineMaxBytes           = 10 << 20
 )
 

@@ -2175,6 +2175,20 @@ func TestServerCodexWebSocketEnforceTracesSafeBrokerFailure(t *testing.T) {
 			assertDiagnosticsLogDoesNotContain(t, path, "private-window-id")
 			assertDiagnosticsLogDoesNotContain(t, path, "private wrapped cause")
 			assertDiagnosticsLogDoesNotContain(t, path, "token-should-not-leak")
+			reconnected, retryResponse, retryErr := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(proxyServer.URL, "http")+legacyCodexResponsesPath, header)
+			if reconnected != nil {
+				_ = reconnected.Close()
+			}
+			if retryResponse != nil {
+				_ = retryResponse.Body.Close()
+			}
+			if test.wantClose == websocket.CloseMessageTooBig {
+				if retryErr == nil || retryResponse == nil || retryResponse.StatusCode != http.StatusUpgradeRequired {
+					t.Fatalf("oversized session reconnect = %v, %v; want 426", retryResponse, retryErr)
+				}
+			} else if retryErr != nil {
+				t.Fatalf("unrelated failure disabled WebSocket: %v", retryErr)
+			}
 		})
 	}
 }

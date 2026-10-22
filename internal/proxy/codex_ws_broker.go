@@ -609,6 +609,9 @@ func (reader *codexWSDownstreamReader) close() {
 }
 
 func classifyCodexWSDownstreamReadError(err error) error {
+	if errors.Is(err, websocket.ErrReadLimit) {
+		return newCodexWebSocketBrokerError(codexWebSocketFailureStageDownstreamRead, codexWebSocketFailureReasonMessageTooBig)
+	}
 	var closeErr *websocket.CloseError
 	if errors.Is(err, io.EOF) || errors.As(err, &closeErr) {
 		return nil
