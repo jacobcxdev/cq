@@ -32,7 +32,7 @@ Review includes source changes required to preserve released behaviour through t
 
 ## Verification record
 
-The initial reconciled source was verified at `c8c84e413d66d7334ee4e96310731ea642a1fe15`. The final follow-up only strengthens dispatch and fixture tests; its focused race tests also passed. The build identity is `0.39.0-dev` and the development builds omit release-time Gemini OAuth link data.
+Production source was verified at `3022c97e5aee9f4375e1d8bb3442dc2b728b3e67`. The final follow-up changes only test timing and this verification record; its focused race test also passed. The build identity is `0.39.0-dev` and the development builds omit release-time Gemini OAuth link data.
 
 | Check | Result |
 |---|---|
@@ -53,12 +53,12 @@ Development binary digests:
 
 | Target | SHA-256 |
 |---|---|
-| darwin/amd64 | `ff17955a8a31031eb9758955048032b7efde50c450bc0ea5884ee2741b89f7f1` |
-| darwin/arm64 | `e80f65216d7d611421cfe7b731de858fa4e01c28252aa79a8011835b44ead2d4` |
-| linux/amd64 | `0fd340b04522559d26ba33023337c527255224daa38ed0ea820370cf29378e34` |
-| linux/arm64 | `757c9631902bfa5c183ba2a299f4d4ac4a96ca2f034b7899801b1dcd464e6d37` |
-| windows/amd64 | `7d2faa9255c863760e45371e2d4023e79a71cd3e2482ce4b3364c149fe3d527a` |
-| windows/arm64 | `16df1fa5a33d306ea2c4683226de14d61ed69324438f0d693eeaf3b7801c0baa` |
+| darwin/amd64 | `8c0e0ada3ef753930e6faac9dc02a620488664207ce73e968a0e2110e6111744` |
+| darwin/arm64 | `a73f5413d34dae56336ca44884c12bba35137a1e0aca4c82483af65e2baa99fd` |
+| linux/amd64 | `17a857dbb458043556c2ae920b6e8f56eeec7abb62fd3b41701326dc6cb7ffad` |
+| linux/arm64 | `46a8515800ea6ffc967982cc446b5fd746952ced2b65150c42602cde59060a25` |
+| windows/amd64 | `05ad6277d49e754a2546884ea10e2f1caccdf4c98d5db2967f508d662b9740e0` |
+| windows/arm64 | `d6bc3548a56e3a916aca23676062c5777427723e51fbed69c63683525cb45d94` |
 
 These binaries are local verification artefacts, not signed or qualified release packages. Native package lifecycle, real provider traffic and installed-client acceptance remain release gates and were not run. No release workflow, tag, system installation replacement or live service operation was performed.
 
@@ -72,6 +72,8 @@ The first PR run passed generation, coverage, build and vet, then exposed two fa
 
 Zsh completion tests also encountered insecure directories in the runner's function search path. The test harness now uses `compinit -i -D` to exclude those directories without prompting or trusting them. Both source and native insertion tests inject an insecure directory deliberately; generated user completion output is unchanged.
 
-Targeted race tests and vet passed for both fixes. The current PR check is the final Linux build/vet/race gate; the binary digests above identify the earlier local smoke-tested source and do not claim to identify subsequent follow-up commits.
+Targeted race tests and vet passed for both fixes. The subsequent Linux ARM64 PR run passed build, vet, catalogue/fixture checks and the full race suite on `3022c97`. A standalone macOS full race run passed on the same production source; all six development builds and all executable smoke checks were repeated successfully. The binary digests above identify that source, not later test/documentation-only commits.
 
 A subsequent parallel run exposed a routing timeout race: the parent deadline could expire after a successful save but before the work context observed cancellation. Routing now checks the parent deadline directly and preserves the confirmed save receipt. A manually expired parent regression covers both sides of the save boundary without scheduler timing. The isolated PowerShell schema-test subprocess guard was raised from 15 to 60 seconds after a Linux runner exceeded the former bound; assertions and service isolation are unchanged.
+
+A 4 MiB Dots stock-protocol fixture once exceeded its three-second response deadline while six cross-compilers ran alongside the race suite. It passed 20 consecutive focused race runs and the standalone full suite. Its response wait now has a scoped ten-second bound; other fixture deadlines and exact payload/authentication assertions are unchanged. No Dots production code changed for this test adjustment.

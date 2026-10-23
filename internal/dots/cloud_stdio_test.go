@@ -230,15 +230,21 @@ func (h *cloudTestHarness) send(id any, method, root string) {
 
 func (h *cloudTestHarness) await(id any) cloudMessage {
 	h.t.Helper()
+	return h.awaitWithin(id, 3*time.Second)
+}
+
+func (h *cloudTestHarness) awaitWithin(id any, timeout time.Duration) cloudMessage {
+	h.t.Helper()
 	expected, _ := json.Marshal(id)
-	deadline := time.After(3 * time.Second)
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
 	for {
 		select {
 		case value := <-h.output.values:
 			if bytes.Equal(value["id"], expected) {
 				return value
 			}
-		case <-deadline:
+		case <-deadline.C:
 			h.t.Fatalf("response %s unavailable; output %s", expected, h.output.text())
 			return nil
 		}
@@ -331,7 +337,10 @@ func TestCloudStockRPCsAndAuthenticationRemainUnchanged(t *testing.T) {
 	if _, err := h.input.Write(raw); err != nil {
 		t.Fatal(err)
 	}
-	h.await("cq-internal-user")
+	// This byte-preservation check parses 4 MiB in both the adapter and fake
+	// stock child. Allow race-instrumented work under contention; latency is
+	// checked separately by the responsiveness tests.
+	h.awaitWithin("cq-internal-user", 10*time.Second)
 	h.send(2, "account/read", "")
 	h.await(2)
 	callback := []byte(`{"id":"refresh-request","method":"account/chatgptAuthTokens/refresh","params":{"reason":"unauthorized"}}` + "\n")
