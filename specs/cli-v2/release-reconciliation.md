@@ -32,7 +32,7 @@ Review includes source changes required to preserve released behaviour through t
 
 ## Verification record
 
-Production source was verified at `c8c84e413d66d7334ee4e96310731ea642a1fe15`. The final follow-up only strengthens dispatch and fixture tests; its focused race tests also passed. The build identity is `0.39.0-dev` and the development builds omit release-time Gemini OAuth link data.
+The initial reconciled source was verified at `c8c84e413d66d7334ee4e96310731ea642a1fe15`. The final follow-up only strengthens dispatch and fixture tests; its focused race tests also passed. The build identity is `0.39.0-dev` and the development builds omit release-time Gemini OAuth link data.
 
 | Check | Result |
 |---|---|
@@ -65,3 +65,11 @@ These binaries are local verification artefacts, not signed or qualified release
 The [September readiness report](production-readiness.md) remains historical evidence. Its source hashes, binary hashes, platform results and counts do not prove this reconciled revision. No native package lifecycle or live provider acceptance is claimed by local fake-service and synthetic HTTP tests.
 
 The four previously reserved candidate transitions remain explicitly unavailable with exit 4: candidate start, client-safety refresh, release activation and release validation. This reconciliation does not manufacture release qualification evidence or expand those capabilities.
+
+## Linux CI follow-up
+
+The first PR run passed generation, coverage, build and vet, then exposed two failures absent from the macOS run. A final removal checkpoint could accept a recreated directory when Linux recycled its inode. Inspection now rejects any root or tombstone that reappears after final quarantine, regardless of file identity. A deterministic reused-identity regression reproduces the old acceptance and verifies rejection.
+
+Zsh completion tests also encountered insecure directories in the runner's function search path. The test harness now uses `compinit -i -D` to exclude those directories without prompting or trusting them. Both source and native insertion tests inject an insecure directory deliberately; generated user completion output is unchanged.
+
+Targeted race tests and vet passed for both fixes. The current PR check is the final Linux build/vet/race gate; the binary digests above identify the earlier local smoke-tested source and do not claim to identify subsequent follow-up commits.

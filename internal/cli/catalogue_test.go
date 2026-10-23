@@ -191,7 +191,14 @@ func TestCLIV2CompletionSyntax(t *testing.T) {
 		case "bash":
 			sourceArgs = []string{"-c", `source "$1"`, "cq-completion-test", file}
 		case "zsh":
-			sourceArgs = []string{"-fc", `autoload -Uz compinit; compinit -D; source "$1"`, "cq-completion-test", file}
+			insecure := filepath.Join(t.TempDir(), "insecure-completions")
+			if err := os.Mkdir(insecure, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(insecure, 0o777); err != nil {
+				t.Fatal(err)
+			}
+			sourceArgs = []string{"-fc", `fpath=("$2" $fpath); autoload -Uz compinit; compinit -i -D; [[ ${fpath[(Ie)$2]} == 0 ]] || exit 1; source "$1"`, "cq-completion-test", file, insecure}
 		case "fish":
 			sourceArgs = []string{"-N", "-c", `source $argv[1]`, file}
 		}

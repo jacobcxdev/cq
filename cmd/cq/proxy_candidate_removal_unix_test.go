@@ -263,7 +263,7 @@ func TestCLIV2CandidateRemovalFinalCommitAndDiscovery(t *testing.T) {
 }
 
 func TestCLIV2CandidateRemovalCheckpointRejectsTamperAndReplacement(t *testing.T) {
-	for _, change := range []string{"tamper", "duplicate", "replacement", "wrong_path", "symlink"} {
+	for _, change := range []string{"tamper", "duplicate", "replacement", "replacement_reused_identity", "wrong_path", "symlink"} {
 		t.Run(change, func(t *testing.T) {
 			a, d := candidateV2Inputs(t)
 			prepareCandidateV2Test(t, a, d)
@@ -290,7 +290,7 @@ func TestCLIV2CandidateRemovalCheckpointRejectsTamperAndReplacement(t *testing.T
 				if err = os.WriteFile(filepath.Join(parent, normal), body, 0o600); err != nil {
 					t.Fatal(err)
 				}
-			case "replacement":
+			case "replacement", "replacement_reused_identity":
 				if err = os.Mkdir(a.InstanceStateRoot, 0o700); err != nil {
 					t.Fatal(err)
 				}
@@ -311,6 +311,16 @@ func TestCLIV2CandidateRemovalCheckpointRejectsTamperAndReplacement(t *testing.T
 			}
 			fresh := d
 			fresh.FS = fsutil.OSFileSystem{}
+			if change == "replacement_reused_identity" {
+				var checkpoint candidateRemovalCheckpoint
+				if err := decodeCandidateCanonicalJSON(body, &checkpoint); err != nil {
+					t.Fatal(err)
+				}
+				fresh.FS = candidateReusedDirectoryIdentityFS{
+					name:     filepath.Base(a.InstanceStateRoot),
+					identity: fsutil.SecureFileIdentity{Device: checkpoint.Device, Inode: checkpoint.Inode, FileID: checkpoint.FileID},
+				}
+			}
 			exit, out := runCandidateV2(t, context.Background(), []string{"proxy", "candidate", "status", "--state-dir", a.InstanceStateRoot, "--json"}, &fresh)
 			if exit != 6 {
 				t.Fatalf("accepted %s: %d %+v", change, exit, out)
@@ -352,4 +362,18 @@ func TestCLIV2CandidateCheckpointSurvivingReceipt(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("surviving receipt=%d %+v", code, out)
 	}
+}
+
+// Reproduce inode reuse independently of the host filesystem allocator.
+type candidateReusedDirectoryIdentityFS struct {
+	fsutil.OSFileSystem
+	name     string
+	identity fsutil.SecureFileIdentity
+}
+
+func (f candidateReusedDirectoryIdentityFS) FileIdentity(info os.FileInfo) (fsutil.SecureFileIdentity, bool) {
+	if info.IsDir() && info.Name() == f.name {
+		return f.identity, true
+	}
+	return f.OSFileSystem.FileIdentity(info)
 }

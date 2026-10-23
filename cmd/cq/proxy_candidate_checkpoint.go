@@ -134,6 +134,7 @@ func inspectCandidateRemovalCheckpoint(ctx context.Context, fsys fsutil.FileSyst
 	defer parent.Close()
 	name, final := candidateCheckpointNames(root)
 	var body []byte
+	finalCheckpoint := false
 	for _, leaf := range []string{name, final} {
 		if err := fsutil.ValidateSecureRegularFile(fsys, filepath.Join(filepath.Dir(root), leaf)); errors.Is(err, os.ErrNotExist) {
 			continue
@@ -154,6 +155,7 @@ func inspectCandidateRemovalCheckpoint(ctx context.Context, fsys fsutil.FileSyst
 			return zero, false, "", proxy.ErrCandidateLifecycleInvalid
 		}
 		body = data
+		finalCheckpoint = leaf == final
 	}
 	if body == nil {
 		return zero, false, root, nil
@@ -185,6 +187,12 @@ func inspectCandidateRemovalCheckpoint(ctx context.Context, fsys fsutil.FileSyst
 		}
 		if err != nil {
 			return zero, false, "", err
+		}
+		// The final checkpoint is quarantined only after both directory names
+		// are absent. A later directory is a replacement even if its inode
+		// was recycled from the deleted candidate.
+		if finalCheckpoint {
+			return zero, false, "", proxy.ErrCandidateLifecycleInvalid
 		}
 		if err = fsutil.ValidateSecureDirectory(fsys, path); err != nil {
 			return zero, false, "", err

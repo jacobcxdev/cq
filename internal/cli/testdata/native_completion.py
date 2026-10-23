@@ -17,6 +17,10 @@ with tempfile.TemporaryDirectory(prefix="cq-native-completion-") as directory:
     root = Path(directory)
     (root / "Équipe bleue.json").write_text("{}\n")
     (root / "service").mkdir()
+    # Exercise CI hosts with insecure completion directories without trusting them.
+    insecure = root / "insecure-completions"
+    insecure.mkdir()
+    insecure.chmod(0o777)
     environment = {
         "HOME": directory,
         "PATH": "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
@@ -49,7 +53,8 @@ with tempfile.TemporaryDirectory(prefix="cq-native-completion-") as directory:
     try:
         setup = ""
         if shell.endswith("zsh"):
-            setup += "autoload -Uz compinit; compinit -D; "
+            setup += "fpath=(" + shlex.quote(str(insecure)) + " $fpath); "
+            setup += "autoload -Uz compinit; compinit -i -D; "
         setup += "source " + shlex.quote(completion) + "; "
         setup += "cq() { printf '%s\\0' \"$@\" > argv; printf '\\n__CQ_DONE__\\n'; }; "
         setup += "printf '\\n__CQ_READY__\\n'\n"
