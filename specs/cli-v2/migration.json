@@ -3819,5 +3819,62 @@
       "exit": 2,
       "message": "Specify a provider: use cq claude proxy pin show or cq codex proxy pin show."
     }
+  },
+  {
+    "legacy_path": "service upgrade",
+    "source": "v0.38.8:cmd/cq/service_command.go",
+    "visibility": "public-with-hidden-machine-options",
+    "disposition": "canonical",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--owner",
+        "target": "--owner",
+        "rule": "Preserve released package grammar and native output for exact package forms; canonical public parsing additionally accepts separated values and ordinary global options."
+      },
+      {
+        "legacy": "--candidate-executable",
+        "target": "--candidate-executable",
+        "rule": "Preserve released package grammar and native output for exact package forms; canonical public parsing additionally accepts separated values and ordinary global options."
+      },
+      {
+        "legacy": "--service-executable",
+        "target": "--service-executable",
+        "rule": "Preserve released package grammar and native output for exact package forms; canonical public parsing additionally accepts separated values and ordinary global options."
+      },
+      {
+        "legacy": "--json",
+        "target": "--json",
+        "rule": "Preserve released package grammar and native output for exact package forms; canonical public parsing additionally accepts separated values and ordinary global options."
+      },
+      {
+        "legacy": "--installer-lock-held",
+        "target": "--installer-lock-held",
+        "rule": "Package-only inherited descriptor proof; excluded from public options. Preserve frozen validated package dispatch."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Released raw RuntimeUpgradeReceiptV1 JSON, one-line human receipt and operational exit 1 with cq: ERROR stderr remain unchanged. Public help and invalid-argument diagnostics use canonical pure parsing."
+    ],
+    "canonical_path": "service upgrade",
+    "deprecation": false,
+    "canonical_option_defaults": {
+      "owner": {
+        "default": null,
+        "required": true,
+        "omission_help": "Existing installation owner. Required: homebrew."
+      },
+      "candidate-executable": {
+        "default": null,
+        "required": true,
+        "omission_help": "Candidate CQ executable to verify and retain. Required."
+      },
+      "service-executable": {
+        "default": null,
+        "required": false,
+        "omission_help": "Stable Homebrew CQ link identifying the installed package. Omit to use the running executable path."
+      }
+    }
   }
 ]

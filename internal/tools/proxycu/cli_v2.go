@@ -70,8 +70,8 @@ func cliV2CompatibilitySelection(repositoryRoot string) (proxy.CUTestPackageV1, 
 			return selection, fmt.Errorf("unknown catalogue kind")
 		}
 	}
-	if leaves != 99 || groups != 38 {
-		return selection, fmt.Errorf("CLI-v2 roster requires 99 leaves and 38 groups")
+	if leaves != 100 || groups != 38 {
+		return selection, fmt.Errorf("CLI-v2 roster requires 100 leaves and 38 groups")
 	}
 	for _, state := range []string{"absent", "stopped", "indeterminate", "unhealthy"} {
 		selection.FullTestIDs = append(selection.FullTestIDs, "TestCLIV2ProxyStatusFacts/"+state)

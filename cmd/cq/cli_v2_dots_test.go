@@ -51,7 +51,17 @@ func TestCLIV2DotsRejectedBeforeRunnerIO(t *testing.T) {
 			if out.ExitCode != 2 || len(out.Errors) != 1 || out.Errors[0].Code != "dots_invalid_argument" {
 				t.Fatalf("outcome = %#v", out)
 			}
+			if !strings.HasPrefix(out.Errors[0].Message, "Invalid Dots argument: ") {
+				t.Fatalf("invalid argument omitted its documented prefix: %q", out.Errors[0].Message)
+			}
 		})
+	}
+}
+
+func TestCLIV2DotsInvalidArgumentMessage(t *testing.T) {
+	out := handleV2DotsWithRunner(context.Background(), v2DotsTestInvocation("prime"), nil, dotsRunner{})
+	if len(out.Errors) != 1 || out.Errors[0].Message != "Invalid Dots argument: Choose a stable Dot handle, an unambiguous name, or --all." {
+		t.Fatalf("outcome = %#v", out)
 	}
 }
 

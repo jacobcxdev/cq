@@ -1309,8 +1309,9 @@ Status: draft. Shared formatting in [README](README.md) applies. Every section b
 | `status` | Inspect selected CQ service components. |
 | `stop` | Stop and disable selected CQ services. |
 | `uninstall` | Stop and remove selected CQ service registrations. |
+| `upgrade` | Upgrade a Homebrew proxy runtime while retaining its listener. |
 
-**Installer boundary:** Package installers manage retained-runtime upgrades. Use `cq service status` to inspect recorded upgrade state and the observed live executable. `service upgrade`, `proxy runtime-check` and private runtime children are machine interfaces, not missing public subcommands; omit them from this child list, public examples and completion. Their exact forms belong in [the frozen machine ABI](../internal-abi.md).
+**Upgrade boundary:** `service upgrade` is a public Homebrew operation with ordinary help and completion. It retains the released raw receipt and error protocol; help explains this exception. Use `cq service status` to inspect recorded upgrade state and the observed live executable. `proxy runtime-check`, inherited installer locks and private runtime children remain machine interfaces in [the frozen machine ABI](../internal-abi.md).
 
 **Examples:**
 

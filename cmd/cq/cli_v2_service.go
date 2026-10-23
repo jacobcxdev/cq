@@ -15,6 +15,8 @@ import (
 
 func lookupV2Service(path string) (cli.Handler, bool) {
 	switch path {
+	case "service upgrade":
+		return handleV2ServiceUpgrade, true
 	case "service install", "service start", "service stop", "service restart", "service status", "service uninstall":
 		return handleV2Service, true
 	}

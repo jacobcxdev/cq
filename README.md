@@ -264,7 +264,7 @@ After an explicit account switch, already-running clients or MCP servers may nee
 
 ### Service lifecycle and status
 
-macOS Homebrew upgrades retain the proxy listener, stop admitting new work, drain each current turn, and select verified runtime copies. Finished WebSocket chats reconnect while other turns finish. First adoption needs a maintenance window. Runtime upgrades are installer-owned; `cq service status` reports their recorded state and the observed live executable. See [Homebrew upgrades](docs/homebrew-upgrades.md).
+macOS Homebrew upgrades retain the proxy listener, stop admitting new work, drain each current turn, and select verified runtime copies. Finished WebSocket chats reconnect while other turns finish. First adoption needs a maintenance window. Use `cq service upgrade --help` for explicit Homebrew runtime selection; it retains the released raw JSON receipt protocol. `cq service status` reports recorded upgrade state and the observed live executable. See [Homebrew upgrades](docs/homebrew-upgrades.md).
 
 Complete installers own service installation and removal. Use `cq service` to
 inspect or restart both package-owned components together:
@@ -749,6 +749,7 @@ cq service start
 cq service status
 cq service stop
 cq service uninstall
+cq service upgrade
 cq version
 ```
 <!-- public-command-index:end -->

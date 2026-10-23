@@ -116,6 +116,7 @@ func assembleCLIV2() map[string]cli.Handler {
 		"service status",
 		"service stop",
 		"service uninstall",
+		"service upgrade",
 		"version",
 	}
 	families := []cli.Lookup{lookupV2Dots, lookupV2Auth, lookupV2AccountInspection, lookupV2AccountMutation, lookupV2Canary, lookupV2Hook, lookupV2Endpoint, lookupV2Candidate, lookupV2Rescue, lookupV2Reserve, lookupV2Service, lookupV2Policy, lookupV2RoutingDiagnostics, lookupV2Models, lookupV2ResetInspection, lookupV2ResetUse, lookupV2Validation, lookupV2Selection, lookupV2Proxy}

@@ -139,6 +139,7 @@ _cq_kind() {
     'service status') printf '%s\n' command ;;
     'service stop') printf '%s\n' command ;;
     'service uninstall') printf '%s\n' command ;;
+    'service upgrade') printf '%s\n' command ;;
     version) printf '%s\n' command ;;
   esac
 }
@@ -183,7 +184,7 @@ _cq_children() {
     'proxy operation') printf '%s\n' status ;;
     'proxy rescue') printf '%s\n' enter exit status ;;
     'proxy state') printf '%s\n' initialise ;;
-    service) printf '%s\n' install restart start status stop uninstall ;;
+    service) printf '%s\n' install restart start status stop uninstall upgrade ;;
   esac
 }
 
@@ -326,6 +327,7 @@ _cq_options() {
     'service status') printf '%s\n' --component --strict --timeout --help -h --json -j --version -v ;;
     'service stop') printf '%s\n' --component --timeout --help -h --json -j --version -v ;;
     'service uninstall') printf '%s\n' --component --timeout --help -h --json -j --version -v ;;
+    'service upgrade') printf '%s\n' --owner --candidate-executable --service-executable --help -h --json -j --version -v ;;
     version) printf '%s\n' --help -h --json -j --version -v ;;
   esac
 }
@@ -349,6 +351,7 @@ _cq_choices() {
     'service status|option|--component') printf '%s\n' all proxy token-refresh ;;
     'service stop|option|--component') printf '%s\n' all proxy token-refresh ;;
     'service uninstall|option|--component') printf '%s\n' all proxy token-refresh ;;
+    'service upgrade|option|--owner') printf '%s\n' homebrew ;;
   esac
 }
 
@@ -543,6 +546,9 @@ _cq_takes_value() {
     'service stop|--timeout') printf '%s\n' 1 ;;
     'service uninstall|--component') printf '%s\n' 1 ;;
     'service uninstall|--timeout') printf '%s\n' 1 ;;
+    'service upgrade|--owner') printf '%s\n' 1 ;;
+    'service upgrade|--candidate-executable') printf '%s\n' 1 ;;
+    'service upgrade|--service-executable') printf '%s\n' 1 ;;
   esac
 }
 
@@ -1598,6 +1604,15 @@ _cq_canonical_option() {
     'service uninstall|-j') printf '%s\n' --json ;;
     'service uninstall|--version') printf '%s\n' --version ;;
     'service uninstall|-v') printf '%s\n' --version ;;
+    'service upgrade|--owner') printf '%s\n' --owner ;;
+    'service upgrade|--candidate-executable') printf '%s\n' --candidate-executable ;;
+    'service upgrade|--service-executable') printf '%s\n' --service-executable ;;
+    'service upgrade|--help') printf '%s\n' --help ;;
+    'service upgrade|-h') printf '%s\n' --help ;;
+    'service upgrade|--json') printf '%s\n' --json ;;
+    'service upgrade|-j') printf '%s\n' --json ;;
+    'service upgrade|--version') printf '%s\n' --version ;;
+    'service upgrade|-v') printf '%s\n' --version ;;
     'version|--help') printf '%s\n' --help ;;
     'version|-h') printf '%s\n' --help ;;
     'version|--json') printf '%s\n' --json ;;
@@ -1658,6 +1673,8 @@ _cq_path_value() {
     'proxy candidate stop|option|--state-dir') printf '%s\n' 1 ;;
     'proxy state initialise|option|--state-dir') printf '%s\n' 1 ;;
     'proxy status|option|--state-dir') printf '%s\n' 1 ;;
+    'service upgrade|option|--candidate-executable') printf '%s\n' 1 ;;
+    'service upgrade|option|--service-executable') printf '%s\n' 1 ;;
   esac
 }
 

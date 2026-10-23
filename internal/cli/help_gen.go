@@ -2139,6 +2139,7 @@ var terminalHelpByPath = map[string]helpPage{
 			{Label: "status", Description: "Inspect selected CQ service components.", Details: []string{}},
 			{Label: "stop", Description: "Stop and disable selected CQ services.", Details: []string{}},
 			{Label: "uninstall", Description: "Stop and remove selected CQ service registrations.", Details: []string{}},
+			{Label: "upgrade", Description: "Upgrade a Homebrew proxy runtime while retaining its listener.", Details: []string{}},
 		},
 		Related: []helpEntry{
 			{Label: "cq proxy", Description: "Inspect proxy readiness or run proxy in foreground.", Details: []string{}},
@@ -2244,6 +2245,24 @@ var terminalHelpByPath = map[string]helpPage{
 		Examples: []helpEntry{
 			{Label: "cq service uninstall --component proxy", Description: "Apply only to the shared proxy.", Details: []string{}},
 			{Label: "cq service uninstall --component token-refresh", Description: "Apply only to the scheduled token-refresh component.", Details: []string{}},
+		},
+	},
+	"service upgrade": {
+		Summary:     "Upgrade a Homebrew proxy runtime while retaining its listener.",
+		Usage:       "cq service upgrade --owner OWNER --candidate-executable ABS_PATH [OPTIONS]",
+		Description: []string{"Upgrade an existing Homebrew-owned installation on macOS. Verify and retain the candidate executable, stop admitting new work, drain active turns, hand over the listener and verify the selected runtime. Refresh registration and ownership metadata follow the verified runtime.", "This released command retains its native output protocol: --json emits one raw RuntimeUpgradeReceiptV1 document, without the CLI-v2 envelope. Operational errors exit 1 and write cq: ERROR to stderr, including with --json. Help remains ordinary pure CLI help.", "First adoption of a predecessor without retained-runtime support requires a maintenance window; the command fails with guidance instead of silently stopping active work. No --component or --timeout option is accepted."},
+		Commands:    []helpEntry{},
+		Related:     []helpEntry{},
+		Arguments:   []helpEntry{},
+		Options: []helpEntry{
+			{Label: "--owner OWNER", Description: "Existing installation owner. Required: homebrew.", Details: []string{"Required.", "Choices: homebrew.", "Must be homebrew; this does not transfer ownership or adopt a foreign installation."}},
+			{Label: "--candidate-executable ABS_PATH", Description: "Candidate CQ executable to verify and retain. Required.", Details: []string{"Required.", "Nonempty clean absolute path; exactly equal to its platform-cleaned form.", "Must exist and pass current-user file ownership, permissions, native build provenance and runtime protocol checks before handover."}},
+			{Label: "--service-executable ABS_PATH", Description: "Stable Homebrew CQ link identifying the installed package. Omit to use the running executable path.", Details: []string{"When omitted: Use the current executable path; the selected path must match existing Homebrew ownership.", "Nonempty clean absolute path when supplied.", "Must resolve to the same file as the currently running CQ executable; it identifies the package, not the retained runtime."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq", Description: "Verify the installed package candidate and upgrade the existing Homebrew runtime.", Details: []string{}},
+			{Label: "cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq --json", Description: "Emit the released raw upgrade receipt for automation.", Details: []string{}},
+			{Label: "cq service status", Description: "Inspect recorded upgrade state and actual service health after the attempt.", Details: []string{}},
 		},
 	},
 	"version": {

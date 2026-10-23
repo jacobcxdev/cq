@@ -1,0 +1,74 @@
+Upgrade a Homebrew proxy runtime while retaining its listener.
+
+Usage: cq service upgrade --owner OWNER --candidate-executable ABS_PATH [OPTIONS]
+
+Upgrade an existing Homebrew-owned installation on macOS. Verify and retain the
+candidate executable, stop admitting new work, drain active turns, hand over the
+listener and verify the selected runtime. Refresh registration and ownership metadata
+follow the verified runtime.
+
+This released command retains its native output protocol: --json emits one raw
+RuntimeUpgradeReceiptV1 document, without the CLI-v2 envelope. Operational errors exit 1
+and write cq: ERROR to stderr, including with --json. Help remains ordinary pure CLI
+help.
+
+First adoption of a predecessor without retained-runtime support requires a maintenance
+window; the command fails with guidance instead of silently stopping active work. No
+--component or --timeout option is accepted.
+
+Options:
+  --owner OWNER
+      Existing installation owner. Required: homebrew.
+      Type: enum. Required: true. Repeatable: false.
+      Default: null.
+      Choices: homebrew.
+      Constraint: Must be homebrew; this does not transfer ownership or adopt a foreign
+      installation.
+  --candidate-executable ABS_PATH
+      Candidate CQ executable to verify and retain. Required.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Nonempty clean absolute path; exactly equal to its platform-cleaned
+      form.
+      Constraint: Must exist and pass current-user file ownership, permissions, native
+      build provenance and runtime protocol checks before handover.
+  --service-executable ABS_PATH
+      Stable Homebrew CQ link identifying the installed package. Omit to use the running
+      executable path.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      When omitted: Use the current executable path; the selected path must match
+      existing Homebrew ownership.
+      Constraint: Nonempty clean absolute path when supplied.
+      Constraint: Must resolve to the same file as the currently running CQ executable;
+      it identifies the package, not the retained runtime.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq
+      Verify the installed package candidate and upgrade the existing Homebrew runtime.
+  cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq --json
+      Emit the released raw upgrade receipt for automation.
+  cq service status
+      Inspect recorded upgrade state and actual service health after the attempt.

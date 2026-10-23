@@ -1164,6 +1164,13 @@
         "service_uninstall_timeout"
       ]
     },
+    "service upgrade": {
+      "document": "runtime.md",
+      "help": true,
+      "declared_errors": [
+        "service_upgrade_failed"
+      ]
+    },
     "version": {
       "document": "accounts.md",
       "help": true,

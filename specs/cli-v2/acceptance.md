@@ -926,6 +926,14 @@ These are implementation requirements, not claims that the current binary passes
 - [ ] Owner conflicts never replace registrations.
 - [ ] JSON supported for every action.
 
+## `cq service upgrade`
+
+- [ ] All help spellings succeed without lifecycle construction or state access.
+- [ ] Required owner and candidate, invalid/unclean paths, duplicates and unknown --component are rejected before lifecycle construction.
+- [ ] Exact released equals-form package invocations retain frozen dispatch and raw receipt output.
+- [ ] Canonical separated-value/global-option invocations use the same native receipt/error protocol with no schema-2 wrapper.
+- [ ] Success, deferred failure, early preparation failure and output failure preserve their released stdout/stderr and exit meanings.
+
 ## `cq version`
 
 - [ ] version succeeds without home directory or credentials.

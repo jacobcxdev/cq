@@ -58,7 +58,7 @@ func TestTerminalCatalogueManifestCoverage(t *testing.T) {
 	if err := json.Unmarshal(indexBytes, &index); err != nil {
 		t.Fatal(err)
 	}
-	if len(manifest.Commands) != 99 || manifest.Groups.Task != "T03" || len(manifest.Groups.Paths) != 39 || index.HelpPages != 138 || len(index.Fixtures) != 560 || len(manifest.Fixtures) != len(index.Fixtures) {
+	if len(manifest.Commands) != 100 || manifest.Groups.Task != "T03" || len(manifest.Groups.Paths) != 39 || index.HelpPages != 139 || len(index.Fixtures) != 568 || len(manifest.Fixtures) != len(index.Fixtures) {
 		t.Fatalf("catalogue size changed: commands=%d groups-and-root=%d helps=%d fixtures=%d assigned=%d", len(manifest.Commands), len(manifest.Groups.Paths), index.HelpPages, len(index.Fixtures), len(manifest.Fixtures))
 	}
 	var catalogue struct {
@@ -142,6 +142,9 @@ func TestTerminalCatalogueManifestCoverage(t *testing.T) {
 		add(f)
 	}
 	for _, f := range terminalServiceFixtures {
+		add(f)
+	}
+	for _, f := range terminalServiceUpgradeFixtures {
 		add(f)
 	}
 	for _, f := range terminalCheckFixtures {

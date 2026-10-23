@@ -13325,6 +13325,147 @@ Apply only to the scheduled token-refresh component.
 - `v0.32.5:cmd/cq/service_command.go:85`
 - `v0.32.5:cmd/cq/service.go:72`
 
+## `cq service upgrade`
+
+Upgrade a Homebrew proxy runtime while retaining its listener.
+
+```text
+cq service upgrade --owner OWNER --candidate-executable ABS_PATH [OPTIONS]
+```
+
+[Exact help](help/service-upgrade.txt) · Family: root · Kind: command
+
+Upgrade an existing Homebrew-owned installation on macOS. Verify and retain the candidate executable, stop admitting new work, drain active turns, hand over the listener and verify the selected runtime. Refresh registration and ownership metadata follow the verified runtime.
+This released command retains its native output protocol: --json emits one raw RuntimeUpgradeReceiptV1 document, without the CLI-v2 envelope. Operational errors exit 1 and write cq: ERROR to stderr, including with --json. Help remains ordinary pure CLI help.
+First adoption of a predecessor without retained-runtime support requires a maintenance window; the command fails with guidance instead of silently stopping active work. No --component or --timeout option is accepted.
+
+### Naming rationale
+
+- `service`: Operating-system-managed proxy and token-refresh jobs owned by CQ.
+- `upgrade`: Select a verified candidate runtime while retaining listener ownership and draining current work.
+- `owner`: Package authority that already owns the installation; this command requires Homebrew.
+- `candidate-executable`: Existing candidate CQ executable whose bytes, build identity and runtime protocol are verified before selection.
+- `service-executable`: Stable Homebrew CQ link used to match the installation owner record; distinct from a retained runtime copy.
+
+### Arguments
+
+None.
+
+### Options
+
+#### `--owner OWNER`
+
+Existing installation owner. Required: homebrew.
+
+Type: enum. Required: true. Repeatable: false.
+
+Default: null.
+
+Choices: homebrew.
+
+Constraint: Must be homebrew; this does not transfer ownership or adopt a foreign installation.
+
+#### `--candidate-executable ABS_PATH`
+
+Candidate CQ executable to verify and retain. Required.
+
+Type: path. Required: true. Repeatable: false.
+
+Default: null.
+
+Constraint: Nonempty clean absolute path; exactly equal to its platform-cleaned form.
+
+Constraint: Must exist and pass current-user file ownership, permissions, native build provenance and runtime protocol checks before handover.
+
+#### `--service-executable ABS_PATH`
+
+Stable Homebrew CQ link identifying the installed package. Omit to use the running executable path.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: Use the current executable path; the selected path must match existing Homebrew ownership.
+
+Constraint: Nonempty clean absolute path when supplied.
+
+Constraint: Must resolve to the same file as the currently running CQ executable; it identifies the package, not the retained runtime.
+
+### Preconditions
+
+- macOS Homebrew-owned retained-runtime installation; unsupported platforms or owners fail without handover.
+- The installation mutation lock must be acquired. Package hooks may separately use the frozen --installer-lock-held marker with its inherited descriptor proof; this is not a public option.
+- Candidate and currently selected artifacts must pass retained-file, digest, build and runtime protocol validation.
+
+### Effects and completion
+
+- Keep the proxy service registration and listener; wait for current turns before handing over to the verified candidate.
+- A deferred or failed upgrade can retain its attempt receipt; inspect cq service status before retrying.
+- On a verified runtime change, update the token-refresh registration and Homebrew ownership record; use the released recovery transaction if later steps fail.
+- No automatic elevation, package download, package version selection or public component selection.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+- `schema_version`: integer 1 in a valid native RuntimeUpgradeReceiptV1; raw compatibility output, not a CLI-v2 envelope
+- `transaction_id`: string; validated persisted transaction identifier
+- `generation`: positive uint64 for a validated receipt
+- `phase`: prepared|waiting|handoff|verifying|committed|deferred|rolling_back|rolled_back|failed
+- `previous`: RuntimeArtifact; previous retained executable identity
+- `candidate`: RuntimeArtifact; candidate retained executable identity
+- `listener_identity`: string; retained listener identity
+- `supervisor_pid`: integer; original supervisor PID
+- `guard_pid`: optional integer; handover guard PID
+- `recovered_supervisor_pid`: optional integer; supervisor PID after recovery
+- `recovery_attempts`: optional integer; recovery count
+- `admission_pause_nanos`: nonnegative integer; measured admission pause
+- `error_code`: optional string; native recovery diagnostic
+
+Human output template:
+
+```text
+Runtime upgrade: {phase} ({previous.version} -> {candidate.version})
+
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+| service_upgrade_failed | 1 | The released lifecycle reports ownership, unsupported platform, maintenance adoption, lock, staging, handover, deferred, verification, recovery or output failure. This conceptual code is not added to the raw protocol. | {native lifecycle error} |
+
+### Examples
+
+```sh
+cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq
+```
+
+Verify the installed package candidate and upgrade the existing Homebrew runtime.
+
+```sh
+cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq --json
+```
+
+Emit the released raw upgrade receipt for automation.
+
+```sh
+cq service status
+```
+
+Inspect recorded upgrade state and actual service health after the attempt.
+
+### Compatibility spellings
+
+No additional spellings; see migration inventory for old flags on unchanged paths.
+
+### Source evidence
+
+- `current:cmd/cq/service_command.go`
+- `current:cmd/cq/service_upgrade.go`
+- `current:cmd/cq/service_upgrade_darwin.go`
+- `current:internal/proxy/runtime_upgrade.go`
+
 ## `cq version`
 
 Show CQ build identity.

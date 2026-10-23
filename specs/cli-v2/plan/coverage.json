@@ -1514,6 +1514,19 @@
       "contract": "commands.json#service.uninstall"
     },
     {
+      "path": "service upgrade",
+      "owner": "T18",
+      "options": [
+        "owner",
+        "candidate-executable",
+        "service-executable"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#service.upgrade"
+    },
+    {
       "path": "version",
       "owner": "T02",
       "options": [],
@@ -2712,6 +2725,17 @@
       ],
       "semantic_owners": [
         "T16"
+      ]
+    },
+    {
+      "legacy_path": "service upgrade",
+      "owner": "T03",
+      "disposition": "canonical",
+      "targets": [
+        "service upgrade"
+      ],
+      "semantic_owners": [
+        "T18"
       ]
     }
   ],

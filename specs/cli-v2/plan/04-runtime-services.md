@@ -109,8 +109,11 @@ go vet ./cmd/cq ./internal/proxy
 | `service status` | None | `--component`, `--strict`, `--timeout` | [Help](../help/service-status.txt) |
 | `service stop` | None | `--component`, `--timeout` | [Help](../help/service-stop.txt) |
 | `service uninstall` | None | `--component`, `--timeout` | [Help](../help/service-uninstall.txt) |
+| `service upgrade` | None | `--owner`, `--candidate-executable`, `--service-executable` | [Help](../help/service-upgrade.txt) |
 
 This task owns every listed command's defaults, required/repeatable flags, ranges, combinations, preconditions, effects, DTOs, exact help/examples, error precedence and acceptance cases in commands.json. Shared lexical checks are T03; this task owns file/account/authority checks and operational outcomes. Global help/json/version options apply to every row.
+
+**Released upgrade reconciliation:** T18 also owns the released public Homebrew upgrade operation. Preserve its native RuntimeUpgradeReceiptV1 JSON, one-line human receipt, operational exit 1 and `cq: ERROR` stderr protocol. Canonical help and argument validation remain pure; explicit package invocations retain their frozen dispatch. This operation does not accept component selection or a public timeout. Verify success, deferred and early failures, invalid owner/paths, all help spellings and raw output before considering the command complete.
 
 **Fixture arrangement:** service-selective-stop fixture installs both components, sets both enabled/running and records per-component manager calls. service-disabled-refresh fixture is installed/disabled; forced restart finishes a new successful run but stays disabled. service-rollback fixture fails second selected component and then either restores or fails rollback.
 

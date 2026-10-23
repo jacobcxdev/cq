@@ -1039,5 +1039,19 @@
     "positionals": [],
     "source": "v0.32.5:cmd/cq/proxy.go:347",
     "notes": "Bare invocation reads/displays both Claude and Codex pins; real leaf behaviour as well as namespace."
+  },
+  {
+    "path": "service upgrade",
+    "visibility": "public-with-hidden-machine-options",
+    "flags": [
+      "--owner",
+      "--candidate-executable",
+      "--service-executable",
+      "--installer-lock-held",
+      "--json"
+    ],
+    "positionals": [],
+    "source": "v0.38.8:cmd/cq/service_command.go",
+    "notes": "Released public Homebrew retained-runtime upgrade. Required owner homebrew and clean absolute candidate-executable; optional stable service-executable and JSON receipt. Released executable path options use equals form. Inherited installer lock is package-only. Native receipt, human output and operational exit/error protocol are preserved."
   }
 ]

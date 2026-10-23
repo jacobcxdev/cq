@@ -11,7 +11,7 @@ Status: design draft, not implemented output. Shared [presentation rules](README
 - Successful human result goes to stdout. Failure heading and exact canonical error message go to stderr, including stable code and exit status. When an adapter returns useful partial data, retain the designed data block and mark it “Observed state · incomplete”; do not synthesise absent fields. Global failures use the shared parser/environment contract. Interrupt exits 130 with `interrupted` and “Operation interrupted; inspect state before retrying.” where supported by the adapter. Cancellation never implies rollback or unchanged state.
 - Failure wireframe for every table row below is `Error · {exact Message}`, then secondary `cq COMMAND · CODE · exit N`; retain observed-state block only when returned. Timeout and interruption use their exact canonical messages in that same heading and retain their code/exit. Red failures may contain amber incomplete observations. No invented retry command after an indeterminate mutation.
 - Help layout for every leaf follows README.md order: title, summary, usage, essential context, arguments, options, global options, related commands, examples. All support `-h, --help`, `-j, --json`, `-v, --version` with shared meanings. Bare help exits 0 without state access, regardless of `--json`. Repeatability/required metadata becomes concise `[required]`, `[repeatable]` or default text; exact validation is preserved in wrapped subordinate text, not repeated boolean boilerplate. No positional arguments unless enumerated per command.
-- Stream exceptions: foreground proxy JSONL and default Codex hook JSON are byte/protocol-preserving, colourless, bannerless. Designed help remains available without starting streams or reading hook stdin.
+- Stream exceptions: foreground proxy JSONL, default Codex hook JSON and native service-upgrade receipts are byte/protocol-preserving, colourless, bannerless. Designed help remains available without starting streams or reading hook stdin.
 
 ## `cq codex proxy canary start`
 
@@ -2214,7 +2214,59 @@ Active runtime  0.35.0
 Upgrade         failed
 ```
 
-Service help explains that package installers manage retained-runtime upgrades and `cq service status` reports recorded upgrade state separately from observed live process identity. Package-only `service upgrade`, `proxy runtime-check` and private runtime children are excluded from public command lists, examples and completion; their exact contracts are in [the machine ABI](../internal-abi.md).
+Service help includes the public `service upgrade` operation and explains its raw output exception. `cq service status` reports recorded upgrade state separately from observed live process identity. `proxy runtime-check`, inherited installer locks and private runtime children remain outside public command lists; their exact contracts are in [the machine ABI](../internal-abi.md).
+
+## `cq service upgrade`
+
+```text
+Usage: cq service upgrade --owner homebrew --candidate-executable ABS_PATH [OPTIONS]
+```
+
+**User decision:** Did the verified Homebrew candidate become the selected runtime, or was the attempt deferred, rolled back or failed?
+
+**Help lead:** Upgrade a Homebrew proxy runtime while retaining its listener.
+
+### Help contract
+
+This public operation requires an existing macOS Homebrew-owned installation with retained-runtime support. It verifies the candidate, stops admission, drains active turns, hands over the retained listener and verifies the selected runtime. Token-refresh registration and ownership metadata follow the verified runtime. First adoption from a predecessor without this capability requires a maintenance window and fails with guidance. No package download, elevation or component selection is implicit.
+
+No positional parameters. Public options, each permitted once:
+
+| Option | Meaning, omission and validation |
+|---|---|
+| `--owner OWNER` | Required; exact value `homebrew`. Identifies the existing package authority; does not transfer ownership or adopt a foreign installation. |
+| `--candidate-executable ABS_PATH` | Required clean absolute path to an existing CQ executable. Candidate bytes, current-user ownership, permissions, native build provenance and runtime protocol must pass validation before handover. |
+| `--service-executable ABS_PATH` | Optional clean absolute path to the stable Homebrew link. Defaults to the running executable path. Must resolve to the same file as the current executable and match the existing installation owner record. This identifies the package, not the retained runtime. |
+
+Public value options accept separated and equals spellings. Global help, JSON and version options apply, including their explicit boolean forms. No `--component` or `--timeout` option exists. Package hooks separately retain their exact inherited-lock grammar; `--installer-lock-held` is not a public option.
+
+### Result design and compatibility exception
+
+This released operation retains its native output bytes, without ANSI colour or a redesigned result card. Help uses the ordinary semantic-colour help design. Human stdout is exactly:
+
+```text
+Runtime upgrade: {phase} ({previous.version} -> {candidate.version})
+```
+
+The line ends with LF. `--json` writes one raw [RuntimeUpgradeReceiptV1](../resources/root.md#runtimeupgradereceiptv1) document, without a schema-2 envelope. Do not add banners, labels, colour, timestamps or progress percentages. A committed receipt describes selected runtime identity; `cq service status` separately observes running services and health.
+
+If lifecycle execution returns both a receipt and an error, emit the receipt before the error. The receipt may be incomplete or zero-valued when staging fails; it is not fabricated success evidence. A failure before lifecycle invocation has empty stdout. Every operational error exits 1 and writes exactly `cq: {native lifecycle error}\n` to stderr, including JSON mode. Deferred, rollback and cancellation failures retain their native semantics; do not replace them with ordinary v2 exits or infer that state was unchanged. Public parsing failures retain canonical exit 2 and canonical diagnostics. Help exits 0 without lifecycle construction or state access.
+
+| Conceptual error | Exit | Exact message contract |
+|---|---|---|
+| `service_upgrade_failed` | 1 | Native lifecycle error, prefixed `cq: ` and terminated by LF. This conceptual code is not an additional emitted field. |
+
+There is no separate empty-data variant: an early failure is empty stdout plus its error. Partial observations retain the raw receipt. Redirected, narrow and no-colour output use the same bytes; terminal wrapping must not insert or omit content.
+
+**Examples:**
+
+```sh
+cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq
+cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq --json
+cq service status
+```
+
+The first requests verified runtime selection; the second exposes the native automation receipt; the third independently inspects the resulting service state. Authored full help, success and failure transcripts are in [the runtime examples](examples/runtime.md).
 
 ## `cq service install`
 

@@ -60,6 +60,11 @@ func TestCLIV2ValueSpellingCoverage(t *testing.T) {
 			if (row.LegacyPath == "service install" || row.LegacyPath == "service uninstall") && (flag.Legacy == "--owner" || flag.Legacy == "--installer-lock-held" || flag.Legacy == "--service-executable") {
 				continue
 			}
+			// Upgrade exposes executable options publicly; the inherited lock
+			// proof remains private to the frozen package-hook ABI.
+			if row.LegacyPath == "service upgrade" && flag.Legacy == "--installer-lock-held" {
+				continue
+			}
 			if flag.Legacy == "--json" || flag.Legacy == "-j" || flag.Legacy == "--human" || flag.Legacy == "--clear" {
 				continue
 			}

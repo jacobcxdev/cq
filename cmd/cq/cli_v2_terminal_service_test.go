@@ -52,7 +52,7 @@ func TestTerminalServiceRegistration(t *testing.T) {
 	}
 	want := map[string]terminalFixtureRegistration{}
 	for _, item := range index.Fixtures {
-		if strings.HasPrefix(item.Command, "cq service ") && !strings.HasSuffix(item.File, "/01-help.txt") {
+		if strings.HasPrefix(item.Command, "cq service ") && item.Command != "cq service upgrade" && !strings.HasSuffix(item.File, "/01-help.txt") {
 			want[item.File] = item
 		}
 	}

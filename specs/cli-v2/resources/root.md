@@ -94,7 +94,13 @@ Optional Homebrew runtime fields are omitted, not null, when unavailable:
 | `pending_runtime_version` | Nonempty candidate version when the receipt phase is prepared, waiting, handoff, verifying, deferred or rolling_back. Omit for committed, rolled_back or failed, and when no receipt exists. Deferred means the candidate remains available for a later attempt; it does not promise an upgrade is currently executing. |
 | `upgrade_phase` | The verified receipt phase: prepared\|waiting\|handoff\|verifying\|committed\|deferred\|rolling_back\|rolled_back\|failed. Omit without a receipt. A malformed or unreadable receipt fails inspection rather than fabricating a phase. |
 
-These fields describe the shared installation transaction, even when only one service component is selected. They do not add public upgrade options or widen the selected mutation. The installer-owned `service upgrade` transaction is specified in [the frozen machine ABI](../internal-abi.md#package-lifecycle-hooks-cq-service); users inspect its result with public `service status`.
+These fields describe the shared installation transaction, even when only one service component is selected. They do not widen the selected mutation. The public `service upgrade` command invokes the Homebrew transaction and retains its raw receipt protocol, specified below; `service status` separately observes service health and recorded upgrade state.
+
+## RuntimeUpgradeReceiptV1
+
+`service upgrade --json` emits the released raw RuntimeUpgradeReceiptV1 document, without a schema-2 envelope. Required and optional fields, phase meanings, RuntimeArtifact identities and validation rules are defined in [the frozen machine ABI](../internal-abi.md#package-lifecycle-hooks-cq-service). Public and package-hook entrypoints share those exact bytes and lifecycle semantics. A failure during the lifecycle can emit an incomplete or zero-value receipt; only validated persisted receipts certify a transaction. Failure before lifecycle invocation emits no stdout. Operational errors write `cq: ERROR\n` to stderr and exit 1, including in JSON mode. Public parsing failures retain canonical exit 2 and diagnostics. Help is pure human text.
+
+The public command requires `--owner homebrew` and `--candidate-executable ABS_PATH`; optional `--service-executable ABS_PATH` identifies the stable package link and defaults to the current executable path. Both executable arguments require clean absolute paths. The stable path must resolve to the current executable; candidate provenance and runtime protocol are verified before handover. There are no positional parameters, `--component` or `--timeout` options. The inherited-lock marker remains package-only. Human stdout is exactly `Runtime upgrade: PHASE (PREVIOUS_VERSION -> CANDIDATE_VERSION)\n`; errors retain any receipt already written. Deferred, failed and rolled-back receipts are not success or live-health evidence.
 
 ## ServiceComponentV2
 

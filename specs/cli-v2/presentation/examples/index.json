@@ -3,8 +3,8 @@
   "clock": "2026-09-23T15:30:00Z",
   "timezone": "Europe/London",
   "terminal_columns": 100,
-  "commands": 99,
-  "help_pages": 138,
+  "commands": 100,
+  "help_pages": 139,
   "fixtures": [
     {
       "command": "cq --help",
@@ -978,7 +978,7 @@
       "source": "groups.md",
       "line": 2065,
       "file": "text/cq-service/01-help.txt",
-      "sha256": "efd448d9bfccedd867e1237d0ee670390b25861a65886eeff9688ef533f1573c",
+      "sha256": "2a3b8ab8810c36459d50e2526d8dcb9bb9d81aa2baec13f9626f3cc7d5d11a8e",
       "context": "### Help\n\n```sh\ncq service --help\n```\n\nExit 0 · stdout:"
     },
     {
@@ -989,7 +989,7 @@
       "invocation": "cq service inspect",
       "exit": 2,
       "source": "groups.md",
-      "line": 2106,
+      "line": 2107,
       "file": "text/cq-service/02-failure.txt",
       "sha256": "6a75b1fba81183a3692514b4e0b427eaa9e9d475830b416784f02838d70293f1",
       "context": "### Failure\n\n```sh\ncq service inspect\n```\n\nExit 2 · stderr:"
@@ -6819,6 +6819,110 @@
       "context": "### Failure\n\nInvocation:\n\n```sh\ncq service uninstall --component proxy\n```\n\nStdout: empty.\n\nStderr:"
     },
     {
+      "command": "cq service upgrade",
+      "scenario": "Help",
+      "variant": "",
+      "stream": "stdout",
+      "invocation": "cq service upgrade --help",
+      "exit": 0,
+      "source": "runtime.md",
+      "line": 4677,
+      "file": "text/cq-service-upgrade/01-help.txt",
+      "sha256": "f9e097adaa3edea9dfe26d3b1f068be8ef08e373bae9ddeb71bd036f4f101812",
+      "context": "### Help\n\nInvocation:\n\n```sh\ncq service upgrade --help\n```\n\nStdout:"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Success",
+      "variant": "",
+      "stream": "stdout",
+      "invocation": "cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq",
+      "exit": 0,
+      "source": "runtime.md",
+      "line": 4740,
+      "file": "text/cq-service-upgrade/02-success.txt",
+      "sha256": "b759a24e3f23a258b102ffddc5a4dbd6e01579a30794e10a8143a9aff67cd9e9",
+      "context": "### Success\n\nInvocation:\n\n```sh\ncq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq\n```\n\nStdout:"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Success · native JSON receipt",
+      "variant": "",
+      "stream": "stdout",
+      "invocation": "cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq --json",
+      "exit": 0,
+      "source": "runtime.md",
+      "line": 4758,
+      "file": "text/cq-service-upgrade/03-success-native-json-receipt.txt",
+      "sha256": "19081ebf995d3874b6a52efb6a82cc2570b3219e98afb6ad3795e81b4e2b9177",
+      "context": "### Success · native JSON receipt\n\nInvocation:\n\n```sh\ncq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq --json\n```\n\nStdout:"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Failure",
+      "variant": "",
+      "stream": "stderr",
+      "invocation": "cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq",
+      "exit": 1,
+      "source": "runtime.md",
+      "line": 4778,
+      "file": "text/cq-service-upgrade/04-failure.txt",
+      "sha256": "ab7d992b4ac7d389aa473ee37ae51f30ce7bbc72e44ce1e71e5b5dfab052e6f8",
+      "context": "### Failure\n\nInvocation:\n\n```sh\ncq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq\n```\n\nStdout: empty.\n\nStderr:"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · active turns",
+      "variant": "",
+      "stream": "stdout",
+      "invocation": "cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq",
+      "exit": 1,
+      "source": "runtime.md",
+      "line": 4794,
+      "file": "text/cq-service-upgrade/05-deferred-active-turns.txt",
+      "sha256": "b4b19f6e93248e3c67af49f5dd6f2cad0104bacffc4e733447d875480dcb1ccb",
+      "context": "### Deferred · active turns\n\nInvocation:\n\n```sh\ncq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq\n```\n\nStdout:"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · active turns",
+      "variant": "",
+      "stream": "stderr",
+      "invocation": "cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq",
+      "exit": 1,
+      "source": "runtime.md",
+      "line": 4800,
+      "file": "text/cq-service-upgrade/06-deferred-active-turns.txt",
+      "sha256": "d5111953ccc1c4a0b556ce729e11e641514ea292f4cf716318b2c0230d49d45c",
+      "context": "Stderr:"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · native JSON receipt",
+      "variant": "",
+      "stream": "stdout",
+      "invocation": "cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq --json",
+      "exit": 1,
+      "source": "runtime.md",
+      "line": 4816,
+      "file": "text/cq-service-upgrade/07-deferred-native-json-receipt.txt",
+      "sha256": "909f44413ff45ba12587d8934ceb45ed3a1f57568b160b0fff33519660d96d90",
+      "context": "### Deferred · native JSON receipt\n\nInvocation:\n\n```sh\ncq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq --json\n```\n\nStdout:"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · native JSON receipt",
+      "variant": "",
+      "stream": "stderr",
+      "invocation": "cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq --json",
+      "exit": 1,
+      "source": "runtime.md",
+      "line": 4822,
+      "file": "text/cq-service-upgrade/08-deferred-native-json-receipt.txt",
+      "sha256": "d5111953ccc1c4a0b556ce729e11e641514ea292f4cf716318b2c0230d49d45c",
+      "context": "Stderr:"
+    },
+    {
       "command": "cq codex dots",
       "scenario": "Help",
       "variant": "",
@@ -7257,7 +7361,7 @@
       "source": "accounts.md",
       "line": 2670,
       "file": "raw/completion.bash",
-      "sha256": "6730a50d44da04d0531721dd872787cff260c403ee5bf9085ed54aa971d140d5",
+      "sha256": "402a5e5458ab3af51b6c43d1df9c4c78bb51a13b5a3433fd91ea2ae1dd8f0398",
       "context": "Frozen raw protocol; copied exactly from the immutable completion catalogue.",
       "frozen_protocol": true
     },
@@ -7271,7 +7375,7 @@
       "source": "accounts.md",
       "line": 2676,
       "file": "raw/completion.zsh",
-      "sha256": "93ed11c9c0fa3af717de9de9a9d8db2aa6c8c59ff0ba673061ed72b770162636",
+      "sha256": "53bcaa98a62e13e3aecd64d3c064c7d31d42c301b8dc2701a9de8c2e77e68d73",
       "context": "Frozen raw protocol; copied exactly from the immutable completion catalogue.",
       "frozen_protocol": true
     },
@@ -7285,7 +7389,7 @@
       "source": "accounts.md",
       "line": 2682,
       "file": "raw/completion.fish",
-      "sha256": "ce2fa3756b6009045851b812e4ec0abe4c532f8f66d38f3da79ef9ebce3b4e1f",
+      "sha256": "80a3a8e9b5182504846c82146e3596b1292342ff4603fdcdc93527a7ddaea6e1",
       "context": "Frozen raw protocol; copied exactly from the immutable completion catalogue.",
       "frozen_protocol": true
     }

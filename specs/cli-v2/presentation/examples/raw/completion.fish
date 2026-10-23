@@ -182,6 +182,7 @@ complete -c cq -f -n '__cq_path_is service' -a start
 complete -c cq -f -n '__cq_path_is service' -a status
 complete -c cq -f -n '__cq_path_is service' -a stop
 complete -c cq -f -n '__cq_path_is service' -a uninstall
+complete -c cq -f -n '__cq_path_is service' -a upgrade
 complete -c cq -f -n '__cq_has_path auth; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
 complete -c cq -f -n '__cq_has_path auth; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
 complete -c cq -f -n '__cq_has_path auth; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
@@ -815,6 +816,12 @@ complete -c cq -f -n '__cq_has_path service uninstall; and __cq_options_open; an
 complete -c cq -f -n '__cq_has_path service uninstall; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
 complete -c cq -f -n '__cq_has_path service uninstall; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
 complete -c cq -f -n '__cq_has_path service uninstall; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -f -n '__cq_has_path service upgrade; and __cq_options_open; and not __fish_seen_argument -l owner' -l owner -r -a homebrew
+complete -c cq -n '__cq_has_path service upgrade; and __cq_options_open; and not __fish_seen_argument -l candidate-executable' -l candidate-executable -r
+complete -c cq -n '__cq_has_path service upgrade; and __cq_options_open; and not __fish_seen_argument -l service-executable' -l service-executable -r
+complete -c cq -f -n '__cq_has_path service upgrade; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path service upgrade; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path service upgrade; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
 complete -c cq -f -n '__cq_has_path version; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
 complete -c cq -f -n '__cq_has_path version; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
 complete -c cq -f -n '__cq_has_path version; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v

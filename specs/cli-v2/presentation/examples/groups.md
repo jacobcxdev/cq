@@ -2075,6 +2075,7 @@ Commands
   status      Inspect selected CQ service components.
   stop        Stop and disable selected CQ services.
   uninstall   Stop and remove selected CQ service registrations.
+  upgrade     Upgrade a Homebrew proxy runtime while retaining its listener.
 
 Global options
   -h, --help     Show this help without reading state.

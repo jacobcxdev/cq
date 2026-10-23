@@ -20,11 +20,11 @@ GitHub's published-release inventory was checked on 23 October 2026. Releases ne
 | HTTP/WebSocket routing, starvation and oversized retry fixes | Retained incoming runtime, persistence gate, quota replan and transport code. CLI adapters preserve their updated control receipts. |
 | Gemini quota endpoint and missing-quota reporting | Retained released production Antigravity host, parser and provider changes. Release-time OAuth secret injection remains unchanged. |
 
-`service upgrade`, `proxy runtime-check --json`, runtime handover arguments and `__dots` are documented in [the machine ABI contract](internal-abi.md). They retain installer/helper protocols and are not ordinary canonical operations. Public Dots commands use the canonical parser; they do not bypass it through the private helper entry.
+`service upgrade` remains public, with help, completion and explicit parameter documentation. Its operational output retains the released raw receipt protocol through both canonical and frozen package invocations. `proxy runtime-check --json`, runtime handover arguments and `__dots` remain private interfaces documented in [the machine ABI contract](internal-abi.md). Public Dots commands use the canonical parser; they do not bypass it through the private helper entry.
 
 ## Public contract and review scope
 
-The integrated catalogue contains **99 commands, 38 groups and 138 help pages**, with **560 authored output fixtures**. The new commands are `codex dots install`, `start`, `stop`, `status`, `sync`, `list`, `prime`, `broadcast`, `board`, and `codex proxy lease redistribute`.
+The integrated catalogue contains **100 commands, 38 groups and 139 help pages**, with **568 authored output fixtures**. The new commands are `codex dots install`, `start`, `stop`, `status`, `sync`, `list`, `prime`, `broadcast`, `board`, `codex proxy lease redistribute`, and the retained public `service upgrade` operation.
 
 Every command is registered with one handler family and one implementation owner. Catalogue, parser-clause, presentation, terminal-fixture and README-index checks verify these sets agree. Examples remain independently authored expectations; generated completion scripts are explicitly identified as protocol fixtures.
 

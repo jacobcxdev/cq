@@ -89,6 +89,9 @@ func validateValue(path string, p ParameterSpec, value, legacy string) string {
 			return "64 lowercase hexadecimal characters"
 		}
 	case "path":
+		if path == "service upgrade" && (p.Name == "candidate-executable" || p.Name == "service-executable") && (!filepath.IsAbs(value) || filepath.Clean(value) != value) {
+			return "Clean absolute path required"
+		}
 		if cleanAbsoluteParameter(path, p.Name) && (!filepath.IsAbs(value) || filepath.Clean(value) != value || filepath.Dir(value) == value) {
 			return "Absolute, lexically clean non-root path required"
 		}

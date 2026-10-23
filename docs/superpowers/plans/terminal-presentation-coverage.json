@@ -396,6 +396,10 @@
       "task": "T11"
     },
     {
+      "command": "cq service upgrade",
+      "task": "T11"
+    },
+    {
       "command": "cq version",
       "task": "T03"
     }
@@ -4364,11 +4368,68 @@
       "stream": "stdout",
       "file": "raw/completion.fish",
       "task": "T03"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-service-upgrade/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-service-upgrade/02-success.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Success · native JSON receipt",
+      "stream": "stdout",
+      "file": "text/cq-service-upgrade/03-success-native-json-receipt.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-service-upgrade/04-failure.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · active turns",
+      "stream": "stdout",
+      "file": "text/cq-service-upgrade/05-deferred-active-turns.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · active turns",
+      "stream": "stderr",
+      "file": "text/cq-service-upgrade/06-deferred-active-turns.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · native JSON receipt",
+      "stream": "stdout",
+      "file": "text/cq-service-upgrade/07-deferred-native-json-receipt.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · native JSON receipt",
+      "stream": "stderr",
+      "file": "text/cq-service-upgrade/08-deferred-native-json-receipt.txt",
+      "task": "T11"
     }
   ],
   "raw_protocol_commands": [
     "cq completion",
     "cq codex proxy trace",
-    "cq codex proxy hook stop"
+    "cq codex proxy hook stop",
+    "cq service upgrade"
   ]
 }

@@ -32,7 +32,7 @@ func handleV2Dots(ctx context.Context, inv cli.Invocation, session *cli.Session)
 func handleV2DotsWithRunner(ctx context.Context, inv cli.Invocation, _ *cli.Session, runner dotsRunner) cli.Outcome {
 	options, err := v2DotsOptions(inv)
 	if err != nil {
-		return v2SelectionFailure(2, "dots_invalid_argument", err.Error())
+		return v2SelectionFailure(2, "dots_invalid_argument", "Invalid Dots argument: "+err.Error())
 	}
 	if ctx.Err() != nil {
 		return v2DotsFailure(ctx.Err())

@@ -20,6 +20,8 @@ Commands:
       Stop and disable selected CQ services.
   uninstall
       Stop and remove selected CQ service registrations.
+  upgrade
+      Upgrade a Homebrew proxy runtime while retaining its listener.
 
 Related commands:
   cq proxy

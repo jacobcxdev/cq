@@ -4658,3 +4658,170 @@ Error · Service ownership conflicts with this operation.
 ```
 
 Exit: 6.
+
+## `cq service upgrade`
+
+This public Homebrew operation preserves the released native receipt protocol. It has no component selector or public timeout. Candidate means the executable to verify and retain; service executable means Homebrew’s stable installation link. These examples use synthetic paths, digests, versions and identifiers.
+
+### Help
+
+Invocation:
+
+```sh
+cq service upgrade --help
+```
+
+Stdout:
+
+```text
+cq service upgrade
+Upgrade a Homebrew proxy runtime while retaining its listener.
+
+Usage
+  cq service upgrade --owner homebrew --candidate-executable ABS_PATH [OPTIONS]
+
+Verify and retain the candidate, stop admitting new work, drain active turns,
+and hand over the existing listener. Then update token-refresh registration
+and ownership metadata. Requires an existing macOS Homebrew installation.
+
+First adoption of a predecessor without retained-runtime support requires a
+maintenance window. Failure or deferral is not proof that no state changed;
+inspect cq service status before retrying.
+
+Options
+  --owner OWNER
+      Required: homebrew. The package authority must already own the installation.
+  --candidate-executable ABS_PATH
+      Required. Existing candidate CQ executable; use a clean absolute path.
+      Its bytes, native build identity and runtime protocol are verified.
+  --service-executable ABS_PATH
+      Optional stable Homebrew CQ link. Defaults to the running executable path.
+      Must be clean and absolute, and resolve to the running executable.
+
+Global options
+  -h, --help       Show help without reading state.
+  -j, --json       Emit the raw released upgrade receipt, without a v2 envelope.
+  -v, --version    Show CQ version without executing the upgrade.
+
+Output compatibility
+  Upgrade results keep their released protocol. Human output is one plain line.
+  JSON is a native RuntimeUpgradeReceiptV1 document; operational errors use
+  stderr and exit 1 even with --json. Syntax errors retain canonical CLI errors.
+  --component, --timeout and --installer-lock-held are not public options.
+
+Examples
+  cq service upgrade --owner homebrew \
+    --candidate-executable /opt/homebrew/bin/cq \
+    --service-executable /opt/homebrew/bin/cq
+      Verify the installed package and select its retained runtime.
+  cq service upgrade --owner homebrew \
+    --candidate-executable /opt/homebrew/bin/cq \
+    --service-executable /opt/homebrew/bin/cq --json
+      Emit the native receipt for automation.
+  cq service status
+      Inspect selected runtime, actual executable and component health afterwards.
+```
+
+Stderr: empty.
+
+Exit: 0.
+
+### Success
+
+Invocation:
+
+```sh
+cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq
+```
+
+Stdout:
+
+```text
+Runtime upgrade: committed (0.34.0 -> 0.34.1)
+```
+
+Stderr: empty.
+
+Exit: 0.
+
+### Success · native JSON receipt
+
+Invocation:
+
+```sh
+cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq --json
+```
+
+Stdout:
+
+```json
+{"schema_version":1,"transaction_id":"example-upgrade","generation":1,"phase":"committed","previous":{"path":"/Users/river/.local/state/cq/runtime-artifacts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cq","version":"0.34.0","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","protocol_version":1},"candidate":{"path":"/Users/river/.local/state/cq/runtime-artifacts/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/cq","version":"0.34.1","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","protocol_version":1},"listener_identity":"tcp|127.0.0.1:19280","supervisor_pid":2142,"admission_pause_nanos":18000000}
+```
+
+Stderr: empty.
+
+Exit: 0.
+
+### Failure
+
+Invocation:
+
+```sh
+cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq
+```
+
+Stdout: empty.
+
+Stderr:
+
+```text
+cq: service platform adapter is unavailable
+```
+
+Exit: 1.
+
+### Deferred · active turns
+
+Invocation:
+
+```sh
+cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq
+```
+
+Stdout:
+
+```text
+Runtime upgrade: deferred (0.34.0 -> 0.34.1)
+```
+
+Stderr:
+
+```text
+cq: runtime upgrade deferred; previous runtime remains active: active_turns
+```
+
+Exit: 1.
+
+### Deferred · native JSON receipt
+
+Invocation:
+
+```sh
+cq service upgrade --owner homebrew --candidate-executable /opt/homebrew/bin/cq --service-executable /opt/homebrew/bin/cq --json
+```
+
+Stdout:
+
+```json
+{"schema_version":1,"transaction_id":"example-upgrade","generation":1,"phase":"deferred","previous":{"path":"/Users/river/.local/state/cq/runtime-artifacts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/cq","version":"0.34.0","sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","protocol_version":1},"candidate":{"path":"/Users/river/.local/state/cq/runtime-artifacts/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/cq","version":"0.34.1","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","protocol_version":1},"listener_identity":"tcp|127.0.0.1:19280","supervisor_pid":2142,"admission_pause_nanos":18000000,"error_code":"active_turns"}
+```
+
+Stderr:
+
+```text
+cq: runtime upgrade deferred; previous runtime remains active: active_turns
+```
+
+Exit: 1.
+
+Native operational output remains plain and unwrapped at every terminal width, including when colour is enabled. Operational failures retain stderr and exit 1 with `--json`; they have no CLI-v2 envelope. A preparation failure has no receipt. A failure after lifecycle entry can emit the released zero-value receipt or empty-phase human line; never fabricate a transaction result. Public syntax errors retain canonical exit 2 diagnostics (a v2 envelope with `--json`), because no native transaction began. Inspect `cq service status` before retrying any failed or deferred transaction.
