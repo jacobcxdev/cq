@@ -252,7 +252,7 @@ func v2SelectionStopped(parent, ctx context.Context) (cli.Outcome, bool) {
 	if parent.Err() == context.Canceled || ctx.Err() == context.Canceled {
 		return v2SelectionFailure(130, "interrupted", "Operation interrupted; inspect state before retrying."), true
 	}
-	if ctx.Err() == context.DeadlineExceeded {
+	if parent.Err() == context.DeadlineExceeded || ctx.Err() == context.DeadlineExceeded {
 		return v2SelectionFailure(7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation."), true
 	}
 	return cli.Outcome{}, false

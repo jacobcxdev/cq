@@ -176,12 +176,15 @@ foreach($test in @(@($legacy,$false),@($good,$true),@(('{}'|ConvertFrom-Json),$f
 			if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			// Bound interpreter startup as well as the pure schema checks. A cold
+			// PowerShell process can exceed 15s during the parallel CI race suite.
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, pwsh, "-NoProfile", "-NonInteractive", "-File", path)
 			cmd.Env = []string{"HOME=" + filepath.Dir(path), "PATH=" + filepath.Dir(pwsh)}
+			started := time.Now()
 			if output, err := cmd.CombinedOutput(); err != nil {
-				t.Fatalf("PowerShell schema fixture: %v %s", err, output)
+				t.Fatalf("PowerShell schema fixture after %s (context: %v): %v %s", time.Since(started).Round(time.Millisecond), ctx.Err(), err, output)
 			}
 		})
 	}

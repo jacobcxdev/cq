@@ -691,3 +691,53 @@ func TestCLIV2SelectionPreparationBudget(t *testing.T) {
 		}
 	})
 }
+
+// Parent cancellation closes Done before its children must observe cancellation.
+// Keep the work context live to model that propagation interval deterministically.
+func TestCLIV2SelectionParentDeadlineBeforeWorkPropagation(t *testing.T) {
+	for _, phase := range []string{"before-save", "after-save"} {
+		t.Run(phase, func(t *testing.T) {
+			base, cancel := context.WithCancel(context.Background())
+			parent := selectionDeadlineParent{base}
+			defer cancel()
+			if phase == "before-save" {
+				cancel()
+			}
+			inv, err := cli.Parse([]string{"codex", "proxy", "fallback", "clear"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			saves := 0
+			out := executeV2Selection(parent, context.Background(), inv, v2SelectionDependencies{
+				LoadConfig: func() (*proxy.Config, error) { return &proxy.Config{}, nil },
+				SaveConfig: func(*proxy.Config) error {
+					saves++
+					cancel()
+					<-parent.Done()
+					return nil
+				},
+			})
+			if out.ExitCode != 7 || len(out.Errors) != 1 || out.Errors[0].Code != "routing_timeout" {
+				t.Fatalf("parent deadline lost: %+v", out)
+			}
+			if phase == "before-save" {
+				if saves != 0 || out.ConfirmedReceipt {
+					t.Fatalf("expired parent dispatched save: saves=%d outcome=%+v", saves, out)
+				}
+			} else if saves != 1 || !out.ConfirmedReceipt || out.Terminal == nil || !strings.Contains(out.Terminal(terminalFixtureOptions(100)), "Saved Codex fallback configuration.") {
+				t.Fatalf("saved receipt lost: saves=%d outcome=%+v", saves, out)
+			}
+		})
+	}
+}
+
+// The test manually expires this parent so no timer or scheduler controls the
+// interval between the parent's deadline and the work context observing it.
+type selectionDeadlineParent struct{ context.Context }
+
+func (c selectionDeadlineParent) Err() error {
+	if c.Context.Err() != nil {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
