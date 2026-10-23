@@ -17,6 +17,8 @@ import (
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
+var errCodexWSQuotaReplan = errors.New("Codex WebSocket quota rejection requires replanning")
+
 // CodexWebSocketRoutingHandler owns one accepted downstream WebSocket while
 // readiness-gated routing selects and supervises account-bound upstreams.
 type CodexWebSocketRoutingHandler interface {
@@ -173,6 +175,7 @@ type codexTerminatingWebSocketHandler struct {
 	generation     atomic.Uint64
 	drainOnce      sync.Once
 	drain          chan struct{}
+	upgrade        *RuntimeUpgradeAdmission
 }
 
 // NewCodexTerminatingWebSocketHandler constructs readiness-gated WebSocket
@@ -202,6 +205,10 @@ func NewCodexTerminatingWebSocketHandler(plans CodexNativeHTTPRequestPlanner, ex
 	}, nil
 }
 
+func (handler *codexTerminatingWebSocketHandler) SetRuntimeUpgradeAdmission(gate *RuntimeUpgradeAdmission) {
+	handler.upgrade = gate
+}
+
 func (handler *codexTerminatingWebSocketHandler) BeginDrain() {
 	if handler != nil && handler.drain != nil {
 		handler.drainOnce.Do(func() { close(handler.drain) })
@@ -227,6 +234,7 @@ func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, down
 		DownstreamGeneration: generation,
 		PrewarmTimeout:       handler.prewarmTimeout,
 		Drain:                handler.drain,
+		UpgradeAdmission:     handler.upgrade,
 	})
 	if err != nil {
 		return err
@@ -268,6 +276,7 @@ func (dialer codexExplicitWSUpstreamDialer) Dial(ctx context.Context, choice Rou
 }
 
 type codexTerminatingWSBrokerConfig struct {
+	UpgradeAdmission     *RuntimeUpgradeAdmission
 	Plans                CodexNativeHTTPRequestPlanner
 	Upstream             codexWSUpstreamDialer
 	Refresher            codex.CredentialReferenceRefresher
@@ -392,6 +401,16 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	var upgrade <-chan struct{}
+	if gate := broker.config.UpgradeAdmission; gate != nil {
+		release, err := gate.beginSession()
+		if err != nil {
+			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
+			return nil
+		}
+		defer release()
+		upgrade = gate.PauseSignal()
+	}
 	serveCtx, cancelServe := context.WithCancel(ctx)
 	downstreamReader := startCodexWSDownstreamReader(serveCtx, cancelServe, downstream)
 	defer downstreamReader.close()
@@ -402,12 +421,19 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 	}()
 	for {
 		select {
+		case <-upgrade:
+			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
+			return nil
 		case <-broker.config.Drain:
 			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy restarting"), time.Now().Add(time.Second))
 			return nil
 		default:
 		}
-		messageType, encoded, err := downstreamReader.read(ctx, serveCtx, broker.config.Drain)
+		messageType, encoded, err := downstreamReader.read(ctx, serveCtx, broker.config.Drain, upgrade)
+		if errors.Is(err, errCodexWSUpgrading) {
+			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
+			return nil
+		}
 		if errors.Is(err, errCodexWSDraining) {
 			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "proxy restarting"), time.Now().Add(time.Second))
 			return nil
@@ -415,8 +441,19 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		if err != nil {
 			return classifyCodexWSDownstreamReadError(err)
 		}
+		releaseTurn := func() {}
+		if gate := broker.config.UpgradeAdmission; gate != nil {
+			release, err := gate.BeginTurn()
+			if err != nil {
+				clearBytes(encoded)
+				_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
+				return nil
+			}
+			releaseTurn = release
+		}
 		pending, err := newCodexWSPendingFrameOwned(messageType, encoded)
 		if err != nil {
+			releaseTurn()
 			return err
 		}
 		frameCtx := withCodexTraceSpan(serveCtx, codexTraceStartFromRouteDiagnostics(pending.diagnostics, "websocket"))
@@ -437,11 +474,14 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		var limit *CachedUsageLimitError
 		if errors.As(err, &limit) {
 			if writeErr := writeCodexWSMessage(serveCtx, downstream, websocket.TextMessage, []byte(`{"type":"error","status":429,"error":{"type":"usage_limit_reached","message":"The usage limit has been reached"}}`)); writeErr != nil {
+				releaseTurn()
 				return writeErr
 			}
+			releaseTurn()
 			continue
 		}
 		if err != nil {
+			releaseTurn()
 			failure := classifyCodexWebSocketFailure(err)
 			closeCode, closeReason := codexTraceWebSocketClose(err)
 			emitCodexTrace(frameCtx, CodexTraceEvent{
@@ -461,6 +501,7 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		} else {
 			emitCodexTrace(frameCtx, CodexTraceEvent{Phase: "terminal", Outcome: "success"})
 		}
+		releaseTurn()
 	}
 }
 
@@ -519,11 +560,15 @@ func startCodexWSDownstreamReader(ctx context.Context, cancel context.CancelFunc
 
 var errCodexWSDraining = errors.New("Codex WebSocket draining")
 
-func (reader *codexWSDownstreamReader) read(parent, ctx context.Context, drain <-chan struct{}) (int, []byte, error) {
+var errCodexWSUpgrading = errors.New("Codex WebSocket upgrading")
+
+func (reader *codexWSDownstreamReader) read(parent, ctx context.Context, drain, upgrade <-chan struct{}) (int, []byte, error) {
 	if reader == nil {
 		return 0, nil, ErrCodexLeaseWriterUnavailable
 	}
 	select {
+	case <-upgrade:
+		return 0, nil, errCodexWSUpgrading
 	case <-drain:
 		return 0, nil, errCodexWSDraining
 	case frame, ok := <-reader.frames:
@@ -564,6 +609,9 @@ func (reader *codexWSDownstreamReader) close() {
 }
 
 func classifyCodexWSDownstreamReadError(err error) error {
+	if errors.Is(err, websocket.ErrReadLimit) {
+		return newCodexWebSocketBrokerError(codexWebSocketFailureStageDownstreamRead, codexWebSocketFailureReasonMessageTooBig)
+	}
 	var closeErr *websocket.CloseError
 	if errors.Is(err, io.EOF) || errors.As(err, &closeErr) {
 		return nil
@@ -785,6 +833,19 @@ func (broker *codexTerminatingWSBroker) serveFrameReserveAttempt(ctx context.Con
 	if pending.prewarm {
 		return broker.servePrewarm(ctx, downstream, pending, active)
 	}
+	if pending != nil && !pending.portable && (active == nil || active.prewarm.State != CodexPrewarmReady) {
+		account := codex.AccountKey("")
+		if active != nil {
+			account = active.account
+		}
+		if planner, ok := broker.config.Plans.(interface {
+			ShouldRedistribute(context.Context, CodexProtocolRequest, codex.AccountKey) bool
+		}); ok && planner.ShouldRedistribute(ctx, pending.request, account) {
+			closeCodexWSActiveUpstream(active)
+			emitCodexTrace(ctx, CodexTraceEvent{Phase: "failover", Outcome: "resynchronise", Reason: "quota_redistribution", Retry: true})
+			return writeCodexWSAccountUnavailableClose(downstream)
+		}
+	}
 	// A ready prewarm is this turn's anchor, not a prior Cyber turn.
 	if pending != nil && !pending.portable && active != nil && active.account != "" && active.prewarm.State != CodexPrewarmReady {
 		if planner, ok := broker.config.Plans.(interface {
@@ -968,7 +1029,13 @@ func (broker *codexTerminatingWSBroker) serveFrameReserveAttempt(ctx context.Con
 			return codexWSAbandonPreparedHandle(ctx, prepared.leaseHandle, ErrCodexLeaseWriterUnavailable)
 		}
 		lifecycle := dial.lifecycle
-		rotated, err := broker.serveDispatchedFrame(ctx, downstream, requestFrame, lifecycle, accounts, &accountIndex, resetAvailable, active, dial)
+		rotated, err := broker.serveDispatchedFrame(ctx, downstream, requestFrame, lifecycle, accounts, &accountIndex, resetAvailable, resetAvailable && reserveRetries > 0 && len(accounts) == 1, active, dial)
+		if err == errCodexWSQuotaReplan {
+			broker.config.Headers = broker.config.Headers.Clone()
+			deleteCodexTurnStateHeader(broker.config.Headers)
+			emitCodexTrace(ctx, CodexTraceEvent{Phase: "failover", Outcome: "replan", Reason: "capacity_exhausted", Retry: true, Failover: true})
+			return broker.serveFrameReserveAttempt(ctx, downstream, pending, active, reserveRetries-1)
+		}
 		if err != nil {
 			return err
 		}
@@ -1059,7 +1126,7 @@ func writeCodexWSAccountUnavailableClose(downstream websocketRelayConn) error {
 	return nil
 }
 
-func (broker *codexTerminatingWSBroker) serveDispatchedFrame(ctx context.Context, downstream websocketRelayConn, requestFrame *codexWSPendingFrame, lifecycle *codexWSLifecycle, accounts []CodexFrozenDispatchAccount, accountIndex *int, resetAvailable bool, active *codexWSActiveUpstream, dial codexWSDialResult) (rotated bool, err error) {
+func (broker *codexTerminatingWSBroker) serveDispatchedFrame(ctx context.Context, downstream websocketRelayConn, requestFrame *codexWSPendingFrame, lifecycle *codexWSLifecycle, accounts []CodexFrozenDispatchAccount, accountIndex *int, resetAvailable, replanQuota bool, active *codexWSActiveUpstream, dial codexWSDialResult) (rotated bool, err error) {
 	defer func() {
 		if rotated && err == nil {
 			return
@@ -1067,10 +1134,12 @@ func (broker *codexTerminatingWSBroker) serveDispatchedFrame(ctx context.Context
 		if err != nil {
 			closeCodexWSActiveUpstream(active)
 		}
-		err = errors.Join(err, lifecycle.cleanupAfterBrokerExit(ctx))
+		if cleanupErr := lifecycle.cleanupAfterBrokerExit(ctx); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
 	}()
 	if active.conn == nil {
-		return broker.finishHandshakeFailure(ctx, downstream, requestFrame, lifecycle, accounts, accountIndex, resetAvailable, active, dial)
+		return broker.finishHandshakeFailure(ctx, downstream, requestFrame, lifecycle, accounts, accountIndex, resetAvailable, replanQuota, active, dial)
 	}
 	if dial.response != nil {
 		turnState, _, stateErr := ParseCodexTurnStateHeader(dial.response.Header)
@@ -1094,7 +1163,7 @@ func (broker *codexTerminatingWSBroker) serveDispatchedFrame(ctx context.Context
 		return false, newCodexWebSocketBrokerError(codexWebSocketFailureStageUpstreamRead, codexWebSocketFailureReasonUpstreamOutcomeIndeterminate)
 	}
 	emitCodexTrace(ctx, CodexTraceEvent{Phase: "upstream_write", Outcome: "success", FrameType: codexTraceWebSocketFrameType(requestFrame.messageType), FrameBytes: len(requestFrame.encoded), AccountHint: codexTraceAccountHint(active.account)})
-	return broker.readUpstreamRequest(ctx, downstream, requestFrame, lifecycle, accounts, accountIndex, resetAvailable, active)
+	return broker.readUpstreamRequest(ctx, downstream, requestFrame, lifecycle, accounts, accountIndex, resetAvailable, replanQuota, active)
 }
 
 func codexWSMarkIndeterminate(ctx context.Context, lifecycle *codexWSLifecycle, upstreamGeneration uint64) error {
@@ -1435,7 +1504,7 @@ func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *Cod
 	}
 	return last
 }
-func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, lifecycle *codexWSLifecycle, accounts []CodexFrozenDispatchAccount, accountIndex *int, resetAvailable bool, active *codexWSActiveUpstream) (bool, error) {
+func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, lifecycle *codexWSLifecycle, accounts []CodexFrozenDispatchAccount, accountIndex *int, resetAvailable, replanQuota bool, active *codexWSActiveUpstream) (bool, error) {
 	for {
 		messageType, frame, err := readCodexWSActiveMessage(ctx, active)
 		if err != nil {
@@ -1527,7 +1596,7 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 						return false, errors.Join(cause, abandonErr)
 					}
 					*lifecycle = *dial.lifecycle
-					return broker.serveDispatchedFrame(ctx, downstream, pending, lifecycle, accounts, accountIndex, resetAvailable, active, dial)
+					return broker.serveDispatchedFrame(ctx, downstream, pending, lifecycle, accounts, accountIndex, resetAvailable, replanQuota, active, dial)
 				}
 			}
 			hasFallback := *accountIndex+1 < len(accounts)
@@ -1564,6 +1633,11 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 				*accountIndex++
 				emitCodexTrace(ctx, CodexTraceEvent{Phase: "failover", Outcome: "account", AccountHint: codexTraceAccountHint(accounts[*accountIndex].Choice().AccountKey), Reason: reason, Retry: true, Failover: true})
 				return true, nil
+			}
+			// A prior admitted turn may freeze only its bound account. After a
+			// definite rejection, rebuild this full create through normal routing.
+			if result.HardUsageLimit && result.DefinitePreAdmissionRejection && lifecycle.turnAdmitted && pending.portable && replanQuota {
+				return false, errCodexWSQuotaReplan
 			}
 			if hasFallback || (!pending.portable && resetAvailable) {
 				markCodexWSProviderTerminal(ctx, string(result.Kind), reason, reason, terminalAccountHint, 0)
@@ -1638,7 +1712,7 @@ func (broker *codexTerminatingWSBroker) applicationAuthRetryAccount(ctx context.
 	return account, true
 }
 
-func (broker *codexTerminatingWSBroker) finishHandshakeFailure(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, lifecycle *codexWSLifecycle, accounts []CodexFrozenDispatchAccount, accountIndex *int, resetAvailable bool, active *codexWSActiveUpstream, dial codexWSDialResult) (bool, error) {
+func (broker *codexTerminatingWSBroker) finishHandshakeFailure(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, lifecycle *codexWSLifecycle, accounts []CodexFrozenDispatchAccount, accountIndex *int, resetAvailable, replanQuota bool, active *codexWSActiveUpstream, dial codexWSDialResult) (bool, error) {
 	if lifecycle == nil || accountIndex == nil {
 		return false, ErrCodexLeaseWriterUnavailable
 	}
@@ -1671,6 +1745,9 @@ func (broker *codexTerminatingWSBroker) finishHandshakeFailure(ctx context.Conte
 		if replacementSlot != 0 {
 			*accountIndex++
 			return true, nil
+		}
+		if dial.wrapped.HardUsageLimit && !lifecycle.attemptAdmitted && lifecycle.turnAdmitted && pending.portable && replanQuota {
+			return false, errCodexWSQuotaReplan
 		}
 		if !pending.portable && resetAvailable {
 			return false, writeCodexWSAccountUnavailableClose(downstream)

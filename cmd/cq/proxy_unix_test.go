@@ -148,7 +148,7 @@ func TestCLIV2ProxyMigrationAfterRuntimePreconditions(t *testing.T) {
 
 func TestCLIV2ProxyUnixPreReadySignals(t *testing.T) {
 	for _, cause := range []error{context.Canceled, errV2ProxyTerminated} {
-		for _, phase := range []string{"before-launch", "worker-boot", "worker-boot-failure"} {
+		for _, phase := range []string{"before-launch", "worker-boot", "worker-boot-failure", "worker-release-failure"} {
 			t.Run(cause.Error()+"/"+phase, func(t *testing.T) {
 				root, err := filepath.EvalSymlinks(t.TempDir())
 				if err != nil {
@@ -160,7 +160,7 @@ func TestCLIV2ProxyUnixPreReadySignals(t *testing.T) {
 				loadProxyStartConfigFn = func() (*proxy.Config, error) { return &proxy.Config{Port: 19280, LocalToken: "fixture-token"}, nil }
 				ctx, cancel := context.WithCancelCause(context.Background())
 				defer cancel(nil)
-				worker := &proxyPreReadyWorker{cancel: func() { cancel(cause) }, fail: phase == "worker-boot-failure"}
+				worker := &proxyPreReadyWorker{cancel: func() { cancel(cause) }, fail: phase == "worker-boot-failure", failFirstRelease: phase == "worker-release-failure"}
 				launcher := &proxyPreReadyLauncher{worker: worker}
 				address := ""
 				cleaned := false
@@ -196,7 +196,7 @@ func TestCLIV2ProxyUnixPreReadySignals(t *testing.T) {
 				if cause == context.Canceled {
 					want = 130
 				}
-				if phase == "worker-boot-failure" {
+				if phase == "worker-boot-failure" || phase == "worker-release-failure" {
 					want = 1
 				}
 				if exit != want || strings.Contains(out, `"event"`) || stderr != "" {
@@ -214,8 +214,27 @@ func TestCLIV2ProxyUnixPreReadySignals(t *testing.T) {
 				if phase == "before-launch" {
 					wantWorkers = 0
 				}
-				if launcher.calls != wantWorkers || worker.reaped != wantWorkers {
-					t.Fatalf("launches=%d reaped=%d want=%d", launcher.calls, worker.reaped, wantWorkers)
+				wantReaps, wantDrains := wantWorkers, 0
+				if phase == "worker-release-failure" {
+					wantReaps, wantDrains = 2, 1
+					if !errors.Is(startupErr, proxy.ErrRuntimeOwnerReleaseUnproven) {
+						t.Fatalf("unproven startup release was hidden: %v", startupErr)
+					}
+				} else if errors.Is(startupErr, proxy.ErrRuntimeOwnerReleaseUnproven) {
+					t.Fatalf("successful release lacked proof: %v", startupErr)
+				}
+				if launcher.calls != wantWorkers || worker.reaped != wantReaps || worker.drained != wantDrains {
+					t.Fatalf("launches=%d reaped=%d drained=%d want=%d/%d/%d", launcher.calls, worker.reaped, worker.drained, wantWorkers, wantReaps, wantDrains)
+				}
+				wantOrder := "boot,reap"
+				if phase == "before-launch" {
+					wantOrder = ""
+				}
+				if phase == "worker-release-failure" {
+					wantOrder = "boot,reap,drain,reap"
+				}
+				if strings.Join(worker.calls, ",") != wantOrder || worker.cleanupError != nil {
+					t.Fatalf("cleanup order=%v want=%s context=%v", worker.calls, wantOrder, worker.cleanupError)
 				}
 			})
 		}
@@ -234,12 +253,16 @@ func (l *proxyPreReadyLauncher) Launch(context.Context, proxy.WorkerManifestV1) 
 
 type proxyPreReadyWorker struct {
 	proxy.RuntimeWorkerProcess
-	cancel func()
-	fail   bool
-	reaped int
+	cancel           func()
+	fail             bool
+	failFirstRelease bool
+	reaped, drained  int
+	calls            []string
+	cleanupError     error
 }
 
 func (w *proxyPreReadyWorker) Boot(ctx context.Context, _ proxy.WorkerManifestV1) (proxy.RuntimeBootAckV1, error) {
+	w.calls = append(w.calls, "boot")
 	w.cancel()
 	err := ctx.Err()
 	if w.fail {
@@ -247,7 +270,30 @@ func (w *proxyPreReadyWorker) Boot(ctx context.Context, _ proxy.WorkerManifestV1
 	}
 	return proxy.RuntimeBootAckV1{}, err
 }
-func (w *proxyPreReadyWorker) StopAndReap(context.Context) (proxy.RuntimeWorkerReleaseV1, error) {
+func (w *proxyPreReadyWorker) BeginDrain(ctx context.Context, mode proxy.TrafficMode, sequence uint64) error {
+	w.calls = append(w.calls, "drain")
+	w.drained++
+	w.checkCleanupContext(ctx)
+	if mode != proxy.TrafficModeDrain || sequence != 0 {
+		return errors.New("unexpected pre-ready drain")
+	}
+	return nil
+}
+func (w *proxyPreReadyWorker) StopAndReap(ctx context.Context) (proxy.RuntimeWorkerReleaseV1, error) {
+	w.calls = append(w.calls, "reap")
 	w.reaped++
-	return proxy.RuntimeWorkerReleaseV1{}, nil
+	w.checkCleanupContext(ctx)
+	if w.failFirstRelease && w.reaped == 1 {
+		return proxy.RuntimeWorkerReleaseV1{}, errors.New("worker release unavailable")
+	}
+	return proxy.RuntimeWorkerReleaseV1{ProcessIdentityDigest: "fixture-process", ProcessTreeAbsenceProofDigest: "fixture-absence", HolderReleaseProofDigest: "fixture-release"}, nil
+}
+func (w *proxyPreReadyWorker) checkCleanupContext(ctx context.Context) {
+	if ctx.Err() != nil {
+		w.cleanupError = errors.New("cleanup inherited cancelled context")
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok || time.Until(deadline) > 5*time.Second {
+		w.cleanupError = errors.New("cleanup lacks bounded deadline")
+	}
 }

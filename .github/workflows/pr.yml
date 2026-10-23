@@ -25,6 +25,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - run: sudo apt-get update && sudo apt-get install -y zsh fish jq
+      - run: python3 specs/cli-v2/generate.py --check --go-output internal/cli/catalogue_gen.go
+      - run: python3 specs/cli-v2/plan/check.py
+      - run: python3 specs/cli-v2/presentation/check.py
+      - run: python3 specs/cli-v2/presentation/examples/export.py --check
       - run: go build ./...
       - run: go vet ./...
       - run: go test -race -count=1 ./...

@@ -13,6 +13,7 @@ import (
 // lease-owned routing state. The accepted credential revision is deliberately
 // absent: callers own that inventory revision and must combine it explicitly.
 type CodexLeaseRouteSnapshot struct {
+	RedistributionGeneration  uint64
 	Classification            CodexRestoredLaneClassification
 	BoundAccountKey           codex.AccountKey
 	BoundIdentity             CodexJournalRecordIdentity
@@ -67,9 +68,10 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 		}
 
 		snapshot := CodexLeaseRouteSnapshot{
-			Classification:    restored.Classification,
-			Provisional:       provisional,
-			JournalGeneration: restored.Fence.Journal,
+			Classification:           restored.Classification,
+			RedistributionGeneration: codexLaneRedistributionPending(restored.Lane),
+			Provisional:              provisional,
+			JournalGeneration:        restored.Fence.Journal,
 		}
 		accountResolver := newCodexLeaseAccountResolver(coordinator.store, accounts)
 		_, snapshot.RestartableFailedHead = codexRestoredLaneRestartableFailedHead(restored)
@@ -171,16 +173,8 @@ func (coordinator *CodexContinuityCoordinator) beginCodexLeasePersistenceContext
 	lifecycle := coordinator.leases.lifecycle
 	finishWait := codexProcessRuntimeObservability.beginPersistenceWait()
 	defer finishWait()
-	for !lifecycle.persistence.TryLock() {
-		timer := time.NewTimer(time.Millisecond)
-		select {
-		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
+	if err := lifecycle.persistence.LockContext(ctx); err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		lifecycle.persistence.Unlock()

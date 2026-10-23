@@ -49,6 +49,25 @@ func runUnixProxyAdoptedRuntime(ctx context.Context, listener net.Listener, serv
 			return err
 		}
 	}
+	return runUnixProxyAdoptedRuntimeWithLifecycle(ctx, listener, serve, file, holder, nil, nil)
+}
+
+func runUnixProxyAdoptedRuntimeWithLifecycle(ctx context.Context, listener net.Listener, serve func(context.Context, net.Listener, http.Handler) error, file *os.File, holder proxy.LifecycleHolderProof, resume *proxy.RuntimeUpgradeResumeV1, observe func(*proxy.RuntimeSupervisor)) error {
+	path, err := proxy.DefaultRuntimeLifecyclePath()
+	if err != nil {
+		return err
+	}
+	configure := func(supervisor *proxy.RuntimeSupervisor) error {
+		if observe != nil {
+			observe(supervisor)
+		}
+		if resume != nil {
+			if err := supervisor.ResumeRuntimeUpgradeOwnership(*resume); err != nil {
+				return err
+			}
+		}
+		return configurePlatformRuntimeUpgrade(ctx, supervisor, file, holder)
+	}
 	holderDigest, err := proxy.RuntimeDescriptorIdentityDigest(file)
 	if err != nil {
 		return fmt.Errorf("digest supervisor runtime lifecycle: %w", err)
@@ -82,7 +101,7 @@ func runUnixProxyAdoptedRuntime(ctx context.Context, listener net.Listener, serv
 	workerManifest := proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(manifestDigest[:])}
 	bootstrap, err := proxy.LoadProxyRescueBootstrapConfig()
 	if errors.Is(err, os.ErrNotExist) {
-		return wrapUnixProxyRuntimeError("run normal supervisor", proxy.RunAdoptedRuntimeSupervisor(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, serve))
+		return wrapUnixProxyRuntimeError("run normal supervisor", proxy.RunAdoptedRuntimeSupervisorConfigured(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, configure, serve))
 	}
 	if err != nil {
 		return fmt.Errorf("load rescue bootstrap: %w", err)
@@ -116,7 +135,10 @@ func runUnixProxyAdoptedRuntime(ctx context.Context, listener net.Listener, serv
 			return err
 		}
 		relay := &proxy.RescueRelay{Transport: http.DefaultTransport, Origin: origin}
-		return supervisor.ConfigureRescue(ctx, relay, state.RuntimeMode)
+		if err := supervisor.ConfigureRescue(ctx, relay, state.RuntimeMode); err != nil {
+			return err
+		}
+		return configure(supervisor)
 	}, serve))
 }
 

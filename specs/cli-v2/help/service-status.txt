@@ -17,8 +17,8 @@ Options:
       Choices: all, proxy, token-refresh.
       Constraint: Exact enum; selection never widens after validation.
   --strict
-      Return non-zero if selected components are not installed, not running, or
-      unhealthy. Default: false.
+      Return non-zero if a selected component is missing or unhealthy. A healthy
+      periodic token-refresh service may be idle between runs. Default: false.
       Type: boolean. Required: false. Repeatable: false.
       Default: false.
   --timeout DURATION

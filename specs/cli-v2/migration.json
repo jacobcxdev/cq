@@ -1142,6 +1142,38 @@
     }
   },
   {
+    "legacy_path": "proxy leases redistribute",
+    "source": "cmd/cq/proxy_leases.go",
+    "visibility": "public",
+    "disposition": "alias",
+    "variants": [],
+    "flag_mappings": [
+      {
+        "legacy": "--port",
+        "target": "--port",
+        "rule": "Pass value unchanged; apply canonical type, validation and omission semantics."
+      }
+    ],
+    "positional_mappings": [],
+    "semantics": [
+      "Public CLI v2 output and error contracts replace legacy output schemas; spelling aliases do not preserve v1 JSON, human output or exit codes."
+    ],
+    "canonical_path": "codex proxy lease redistribute",
+    "deprecation": true,
+    "canonical_option_defaults": {
+      "port": {
+        "default": null,
+        "required": false,
+        "omission_help": "Connect to the authenticated loopback proxy on this port (1\u201365535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset."
+      },
+      "timeout": {
+        "default": "10s",
+        "required": false,
+        "omission_help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s."
+      }
+    }
+  },
+  {
     "legacy_path": "proxy trace",
     "source": "v0.32.5:cmd/cq/proxy_trace.go:151",
     "visibility": "public",

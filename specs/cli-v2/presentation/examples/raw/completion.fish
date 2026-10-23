@@ -68,12 +68,22 @@ complete -c cq -f -n '__cq_path_is claude proxy pin' -a clear
 complete -c cq -f -n '__cq_path_is claude proxy pin' -a set
 complete -c cq -f -n '__cq_path_is claude proxy pin' -a show
 complete -c cq -f -n '__cq_path_is codex' -a account
+complete -c cq -f -n '__cq_path_is codex' -a dots
 complete -c cq -f -n '__cq_path_is codex' -a proxy
 complete -c cq -f -n '__cq_path_is codex' -a reset
 complete -c cq -f -n '__cq_path_is codex account' -a activate
 complete -c cq -f -n '__cq_path_is codex account' -a list
 complete -c cq -f -n '__cq_path_is codex account' -a login
 complete -c cq -f -n '__cq_path_is codex account' -a remove
+complete -c cq -f -n '__cq_path_is codex dots' -a board
+complete -c cq -f -n '__cq_path_is codex dots' -a broadcast
+complete -c cq -f -n '__cq_path_is codex dots' -a install
+complete -c cq -f -n '__cq_path_is codex dots' -a list
+complete -c cq -f -n '__cq_path_is codex dots' -a prime
+complete -c cq -f -n '__cq_path_is codex dots' -a start
+complete -c cq -f -n '__cq_path_is codex dots' -a status
+complete -c cq -f -n '__cq_path_is codex dots' -a stop
+complete -c cq -f -n '__cq_path_is codex dots' -a sync
 complete -c cq -f -n '__cq_path_is codex proxy' -a canary
 complete -c cq -f -n '__cq_path_is codex proxy' -a credential-endpoint
 complete -c cq -f -n '__cq_path_is codex proxy' -a fallback
@@ -105,6 +115,7 @@ complete -c cq -f -n '__cq_path_is codex proxy fallback' -a show
 complete -c cq -f -n '__cq_path_is codex proxy fixture' -a create
 complete -c cq -f -n '__cq_path_is codex proxy hook' -a stop
 complete -c cq -f -n '__cq_path_is codex proxy lease' -a invalidate
+complete -c cq -f -n '__cq_path_is codex proxy lease' -a redistribute
 complete -c cq -f -n '__cq_path_is codex proxy pin' -a clear
 complete -c cq -f -n '__cq_path_is codex proxy pin' -a set
 complete -c cq -f -n '__cq_path_is codex proxy pin' -a show
@@ -250,6 +261,53 @@ complete -c cq -f -n '__cq_has_path codex account remove; and __cq_options_open;
 complete -c cq -f -n '__cq_has_path codex account remove; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
 complete -c cq -f -n '__cq_has_path codex account remove; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
 complete -c cq -f -n '__cq_has_path codex account remove; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -n '__cq_has_path codex dots; and __cq_options_open; and not __fish_seen_argument -l root' -l root -r
+complete -c cq -f -n '__cq_has_path codex dots; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path codex dots; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path codex dots; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -n '__cq_has_path codex dots board; and __cq_options_open; and not __fish_seen_argument -l root' -l root -r
+complete -c cq -f -n '__cq_has_path codex dots board; and __cq_options_open; and not __fish_seen_argument -l clear' -l clear
+complete -c cq -f -n '__cq_has_path codex dots board; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path codex dots board; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path codex dots board; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -n '__cq_has_path codex dots broadcast; and __cq_options_open; and not __fish_seen_argument -l root' -l root -r
+complete -c cq -f -n '__cq_has_path codex dots broadcast; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path codex dots broadcast; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path codex dots broadcast; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -n '__cq_has_path codex dots install; and __cq_options_open; and not __fish_seen_argument -l root' -l root -r
+complete -c cq -f -n '__cq_has_path codex dots install; and __cq_options_open; and not __fish_seen_argument -l mode' -l mode -r -a 'native isolated'
+complete -c cq -n '__cq_has_path codex dots install; and __cq_options_open; and not __fish_seen_argument -l app' -l app -r
+complete -c cq -n '__cq_has_path codex dots install; and __cq_options_open; and not __fish_seen_argument -l system-auth' -l system-auth -r
+complete -c cq -n '__cq_has_path codex dots install; and __cq_options_open; and not __fish_seen_argument -l cq-accounts' -l cq-accounts -r
+complete -c cq -n '__cq_has_path codex dots install; and __cq_options_open; and not __fish_seen_argument -l account-source' -l account-source -r
+complete -c cq -f -n '__cq_has_path codex dots install; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path codex dots install; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path codex dots install; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -n '__cq_has_path codex dots list; and __cq_options_open; and not __fish_seen_argument -l root' -l root -r
+complete -c cq -f -n '__cq_has_path codex dots list; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path codex dots list; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path codex dots list; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -n '__cq_has_path codex dots prime; and __cq_options_open; and not __fish_seen_argument -l root' -l root -r
+complete -c cq -f -n '__cq_has_path codex dots prime; and __cq_options_open; and not __fish_seen_argument -l all' -l all
+complete -c cq -f -n '__cq_has_path codex dots prime; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path codex dots prime; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path codex dots prime; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -n '__cq_has_path codex dots start; and __cq_options_open; and not __fish_seen_argument -l root' -l root -r
+complete -c cq -f -n '__cq_has_path codex dots start; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path codex dots start; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path codex dots start; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -n '__cq_has_path codex dots status; and __cq_options_open; and not __fish_seen_argument -l root' -l root -r
+complete -c cq -f -n '__cq_has_path codex dots status; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path codex dots status; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path codex dots status; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -n '__cq_has_path codex dots stop; and __cq_options_open; and not __fish_seen_argument -l root' -l root -r
+complete -c cq -f -n '__cq_has_path codex dots stop; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path codex dots stop; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path codex dots stop; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -n '__cq_has_path codex dots sync; and __cq_options_open; and not __fish_seen_argument -l root' -l root -r
+complete -c cq -f -n '__cq_has_path codex dots sync; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path codex dots sync; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path codex dots sync; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
 complete -c cq -f -n '__cq_has_path codex proxy; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
 complete -c cq -f -n '__cq_has_path codex proxy; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
 complete -c cq -f -n '__cq_has_path codex proxy; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
@@ -349,6 +407,11 @@ complete -c cq -f -n '__cq_has_path codex proxy lease invalidate; and __cq_optio
 complete -c cq -f -n '__cq_has_path codex proxy lease invalidate; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
 complete -c cq -f -n '__cq_has_path codex proxy lease invalidate; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
 complete -c cq -f -n '__cq_has_path codex proxy lease invalidate; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
+complete -c cq -f -n '__cq_has_path codex proxy lease redistribute; and __cq_options_open; and not __fish_seen_argument -l port' -l port -r
+complete -c cq -f -n '__cq_has_path codex proxy lease redistribute; and __cq_options_open; and not __fish_seen_argument -l timeout' -l timeout -r
+complete -c cq -f -n '__cq_has_path codex proxy lease redistribute; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
+complete -c cq -f -n '__cq_has_path codex proxy lease redistribute; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
+complete -c cq -f -n '__cq_has_path codex proxy lease redistribute; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v
 complete -c cq -f -n '__cq_has_path codex proxy pin; and __cq_options_open; and not __fish_seen_argument -l help -s h' -l help -s h
 complete -c cq -f -n '__cq_has_path codex proxy pin; and __cq_options_open; and not __fish_seen_argument -l json -s j' -l json -s j
 complete -c cq -f -n '__cq_has_path codex proxy pin; and __cq_options_open; and not __fish_seen_argument -l version -s v' -l version -s v

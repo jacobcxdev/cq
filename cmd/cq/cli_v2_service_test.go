@@ -16,6 +16,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/cli"
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
+	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
@@ -951,5 +952,43 @@ func TestCLIV2ServiceFactoryReceivesBudgetSelection(t *testing.T) {
 	outcome := handleV2Service(context.Background(), inv, nil)
 	if outcome.ExitCode != 7 || calls != 1 {
 		t.Fatalf("factory budget exit=%d calls=%d", outcome.ExitCode, calls)
+	}
+}
+
+func TestCLIV2ServiceRetainedRuntimeStatus(t *testing.T) {
+	l, p, store := newSelectedServiceHarness(t)
+	store.record.Owner = installstate.OwnerHomebrew
+	store.record.Version = "0.34.1"
+	c := p.statuses[serviceProxy]
+	c.PackageExecutable = store.record.Executable
+	c.ConfiguredExecutable = "/retained/previous/cq"
+	c.LiveExecutable = "/retained/current/cq"
+	c.Listener = "127.0.0.1:19280"
+	p.statuses[serviceProxy] = c
+	l.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) {
+		return proxy.RuntimeUpgradeReceiptV1{Phase: "committed", Previous: installer.RuntimeArtifact{Version: "0.34.0"}, Candidate: installer.RuntimeArtifact{Version: "0.34.1"}}, nil
+	}
+	exit, data, code := runSelectedService(t, context.Background(), l, "service", "status", "--component", "proxy", "--strict", "--json")
+	if exit != 0 || data.ActiveRuntimeVersion != "0.34.1" || data.UpgradePhase != "committed" || data.PendingRuntimeVersion != "" {
+		t.Fatalf("status exit=%d code=%s data=%+v", exit, code, data)
+	}
+	got := data.Components[0]
+	if got.Owner != "package" || got.Executable == nil || *got.Executable != c.ConfiguredExecutable || got.LiveExecutable == nil || *got.LiveExecutable != c.LiveExecutable || got.Listener != c.Listener {
+		t.Fatalf("retained runtime identity lost: %+v", got)
+	}
+	for _, width := range []int{40, 100} {
+		terminal := terminalService(data, 0, cli.TerminalOptions{Width: width})
+		for _, text := range []string{"Active runtime", "0.34.1", "Upgrade", "committed", "Live binary", c.LiveExecutable, c.ConfiguredExecutable, c.Listener} {
+			if !strings.Contains(terminal, text) {
+				t.Fatalf("terminal width %d missing %q: %s", width, text, terminal)
+			}
+		}
+	}
+	if _, err := l.Selected(context.Background(), serviceStop, serviceProxy, false); err != nil {
+		t.Fatal(err)
+	}
+	c.PackageExecutable = ""
+	if selectedServiceExecutableMatches(c, store.record) {
+		t.Fatal("unverified retained executable accepted")
 	}
 }

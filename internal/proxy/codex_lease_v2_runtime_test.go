@@ -1627,6 +1627,199 @@ func TestCodexLeaseRuntimeAccountUnavailableAccumulatesOnlyWithinTurn(t *testing
 	}
 }
 
+func TestCodexLeaseRuntimeUnadmittedHardRebindRecordsLiveUncertainty(t *testing.T) {
+	coordinator, fsys, now := openCodexLeaseRuntimeTestCoordinator(t)
+	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+	plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{
+		{AccountKey: "account-a", CandidateID: "a", Kind: CodexAttemptSlotDirect},
+		{AccountKey: "account-b", CandidateID: "b", Kind: CodexAttemptSlotDirect},
+	})
+	handle, err := runtimeLease.BeginRequest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.RecordAccountUnavailableContext(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.MarkDispatched()
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err = handle.IndeterminateContext(context.Background(), CodexHTTPResponseEvidence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if handle.EverAdmitted() || handle.State() != LeaseOrphaned || !handle.record.NonMigratable || handle.record.AccountHash != coordinator.store.hash("account", "account-a") || handle.record.ResponseObserverRefs != 1 || handle.record.SocketLineageExtinct {
+		t.Fatalf("live uncertainty lost binding or observer: %#v", handle.record)
+	}
+	before := append([]byte(nil), coordinator.store.journalBytes...)
+	if _, err := runtimeLease.BeginRequest(plan); err == nil {
+		t.Fatal("live uncertain hard rebind replayed")
+	}
+	if !bytes.Equal(before, coordinator.store.journalBytes) {
+		t.Fatal("rejected replay changed journal")
+	}
+	identity := handle.identity
+	if err := coordinator.Close(); err != nil {
+		t.Fatal(err)
+	}
+	coordinator = reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+	restored := findCodexLeaseV2CASTestRecord(t, coordinator.store.v2.Records, identity)
+	if restored.EverAdmitted || !restored.NonMigratable || codexLeaseCurrentAttemptState(restored) != CodexAttemptIndeterminate || restored.ResponseObserverRefs != 0 || !restored.SocketLineageExtinct || restored.AccountHash != coordinator.store.hash("account", "account-a") || !codexLaneAffinityIsZero(coordinator.store.v2.Lanes[0]) {
+		t.Fatalf("restored live uncertainty lost conservative authority: %#v", restored)
+	}
+}
+
+func TestCodexLeaseRuntimeUnadmittedHardRebindSurvivesRestart(t *testing.T) {
+	for _, dispatched := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dispatched=%v", dispatched), func(t *testing.T) {
+			coordinator, fsys, now := openCodexLeaseRuntimeTestCoordinator(t)
+			runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+			plan := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{
+				{AccountKey: "account-a", CandidateID: "a", Kind: CodexAttemptSlotDirect},
+				{AccountKey: "account-b", CandidateID: "b", Kind: CodexAttemptSlotDirect},
+			})
+			handle, err := runtimeLease.BeginRequest(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.MarkDispatched()
+			if err != nil {
+				t.Fatal(err)
+			}
+			handle, err = handle.RecordAccountUnavailableContext(context.Background(), 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if dispatched {
+				handle, err = handle.MarkDispatched()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if handle.record.EverAdmitted || !codexLeaseCurrentAttemptAccountDiffersFromBinding(handle.record) {
+				t.Fatal("fixture does not reproduce an unadmitted hard rebind")
+			}
+			identity := handle.identity
+			if err := coordinator.Close(); err != nil {
+				t.Fatal(err)
+			}
+			coordinator = reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+			restored := findCodexLeaseV2CASTestRecord(t, coordinator.store.v2.Records, identity)
+			wantState := CodexAttemptAbandonedBeforeDispatch
+			if dispatched {
+				wantState = CodexAttemptIndeterminate
+			}
+			if codexLeaseCurrentAttemptState(restored) != wantState || restored.EverAdmitted || restored.NonMigratable != dispatched || restored.RoutingRefs != 0 || restored.AttemptRefs != 0 || restored.ResponseObserverRefs != 0 || !restored.SocketLineageExtinct {
+				t.Fatalf("restored hard rebind lost conservative lifecycle: %#v", restored)
+			}
+			if restored.AccountHash != coordinator.store.hash("account", "account-a") || !codexLaneAffinityIsZero(coordinator.store.v2.Lanes[0]) {
+				t.Fatal("restoration moved binding or created admission affinity")
+			}
+			before := append([]byte(nil), coordinator.store.journalBytes...)
+			if err := coordinator.Close(); err != nil {
+				t.Fatal(err)
+			}
+			coordinator = reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+			if !bytes.Equal(before, coordinator.store.journalBytes) {
+				t.Fatal("second restoration changed stable journal")
+			}
+			restored = findCodexLeaseV2CASTestRecord(t, coordinator.store.v2.Records, identity)
+			runtimeLease = newCodexLeaseRuntimeTest(t, coordinator)
+			if dispatched {
+				for _, invalid := range []struct {
+					name   string
+					mutate func(*CodexJournalRecordV2)
+				}{
+					{"missing uncertainty pin", func(r *CodexJournalRecordV2) { r.NonMigratable = false }},
+					{"missing unavailable provenance", func(r *CodexJournalRecordV2) { r.Attempts[0].State = CodexAttemptProviderFailed }},
+				} {
+					mutation := cloneCodexJournalRecordV2(restored)
+					invalid.mutate(&mutation)
+					if err := coordinator.store.validateV2RouteAndAttempts(mutation); err == nil {
+						t.Fatalf("accepted interrupted hard rebind with %s", invalid.name)
+					}
+				}
+				for _, account := range []codex.AccountKey{"account-a", "account-b"} {
+					retry := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: account, CandidateID: "retry", Kind: CodexAttemptSlotDirect}})
+					retry.Accounts = plan.Accounts
+					if _, err := runtimeLease.BeginRequest(retry); err == nil {
+						t.Fatalf("indeterminate hard rebind replayed on %s", account)
+					}
+				}
+				if !bytes.Equal(before, coordinator.store.journalBytes) {
+					t.Fatal("rejected replay changed journal")
+				}
+			} else {
+				for _, mutate := range []func(*CodexJournalRecordV2){
+					func(r *CodexJournalRecordV2) { r.RoutingRefs = 1 },
+					func(r *CodexJournalRecordV2) { r.SocketLineageExtinct = false },
+				} {
+					invalid := cloneCodexJournalRecordV2(restored)
+					mutate(&invalid)
+					if err := coordinator.store.validateV2RouteAndAttempts(invalid); err == nil {
+						t.Fatal("accepted abandoned hard rebind before full drain")
+					}
+				}
+			}
+			fresh := codexLeaseRuntimeTestPlan("fresh-turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "fresh", Kind: CodexAttemptSlotDirect}})
+			fresh.Key.Lane.Thread = "fresh-thread"
+			admitted, err := runtimeLease.BeginRequest(fresh)
+			if err != nil {
+				t.Fatal(err)
+			}
+			admitted, err = admitted.MarkDispatched()
+			if err != nil {
+				t.Fatal(err)
+			}
+			admitted, err = admitted.AdmitHTTP2xx()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !admitted.EverAdmitted() || admitted.AccountKey() != "account-b" {
+				t.Fatal("restored journal blocked independent new chat")
+			}
+			preserved := findCodexLeaseV2CASTestRecord(t, coordinator.store.v2.Records, identity)
+			if !reflect.DeepEqual(restored, preserved) {
+				t.Fatal("independent admission changed interrupted request")
+			}
+			continuation := codexLeaseRuntimeTestPlan("turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-b", CandidateID: "continuation", Kind: CodexAttemptSlotDirect}})
+			continuation.Accounts = plan.Accounts
+			if dispatched {
+				continuation.Key.Turn = "new-logical-turn"
+			}
+			resumed, err := runtimeLease.BeginRequest(continuation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resumed, err = resumed.MarkDispatched()
+			if err != nil {
+				t.Fatal(err)
+			}
+			resumed, err = resumed.AdmitHTTP2xx()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resumed.AccountKey() != "account-b" || !resumed.EverAdmitted() {
+				t.Fatal("same-chat recovery did not admit replacement")
+			}
+			if dispatched {
+				old := findCodexLeaseV2CASTestRecord(t, coordinator.store.v2.Records, identity)
+				if old.State != LeaseSuperseded || codexLeaseCurrentAttemptState(old) != CodexAttemptIndeterminate || !old.NonMigratable || old.EverAdmitted || old.AccountHash != restored.AccountHash {
+					t.Fatal("new logical turn altered uncertain work")
+				}
+			} else if resumed.RequestGeneration() != restored.Generation+1 {
+				t.Fatal("unsent replacement did not resume same logical turn")
+			}
+		})
+	}
+}
+
 func TestCodexLeaseRuntimePendingAccountUnavailableRebindSurvivesRestart(t *testing.T) {
 	for _, test := range []struct {
 		name       string

@@ -65,7 +65,7 @@ func TestRefreshAccessTokenSendsExactRequest(t *testing.T) {
 
 func TestLoadCodeAssistSendsExactRequest(t *testing.T) {
 	doer := doerFunc(func(req *http.Request) (*http.Response, error) {
-		assertAntigravityRequest(t, req, loadCodeAssistURL, "access-token", "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\"}}")
+		assertAntigravityRequest(t, req, "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", "access-token", "{\"metadata\":{\"ideType\":\"ANTIGRAVITY\"}}")
 		return httpResponse(http.StatusOK, "{\"cloudaicompanionProject\":{\"projectId\":\"project-123\"}}"), nil
 	})
 
@@ -91,7 +91,7 @@ func TestLoadCodeAssistAcceptsStringProject(t *testing.T) {
 func TestRetrieveUserQuotaSummarySendsExactRequest(t *testing.T) {
 	wantBody := "{\"groups\":[]}"
 	doer := doerFunc(func(req *http.Request) (*http.Response, error) {
-		assertAntigravityRequest(t, req, retrieveQuotaURL, "access-token", "{\"project\":\"project-123\"}")
+		assertAntigravityRequest(t, req, "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", "access-token", "{\"project\":\"project-123\"}")
 		return httpResponse(http.StatusOK, wantBody), nil
 	})
 

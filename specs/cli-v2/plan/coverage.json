@@ -441,6 +441,118 @@
       "contract": "commands.json#codex.account.remove"
     },
     {
+      "path": "codex dots board",
+      "owner": "T08",
+      "options": [
+        "root",
+        "clear"
+      ],
+      "positionals": [
+        "thread"
+      ],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.dots.board"
+    },
+    {
+      "path": "codex dots broadcast",
+      "owner": "T08",
+      "options": [
+        "root"
+      ],
+      "positionals": [
+        "message"
+      ],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.dots.broadcast"
+    },
+    {
+      "path": "codex dots install",
+      "owner": "T08",
+      "options": [
+        "root",
+        "mode",
+        "app",
+        "system-auth",
+        "cq-accounts",
+        "account-source"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.dots.install"
+    },
+    {
+      "path": "codex dots list",
+      "owner": "T08",
+      "options": [
+        "root"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.dots.list"
+    },
+    {
+      "path": "codex dots prime",
+      "owner": "T08",
+      "options": [
+        "root",
+        "all"
+      ],
+      "positionals": [
+        "dot"
+      ],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.dots.prime"
+    },
+    {
+      "path": "codex dots start",
+      "owner": "T08",
+      "options": [
+        "root"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.dots.start"
+    },
+    {
+      "path": "codex dots status",
+      "owner": "T08",
+      "options": [
+        "root"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.dots.status"
+    },
+    {
+      "path": "codex dots stop",
+      "owner": "T08",
+      "options": [
+        "root"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.dots.stop"
+    },
+    {
+      "path": "codex dots sync",
+      "owner": "T08",
+      "options": [
+        "root"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.dots.sync"
+    },
+    {
       "path": "codex proxy canary start",
       "owner": "T25",
       "options": [],
@@ -617,6 +729,18 @@
       "acceptance_case_count": 2,
       "availability": true,
       "contract": "commands.json#codex.proxy.lease.invalidate"
+    },
+    {
+      "path": "codex proxy lease redistribute",
+      "owner": "T16",
+      "options": [
+        "port",
+        "timeout"
+      ],
+      "positionals": [],
+      "acceptance_case_count": 5,
+      "availability": true,
+      "contract": "commands.json#codex.proxy.lease.redistribute"
     },
     {
       "path": "codex proxy pin clear",
@@ -1426,6 +1550,10 @@
     },
     {
       "path": "codex account",
+      "owner": "T02"
+    },
+    {
+      "path": "codex dots",
       "owner": "T02"
     },
     {
@@ -2574,6 +2702,17 @@
       "semantic_owners": [
         "T03"
       ]
+    },
+    {
+      "legacy_path": "proxy leases redistribute",
+      "owner": "T03",
+      "disposition": "alias",
+      "targets": [
+        "codex proxy lease redistribute"
+      ],
+      "semantic_owners": [
+        "T16"
+      ]
     }
   ],
   "resource_documents": [
@@ -2731,6 +2870,12 @@
         "T26",
         "T27",
         "T28"
+      ]
+    },
+    {
+      "path": "resources/dots.md",
+      "owners": [
+        "T08"
       ]
     }
   ],

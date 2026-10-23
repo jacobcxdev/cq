@@ -96,8 +96,8 @@ func TestCLIV2GeneratedCatalogue(t *testing.T) {
 			t.Fatalf("catalogue[%d] differs:\n got %#v\nwant %#v", index, catalogue[index], want)
 		}
 	}
-	if groups != 37 || commands != 89 {
-		t.Fatalf("catalogue kinds = %d groups, %d commands; want 37 and 89", groups, commands)
+	if groups != 38 || commands != 99 {
+		t.Fatalf("catalogue kinds = %d groups, %d commands; want 38 and 99", groups, commands)
 	}
 }
 
@@ -106,8 +106,8 @@ func TestCLIV2GeneratedHelpCatalogue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 127 {
-		t.Fatalf("help golden count = %d, want 127", len(files))
+	if len(files) != 138 {
+		t.Fatalf("help golden count = %d, want 138", len(files))
 	}
 	paths := []string{""}
 	for _, command := range catalogue {

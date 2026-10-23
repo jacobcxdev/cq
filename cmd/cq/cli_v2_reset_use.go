@@ -232,6 +232,8 @@ func handleV2ResetUseWithFactory(parent context.Context, inv cli.Invocation, s *
 			message = "Fresh quota could not be matched to the selected account."
 		case "history_update_failed":
 			message = "Quota history update failed."
+		case "redistribution_failed":
+			message = "Reset succeeded, but proxy lease redistribution could not be scheduled."
 		}
 		if message != "" {
 			out.Warnings = append(out.Warnings, cli.Diagnostic{Code: "codex_reset_" + warning.Code, Message: message})

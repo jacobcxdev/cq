@@ -1698,3 +1698,47 @@ func (file *faultDurableFile) Sync() error {
 	}
 	return file.DurableFile.Sync()
 }
+
+func TestOwnerControlledAtomicWritePreservesDirectoryAndFencesPublication(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("Unix owner directory permissions")
+	}
+	for _, mode := range []os.FileMode{0o700, 0o755} {
+		t.Run(mode.String(), func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(root, mode); err != nil {
+				t.Fatal(err)
+			}
+			fsys := OSFileSystem{}
+			opened, err := fsys.OpenDurableDirectory(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			directory := opened.(SecureDirectory)
+			defer directory.Close()
+			path := filepath.Join(root, "auth.json")
+			if err := os.WriteFile(path, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			blocked := errors.New("owner generation changed")
+			if err := SecureAtomicWriteInOwnerControlledDirectoryChecked(fsys, directory, root, "auth.json", []byte("new"), func() error { return blocked }); !errors.Is(err, blocked) {
+				t.Fatalf("precondition=%v", err)
+			}
+			data, _ := os.ReadFile(path)
+			if string(data) != "old" {
+				t.Fatal("failed fence published")
+			}
+			if err := SecureAtomicWriteInOwnerControlledDirectoryChecked(fsys, directory, root, "auth.json", []byte("new"), nil); err != nil {
+				t.Fatal(err)
+			}
+			dirInfo, _ := os.Stat(root)
+			fileInfo, _ := os.Stat(path)
+			if dirInfo.Mode().Perm() != mode || fileInfo.Mode().Perm() != 0o600 {
+				t.Fatal("owner permissions changed")
+			}
+		})
+	}
+}

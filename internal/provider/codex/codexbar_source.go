@@ -25,9 +25,10 @@ const (
 )
 
 type CodexBarSource struct {
-	root     string
-	fs       codexBarReadFileSystem
-	ownsFile func(os.FileInfo) bool
+	root           string
+	fs             codexBarReadFileSystem
+	ownsFile       func(os.FileInfo) bool
+	renewalPending func(codexBarManifestRecord) bool
 }
 
 type codexBarReadFileSystem interface {
@@ -196,17 +197,27 @@ func codexBarProtectionDigest(domain string, parts ...[]byte) [sha256.Size]byte 
 }
 
 func (s *CodexBarSource) List(ctx context.Context) ([]ExternalCandidate, error) {
-	manifest, err := s.loadManifest()
+	return s.list(ctx, true)
+}
+
+func (s *CodexBarSource) list(ctx context.Context, retryPublication bool) ([]ExternalCandidate, error) {
+	manifest, err := s.loadValidatedManifest()
 	if err != nil {
 		return nil, err
 	}
-	candidates := make([]ExternalCandidate, 0, len(manifest.Accounts))
-	for _, record := range manifest.Accounts {
+	candidates := make([]ExternalCandidate, 0, len(manifest.value.Accounts))
+	for _, record := range manifest.value.Accounts {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		account, revision, err := s.readRecord(record, "")
 		if err != nil {
+			if retryPublication && s.renewalPending != nil && s.confirmExternalFileGeneration(manifest.path, manifest.generation, ErrStaleRevision) != nil {
+				return s.list(ctx, false)
+			}
+			if s.renewalPending != nil && s.renewalPending(record) {
+				continue
+			}
 			return nil, err
 		}
 		candidates = append(candidates, ExternalCandidate{

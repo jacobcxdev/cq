@@ -219,7 +219,7 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 		"- cq",
 		"custom_block: |",
 		"installer script:",
-		"uninstall script:",
+		"uninstall(script:",
 		`executable: "/bin/bash"`,
 		`set -euo pipefail`,
 		`attributes=$(/usr/bin/xattr "$source")`,
@@ -228,14 +228,10 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 		`if [[ ! -L "$target" || ! "$target" -ef "$source" ]]; then`,
 		`"$source" service install --owner=homebrew "--service-executable=$target"`,
 		`if [[ "$linked" == 1 && -L "$target" && "$target" -ef "$source" ]]; then`,
-		`if [[ -x "$source" && "$target" -ef "$source" ]]; then`,
+		`if [[ ! -x "$source" || ! "$target" -ef "$source" ]]; then`,
 		`"$source" service uninstall --owner=homebrew "--service-executable=$target"`,
-		`if [[ ! -L "$target" || "$(readlink "$target")" != "$source" ]]; then`,
 		`"#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq"`,
-		`/bin/launchctl bootout "gui/$UID/dev.jacobcx.cq.proxy"`,
-		`/bin/launchctl bootout "gui/$UID/dev.jacobcx.cq.refresh"`,
-		`"$HOME/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist"`,
-		`"$HOME/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"`,
+		`CQ removal requires its verified package executable`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask missing %q", required)
@@ -247,8 +243,8 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 	if strings.Contains(text, "hooks:") || strings.Contains(text, "generated_script") {
 		t.Fatal("Homebrew Cask uses sandboxed hooks or prematurely evaluates staged paths")
 	}
-	if count := strings.Count(text, "|| true"); count != 2 {
-		t.Fatalf("Homebrew Cask has %d fail-open commands, want two launchd backstops", count)
+	if count := strings.Count(text, "|| true"); count != 0 {
+		t.Fatalf("Homebrew Cask has %d fail-open commands, want none", count)
 	}
 	if strings.Contains(text, "/usr/bin/sudo") {
 		t.Fatal("Homebrew Cask uninstall backstop requires privilege escalation")
@@ -323,11 +319,14 @@ func TestHomebrewCaskValidationFailsClosed(t *testing.T) {
 		`abort "CQ lifecycle command survived validation isolation"`,
 		`abort "production CQ binary path survived validation isolation"`,
 		`abort "production CQ launchd label survived validation isolation"`,
-		`find "$validation_binary" -depth -delete`,
+		"brew uninstall --cask --force \"$validation_token\"\n[[ ! -e \"$validation_binary\" && ! -L \"$validation_binary\" ]]",
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask validation missing fail-closed guard %q", required)
 		}
+	}
+	if strings.Contains(text, `find "$validation_binary" -depth -delete`) {
+		t.Fatal("Homebrew Cask validation deletes verified package before uninstall")
 	}
 }
 
@@ -463,7 +462,7 @@ func TestCICoversSupportedNativePlatforms(t *testing.T) {
 			t.Errorf("CI uses forbidden platform bypass %q", forbidden)
 		}
 	}
-	if !strings.Contains(text, "CQ_CANDIDATE_VERSION: 0.34.0") || !strings.Contains(text, `current_version="${CQ_CANDIDATE_VERSION}-ci"`) || strings.Contains(text, "1.0.0") {
+	if !strings.Contains(text, "CQ_CANDIDATE_VERSION: 0.39.0") || !strings.Contains(text, `current_version="${CQ_CANDIDATE_VERSION}-ci"`) || strings.Contains(text, "1.0.0") {
 		t.Error("CI must keep both candidate paths on the planned 0.x release line")
 	}
 	if !strings.Contains(text, "go test -race -count=1 ./internal/userdirs ./internal/fsutil") {
@@ -618,14 +617,28 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	homebrewText := string(homebrewInstall)
+	pidQuery := `if .schema_version == 2 then .data.components[] | select(.id == "proxy") | .pid else .proxy.pid end`
+	pidCapture := `proxy_pid=$($installed_cq service status --json | jq -er '` + pidQuery + `')`
+	pidGuard := `[[ "$($installed_cq service status --json | jq -er '` + pidQuery + `')" == "$proxy_pid" ]]`
 	for _, required := range []string{
-		`"$live_executable" -ef "$installed_cq"`,
+		`Digest::SHA256.file(live).hexdigest == package_digest`,
+		`status["active_runtime_version"] == expected_version`,
+		`Digest::SHA256.file(path).hexdigest == digest`,
+		`brew reinstall --cask "$validation_tap/cq"`,
+		pidCapture,
+		pidGuard,
 		`jq . <<<"$status_json" >&2`,
 		`tail -n 80 "$log" >&2`,
 	} {
 		if !strings.Contains(homebrewText, required) {
 			t.Errorf("Homebrew installation script missing identity/diagnostic proof %q", required)
 		}
+	}
+	pidCaptureIndex := strings.Index(homebrewText, pidCapture)
+	reinstallIndex := strings.Index(homebrewText, `brew reinstall --cask "$validation_tap/cq"`)
+	pidGuardIndex := strings.Index(homebrewText, pidGuard)
+	if pidCaptureIndex < 0 || reinstallIndex < pidCaptureIndex || pidGuardIndex < reinstallIndex {
+		t.Error("Homebrew reinstall does not preserve the captured proxy PID identity")
 	}
 	linuxText := string(linux)
 	for _, required := range []string{

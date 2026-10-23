@@ -9,7 +9,6 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"github.com/jacobcxdev/cq/internal/httputil"
 	"net/http"
 	"os"
 	"os/exec"
@@ -21,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/proxy"
@@ -60,8 +60,8 @@ type darwinServicePlatform struct {
 
 func init() {
 	serviceLifecycleFactory = defaultDarwinServiceLifecycle
-	selectedServiceLifecycleFactory = func(context.Context, serviceAction, serviceSelection) (*serviceLifecycle, error) {
-		return darwinServiceLifecycleWithHome("", darwinSelectedHome)
+	selectedServiceLifecycleFactory = func(ctx context.Context, _ serviceAction, _ serviceSelection) (*serviceLifecycle, error) {
+		return darwinServiceLifecycleWithHomeContext(ctx, "", darwinSelectedHome)
 	}
 }
 
@@ -72,6 +72,13 @@ func defaultDarwinServiceLifecycle(stableExecutable string) (*serviceLifecycle, 
 }
 
 func darwinServiceLifecycleWithHome(stableExecutable string, resolveHome func() (string, error)) (*serviceLifecycle, error) {
+	return darwinServiceLifecycleWithHomeContext(context.Background(), stableExecutable, resolveHome)
+}
+
+func darwinServiceLifecycleWithHomeContext(ctx context.Context, stableExecutable string, resolveHome func() (string, error)) (*serviceLifecycle, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	roots, err := userdirs.Default()
 	if err != nil {
 		return nil, err
@@ -109,7 +116,7 @@ func darwinServiceLifecycleWithHome(stableExecutable string, resolveHome func() 
 		initialiseProxy: initialiseDarwinRuntimeLifecycle,
 	}
 	store := &installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}
-	return &serviceLifecycle{
+	lifecycle := &serviceLifecycle{
 		Platform:       platform,
 		Store:          store,
 		Executable:     executable,
@@ -117,7 +124,9 @@ func darwinServiceLifecycleWithHome(stableExecutable string, resolveHome func() 
 		StatusAttempts: 20,
 		StatusInterval: time.Second,
 		MutationLocker: installer.FileInstallLocker{FS: fsutil.OSFileSystem{}, StateRoot: roots.State},
-	}, nil
+	}
+	configureDarwinServiceUpgrades(ctx, lifecycle, platform)
+	return lifecycle, nil
 }
 
 func newDarwinCommandServicePlatform(home string, roots userdirs.Roots, executable string) *darwinServicePlatform {
@@ -478,6 +487,9 @@ func (platform *darwinServicePlatform) restore(ctx context.Context, label, path 
 	if _, err := platform.bootoutAndWait(ctx, label); err != nil {
 		return fmt.Errorf("boot out failed candidate: %w", err)
 	}
+	if err := platform.waitJobUnloaded(ctx, label); err != nil {
+		return errors.Join(restoreErr, fmt.Errorf("wait for failed candidate to unload: %w", err))
+	}
 	if exists {
 		if err := atomicWriteDarwinLaunchAgent(path, data); err != nil {
 			return errors.Join(restoreErr, fmt.Errorf("restore previous definition: %w", err))
@@ -496,13 +508,16 @@ func (platform *darwinServicePlatform) restore(ctx context.Context, label, path 
 }
 
 func (platform *darwinServicePlatform) remove(ctx context.Context, label string) error {
-	var result error
 	if _, err := platform.run(ctx, "bootout", platform.target(label)); err != nil && !isDarwinLaunchctlNotLoaded(err) {
-		result = errors.Join(result, fmt.Errorf("boot out %s: %w", label, err))
+		return fmt.Errorf("boot out %s: %w", label, err)
 	}
-	if selectedServiceContext(ctx) && ctx.Err() != nil {
-		return errors.Join(result, ctx.Err())
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	if err := platform.waitJobUnloaded(ctx, label); err != nil {
+		return fmt.Errorf("wait for %s to unload: %w", label, err)
+	}
+	var result error
 	path := platform.plistPath(label)
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		result = errors.Join(result, fmt.Errorf("remove %s definition: %w", label, err))
@@ -512,6 +527,33 @@ func (platform *darwinServicePlatform) remove(ctx context.Context, label string)
 		}
 	}
 	return result
+}
+
+func (platform *darwinServicePlatform) waitJobUnloaded(ctx context.Context, label string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	quiet := 0
+	for {
+		loaded, _, err := platform.printJob(ctx, label)
+		if err != nil {
+			return err
+		}
+		if !loaded {
+			quiet++
+			if quiet == 10 {
+				return nil
+			}
+		} else {
+			quiet = 0
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func (platform *darwinServicePlatform) kickstart(ctx context.Context, label string) error {
@@ -912,7 +954,7 @@ func parseDarwinLaunchctlStatus(output []byte) (state string, runs int, lastExit
 
 func inspectDarwinProxyRuntime(ctx context.Context, executable string) componentStatus {
 	status := componentStatus{ID: proxyAgentLabel, Manager: "launchd", Registered: true, ConfiguredExecutable: executable}
-	facts := collectDarwinProxyInspectionFacts(ctx, "")
+	facts := collectDarwinProxyInspectionFactsForExecutable(ctx, "", executable)
 	if facts.service.Status == proxy.FactKnown && facts.service.Value != nil {
 		status.Running = facts.service.Value.State == "running"
 		status.PID = facts.service.Value.PID
@@ -924,7 +966,22 @@ func inspectDarwinProxyRuntime(ctx context.Context, executable string) component
 	if facts.runtime.Status == proxy.FactKnown && facts.runtime.Value != nil && status.LiveExecutable == "" {
 		status.LiveExecutable = facts.runtime.Value.Executable
 	}
-	status.Healthy = status.Running && status.Listener != "" && facts.runtime.Status == proxy.FactKnown && facts.runtime.Value != nil && facts.runtime.Value.Reachable && facts.runtime.Value.Health == "healthy" && sameDarwinExecutable(status.LiveExecutable, executable)
+	expected := executable
+	roots, rootsErr := userdirs.Default()
+	if rootsErr == nil {
+		artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: roots}
+		pinned, pinErr := darwinExistingRuntimeArtifact(ctx, artifacts, executable)
+		if pinErr == nil && pinned.Path == executable {
+			ownership, loadErr := (installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}).Load()
+			if loadErr == nil && ownership.Owner == installstate.OwnerHomebrew {
+				selected, selectErr := darwinSelectedRuntimeArtifact(ctx, artifacts, proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: roots}, ownership)
+				if selectErr == nil {
+					expected = selected.Path
+				}
+			}
+		}
+	}
+	status.Healthy = status.Running && status.Listener != "" && facts.runtime.Status == proxy.FactKnown && facts.runtime.Value != nil && facts.runtime.Value.Reachable && facts.runtime.Value.Health == "healthy" && sameDarwinExecutable(status.LiveExecutable, expected)
 	return status
 }
 
@@ -1137,7 +1194,14 @@ func (platform *darwinServicePlatform) PreflightSelected(ctx context.Context, ex
 			return err
 		}
 		if exists && !sameServiceExecutable(definition.ProgramArguments[0], executable) {
-			return installstate.ErrOwnershipConflict
+			current, err := filepath.EvalSymlinks(executable)
+			if err != nil {
+				return err
+			}
+			selected, err := resolveDarwinRetainedServiceRuntime(ctx, platform.roots, current, definition.ProgramArguments[0])
+			if err != nil || selected.Path == "" {
+				return errors.Join(installstate.ErrOwnershipConflict, err)
+			}
 		}
 		loaded, _, err := platform.printJob(ctx, label)
 		if err != nil {
@@ -1184,12 +1248,32 @@ func (platform *darwinServicePlatform) InspectSelected(ctx context.Context, sele
 		}
 		c.Observed.Owner = "cq"
 		c.ConfiguredExecutable = d.ProgramArguments[0]
+		if filepath.Dir(filepath.Dir(c.ConfiguredExecutable)) == filepath.Join(platform.roots.State, "runtime-artifacts") {
+			current, err := filepath.EvalSymlinks(platform.executable)
+			if err != nil {
+				return status, err
+			}
+			selected, err := resolveDarwinRetainedServiceRuntime(ctx, platform.roots, current, c.ConfiguredExecutable)
+			if err != nil || selected.Path == "" {
+				return status, errors.Join(installstate.ErrOwnershipConflict, err)
+			}
+			record, err := (installstate.Store{FS: fsutil.OSFileSystem{}, Roots: platform.roots}).Load()
+			if err != nil {
+				return status, err
+			}
+			c.PackageExecutable = record.Executable
+		}
 		enabled, err := platform.enabled(ctx, label)
 		if err != nil {
 			return status, err
 		}
 		c.Observed.Enabled = serviceBool(enabled)
 		roots, rootErr := darwinDefinitionRoots(d)
+		// Released retained jobs predate explicit environment binding. Accept the
+		// roots only when their retained artifact and package ownership are proven.
+		if rootErr != nil && len(d.EnvironmentVariables) == 0 && c.PackageExecutable != "" {
+			roots, rootErr = platform.roots, nil
+		}
 		if rootErr == nil {
 			c.Observed.Roots = &roots
 		}
@@ -1334,10 +1418,18 @@ func inspectDarwinSelectedProxyRuntimeWith(ctx context.Context, executable strin
 		return status
 	}
 	live := strings.TrimSpace(string(output))
-	if !sameServiceExecutable(live, executable) {
+	status.LiveExecutable = live
+	expected := executable
+	if filepath.Dir(filepath.Dir(executable)) == filepath.Join(roots.State, "runtime-artifacts") {
+		selected, err := resolveDarwinRetainedServiceRuntime(ctx, roots, executable, executable)
+		if err != nil || selected.Path == "" {
+			return status
+		}
+		expected = selected.Path
+	}
+	if !sameServiceExecutable(live, expected) {
 		return status
 	}
-	status.LiveExecutable = live
 	output, err = run(ctx, "/usr/sbin/lsof", "-nP", "-a", fmt.Sprintf("-iTCP:%d", cfg.Port), "-sTCP:LISTEN", "-Fp")
 	if err != nil || requireInstalledHTTPValidationListenerPID(output, pid) != nil {
 		return status

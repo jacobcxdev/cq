@@ -19,9 +19,13 @@ func isMachineABI(argv []string) bool {
 		return false
 	}
 	if argv[0] == "service" {
-		for _, arg := range argv[2:] {
-			if arg == "--service-executable=" {
-				return false
+		for i := 2; i < len(argv); i++ {
+			name, value, equals := strings.Cut(argv[i], "=")
+			switch name {
+			case "--service-executable", "--candidate-executable", "--snapshot-file":
+				if equals && value == "" || !equals && i+1 < len(argv) && argv[i+1] == "" {
+					return false
+				}
 			}
 		}
 		switch argv[1] {
@@ -39,7 +43,7 @@ func isMachineABI(argv []string) bool {
 			if !packageOption {
 				return false
 			}
-		case "snapshot", "restore":
+		case "snapshot", "restore", "upgrade":
 		default:
 			return false
 		}
@@ -48,6 +52,9 @@ func isMachineABI(argv []string) bool {
 	}
 	if argv[0] != "proxy" {
 		return false
+	}
+	if len(argv) == 3 && argv[1] == "runtime-check" && argv[2] == "--json" {
+		return true
 	}
 	if isLinuxAcceptanceHelperCommand(argv) {
 		return true
@@ -87,6 +94,8 @@ func dispatchMachineABI(argv []string) (handled bool, exitCode int) {
 	switch {
 	case argv[0] == "service":
 		err = runService(argv[1:])
+	case argv[0] == "proxy" && argv[1] == "runtime-check":
+		err = runProxyRuntimeCheck(argv[2:], os.Stdout)
 	case isLinuxAcceptanceHelperCommand(argv):
 		if runLinuxAcceptanceHelper(context.Background()) != nil {
 			err = errors.New("Linux acceptance helper failed")

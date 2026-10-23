@@ -21,7 +21,7 @@ import (
 
 func lookupV2RoutingDiagnostics(path string) (cli.Handler, bool) {
 	switch path {
-	case "codex proxy lease invalidate", "codex proxy trace":
+	case "codex proxy lease invalidate", "codex proxy lease redistribute", "codex proxy trace":
 		return handleV2RoutingDiagnostics, true
 	}
 	return nil, false
@@ -116,6 +116,23 @@ func handleV2RoutingDiagnosticsWithPreparation(parent context.Context, inv cli.I
 		port := 0
 		if values := inv.Options["port"]; len(values) > 0 {
 			port, _ = strconv.Atoi(values[0])
+		}
+		if inv.Path == "codex proxy lease redistribute" {
+			result, err := requestProxyLeaseRedistribution(ctx, port, http.NoBody, deps.Lease)
+			if out, stopped := v2SelectionStopped(parent, ctx); stopped {
+				return out
+			}
+			if err != nil {
+				return v2LeaseFailureForAction(err, "redistribution")
+			}
+			data, _ := json.Marshal(result)
+			return cli.Outcome{Data: data, Human: fmt.Sprintf("Scheduled leases: %d\nDeferred leases: %d\nJournal generation: %d\n", result.ScheduledLeases, result.DeferredLeases, result.JournalGeneration), Terminal: func(o cli.TerminalOptions) string {
+				return cli.TerminalLine(o, 0, cli.Span{Text: "Codex lease redistribution scheduled", Role: cli.Heading}) +
+					routingLine(o, 2, 20, "Scheduled leases", cli.TerminalCount(uint64(result.ScheduledLeases))) +
+					routingLine(o, 2, 20, "Deferred leases", cli.TerminalCount(uint64(result.DeferredLeases))) +
+					routingLine(o, 2, 20, "Journal generation", routingNumberIdentifier(result.JournalGeneration)) +
+					"\n" + cli.TerminalLine(o, 0, cli.Span{Text: "Chats move at a safe request boundary; active work continues."})
+			}}
 		}
 		result, err := requestProxyLeaseInvalidation(ctx, port, deps.Lease)
 		if out, stopped := v2SelectionStopped(parent, ctx); stopped {
@@ -217,6 +234,10 @@ func handleV2RoutingDiagnosticsWithPreparation(parent context.Context, inv cli.I
 }
 
 func v2LeaseFailure(err error) cli.Outcome {
+	return v2LeaseFailureForAction(err, "invalidation")
+}
+
+func v2LeaseFailureForAction(err error, action string) cli.Outcome {
 	var failure *proxyLeaseError
 	if !errors.As(err, &failure) {
 		return v2SelectionFailure(1, "routing_io_failed", "Routing operation failed: lease control.")
@@ -227,11 +248,11 @@ func v2LeaseFailure(err error) cli.Outcome {
 	case failure.kind == "io":
 		return v2SelectionFailure(1, "routing_io_failed", "Routing operation failed: lease control.")
 	case failure.status == 503 && failure.code == "lease_journal_unavailable":
-		return v2SelectionFailure(4, "lease_journal_unavailable", "Lease journal is unavailable for invalidation.")
+		return v2SelectionFailure(4, "lease_journal_unavailable", "Lease journal is unavailable for "+action+".")
 	case failure.status == 503 && failure.code == "routing_io_failed":
-		return v2SelectionFailure(1, "routing_io_failed", "Routing operation failed: persist lease invalidation; inspect current state before retrying.")
+		return v2SelectionFailure(1, "routing_io_failed", "Routing operation failed: persist lease "+action+"; inspect current state before retrying.")
 	case failure.status == 409 || (failure.status == 503 && failure.code == "routing_conflict"):
-		return v2SelectionFailure(6, "routing_conflict", "Routing state conflict: lease invalidation rejected.")
+		return v2SelectionFailure(6, "routing_conflict", "Routing state conflict: lease "+action+" rejected.")
 	default:
 		return v2SelectionFailure(4, "routing_control_unavailable", "Running CQ proxy control is unavailable.")
 	}

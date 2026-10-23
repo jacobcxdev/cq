@@ -1277,7 +1277,7 @@ Inspect or update the configured setting.
 
 ## `cq codex`
 
-Manage Codex accounts, quota resets and provider-specific proxy controls.
+Manage Codex accounts, Dots, quota resets and provider-specific proxy controls.
 
 ```text
 cq codex <COMMAND> [OPTIONS]
@@ -1829,6 +1829,1036 @@ Remove explicitly confirmed local credentials and emit JSON.
 - `v0.32.5:internal/app/accounts.go:239`
 - `v0.32.5:internal/provider/claude/accounts.go:119`
 - `v0.32.5:internal/provider/codex/credential_coordinator.go:569`
+
+## `cq codex dots`
+
+Manage multi-account Dots and their private installation state.
+
+```text
+cq codex dots <COMMAND> [OPTIONS]
+```
+
+[Exact help](help/codex-dots.txt) · Family: dots · Kind: group
+
+Manage multi-account Dots for the configured native app or an isolated research profile.
+Choose a subcommand below. A bare group prints this help without reading configuration or changing state.
+--root is inherited by every Dots command and can appear before or after the leaf command.
+
+### Naming rationale
+
+- `codex`: Explicit provider scope; never inferred from another command.
+- `dots`: The multi-account Dots adapter and its private installation state.
+
+### Arguments
+
+None.
+
+### Options
+
+#### `--root ABS_PATH`
+
+Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.
+
+Constraint: Must be a clean absolute path when supplied.
+
+Constraint: Must not contain the home directory or overlap native app, credential or application-support paths.
+
+### Preconditions
+
+None beyond global rules.
+
+### Effects and completion
+
+- Print exact generated group help and exit 0 without state access.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+
+Human output template:
+
+```text
+Exact generated help/codex-dots.txt; plain text even with --json.
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+
+### Examples
+
+```sh
+cq codex dots --help
+```
+
+Show Dots commands and inherited options.
+
+### Compatibility spellings
+
+No additional spellings; see migration inventory for old flags on unchanged paths.
+
+### Source evidence
+
+- `cmd/cq/dots.go:CodexDotsCmd`
+
+## `cq codex dots board`
+
+Show or assign one local chat as the shared Dot message board.
+
+```text
+cq codex dots board [THREAD] [OPTIONS]
+```
+
+[Exact help](help/codex-dots-board.txt) · Family: dots · Kind: command
+
+Show or assign one local chat as the shared Dot message board.
+With no argument, show the shared board binding. Supply THREAD to bind an existing local chat.
+Binding a chat announces the board to discovered Dots and reports notice delivery outcomes.
+Use --clear to remove the binding.
+
+### Naming rationale
+
+- `codex`: Explicit provider scope; never inferred from another command.
+- `dots`: The multi-account Dots adapter and its private installation state.
+- `board`: Show or assign one local chat as the shared Dot message board.
+
+### Arguments
+
+#### `THREAD`
+
+Existing local thread ID or codex://threads/ID link. Omit to show the binding.
+
+Type: string. Required: false. Repeatable: false.
+
+Default: null.
+
+Constraint: Exact lower-case UUID or codex://threads/UUID link.
+
+Constraint: Cannot combine with --clear=true; --clear=false permits THREAD.
+
+### Options
+
+#### `--root ABS_PATH`
+
+Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.
+
+Constraint: Must be a clean absolute path when supplied.
+
+Constraint: Must not contain the home directory or overlap native app, credential or application-support paths.
+
+#### `--clear`
+
+Remove the shared message board binding.
+
+Type: boolean. Required: false. Repeatable: false.
+
+Default: false.
+
+Constraint: Cannot combine --clear=true with THREAD; --clear=false permits THREAD.
+
+### Preconditions
+
+- Validate all syntax and supplied values before home, filesystem or service access.
+- Protect native app, credential and application-support paths from overlap with the private Dots root.
+
+### Effects and completion
+
+- With no arguments, show the existing shared board binding.
+- With THREAD, bind that existing local chat; with --clear, remove the binding.
+- Normalise a codex://threads/ID link to its exact thread ID before controller dispatch.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+- `operation`: string: requested Dots operation
+- `result`: DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values
+
+Human output template:
+
+```text
+Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion.
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+| dots_invalid_argument | 2 | A supplied path, selector, message, or combination of arguments is invalid. | Invalid Dots argument: {detail}. |
+| dots_operation_failed | 1 | The Dots controller or its native launch preparation fails. | The Dots operation failed; inspect cq codex dots status before retrying. |
+| dots_result_invalid | 1 | The controller receipt cannot be represented by the typed result. | The Dots operation returned an invalid receipt; inspect state before retrying. |
+| dots_result_missing | 1 | The controller reports success without a receipt. | The Dots operation returned no receipt; inspect state before retrying. |
+| dots_timeout | 7 | The command context deadline expires. | The Dots operation timed out; inspect state before retrying. |
+| interrupted | 130 | The command context is cancelled. | Operation interrupted; inspect state before retrying. |
+
+### Examples
+
+```sh
+cq codex dots board
+```
+
+Show the shared board binding.
+
+```sh
+cq codex dots board codex://threads/01234567-89ab-cdef-0123-456789abcdef
+```
+
+Bind one existing local chat as the shared board.
+
+```sh
+cq codex dots board --clear
+```
+
+Remove the shared board binding.
+
+### Compatibility spellings
+
+No additional spellings; see migration inventory for old flags on unchanged paths.
+
+### Source evidence
+
+- `cmd/cq/dots.go:CodexDotsCmd`
+- `cmd/cq/cli_v2_dots.go:v2DotsOptions`
+- `cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner`
+
+## `cq codex dots broadcast`
+
+Send a user message to every discovered Dot.
+
+```text
+cq codex dots broadcast MESSAGE [OPTIONS]
+```
+
+[Exact help](help/codex-dots-broadcast.txt) · Family: dots · Kind: command
+
+Send a user message to every discovered Dot.
+Send one message to every discovered Dot and report each delivery outcome.
+Acceptance confirms delivery to the adapter. Inspect unknown outcomes before retrying.
+
+### Naming rationale
+
+- `codex`: Explicit provider scope; never inferred from another command.
+- `dots`: The multi-account Dots adapter and its private installation state.
+- `broadcast`: Send a user message to every discovered Dot.
+
+### Arguments
+
+#### `MESSAGE`
+
+Message to send once to every discovered Dot (1 to 3000 characters).
+
+Type: string. Required: true. Repeatable: false.
+
+Default: null.
+
+Constraint: Valid UTF-8 containing 1 to 3000 Unicode characters; must not be whitespace-only.
+
+Constraint: Quote a multi-word message as one argument; use -- before a message beginning with a dash.
+
+### Options
+
+#### `--root ABS_PATH`
+
+Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.
+
+Constraint: Must be a clean absolute path when supplied.
+
+Constraint: Must not contain the home directory or overlap native app, credential or application-support paths.
+
+### Preconditions
+
+- Validate all syntax and supplied values before home, filesystem or service access.
+- Protect native app, credential and application-support paths from overlap with the private Dots root.
+
+### Effects and completion
+
+- Submit the user message once to every discovered Dot and retain delivery outcomes.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+- `operation`: string: requested Dots operation
+- `result`: DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values
+
+Human output template:
+
+```text
+Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion.
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+| dots_invalid_argument | 2 | A supplied path, selector, message, or combination of arguments is invalid. | Invalid Dots argument: {detail}. |
+| dots_operation_failed | 1 | The Dots controller or its native launch preparation fails. | The Dots operation failed; inspect cq codex dots status before retrying. |
+| dots_result_invalid | 1 | The controller receipt cannot be represented by the typed result. | The Dots operation returned an invalid receipt; inspect state before retrying. |
+| dots_result_missing | 1 | The controller reports success without a receipt. | The Dots operation returned no receipt; inspect state before retrying. |
+| dots_timeout | 7 | The command context deadline expires. | The Dots operation timed out; inspect state before retrying. |
+| interrupted | 130 | The command context is cancelled. | Operation interrupted; inspect state before retrying. |
+
+### Examples
+
+```sh
+cq codex dots broadcast 'Please summarise your current work.'
+```
+
+Send one message to every discovered Dot.
+
+### Compatibility spellings
+
+No additional spellings; see migration inventory for old flags on unchanged paths.
+
+### Source evidence
+
+- `cmd/cq/dots.go:CodexDotsCmd`
+- `cmd/cq/cli_v2_dots.go:v2DotsOptions`
+- `cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner`
+
+## `cq codex dots install`
+
+Install multi-account Dots for the normal native app.
+
+```text
+cq codex dots install [OPTIONS]
+```
+
+[Exact help](help/codex-dots-install.txt) · Family: dots · Kind: command
+
+Install multi-account Dots for the normal native app.
+Create the private installation, discover account profiles, and start the Dots adapter.
+The result reports whether setup is ready or needs onboarding or a normal app restart.
+
+### Naming rationale
+
+- `codex`: Explicit provider scope; never inferred from another command.
+- `dots`: The multi-account Dots adapter and its private installation state.
+- `install`: Install multi-account Dots for the normal native app.
+
+### Arguments
+
+None.
+
+### Options
+
+#### `--root ABS_PATH`
+
+Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.
+
+Constraint: Must be a clean absolute path when supplied.
+
+Constraint: Must not contain the home directory or overlap native app, credential or application-support paths.
+
+#### `--mode MODE`
+
+Use the normal native profile or an isolated research profile. Default: native.
+
+Type: enum. Required: false. Repeatable: false.
+
+Default: "native".
+
+Choices: native, isolated.
+
+Constraint: Exact enum native or isolated.
+
+#### `--app ABS_PATH`
+
+Native app bundle. Default: /Applications/ChatGPT.app.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: "/Applications/ChatGPT.app".
+
+Constraint: Clean absolute path.
+
+#### `--system-auth ABS_PATH`
+
+Read-only native Codex authentication path. Default: ~/.codex/auth.json.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+Constraint: Clean absolute path when supplied.
+
+#### `--cq-accounts ABS_PATH`
+
+Read-only CQ Codex accounts directory. Default: ~/.codex/accounts.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+Constraint: Clean absolute path when supplied.
+
+#### `--account-source ABS_PATH`
+
+Optional read-only CodexBar account directory. Omission adds no source.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+Constraint: Clean absolute path when supplied.
+
+### Preconditions
+
+- Validate all syntax and supplied values before home, filesystem or service access.
+- Protect native app, credential and application-support paths from overlap with the private Dots root.
+
+### Effects and completion
+
+- Install the Dots adapter into its protected private root using the selected integration mode.
+- Read native, CQ and optional CodexBar credentials without modifying their source files.
+- Native mode uses the existing CQ proxy configuration; retain restart and onboarding requirements from the controller receipt.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+- `operation`: string: requested Dots operation
+- `result`: DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values
+
+Human output template:
+
+```text
+Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion.
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+| dots_invalid_argument | 2 | A supplied path, selector, message, or combination of arguments is invalid. | Invalid Dots argument: {detail}. |
+| dots_operation_failed | 1 | The Dots controller or its native launch preparation fails. | The Dots operation failed; inspect cq codex dots status before retrying. |
+| dots_result_invalid | 1 | The controller receipt cannot be represented by the typed result. | The Dots operation returned an invalid receipt; inspect state before retrying. |
+| dots_result_missing | 1 | The controller reports success without a receipt. | The Dots operation returned no receipt; inspect state before retrying. |
+| dots_timeout | 7 | The command context deadline expires. | The Dots operation timed out; inspect state before retrying. |
+| interrupted | 130 | The command context is cancelled. | Operation interrupted; inspect state before retrying. |
+
+### Examples
+
+```sh
+cq codex dots install
+```
+
+Install Dots using native mode and default paths.
+
+```sh
+cq codex dots install --root /tmp/cq-dots --mode isolated
+```
+
+Install an isolated research profile in a separate root.
+
+### Compatibility spellings
+
+No additional spellings; see migration inventory for old flags on unchanged paths.
+
+### Source evidence
+
+- `cmd/cq/dots.go:CodexDotsCmd`
+- `cmd/cq/cli_v2_dots.go:v2DotsOptions`
+- `cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner`
+
+## `cq codex dots list`
+
+List discovered Dots.
+
+```text
+cq codex dots list [OPTIONS]
+```
+
+[Exact help](help/codex-dots-list.txt) · Family: dots · Kind: command
+
+List discovered Dots.
+Show each discovered Dot's stable handle, display name, account, and setup state.
+Use a stable handle or an exact, unambiguous display name with cq codex dots prime.
+
+### Naming rationale
+
+- `codex`: Explicit provider scope; never inferred from another command.
+- `dots`: The multi-account Dots adapter and its private installation state.
+- `list`: List discovered Dots.
+
+### Arguments
+
+None.
+
+### Options
+
+#### `--root ABS_PATH`
+
+Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.
+
+Constraint: Must be a clean absolute path when supplied.
+
+Constraint: Must not contain the home directory or overlap native app, credential or application-support paths.
+
+### Preconditions
+
+- Validate all syntax and supplied values before home, filesystem or service access.
+- Protect native app, credential and application-support paths from overlap with the private Dots root.
+
+### Effects and completion
+
+- Read and report discovered Dots with their stable IDs, names, account associations and setup state.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+- `operation`: string: requested Dots operation
+- `result`: DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values
+
+Human output template:
+
+```text
+Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion.
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+| dots_invalid_argument | 2 | A supplied path, selector, message, or combination of arguments is invalid. | Invalid Dots argument: {detail}. |
+| dots_operation_failed | 1 | The Dots controller or its native launch preparation fails. | The Dots operation failed; inspect cq codex dots status before retrying. |
+| dots_result_invalid | 1 | The controller receipt cannot be represented by the typed result. | The Dots operation returned an invalid receipt; inspect state before retrying. |
+| dots_result_missing | 1 | The controller reports success without a receipt. | The Dots operation returned no receipt; inspect state before retrying. |
+| dots_timeout | 7 | The command context deadline expires. | The Dots operation timed out; inspect state before retrying. |
+| interrupted | 130 | The command context is cancelled. | Operation interrupted; inspect state before retrying. |
+
+### Examples
+
+```sh
+cq codex dots list
+```
+
+List discovered Dots.
+
+### Compatibility spellings
+
+No additional spellings; see migration inventory for old flags on unchanged paths.
+
+### Source evidence
+
+- `cmd/cq/dots.go:CodexDotsCmd`
+- `cmd/cq/cli_v2_dots.go:v2DotsOptions`
+- `cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner`
+
+## `cq codex dots prime`
+
+Prime one Dot or all discovered Dots.
+
+```text
+cq codex dots prime [DOT] [OPTIONS]
+```
+
+[Exact help](help/codex-dots-prime.txt) · Family: dots · Kind: command
+
+Prime one Dot or all discovered Dots.
+Request setup for one Dot, or choose --all for every discovered Dot.
+Delivery acceptance confirms the request was accepted; the Dot may still be responding.
+
+### Naming rationale
+
+- `codex`: Explicit provider scope; never inferred from another command.
+- `dots`: The multi-account Dots adapter and its private installation state.
+- `prime`: Prime one Dot or all discovered Dots.
+
+### Arguments
+
+#### `DOT`
+
+Stable Dot handle or exact unambiguous display name. Choose DOT or --all.
+
+Type: string. Required: false. Repeatable: false.
+
+Default: null.
+
+Constraint: Non-empty and not whitespace-only when supplied.
+
+Constraint: Exactly one of DOT or --all must be selected.
+
+### Options
+
+#### `--root ABS_PATH`
+
+Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.
+
+Constraint: Must be a clean absolute path when supplied.
+
+Constraint: Must not contain the home directory or overlap native app, credential or application-support paths.
+
+#### `--all`
+
+Prime all discovered Dots instead of selecting DOT.
+
+Type: boolean. Required: false. Repeatable: false.
+
+Default: false.
+
+Constraint: Cannot combine --all=true with DOT; --all=false permits DOT.
+
+### Preconditions
+
+- Validate all syntax and supplied values before home, filesystem or service access.
+- Protect native app, credential and application-support paths from overlap with the private Dots root.
+
+### Effects and completion
+
+- Request priming for the selected Dot or all discovered Dots; preserve per-Dot delivery outcomes.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+- `operation`: string: requested Dots operation
+- `result`: DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values
+
+Human output template:
+
+```text
+Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion.
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+| dots_invalid_argument | 2 | A supplied path, selector, message, or combination of arguments is invalid. | Invalid Dots argument: {detail}. |
+| dots_operation_failed | 1 | The Dots controller or its native launch preparation fails. | The Dots operation failed; inspect cq codex dots status before retrying. |
+| dots_result_invalid | 1 | The controller receipt cannot be represented by the typed result. | The Dots operation returned an invalid receipt; inspect state before retrying. |
+| dots_result_missing | 1 | The controller reports success without a receipt. | The Dots operation returned no receipt; inspect state before retrying. |
+| dots_timeout | 7 | The command context deadline expires. | The Dots operation timed out; inspect state before retrying. |
+| interrupted | 130 | The command context is cancelled. | Operation interrupted; inspect state before retrying. |
+
+### Examples
+
+```sh
+cq codex dots prime dot-handle
+```
+
+Prime one Dot by stable handle.
+
+```sh
+cq codex dots prime --all
+```
+
+Prime every discovered Dot.
+
+### Compatibility spellings
+
+No additional spellings; see migration inventory for old flags on unchanged paths.
+
+### Source evidence
+
+- `cmd/cq/dots.go:CodexDotsCmd`
+- `cmd/cq/cli_v2_dots.go:v2DotsOptions`
+- `cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner`
+
+## `cq codex dots start`
+
+Start Dots in the configured native app.
+
+```text
+cq codex dots start [OPTIONS]
+```
+
+[Exact help](help/codex-dots-start.txt) · Family: dots · Kind: command
+
+Start Dots in the configured native app.
+Start the configured Dots adapter and check the native catalogue and workspace.
+If the normal app must restart or a Dot needs onboarding, the result explains what remains.
+
+### Naming rationale
+
+- `codex`: Explicit provider scope; never inferred from another command.
+- `dots`: The multi-account Dots adapter and its private installation state.
+- `start`: Start Dots in the configured native app.
+
+### Arguments
+
+None.
+
+### Options
+
+#### `--root ABS_PATH`
+
+Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.
+
+Constraint: Must be a clean absolute path when supplied.
+
+Constraint: Must not contain the home directory or overlap native app, credential or application-support paths.
+
+### Preconditions
+
+- Validate all syntax and supplied values before home, filesystem or service access.
+- Protect native app, credential and application-support paths from overlap with the private Dots root.
+
+### Effects and completion
+
+- Start the configured Dots integration and retain native catalogue, restart, onboarding and component observations.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+- `operation`: string: requested Dots operation
+- `result`: DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values
+
+Human output template:
+
+```text
+Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion.
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+| dots_invalid_argument | 2 | A supplied path, selector, message, or combination of arguments is invalid. | Invalid Dots argument: {detail}. |
+| dots_operation_failed | 1 | The Dots controller or its native launch preparation fails. | The Dots operation failed; inspect cq codex dots status before retrying. |
+| dots_result_invalid | 1 | The controller receipt cannot be represented by the typed result. | The Dots operation returned an invalid receipt; inspect state before retrying. |
+| dots_result_missing | 1 | The controller reports success without a receipt. | The Dots operation returned no receipt; inspect state before retrying. |
+| dots_timeout | 7 | The command context deadline expires. | The Dots operation timed out; inspect state before retrying. |
+| interrupted | 130 | The command context is cancelled. | Operation interrupted; inspect state before retrying. |
+
+### Examples
+
+```sh
+cq codex dots start
+```
+
+Start Dots in the configured native app.
+
+### Compatibility spellings
+
+No additional spellings; see migration inventory for old flags on unchanged paths.
+
+### Source evidence
+
+- `cmd/cq/dots.go:CodexDotsCmd`
+- `cmd/cq/cli_v2_dots.go:v2DotsOptions`
+- `cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner`
+
+## `cq codex dots status`
+
+Show Dots status.
+
+```text
+cq codex dots status [OPTIONS]
+```
+
+[Exact help](help/codex-dots-status.txt) · Family: dots · Kind: command
+
+Show Dots status.
+Read the native catalogue, workspace, and adapter component status.
+Readiness describes the observed app state; it does not confirm a Dot has completed a message.
+
+### Naming rationale
+
+- `codex`: Explicit provider scope; never inferred from another command.
+- `dots`: The multi-account Dots adapter and its private installation state.
+- `status`: Show Dots status.
+
+### Arguments
+
+None.
+
+### Options
+
+#### `--root ABS_PATH`
+
+Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.
+
+Constraint: Must be a clean absolute path when supplied.
+
+Constraint: Must not contain the home directory or overlap native app, credential or application-support paths.
+
+### Preconditions
+
+- Validate all syntax and supplied values before home, filesystem or service access.
+- Protect native app, credential and application-support paths from overlap with the private Dots root.
+
+### Effects and completion
+
+- Read and report controller status without promoting unknown or incomplete observations to readiness.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+- `operation`: string: requested Dots operation
+- `result`: DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values
+
+Human output template:
+
+```text
+Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion.
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+| dots_invalid_argument | 2 | A supplied path, selector, message, or combination of arguments is invalid. | Invalid Dots argument: {detail}. |
+| dots_operation_failed | 1 | The Dots controller or its native launch preparation fails. | The Dots operation failed; inspect cq codex dots status before retrying. |
+| dots_result_invalid | 1 | The controller receipt cannot be represented by the typed result. | The Dots operation returned an invalid receipt; inspect state before retrying. |
+| dots_result_missing | 1 | The controller reports success without a receipt. | The Dots operation returned no receipt; inspect state before retrying. |
+| dots_timeout | 7 | The command context deadline expires. | The Dots operation timed out; inspect state before retrying. |
+| interrupted | 130 | The command context is cancelled. | Operation interrupted; inspect state before retrying. |
+
+### Examples
+
+```sh
+cq codex dots status
+```
+
+Show Dots status.
+
+### Compatibility spellings
+
+No additional spellings; see migration inventory for old flags on unchanged paths.
+
+### Source evidence
+
+- `cmd/cq/dots.go:CodexDotsCmd`
+- `cmd/cq/cli_v2_dots.go:v2DotsOptions`
+- `cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner`
+
+## `cq codex dots stop`
+
+Stop the Dots adapter after quitting the app.
+
+```text
+cq codex dots stop [OPTIONS]
+```
+
+[Exact help](help/codex-dots-stop.txt) · Family: dots · Kind: command
+
+Stop the Dots adapter after quitting the app.
+Quit the desktop app before stopping its Dots adapter processes.
+The result confirms when the adapter has stopped.
+
+### Naming rationale
+
+- `codex`: Explicit provider scope; never inferred from another command.
+- `dots`: The multi-account Dots adapter and its private installation state.
+- `stop`: Stop the Dots adapter after quitting the app.
+
+### Arguments
+
+None.
+
+### Options
+
+#### `--root ABS_PATH`
+
+Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.
+
+Constraint: Must be a clean absolute path when supplied.
+
+Constraint: Must not contain the home directory or overlap native app, credential or application-support paths.
+
+### Preconditions
+
+- Validate all syntax and supplied values before home, filesystem or service access.
+- Protect native app, credential and application-support paths from overlap with the private Dots root.
+
+### Effects and completion
+
+- Stop the Dots adapter after the native app has been quit.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+- `operation`: string: requested Dots operation
+- `result`: DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values
+
+Human output template:
+
+```text
+Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion.
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+| dots_invalid_argument | 2 | A supplied path, selector, message, or combination of arguments is invalid. | Invalid Dots argument: {detail}. |
+| dots_operation_failed | 1 | The Dots controller or its native launch preparation fails. | The Dots operation failed; inspect cq codex dots status before retrying. |
+| dots_result_invalid | 1 | The controller receipt cannot be represented by the typed result. | The Dots operation returned an invalid receipt; inspect state before retrying. |
+| dots_result_missing | 1 | The controller reports success without a receipt. | The Dots operation returned no receipt; inspect state before retrying. |
+| dots_timeout | 7 | The command context deadline expires. | The Dots operation timed out; inspect state before retrying. |
+| interrupted | 130 | The command context is cancelled. | Operation interrupted; inspect state before retrying. |
+
+### Examples
+
+```sh
+cq codex dots stop
+```
+
+Stop the Dots adapter after quitting the app.
+
+### Compatibility spellings
+
+No additional spellings; see migration inventory for old flags on unchanged paths.
+
+### Source evidence
+
+- `cmd/cq/dots.go:CodexDotsCmd`
+- `cmd/cq/cli_v2_dots.go:v2DotsOptions`
+- `cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner`
+
+## `cq codex dots sync`
+
+Refresh Dots account discovery.
+
+```text
+cq codex dots sync [OPTIONS]
+```
+
+[Exact help](help/codex-dots-sync.txt) · Family: dots · Kind: command
+
+Refresh Dots account discovery.
+Refresh account discovery and start or restart adapter components when needed.
+A pending normal app restart or incomplete discovery is reported in the result.
+
+### Naming rationale
+
+- `codex`: Explicit provider scope; never inferred from another command.
+- `dots`: The multi-account Dots adapter and its private installation state.
+- `sync`: Refresh Dots account discovery.
+
+### Arguments
+
+None.
+
+### Options
+
+#### `--root ABS_PATH`
+
+Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.
+
+Type: path. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.
+
+Constraint: Must be a clean absolute path when supplied.
+
+Constraint: Must not contain the home directory or overlap native app, credential or application-support paths.
+
+### Preconditions
+
+- Validate all syntax and supplied values before home, filesystem or service access.
+- Protect native app, credential and application-support paths from overlap with the private Dots root.
+
+### Effects and completion
+
+- Refresh account discovery and retain discovery and native catalogue observations.
+- Start or restart adapter components when required; if the normal app must be restarted, retain the pending restart receipt without interrupting its work.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+- `operation`: string: requested Dots operation
+- `result`: DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values
+
+Human output template:
+
+```text
+Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion.
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+| dots_invalid_argument | 2 | A supplied path, selector, message, or combination of arguments is invalid. | Invalid Dots argument: {detail}. |
+| dots_operation_failed | 1 | The Dots controller or its native launch preparation fails. | The Dots operation failed; inspect cq codex dots status before retrying. |
+| dots_result_invalid | 1 | The controller receipt cannot be represented by the typed result. | The Dots operation returned an invalid receipt; inspect state before retrying. |
+| dots_result_missing | 1 | The controller reports success without a receipt. | The Dots operation returned no receipt; inspect state before retrying. |
+| dots_timeout | 7 | The command context deadline expires. | The Dots operation timed out; inspect state before retrying. |
+| interrupted | 130 | The command context is cancelled. | Operation interrupted; inspect state before retrying. |
+
+### Examples
+
+```sh
+cq codex dots sync
+```
+
+Refresh Dots account discovery.
+
+### Compatibility spellings
+
+No additional spellings; see migration inventory for old flags on unchanged paths.
+
+### Source evidence
+
+- `cmd/cq/dots.go:CodexDotsCmd`
+- `cmd/cq/cli_v2_dots.go:v2DotsOptions`
+- `cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner`
 
 ## `cq codex proxy`
 
@@ -3732,7 +4762,7 @@ Look up a synthetic event; an unknown turn returns {}.
 
 ## `cq codex proxy lease`
 
-Invalidate reusable Codex routing affinities.
+Manage reusable Codex routing affinities.
 
 ```text
 cq codex proxy lease <COMMAND> [OPTIONS]
@@ -3899,6 +4929,119 @@ Expire reusable affinity without breaking required continuity.
 
 - `v0.32.5:cmd/cq/proxy_leases.go:40`
 - `v0.32.5:internal/proxy/codex_lease_invalidation.go:9`
+
+## `cq codex proxy lease redistribute`
+
+Schedule Codex chats to rebalance across available accounts.
+
+```text
+cq codex proxy lease redistribute [OPTIONS]
+```
+
+[Exact help](help/codex-proxy-lease-redistribute.txt) · Family: routing · Kind: command
+
+Schedule existing Codex task-account leases for redistribution at a safe request boundary. Active work continues; required account continuity remains intact. The receipt counts scheduled leases and leases deferred until their current work finishes.
+
+### Naming rationale
+
+- `codex`: Provider-first scope: these operations affect Codex routing.
+- `proxy`: Distinguish proxy routing from the provider account used directly by its own client.
+- `lease`: Singular namespace for reusable task-account affinity.
+- `redistribute`: Schedule a fresh account choice for existing chats when their next portable request can safely move.
+
+### Arguments
+
+None.
+
+### Options
+
+#### `--port PORT`
+
+Connect to the authenticated loopback proxy on this port (1–65535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset.
+
+Type: integer. Required: false. Repeatable: false.
+
+Default: null.
+
+When omitted: configured port, otherwise 19280
+
+Constraint: Integer 1–65535.
+
+Constraint: No configuration file is created to resolve omission.
+
+#### `--timeout TIMEOUT`
+
+Maximum elapsed time for this command, including local preparation and control requests; default 10s.
+
+Type: duration. Required: false. Repeatable: false.
+
+Default: "10s".
+
+Constraint: Positive Go duration.
+
+Constraint: Expiry returns exit 7; a timed-out mutation may already have committed, so inspect state before retrying.
+
+### Preconditions
+
+- Running authenticated proxy with writable, migrated lease journal.
+
+### Effects and completion
+
+- Durably schedule reusable task-account leases for a fresh route at a safe request boundary.
+- Active requests and required account continuity remain intact; no restart is required.
+- Scheduled and deferred counts describe this scheduling operation, not completed account moves. Repeating the operation may advance journal generation.
+
+### Output
+
+Fields below belong to envelope `data`; global envelope keys are specified once in README.md.
+
+- `scheduled_leases`: integer >=0; leases marked for a fresh route at the next safe request boundary
+- `deferred_leases`: Scheduled leases currently bound to an account by active work or required continuity; a subset of scheduled_leases.
+- `journal_generation`: uint64; resulting durable journal generation
+
+Human output template:
+
+```text
+Scheduled leases: {scheduled_leases}
+Deferred leases: {deferred_leases}
+Journal generation: {journal_generation}
+
+```
+
+### Command errors
+
+| Code | Exit | Condition | Exact message |
+| --- | ---: | --- | --- |
+| routing_invalid_argument | 2 | Unknown, duplicate, missing, malformed, or mutually exclusive arguments. | Invalid argument: {detail}. |
+| routing_io_failed | 1 | Configuration, state, or output cannot be read or written. | Routing operation failed: {detail}. |
+| routing_timeout | 7 | Command deadline expires. | Routing operation timed out; inspect current state before retrying a mutation. |
+| routing_control_unavailable | 4 | Required live proxy control is unreachable or unavailable. | Running CQ proxy control is unavailable. |
+| routing_auth_failed | 5 | Local proxy token missing or control rejects authentication. | Local proxy authentication failed. |
+| routing_conflict | 6 | State changed or runtime preconditions fail. | Routing state conflict: {detail}. |
+| lease_journal_unavailable | 4 | Journal writer unavailable or quarantined legacy journal cannot mutate. | Lease journal is unavailable for redistribution. |
+
+### Examples
+
+```sh
+cq codex proxy lease redistribute
+```
+
+Schedule existing chats to rebalance without interrupting active work.
+
+```sh
+cq codex proxy lease redistribute --port 19281 --timeout 20s
+```
+
+Schedule redistribution through a specific running proxy with a longer deadline.
+
+### Compatibility spellings
+
+- `cq proxy leases redistribute` → `codex proxy lease redistribute`. Singular provider-first lease namespace; preserve optional port.
+
+### Source evidence
+
+- `cmd/cq/proxy_leases.go`
+- `internal/proxy/codex_lease_redistribution.go`
 
 ## `cq codex proxy pin`
 
@@ -11880,7 +13023,7 @@ Constraint: Exact enum; selection never widens after validation.
 
 #### `--strict`
 
-Return non-zero if selected components are not installed, not running, or unhealthy. Default: false.
+Return non-zero if a selected component is missing or unhealthy. A healthy periodic token-refresh service may be idle between runs. Default: false.
 
 Type: boolean. Required: false. Repeatable: false.
 

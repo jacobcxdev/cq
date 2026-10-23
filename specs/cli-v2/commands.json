@@ -1391,7 +1391,7 @@
     {
       "id": "codex",
       "path": "codex",
-      "summary": "Manage Codex accounts, quota resets and provider-specific proxy controls.",
+      "summary": "Manage Codex accounts, Dots, quota resets and provider-specific proxy controls.",
       "description": [
         "Manage Codex accounts, quota resets and provider-specific proxy controls.",
         "Choose a subcommand below. A bare group prints this help without reading configuration or changing state."
@@ -1992,6 +1992,1159 @@
         "v0.32.5:internal/provider/codex/credential_coordinator.go:569"
       ],
       "family": "accounts",
+      "kind": "command"
+    },
+    {
+      "id": "codex.dots",
+      "path": "codex dots",
+      "summary": "Manage multi-account Dots and their private installation state.",
+      "description": [
+        "Manage multi-account Dots for the configured native app or an isolated research profile.",
+        "Choose a subcommand below. A bare group prints this help without reading configuration or changing state.",
+        "--root is inherited by every Dots command and can appear before or after the leaf command."
+      ],
+      "terms": {
+        "codex": "Explicit provider scope; never inferred from another command.",
+        "dots": "The multi-account Dots adapter and its private installation state."
+      },
+      "positionals": [],
+      "options": [
+        {
+          "name": "root",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.",
+          "validation": [
+            "Must be a clean absolute path when supplied.",
+            "Must not contain the home directory or overlap native app, credential or application-support paths."
+          ],
+          "omission_resolution": "Resolve ~/.local/share/cq/dots from the current user home after syntax validation."
+        }
+      ],
+      "preconditions": [],
+      "effects": [
+        "Print exact generated group help and exit 0 without state access."
+      ],
+      "output": {
+        "fields": {},
+        "human": "Exact generated help/codex-dots.txt; plain text even with --json."
+      },
+      "errors": [],
+      "examples": [
+        {
+          "command": "cq codex dots --help",
+          "description": "Show Dots commands and inherited options."
+        }
+      ],
+      "aliases": [],
+      "tests": [
+        "Bare group, -h and --help produce identical text and exit 0 without state access.",
+        "--root is inherited before and after every leaf; repeated root options are rejected."
+      ],
+      "sources": [
+        "cmd/cq/dots.go:CodexDotsCmd"
+      ],
+      "family": "dots",
+      "kind": "group"
+    },
+    {
+      "id": "codex.dots.board",
+      "path": "codex dots board",
+      "summary": "Show or assign one local chat as the shared Dot message board.",
+      "description": [
+        "Show or assign one local chat as the shared Dot message board.",
+        "With no argument, show the shared board binding. Supply THREAD to bind an existing local chat.",
+        "Binding a chat announces the board to discovered Dots and reports notice delivery outcomes.",
+        "Use --clear to remove the binding."
+      ],
+      "terms": {
+        "codex": "Explicit provider scope; never inferred from another command.",
+        "dots": "The multi-account Dots adapter and its private installation state.",
+        "board": "Show or assign one local chat as the shared Dot message board."
+      },
+      "positionals": [
+        {
+          "name": "thread",
+          "type": "string",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "THREAD",
+          "help": "Existing local thread ID or codex://threads/ID link. Omit to show the binding.",
+          "validation": [
+            "Exact lower-case UUID or codex://threads/UUID link.",
+            "Cannot combine with --clear=true; --clear=false permits THREAD."
+          ]
+        }
+      ],
+      "options": [
+        {
+          "name": "root",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.",
+          "validation": [
+            "Must be a clean absolute path when supplied.",
+            "Must not contain the home directory or overlap native app, credential or application-support paths."
+          ],
+          "omission_resolution": "Resolve ~/.local/share/cq/dots from the current user home after syntax validation."
+        },
+        {
+          "name": "clear",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false,
+          "default": false,
+          "metavar": null,
+          "help": "Remove the shared message board binding.",
+          "validation": [
+            "Cannot combine --clear=true with THREAD; --clear=false permits THREAD."
+          ]
+        }
+      ],
+      "preconditions": [
+        "Validate all syntax and supplied values before home, filesystem or service access.",
+        "Protect native app, credential and application-support paths from overlap with the private Dots root."
+      ],
+      "effects": [
+        "With no arguments, show the existing shared board binding.",
+        "With THREAD, bind that existing local chat; with --clear, remove the binding.",
+        "Normalise a codex://threads/ID link to its exact thread ID before controller dispatch."
+      ],
+      "output": {
+        "fields": {
+          "operation": "string: requested Dots operation",
+          "result": "DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values"
+        },
+        "human": "Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion."
+      },
+      "errors": [
+        {
+          "code": "dots_invalid_argument",
+          "exit": 2,
+          "condition": "A supplied path, selector, message, or combination of arguments is invalid.",
+          "message": "Invalid Dots argument: {detail}."
+        },
+        {
+          "code": "dots_operation_failed",
+          "exit": 1,
+          "condition": "The Dots controller or its native launch preparation fails.",
+          "message": "The Dots operation failed; inspect cq codex dots status before retrying."
+        },
+        {
+          "code": "dots_result_invalid",
+          "exit": 1,
+          "condition": "The controller receipt cannot be represented by the typed result.",
+          "message": "The Dots operation returned an invalid receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_result_missing",
+          "exit": 1,
+          "condition": "The controller reports success without a receipt.",
+          "message": "The Dots operation returned no receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_timeout",
+          "exit": 7,
+          "condition": "The command context deadline expires.",
+          "message": "The Dots operation timed out; inspect state before retrying."
+        },
+        {
+          "code": "interrupted",
+          "exit": 130,
+          "condition": "The command context is cancelled.",
+          "message": "Operation interrupted; inspect state before retrying."
+        }
+      ],
+      "examples": [
+        {
+          "command": "cq codex dots board",
+          "description": "Show the shared board binding."
+        },
+        {
+          "command": "cq codex dots board codex://threads/01234567-89ab-cdef-0123-456789abcdef",
+          "description": "Bind one existing local chat as the shared board."
+        },
+        {
+          "command": "cq codex dots board --clear",
+          "description": "Remove the shared board binding."
+        }
+      ],
+      "aliases": [],
+      "tests": [
+        "--help performs no credential, configuration, filesystem, service or network access.",
+        "Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.",
+        "--root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.",
+        "--json emits exactly one canonical v2 envelope; diagnostics remain on stderr.",
+        "Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion."
+      ],
+      "sources": [
+        "cmd/cq/dots.go:CodexDotsCmd",
+        "cmd/cq/cli_v2_dots.go:v2DotsOptions",
+        "cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner"
+      ],
+      "family": "dots",
+      "kind": "command"
+    },
+    {
+      "id": "codex.dots.broadcast",
+      "path": "codex dots broadcast",
+      "summary": "Send a user message to every discovered Dot.",
+      "description": [
+        "Send a user message to every discovered Dot.",
+        "Send one message to every discovered Dot and report each delivery outcome.",
+        "Acceptance confirms delivery to the adapter. Inspect unknown outcomes before retrying."
+      ],
+      "terms": {
+        "codex": "Explicit provider scope; never inferred from another command.",
+        "dots": "The multi-account Dots adapter and its private installation state.",
+        "broadcast": "Send a user message to every discovered Dot."
+      },
+      "positionals": [
+        {
+          "name": "message",
+          "type": "string",
+          "required": true,
+          "repeatable": false,
+          "default": null,
+          "metavar": "MESSAGE",
+          "help": "Message to send once to every discovered Dot (1 to 3000 characters).",
+          "validation": [
+            "Valid UTF-8 containing 1 to 3000 Unicode characters; must not be whitespace-only.",
+            "Quote a multi-word message as one argument; use -- before a message beginning with a dash."
+          ]
+        }
+      ],
+      "options": [
+        {
+          "name": "root",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.",
+          "validation": [
+            "Must be a clean absolute path when supplied.",
+            "Must not contain the home directory or overlap native app, credential or application-support paths."
+          ],
+          "omission_resolution": "Resolve ~/.local/share/cq/dots from the current user home after syntax validation."
+        }
+      ],
+      "preconditions": [
+        "Validate all syntax and supplied values before home, filesystem or service access.",
+        "Protect native app, credential and application-support paths from overlap with the private Dots root."
+      ],
+      "effects": [
+        "Submit the user message once to every discovered Dot and retain delivery outcomes."
+      ],
+      "output": {
+        "fields": {
+          "operation": "string: requested Dots operation",
+          "result": "DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values"
+        },
+        "human": "Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion."
+      },
+      "errors": [
+        {
+          "code": "dots_invalid_argument",
+          "exit": 2,
+          "condition": "A supplied path, selector, message, or combination of arguments is invalid.",
+          "message": "Invalid Dots argument: {detail}."
+        },
+        {
+          "code": "dots_operation_failed",
+          "exit": 1,
+          "condition": "The Dots controller or its native launch preparation fails.",
+          "message": "The Dots operation failed; inspect cq codex dots status before retrying."
+        },
+        {
+          "code": "dots_result_invalid",
+          "exit": 1,
+          "condition": "The controller receipt cannot be represented by the typed result.",
+          "message": "The Dots operation returned an invalid receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_result_missing",
+          "exit": 1,
+          "condition": "The controller reports success without a receipt.",
+          "message": "The Dots operation returned no receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_timeout",
+          "exit": 7,
+          "condition": "The command context deadline expires.",
+          "message": "The Dots operation timed out; inspect state before retrying."
+        },
+        {
+          "code": "interrupted",
+          "exit": 130,
+          "condition": "The command context is cancelled.",
+          "message": "Operation interrupted; inspect state before retrying."
+        }
+      ],
+      "examples": [
+        {
+          "command": "cq codex dots broadcast 'Please summarise your current work.'",
+          "description": "Send one message to every discovered Dot."
+        }
+      ],
+      "aliases": [],
+      "tests": [
+        "--help performs no credential, configuration, filesystem, service or network access.",
+        "Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.",
+        "--root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.",
+        "--json emits exactly one canonical v2 envelope; diagnostics remain on stderr.",
+        "Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion."
+      ],
+      "sources": [
+        "cmd/cq/dots.go:CodexDotsCmd",
+        "cmd/cq/cli_v2_dots.go:v2DotsOptions",
+        "cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner"
+      ],
+      "family": "dots",
+      "kind": "command"
+    },
+    {
+      "id": "codex.dots.install",
+      "path": "codex dots install",
+      "summary": "Install multi-account Dots for the normal native app.",
+      "description": [
+        "Install multi-account Dots for the normal native app.",
+        "Create the private installation, discover account profiles, and start the Dots adapter.",
+        "The result reports whether setup is ready or needs onboarding or a normal app restart."
+      ],
+      "terms": {
+        "codex": "Explicit provider scope; never inferred from another command.",
+        "dots": "The multi-account Dots adapter and its private installation state.",
+        "install": "Install multi-account Dots for the normal native app."
+      },
+      "positionals": [],
+      "options": [
+        {
+          "name": "root",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.",
+          "validation": [
+            "Must be a clean absolute path when supplied.",
+            "Must not contain the home directory or overlap native app, credential or application-support paths."
+          ],
+          "omission_resolution": "Resolve ~/.local/share/cq/dots from the current user home after syntax validation."
+        },
+        {
+          "name": "mode",
+          "type": "enum",
+          "required": false,
+          "repeatable": false,
+          "default": "native",
+          "metavar": "MODE",
+          "help": "Use the normal native profile or an isolated research profile. Default: native.",
+          "validation": [
+            "Exact enum native or isolated."
+          ],
+          "choices": [
+            "native",
+            "isolated"
+          ]
+        },
+        {
+          "name": "app",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": "/Applications/ChatGPT.app",
+          "metavar": "ABS_PATH",
+          "help": "Native app bundle. Default: /Applications/ChatGPT.app.",
+          "validation": [
+            "Clean absolute path."
+          ]
+        },
+        {
+          "name": "system-auth",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Read-only native Codex authentication path. Default: ~/.codex/auth.json.",
+          "validation": [
+            "Clean absolute path when supplied."
+          ]
+        },
+        {
+          "name": "cq-accounts",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Read-only CQ Codex accounts directory. Default: ~/.codex/accounts.",
+          "validation": [
+            "Clean absolute path when supplied."
+          ]
+        },
+        {
+          "name": "account-source",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Optional read-only CodexBar account directory. Omission adds no source.",
+          "validation": [
+            "Clean absolute path when supplied."
+          ]
+        }
+      ],
+      "preconditions": [
+        "Validate all syntax and supplied values before home, filesystem or service access.",
+        "Protect native app, credential and application-support paths from overlap with the private Dots root."
+      ],
+      "effects": [
+        "Install the Dots adapter into its protected private root using the selected integration mode.",
+        "Read native, CQ and optional CodexBar credentials without modifying their source files.",
+        "Native mode uses the existing CQ proxy configuration; retain restart and onboarding requirements from the controller receipt."
+      ],
+      "output": {
+        "fields": {
+          "operation": "string: requested Dots operation",
+          "result": "DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values"
+        },
+        "human": "Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion."
+      },
+      "errors": [
+        {
+          "code": "dots_invalid_argument",
+          "exit": 2,
+          "condition": "A supplied path, selector, message, or combination of arguments is invalid.",
+          "message": "Invalid Dots argument: {detail}."
+        },
+        {
+          "code": "dots_operation_failed",
+          "exit": 1,
+          "condition": "The Dots controller or its native launch preparation fails.",
+          "message": "The Dots operation failed; inspect cq codex dots status before retrying."
+        },
+        {
+          "code": "dots_result_invalid",
+          "exit": 1,
+          "condition": "The controller receipt cannot be represented by the typed result.",
+          "message": "The Dots operation returned an invalid receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_result_missing",
+          "exit": 1,
+          "condition": "The controller reports success without a receipt.",
+          "message": "The Dots operation returned no receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_timeout",
+          "exit": 7,
+          "condition": "The command context deadline expires.",
+          "message": "The Dots operation timed out; inspect state before retrying."
+        },
+        {
+          "code": "interrupted",
+          "exit": 130,
+          "condition": "The command context is cancelled.",
+          "message": "Operation interrupted; inspect state before retrying."
+        }
+      ],
+      "examples": [
+        {
+          "command": "cq codex dots install",
+          "description": "Install Dots using native mode and default paths."
+        },
+        {
+          "command": "cq codex dots install --root /tmp/cq-dots --mode isolated",
+          "description": "Install an isolated research profile in a separate root."
+        }
+      ],
+      "aliases": [],
+      "tests": [
+        "--help performs no credential, configuration, filesystem, service or network access.",
+        "Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.",
+        "--root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.",
+        "--json emits exactly one canonical v2 envelope; diagnostics remain on stderr.",
+        "Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion."
+      ],
+      "sources": [
+        "cmd/cq/dots.go:CodexDotsCmd",
+        "cmd/cq/cli_v2_dots.go:v2DotsOptions",
+        "cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner"
+      ],
+      "family": "dots",
+      "kind": "command"
+    },
+    {
+      "id": "codex.dots.list",
+      "path": "codex dots list",
+      "summary": "List discovered Dots.",
+      "description": [
+        "List discovered Dots.",
+        "Show each discovered Dot's stable handle, display name, account, and setup state.",
+        "Use a stable handle or an exact, unambiguous display name with cq codex dots prime."
+      ],
+      "terms": {
+        "codex": "Explicit provider scope; never inferred from another command.",
+        "dots": "The multi-account Dots adapter and its private installation state.",
+        "list": "List discovered Dots."
+      },
+      "positionals": [],
+      "options": [
+        {
+          "name": "root",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.",
+          "validation": [
+            "Must be a clean absolute path when supplied.",
+            "Must not contain the home directory or overlap native app, credential or application-support paths."
+          ],
+          "omission_resolution": "Resolve ~/.local/share/cq/dots from the current user home after syntax validation."
+        }
+      ],
+      "preconditions": [
+        "Validate all syntax and supplied values before home, filesystem or service access.",
+        "Protect native app, credential and application-support paths from overlap with the private Dots root."
+      ],
+      "effects": [
+        "Read and report discovered Dots with their stable IDs, names, account associations and setup state."
+      ],
+      "output": {
+        "fields": {
+          "operation": "string: requested Dots operation",
+          "result": "DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values"
+        },
+        "human": "Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion."
+      },
+      "errors": [
+        {
+          "code": "dots_invalid_argument",
+          "exit": 2,
+          "condition": "A supplied path, selector, message, or combination of arguments is invalid.",
+          "message": "Invalid Dots argument: {detail}."
+        },
+        {
+          "code": "dots_operation_failed",
+          "exit": 1,
+          "condition": "The Dots controller or its native launch preparation fails.",
+          "message": "The Dots operation failed; inspect cq codex dots status before retrying."
+        },
+        {
+          "code": "dots_result_invalid",
+          "exit": 1,
+          "condition": "The controller receipt cannot be represented by the typed result.",
+          "message": "The Dots operation returned an invalid receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_result_missing",
+          "exit": 1,
+          "condition": "The controller reports success without a receipt.",
+          "message": "The Dots operation returned no receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_timeout",
+          "exit": 7,
+          "condition": "The command context deadline expires.",
+          "message": "The Dots operation timed out; inspect state before retrying."
+        },
+        {
+          "code": "interrupted",
+          "exit": 130,
+          "condition": "The command context is cancelled.",
+          "message": "Operation interrupted; inspect state before retrying."
+        }
+      ],
+      "examples": [
+        {
+          "command": "cq codex dots list",
+          "description": "List discovered Dots."
+        }
+      ],
+      "aliases": [],
+      "tests": [
+        "--help performs no credential, configuration, filesystem, service or network access.",
+        "Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.",
+        "--root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.",
+        "--json emits exactly one canonical v2 envelope; diagnostics remain on stderr.",
+        "Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion."
+      ],
+      "sources": [
+        "cmd/cq/dots.go:CodexDotsCmd",
+        "cmd/cq/cli_v2_dots.go:v2DotsOptions",
+        "cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner"
+      ],
+      "family": "dots",
+      "kind": "command"
+    },
+    {
+      "id": "codex.dots.prime",
+      "path": "codex dots prime",
+      "summary": "Prime one Dot or all discovered Dots.",
+      "description": [
+        "Prime one Dot or all discovered Dots.",
+        "Request setup for one Dot, or choose --all for every discovered Dot.",
+        "Delivery acceptance confirms the request was accepted; the Dot may still be responding."
+      ],
+      "terms": {
+        "codex": "Explicit provider scope; never inferred from another command.",
+        "dots": "The multi-account Dots adapter and its private installation state.",
+        "prime": "Prime one Dot or all discovered Dots."
+      },
+      "positionals": [
+        {
+          "name": "dot",
+          "type": "string",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "DOT",
+          "help": "Stable Dot handle or exact unambiguous display name. Choose DOT or --all.",
+          "validation": [
+            "Non-empty and not whitespace-only when supplied.",
+            "Exactly one of DOT or --all must be selected."
+          ]
+        }
+      ],
+      "options": [
+        {
+          "name": "root",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.",
+          "validation": [
+            "Must be a clean absolute path when supplied.",
+            "Must not contain the home directory or overlap native app, credential or application-support paths."
+          ],
+          "omission_resolution": "Resolve ~/.local/share/cq/dots from the current user home after syntax validation."
+        },
+        {
+          "name": "all",
+          "type": "boolean",
+          "required": false,
+          "repeatable": false,
+          "default": false,
+          "metavar": null,
+          "help": "Prime all discovered Dots instead of selecting DOT.",
+          "validation": [
+            "Cannot combine --all=true with DOT; --all=false permits DOT."
+          ]
+        }
+      ],
+      "preconditions": [
+        "Validate all syntax and supplied values before home, filesystem or service access.",
+        "Protect native app, credential and application-support paths from overlap with the private Dots root."
+      ],
+      "effects": [
+        "Request priming for the selected Dot or all discovered Dots; preserve per-Dot delivery outcomes."
+      ],
+      "output": {
+        "fields": {
+          "operation": "string: requested Dots operation",
+          "result": "DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values"
+        },
+        "human": "Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion."
+      },
+      "errors": [
+        {
+          "code": "dots_invalid_argument",
+          "exit": 2,
+          "condition": "A supplied path, selector, message, or combination of arguments is invalid.",
+          "message": "Invalid Dots argument: {detail}."
+        },
+        {
+          "code": "dots_operation_failed",
+          "exit": 1,
+          "condition": "The Dots controller or its native launch preparation fails.",
+          "message": "The Dots operation failed; inspect cq codex dots status before retrying."
+        },
+        {
+          "code": "dots_result_invalid",
+          "exit": 1,
+          "condition": "The controller receipt cannot be represented by the typed result.",
+          "message": "The Dots operation returned an invalid receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_result_missing",
+          "exit": 1,
+          "condition": "The controller reports success without a receipt.",
+          "message": "The Dots operation returned no receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_timeout",
+          "exit": 7,
+          "condition": "The command context deadline expires.",
+          "message": "The Dots operation timed out; inspect state before retrying."
+        },
+        {
+          "code": "interrupted",
+          "exit": 130,
+          "condition": "The command context is cancelled.",
+          "message": "Operation interrupted; inspect state before retrying."
+        }
+      ],
+      "examples": [
+        {
+          "command": "cq codex dots prime dot-handle",
+          "description": "Prime one Dot by stable handle."
+        },
+        {
+          "command": "cq codex dots prime --all",
+          "description": "Prime every discovered Dot."
+        }
+      ],
+      "aliases": [],
+      "tests": [
+        "--help performs no credential, configuration, filesystem, service or network access.",
+        "Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.",
+        "--root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.",
+        "--json emits exactly one canonical v2 envelope; diagnostics remain on stderr.",
+        "Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion."
+      ],
+      "sources": [
+        "cmd/cq/dots.go:CodexDotsCmd",
+        "cmd/cq/cli_v2_dots.go:v2DotsOptions",
+        "cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner"
+      ],
+      "family": "dots",
+      "kind": "command"
+    },
+    {
+      "id": "codex.dots.start",
+      "path": "codex dots start",
+      "summary": "Start Dots in the configured native app.",
+      "description": [
+        "Start Dots in the configured native app.",
+        "Start the configured Dots adapter and check the native catalogue and workspace.",
+        "If the normal app must restart or a Dot needs onboarding, the result explains what remains."
+      ],
+      "terms": {
+        "codex": "Explicit provider scope; never inferred from another command.",
+        "dots": "The multi-account Dots adapter and its private installation state.",
+        "start": "Start Dots in the configured native app."
+      },
+      "positionals": [],
+      "options": [
+        {
+          "name": "root",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.",
+          "validation": [
+            "Must be a clean absolute path when supplied.",
+            "Must not contain the home directory or overlap native app, credential or application-support paths."
+          ],
+          "omission_resolution": "Resolve ~/.local/share/cq/dots from the current user home after syntax validation."
+        }
+      ],
+      "preconditions": [
+        "Validate all syntax and supplied values before home, filesystem or service access.",
+        "Protect native app, credential and application-support paths from overlap with the private Dots root."
+      ],
+      "effects": [
+        "Start the configured Dots integration and retain native catalogue, restart, onboarding and component observations."
+      ],
+      "output": {
+        "fields": {
+          "operation": "string: requested Dots operation",
+          "result": "DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values"
+        },
+        "human": "Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion."
+      },
+      "errors": [
+        {
+          "code": "dots_invalid_argument",
+          "exit": 2,
+          "condition": "A supplied path, selector, message, or combination of arguments is invalid.",
+          "message": "Invalid Dots argument: {detail}."
+        },
+        {
+          "code": "dots_operation_failed",
+          "exit": 1,
+          "condition": "The Dots controller or its native launch preparation fails.",
+          "message": "The Dots operation failed; inspect cq codex dots status before retrying."
+        },
+        {
+          "code": "dots_result_invalid",
+          "exit": 1,
+          "condition": "The controller receipt cannot be represented by the typed result.",
+          "message": "The Dots operation returned an invalid receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_result_missing",
+          "exit": 1,
+          "condition": "The controller reports success without a receipt.",
+          "message": "The Dots operation returned no receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_timeout",
+          "exit": 7,
+          "condition": "The command context deadline expires.",
+          "message": "The Dots operation timed out; inspect state before retrying."
+        },
+        {
+          "code": "interrupted",
+          "exit": 130,
+          "condition": "The command context is cancelled.",
+          "message": "Operation interrupted; inspect state before retrying."
+        }
+      ],
+      "examples": [
+        {
+          "command": "cq codex dots start",
+          "description": "Start Dots in the configured native app."
+        }
+      ],
+      "aliases": [],
+      "tests": [
+        "--help performs no credential, configuration, filesystem, service or network access.",
+        "Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.",
+        "--root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.",
+        "--json emits exactly one canonical v2 envelope; diagnostics remain on stderr.",
+        "Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion."
+      ],
+      "sources": [
+        "cmd/cq/dots.go:CodexDotsCmd",
+        "cmd/cq/cli_v2_dots.go:v2DotsOptions",
+        "cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner"
+      ],
+      "family": "dots",
+      "kind": "command"
+    },
+    {
+      "id": "codex.dots.status",
+      "path": "codex dots status",
+      "summary": "Show Dots status.",
+      "description": [
+        "Show Dots status.",
+        "Read the native catalogue, workspace, and adapter component status.",
+        "Readiness describes the observed app state; it does not confirm a Dot has completed a message."
+      ],
+      "terms": {
+        "codex": "Explicit provider scope; never inferred from another command.",
+        "dots": "The multi-account Dots adapter and its private installation state.",
+        "status": "Show Dots status."
+      },
+      "positionals": [],
+      "options": [
+        {
+          "name": "root",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.",
+          "validation": [
+            "Must be a clean absolute path when supplied.",
+            "Must not contain the home directory or overlap native app, credential or application-support paths."
+          ],
+          "omission_resolution": "Resolve ~/.local/share/cq/dots from the current user home after syntax validation."
+        }
+      ],
+      "preconditions": [
+        "Validate all syntax and supplied values before home, filesystem or service access.",
+        "Protect native app, credential and application-support paths from overlap with the private Dots root."
+      ],
+      "effects": [
+        "Read and report controller status without promoting unknown or incomplete observations to readiness."
+      ],
+      "output": {
+        "fields": {
+          "operation": "string: requested Dots operation",
+          "result": "DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values"
+        },
+        "human": "Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion."
+      },
+      "errors": [
+        {
+          "code": "dots_invalid_argument",
+          "exit": 2,
+          "condition": "A supplied path, selector, message, or combination of arguments is invalid.",
+          "message": "Invalid Dots argument: {detail}."
+        },
+        {
+          "code": "dots_operation_failed",
+          "exit": 1,
+          "condition": "The Dots controller or its native launch preparation fails.",
+          "message": "The Dots operation failed; inspect cq codex dots status before retrying."
+        },
+        {
+          "code": "dots_result_invalid",
+          "exit": 1,
+          "condition": "The controller receipt cannot be represented by the typed result.",
+          "message": "The Dots operation returned an invalid receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_result_missing",
+          "exit": 1,
+          "condition": "The controller reports success without a receipt.",
+          "message": "The Dots operation returned no receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_timeout",
+          "exit": 7,
+          "condition": "The command context deadline expires.",
+          "message": "The Dots operation timed out; inspect state before retrying."
+        },
+        {
+          "code": "interrupted",
+          "exit": 130,
+          "condition": "The command context is cancelled.",
+          "message": "Operation interrupted; inspect state before retrying."
+        }
+      ],
+      "examples": [
+        {
+          "command": "cq codex dots status",
+          "description": "Show Dots status."
+        }
+      ],
+      "aliases": [],
+      "tests": [
+        "--help performs no credential, configuration, filesystem, service or network access.",
+        "Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.",
+        "--root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.",
+        "--json emits exactly one canonical v2 envelope; diagnostics remain on stderr.",
+        "Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion."
+      ],
+      "sources": [
+        "cmd/cq/dots.go:CodexDotsCmd",
+        "cmd/cq/cli_v2_dots.go:v2DotsOptions",
+        "cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner"
+      ],
+      "family": "dots",
+      "kind": "command"
+    },
+    {
+      "id": "codex.dots.stop",
+      "path": "codex dots stop",
+      "summary": "Stop the Dots adapter after quitting the app.",
+      "description": [
+        "Stop the Dots adapter after quitting the app.",
+        "Quit the desktop app before stopping its Dots adapter processes.",
+        "The result confirms when the adapter has stopped."
+      ],
+      "terms": {
+        "codex": "Explicit provider scope; never inferred from another command.",
+        "dots": "The multi-account Dots adapter and its private installation state.",
+        "stop": "Stop the Dots adapter after quitting the app."
+      },
+      "positionals": [],
+      "options": [
+        {
+          "name": "root",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.",
+          "validation": [
+            "Must be a clean absolute path when supplied.",
+            "Must not contain the home directory or overlap native app, credential or application-support paths."
+          ],
+          "omission_resolution": "Resolve ~/.local/share/cq/dots from the current user home after syntax validation."
+        }
+      ],
+      "preconditions": [
+        "Validate all syntax and supplied values before home, filesystem or service access.",
+        "Protect native app, credential and application-support paths from overlap with the private Dots root."
+      ],
+      "effects": [
+        "Stop the Dots adapter after the native app has been quit."
+      ],
+      "output": {
+        "fields": {
+          "operation": "string: requested Dots operation",
+          "result": "DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values"
+        },
+        "human": "Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion."
+      },
+      "errors": [
+        {
+          "code": "dots_invalid_argument",
+          "exit": 2,
+          "condition": "A supplied path, selector, message, or combination of arguments is invalid.",
+          "message": "Invalid Dots argument: {detail}."
+        },
+        {
+          "code": "dots_operation_failed",
+          "exit": 1,
+          "condition": "The Dots controller or its native launch preparation fails.",
+          "message": "The Dots operation failed; inspect cq codex dots status before retrying."
+        },
+        {
+          "code": "dots_result_invalid",
+          "exit": 1,
+          "condition": "The controller receipt cannot be represented by the typed result.",
+          "message": "The Dots operation returned an invalid receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_result_missing",
+          "exit": 1,
+          "condition": "The controller reports success without a receipt.",
+          "message": "The Dots operation returned no receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_timeout",
+          "exit": 7,
+          "condition": "The command context deadline expires.",
+          "message": "The Dots operation timed out; inspect state before retrying."
+        },
+        {
+          "code": "interrupted",
+          "exit": 130,
+          "condition": "The command context is cancelled.",
+          "message": "Operation interrupted; inspect state before retrying."
+        }
+      ],
+      "examples": [
+        {
+          "command": "cq codex dots stop",
+          "description": "Stop the Dots adapter after quitting the app."
+        }
+      ],
+      "aliases": [],
+      "tests": [
+        "--help performs no credential, configuration, filesystem, service or network access.",
+        "Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.",
+        "--root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.",
+        "--json emits exactly one canonical v2 envelope; diagnostics remain on stderr.",
+        "Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion."
+      ],
+      "sources": [
+        "cmd/cq/dots.go:CodexDotsCmd",
+        "cmd/cq/cli_v2_dots.go:v2DotsOptions",
+        "cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner"
+      ],
+      "family": "dots",
+      "kind": "command"
+    },
+    {
+      "id": "codex.dots.sync",
+      "path": "codex dots sync",
+      "summary": "Refresh Dots account discovery.",
+      "description": [
+        "Refresh Dots account discovery.",
+        "Refresh account discovery and start or restart adapter components when needed.",
+        "A pending normal app restart or incomplete discovery is reported in the result."
+      ],
+      "terms": {
+        "codex": "Explicit provider scope; never inferred from another command.",
+        "dots": "The multi-account Dots adapter and its private installation state.",
+        "sync": "Refresh Dots account discovery."
+      },
+      "positionals": [],
+      "options": [
+        {
+          "name": "root",
+          "type": "path",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "ABS_PATH",
+          "help": "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.",
+          "validation": [
+            "Must be a clean absolute path when supplied.",
+            "Must not contain the home directory or overlap native app, credential or application-support paths."
+          ],
+          "omission_resolution": "Resolve ~/.local/share/cq/dots from the current user home after syntax validation."
+        }
+      ],
+      "preconditions": [
+        "Validate all syntax and supplied values before home, filesystem or service access.",
+        "Protect native app, credential and application-support paths from overlap with the private Dots root."
+      ],
+      "effects": [
+        "Refresh account discovery and retain discovery and native catalogue observations.",
+        "Start or restart adapter components when required; if the normal app must be restarted, retain the pending restart receipt without interrupting its work."
+      ],
+      "output": {
+        "fields": {
+          "operation": "string: requested Dots operation",
+          "result": "DotsResult|null: typed released controller receipt; optional fields distinguish absent observations from explicit false values"
+        },
+        "human": "Render the operation and available typed receipt fields. Preserve pending, unknown and accepted outcomes without claiming readiness or response completion."
+      },
+      "errors": [
+        {
+          "code": "dots_invalid_argument",
+          "exit": 2,
+          "condition": "A supplied path, selector, message, or combination of arguments is invalid.",
+          "message": "Invalid Dots argument: {detail}."
+        },
+        {
+          "code": "dots_operation_failed",
+          "exit": 1,
+          "condition": "The Dots controller or its native launch preparation fails.",
+          "message": "The Dots operation failed; inspect cq codex dots status before retrying."
+        },
+        {
+          "code": "dots_result_invalid",
+          "exit": 1,
+          "condition": "The controller receipt cannot be represented by the typed result.",
+          "message": "The Dots operation returned an invalid receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_result_missing",
+          "exit": 1,
+          "condition": "The controller reports success without a receipt.",
+          "message": "The Dots operation returned no receipt; inspect state before retrying."
+        },
+        {
+          "code": "dots_timeout",
+          "exit": 7,
+          "condition": "The command context deadline expires.",
+          "message": "The Dots operation timed out; inspect state before retrying."
+        },
+        {
+          "code": "interrupted",
+          "exit": 130,
+          "condition": "The command context is cancelled.",
+          "message": "Operation interrupted; inspect state before retrying."
+        }
+      ],
+      "examples": [
+        {
+          "command": "cq codex dots sync",
+          "description": "Refresh Dots account discovery."
+        }
+      ],
+      "aliases": [],
+      "tests": [
+        "--help performs no credential, configuration, filesystem, service or network access.",
+        "Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.",
+        "--root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.",
+        "--json emits exactly one canonical v2 envelope; diagnostics remain on stderr.",
+        "Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion."
+      ],
+      "sources": [
+        "cmd/cq/dots.go:CodexDotsCmd",
+        "cmd/cq/cli_v2_dots.go:v2DotsOptions",
+        "cmd/cq/cli_v2_dots.go:handleV2DotsWithRunner"
+      ],
+      "family": "dots",
       "kind": "command"
     },
     {
@@ -3883,7 +5036,7 @@
     {
       "id": "codex.proxy.lease",
       "path": "codex proxy lease",
-      "summary": "Invalidate reusable Codex routing affinities.",
+      "summary": "Manage reusable Codex routing affinities.",
       "description": [
         "Invalidate reusable Codex routing affinities.",
         "Choose a subcommand below. A bare group prints this help without reading configuration or changing state."
@@ -4039,6 +5192,140 @@
       "sources": [
         "v0.32.5:cmd/cq/proxy_leases.go:40",
         "v0.32.5:internal/proxy/codex_lease_invalidation.go:9"
+      ],
+      "family": "routing",
+      "kind": "command"
+    },
+    {
+      "id": "codex.proxy.lease.redistribute",
+      "path": "codex proxy lease redistribute",
+      "summary": "Schedule Codex chats to rebalance across available accounts.",
+      "description": [
+        "Schedule existing Codex task-account leases for redistribution at a safe request boundary. Active work continues; required account continuity remains intact. The receipt counts scheduled leases and leases deferred until their current work finishes."
+      ],
+      "terms": {
+        "codex": "Provider-first scope: these operations affect Codex routing.",
+        "proxy": "Distinguish proxy routing from the provider account used directly by its own client.",
+        "lease": "Singular namespace for reusable task-account affinity.",
+        "redistribute": "Schedule a fresh account choice for existing chats when their next portable request can safely move."
+      },
+      "positionals": [],
+      "options": [
+        {
+          "name": "port",
+          "type": "integer",
+          "required": false,
+          "repeatable": false,
+          "default": null,
+          "metavar": "PORT",
+          "help": "Connect to the authenticated loopback proxy on this port (1–65535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset.",
+          "validation": [
+            "Integer 1–65535.",
+            "No configuration file is created to resolve omission."
+          ],
+          "omission_resolution": "configured port, otherwise 19280"
+        },
+        {
+          "name": "timeout",
+          "type": "duration",
+          "required": false,
+          "repeatable": false,
+          "default": "10s",
+          "metavar": "TIMEOUT",
+          "help": "Maximum elapsed time for this command, including local preparation and control requests; default 10s.",
+          "validation": [
+            "Positive Go duration.",
+            "Expiry returns exit 7; a timed-out mutation may already have committed, so inspect state before retrying."
+          ]
+        }
+      ],
+      "preconditions": [
+        "Running authenticated proxy with writable, migrated lease journal."
+      ],
+      "effects": [
+        "Durably schedule reusable task-account leases for a fresh route at a safe request boundary.",
+        "Active requests and required account continuity remain intact; no restart is required.",
+        "Scheduled and deferred counts describe this scheduling operation, not completed account moves. Repeating the operation may advance journal generation."
+      ],
+      "output": {
+        "human": "Scheduled leases: {scheduled_leases}\nDeferred leases: {deferred_leases}\nJournal generation: {journal_generation}\n",
+        "fields": {
+          "scheduled_leases": "integer >=0; leases marked for a fresh route at the next safe request boundary",
+          "deferred_leases": "Scheduled leases currently bound to an account by active work or required continuity; a subset of scheduled_leases.",
+          "journal_generation": "uint64; resulting durable journal generation"
+        }
+      },
+      "errors": [
+        {
+          "code": "routing_invalid_argument",
+          "exit": 2,
+          "condition": "Unknown, duplicate, missing, malformed, or mutually exclusive arguments.",
+          "message": "Invalid argument: {detail}."
+        },
+        {
+          "code": "routing_io_failed",
+          "exit": 1,
+          "condition": "Configuration, state, or output cannot be read or written.",
+          "message": "Routing operation failed: {detail}."
+        },
+        {
+          "code": "routing_timeout",
+          "exit": 7,
+          "condition": "Command deadline expires.",
+          "message": "Routing operation timed out; inspect current state before retrying a mutation."
+        },
+        {
+          "code": "routing_control_unavailable",
+          "exit": 4,
+          "condition": "Required live proxy control is unreachable or unavailable.",
+          "message": "Running CQ proxy control is unavailable."
+        },
+        {
+          "code": "routing_auth_failed",
+          "exit": 5,
+          "condition": "Local proxy token missing or control rejects authentication.",
+          "message": "Local proxy authentication failed."
+        },
+        {
+          "code": "routing_conflict",
+          "exit": 6,
+          "condition": "State changed or runtime preconditions fail.",
+          "message": "Routing state conflict: {detail}."
+        },
+        {
+          "code": "lease_journal_unavailable",
+          "exit": 4,
+          "condition": "Journal writer unavailable or quarantined legacy journal cannot mutate.",
+          "message": "Lease journal is unavailable for redistribution."
+        }
+      ],
+      "examples": [
+        {
+          "command": "cq codex proxy lease redistribute",
+          "description": "Schedule existing chats to rebalance without interrupting active work."
+        },
+        {
+          "command": "cq codex proxy lease redistribute --port 19281 --timeout 20s",
+          "description": "Schedule redistribution through a specific running proxy with a longer deadline."
+        }
+      ],
+      "aliases": [
+        {
+          "path": "proxy leases redistribute",
+          "translation": "codex proxy lease redistribute",
+          "note": "Singular provider-first lease namespace; preserve optional port."
+        }
+      ],
+      "tests": [
+        "All argument and help rules in the global contract apply.",
+        "--help performs no state access and succeeds without configuration.",
+        "Require scheduled_leases, deferred_leases and journal_generation in a successful control receipt; reject unknown fields, negative counts and trailing JSON.",
+        "Retain typed authentication, journal, conflict and persistence errors without exposing response bodies.",
+        "Cancellation or expiry must not dispatch a later control mutation."
+      ],
+      "sources": [
+        "cmd/cq/proxy_leases.go",
+        "internal/proxy/codex_lease_redistribution.go"
       ],
       "family": "routing",
       "kind": "command"
@@ -12441,7 +13728,7 @@
           "repeatable": false,
           "default": false,
           "metavar": "STRICT",
-          "help": "Return non-zero if selected components are not installed, not running, or unhealthy. Default: false.",
+          "help": "Return non-zero if a selected component is missing or unhealthy. A healthy periodic token-refresh service may be idle between runs. Default: false.",
           "validation": []
         },
         {

@@ -1,0 +1,3 @@
+Warning · Dots has pending or incomplete work; inspect the receipt before retrying.
+  Code: dots_incomplete
+  Command: cq codex dots broadcast

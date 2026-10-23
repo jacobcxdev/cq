@@ -25,7 +25,7 @@ func TestCandidateWorkflowBuildsWithoutPublication(t *testing.T) {
 		"permissions:\n  contents: read\n",
 		"persist-credentials: false",
 		"install-only: true",
-		"CQ_CANDIDATE_VERSION: 0.34.0",
+		"CQ_CANDIDATE_VERSION: 0.39.0",
 		"version_template: '{{ .Env.CQ_CANDIDATE_VERSION }}'",
 		"test -n \"$GEMINI_ANTIGRAVITY_CLIENT_SECRET\"",
 		"goreleaser build --snapshot --clean --skip=before,pre-hooks,post-hooks",

@@ -316,6 +316,16 @@
     "notes": ""
   },
   {
+    "path": "proxy leases redistribute",
+    "visibility": "public",
+    "flags": [
+      "--port"
+    ],
+    "positionals": [],
+    "source": "cmd/cq/proxy_leases.go",
+    "notes": ""
+  },
+  {
     "path": "proxy trace",
     "visibility": "public",
     "flags": [

@@ -46,6 +46,7 @@ var aliases = map[string]aliasSpec{
 	"proxy prime enable":                            {target: "codex proxy prime enable"},
 	"proxy prime disable":                           {target: "codex proxy prime disable"},
 	"proxy leases invalidate":                       {target: "codex proxy lease invalidate"},
+	"proxy leases redistribute":                     {target: "codex proxy lease redistribute"},
 	"proxy trace":                                   {target: "codex proxy trace"},
 	"proxy reserve set":                             {target: "codex proxy reserve set"},
 	"proxy reserve disable":                         {target: "codex proxy reserve disable"},

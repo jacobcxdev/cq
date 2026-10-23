@@ -1,10 +1,11 @@
 # CQ CLI v2: canonical implementation specification
 
-Status: implemented canonical contract; production-readiness review updated 26 September 2026. This package specifies the whole public CLI and preserves installed machine interfaces explicitly. Planned feature release: **0.34.0**, retaining the requested 0.x release line. “CLI v2” names this contract and JSON envelope version; it is not the release number. Release publication and installed acceptance remain separate gates.
+Status: implemented canonical contract; release reconciliation updated 23 October 2026. This package specifies the whole public CLI and preserves installed machine interfaces explicitly. Planned feature release: **0.39.0**, retaining the requested 0.x release line. “CLI v2” names this contract and JSON envelope version; it is not the release number. Release publication and installed acceptance remain separate gates.
 
 ## Read this package
 
-- [Production-readiness handoff](production-readiness.md): current source, independent review, executable checks and remaining release-only gates.
+- [Release reconciliation](release-reconciliation.md): current default-branch integration, review, verification and PR scope.
+- [September production-readiness handoff](production-readiness.md): historical review and executable evidence; not current reconciliation proof.
 
 - [Implementation plan](plan.md): 29 sequenced tasks across six workstreams, with command/parameter ownership, file targets, regression cases and delivery gates.
 - [Command reference](COMMANDS.md): every command, argument, option, constraint, effect, output, error, example and naming rationale.
@@ -31,6 +32,7 @@ cq
 │   └── proxy pin  show | set | clear
 ├── codex
 │   ├── account  login | list | activate | remove
+│   ├── dots  install | start | stop | status | sync | list | prime | broadcast | board
 │   ├── reset  list | recommend | use
 │   └── proxy
 │       ├── pin  show | set | clear
@@ -40,7 +42,7 @@ cq
 │       ├── pool  set | rename | value
 │       ├── session  bind | show | list | unbind | digest
 │       ├── policy  apply | show
-│       ├── lease invalidate
+│       ├── lease  invalidate | redistribute
 │       ├── trace
 │       ├── fixture create
 │       ├── readiness show

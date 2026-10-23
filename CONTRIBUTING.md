@@ -73,6 +73,7 @@ To release a new version:
    scripts/validate-codex-release
    ```
    This runs normal WebSocket, repeated HTTP, compaction, and rescue traffic through isolated proxy listeners. It leaves any production listener unchanged and publishes the commit-bound `cq/live-normal-routing` status required by the tag workflow.
+   Live checks discover the installed client's recommended model through `model/list`, log its concrete ID, and keep that selection fixed across direct and proxied traffic for the run. Model discovery uses an isolated profile and fails explicitly if no unambiguous visible default is available. Synthetic checks keep their reviewed fixture model and do not require live model access.
 3. Tag the commit: `git tag v0.x.y`
 4. Push the tag: `git push origin v0.x.y`
 5. Run the `Release` workflow against that tag. It builds and validates release
@@ -97,9 +98,9 @@ Direct `cq proxy install|restart|uninstall` LaunchAgent commands remain
 available for focused development and repair work, but they are not a complete
 Homebrew installation path.
 
-The release lifecycle gate uses the unchanged previous release executable with
-the corrected installer artifacts. It verifies install, upgrade, transport and
-uninstall, but does not claim to reproduce every legacy stored-hook migration.
+The release lifecycle gate uses the published previous Cask and executable.
+It verifies the actual previous uninstall hook against the candidate install
+hook, followed by transport and uninstall checks.
 
 For local development rollouts, never overwrite the running executable in place
 with `cp`, `install`, or shell redirection. macOS can kill the mapped process with

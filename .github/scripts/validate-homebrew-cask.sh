@@ -92,7 +92,7 @@ text.gsub!(/^(\s*)url ".*"$/) { "#{Regexp.last_match(1)}url \"file://#{archive}\
 text.sub!(/^\s*binary "cq"$/, '  binary "cq", target: "cq-cask-validation"') or abort "missing cq binary artifact"
 text.gsub!('#{HOMEBREW_PREFIX}/bin/cq', '#{HOMEBREW_PREFIX}/bin/cq-cask-validation')
 abort "missing supported installer artifact" unless text.include?('installer script:')
-abort "missing supported uninstall artifact" unless text.include?('uninstall script:')
+abort "missing supported uninstall artifact" unless text.match?(/^[ \t]*uninstall(?:\(script:| script:)/)
 %w[install uninstall].each do |action|
   command = '"$source" service ' + action + ' --owner=homebrew "--service-executable=$target"'
   abort "missing CQ lifecycle command: #{action}" unless text.scan(command).length == 1
@@ -125,6 +125,7 @@ if xattr -p com.apple.quarantine "$validation_binary" >/dev/null 2>&1; then
   echo "Homebrew Cask left cq quarantined" >&2
   exit 1
 fi
-find "$validation_binary" -depth -delete
+HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force "$validation_token"
+[[ ! -e "$validation_binary" && ! -L "$validation_binary" ]]
 
-echo "Homebrew Cask quarantine and missing-binary uninstall validation passed"
+echo "Homebrew Cask quarantine and verified uninstall validation passed"

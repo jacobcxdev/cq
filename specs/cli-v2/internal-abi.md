@@ -1,6 +1,6 @@
 # Frozen machine interfaces and installer contract
 
-These interfaces preserve the v0.32.5 ABI. They are not subject to the new public parser, JSON envelope, exit-code table, reordered options, or public aliases. No public discoverability is added for process-child or package-hook entrypoints. All names beginning `__` remain internal. Human operators must use the public command catalogue; package managers and CQ-owned launchers are the permitted callers below. Existing executable paths remain valid through CLI migration. Public `--help` must not accidentally launch one of these interfaces.
+These interfaces preserve the v0.32.5 baseline and the later released installer/runtime extensions explicitly recorded below. They are not subject to the new public parser, JSON envelope, exit-code table, reordered options, or public aliases. No public discoverability is added for process-child or package-hook entrypoints. All names beginning `__` remain internal. Human operators must use the public command catalogue; package managers and CQ-owned launchers are the permitted callers below. Existing executable paths remain valid through CLI migration. Public `--help` must not accidentally launch one of these interfaces.
 
 ## Package lifecycle hooks: `cq service`
 
@@ -9,28 +9,33 @@ Package-hook argument forms, subject to the dispatch rule below:
 ```
 cq service install [--owner OWNER] [--service-executable=PATH] [--installer-lock-held]
 cq service uninstall [--owner OWNER] [--service-executable=PATH] [--installer-lock-held]
+cq service upgrade --owner homebrew --candidate-executable=PATH [--service-executable=PATH] [--installer-lock-held] [--json]
 cq service snapshot --owner OWNER --snapshot-file=PATH --installer-lock-held
 cq service restore --owner OWNER --snapshot-file=PATH --installer-lock-held
 ```
 
-For install/uninstall, bare `cq service install` and `cq service uninstall` use the canonical v2 public parser, output and exit contracts. A machine-ABI invocation must contain at least one package-only marker: `--owner`, `--service-executable` or `--installer-lock-held`, in its exact permitted form, and the entire invocation must pass the package-hook grammar below. Marker presence alone does not grant machine dispatch or mutation authority. Invalid package options, empty explicit values and combinations with public `--component` or `--timeout` must be rejected without mutation; they must not fall through to a permissive legacy alias. Omitting `--owner` retains the legacy `manual` default only when another valid package-only marker establishes package context and all that marker's owner constraints are satisfied. This default does not make the bare forms machine entrypoints. Snapshot/restore remain hidden machine actions and require their explicit owner, snapshot path and inherited lock marker.
+For install/uninstall, bare `cq service install` and `cq service uninstall` use the canonical v2 public parser, output and exit contracts. A machine-ABI invocation must contain at least one package-only marker: `--owner`, `--service-executable` or `--installer-lock-held`, in its exact permitted form, and the entire invocation must pass the package-hook grammar below. Marker presence alone does not grant machine dispatch or mutation authority. Invalid package options, empty explicit values and combinations with public `--component` or `--timeout` must be rejected without mutation; they must not fall through to a permissive legacy alias. Omitting `--owner` retains the legacy `manual` default only when another valid package-only marker establishes package context and all that marker's owner constraints are satisfied. This default does not make the bare forms machine entrypoints. Snapshot/restore remain hidden machine actions and require their explicit owner, snapshot path and inherited lock marker. Upgrade is also a hidden package action: only the exact parsed Homebrew invocation with a nonempty candidate path receives machine dispatch. Bare `cq service upgrade` is not a public command. A public help/global option must never execute a package transaction.
 
-`install`, `uninstall`, `snapshot`, and `restore` are literal action names. `snapshot` saves the operating-system service definitions and enabled/running state before a package transaction. `restore` reinstates and verifies that exact saved state after a failed transaction. These two actions are hidden, not new user backup commands.
+`install`, `upgrade`, `uninstall`, `snapshot`, and `restore` are literal action names. `upgrade` requests the Homebrew retained-runtime transaction: verify and stage the candidate, stop admission, drain current turns, hand over the retained listener and verify the selected runtime, preserving its receipt and recovery state. `snapshot` saves the operating-system service definitions and enabled/running state before a package transaction. `restore` reinstates and verifies that exact saved state after a failed transaction. These two actions are hidden, not new user backup commands.
 
 | Option | Exact ABI |
 |---|---|
-| `--owner OWNER`, `--owner=OWNER` | Optional on install/uninstall; required on snapshot/restore because they require inherited package locking. Explicit choices are `homebrew`, `winget`, `go`. Omission selects internal owner `manual`; explicit `manual` is rejected. Identifies the package authority allowed to claim or mutate the installation. No repeated owner. |
-| `--service-executable=PATH` | Optional; omission defaults to empty. When supplied, the value must be nonempty and is valid on install/uninstall only with owner `homebrew`. Equals form only. Clean absolute path, exactly equal to `filepath.Clean(PATH)`. The stable executable and currently running executable must resolve to the same file. Supplies Homebrew's stable link instead of its version-specific executable path. No repeated nonempty value. |
+| `--owner OWNER`, `--owner=OWNER` | Optional on install/uninstall; required on snapshot/restore because they require inherited package locking, and required as `homebrew` on upgrade. Explicit choices are `homebrew`, `winget`, `go`. Omission selects internal owner `manual`; explicit `manual` is rejected. Identifies the package authority allowed to claim or mutate the installation. No repeated owner. |
+| `--service-executable=PATH` | Optional; omission defaults to empty. When supplied, the value must be nonempty and is valid on install/upgrade/uninstall/snapshot/restore only with owner `homebrew`. Equals form only. Clean absolute path, exactly equal to `filepath.Clean(PATH)`. The stable executable and currently running executable must resolve to the same file. Supplies Homebrew's stable link instead of its version-specific executable path. No repeated nonempty value. |
+| `--candidate-executable=PATH` | Required on upgrade; forbidden on other actions. Equals form only. Nonempty clean absolute path to the candidate package executable. Candidate staging verifies its bytes, build provenance and runtime protocol before handover. No repeated nonempty value. |
+| `--json` | Bare boolean, default false; only upgrade accepts it among package mutators. Emits the native upgrade receipt, not a v2 envelope. No repeated flag or value form. |
 | `--snapshot-file=PATH` | Required snapshot/restore only. Equals form only. Clean absolute path. Secure snapshot file; maximum 3 MiB. No repeated nonempty value. |
 | `--installer-lock-held` | Boolean marker, no value form, default false. Requires explicit non-manual package owner and package action. Required snapshot/restore. The caller must supply the already-held installer mutation lock through stdin; CQ validates the inherited descriptor, and rejects a marker without valid lock authority. This does not mean “skip locking”. |
 
-Options follow the action; no positionals. Unknown arguments fail. `--json` is rejected for these mutators. Without inherited marker, install/uninstall acquire the mutation lock themselves. All hooks use current-user service scope. Successful mutations write no stdout. Errors return process exit 1 and `cq: <error>\n` on stderr; successful completion returns 0. Install claims ownership and installs/starts both components. Uninstall stops/removes owned components. Snapshot checks ownership and platform preflight, then atomically writes the secure snapshot. Restore decodes one strict JSON document, rejects unknown fields or trailing JSON, checks schema/owner/executable identity, restores platform state, snapshots it again, and fails if the result differs.
+Options follow the action; no positionals. Unknown arguments fail. Explicit empty package paths are rejected by machine dispatch. `--json` is rejected for install/uninstall/snapshot/restore. Without inherited marker, install/uninstall/upgrade acquire the mutation lock themselves. All hooks use current-user service scope. Successful install/uninstall/snapshot/restore write no stdout. Upgrade writes `Runtime upgrade: PHASE (PREVIOUS_VERSION -> CANDIDATE_VERSION)\n`, or one native RuntimeUpgradeReceiptV1 JSON document with `--json`; when upgrade returns a receipt alongside a failure, that receipt is still emitted before the error. An early failure before upgrade starts need not emit a receipt. Errors return process exit 1 and `cq: <error>\n` on stderr; successful completion returns 0. Install claims ownership and installs/starts both components. Uninstall stops/removes owned components. Snapshot checks ownership and platform preflight, then atomically writes the secure snapshot. Restore decodes one strict JSON document, rejects unknown fields or trailing JSON, checks schema/owner/executable identity, restores platform state, snapshots it again, and fails if the result differs.
 
 Snapshot schema: `schema_version` integer exactly 1; `owner` one of the package owners above; `executable` absolute string; `platform` object with `manager` string, optional `folder_exists` boolean, optional `folder_security_descriptor` string, and `components` array. Each component contains `id` string and `exists` boolean, optional `definition` base64 string holding native definition bytes, `enabled` boolean, `unit_file_state` string, `running` boolean. Optional fields omitted when zero-valued by Go JSON. This is a restoration payload, not an editable user configuration file.
 
-Legacy service parser also accepts public `restart` with no options and `status [--json]`. Neither accepts `--owner`; status is the sole old action accepting JSON. The new public service grammar can replace these routes, but package-specific old forms above must remain dispatchable before public parsing. Snapshot/restore have no legacy manual help entry; retain that absence in the hidden ABI. A public help request must explain that a path is internal rather than execute a transaction.
+Legacy service parser also accepts public `restart` with no options and `status [--json]`. Neither accepts `--owner`; status and the later released package upgrade action accept JSON. Only upgrade remains a machine mutator with JSON; public status uses the canonical v2 envelope. The new public service grammar can replace these routes, but package-specific old forms above must remain dispatchable before public parsing. Snapshot/restore/upgrade have no public help entry; retain that absence in the hidden ABI. A public help request must explain that a path is internal rather than execute a transaction.
 
-Sources: `cmd/cq/service_command.go:111`, `cmd/cq/service.go:179` in v0.32.5.
+RuntimeUpgradeReceiptV1 has required fields: `schema_version` exactly 1; `transaction_id` ASCII `[a-zA-Z0-9_-]{1,128}`; `generation` positive uint64; `phase` one of prepared|waiting|handoff|verifying|committed|deferred|rolling_back|rolled_back|failed; `previous` and `candidate` RuntimeArtifact objects; `listener_identity` nonempty string; `supervisor_pid` integer greater than 1; and `admission_pause_nanos` nonnegative integer. Optional nonzero fields are `guard_pid` (integer greater than 1), `recovered_supervisor_pid` (integer greater than 1), `recovery_attempts` (integer 1..3), and nonempty `error_code`. Recovery PID and attempt count must occur together. Each RuntimeArtifact has required `path` absolute string, `version` nonempty string, `sha256` 64 lowercase hex characters, and `protocol_version` exactly 1. Native failure receipts can be incomplete zero values if staging fails; only validated persisted receipts certify a transaction. A committed receipt records runtime selection; service liveness and health still require separate inspection.
+
+Sources: baseline `cmd/cq/service_command.go` and `cmd/cq/service.go` in v0.32.5; released extension in current `cmd/cq/service_upgrade.go`, `cmd/cq/service_upgrade_darwin.go`, `internal/proxy/runtime_upgrade.go` and `internal/installer/runtime_artifact.go`.
 
 ## Separate installer executable: `cq-install`
 
@@ -63,6 +68,33 @@ on uninstall.
 Package invocation example: `cq-install install --silent --owner=winget`, only from the eligible Windows release package. General installation example: `cq-install install`.
 
 Source: `cmd/cq-install/main.go:117`.
+
+## Retained runtime compatibility check
+
+```text
+cq proxy runtime-check --json
+```
+
+Exactly these three tokens, in this order; no public global options, aliases, help, defaults or extra arguments. Installer/artifact validation only. It reads an existing proxy configuration if present and rejects malformed configuration, but does not create configuration, open the credential coordinator, start a listener or send upstream requests. Missing configuration is accepted.
+
+Success returns exit 0 and one JSON object with exactly `schema_version` (integer 1), `version` (the executable's build version string), `protocol_version` (integer 1), `goos` (the executable's Go OS identifier), and `goarch` (its Go architecture identifier). No v2 envelope. Failure returns exit 1 with `cq: <error>\n` on stderr and no successful result. The package validator separately verifies digest, provenance, native platform and retained-file authority; this self-report alone does not prove an authorised artifact.
+
+Source: `cmd/cq/proxy_runtime_check.go`, `internal/installer/runtime_artifact.go`.
+
+## macOS retained-runtime guard and resume children
+
+```text
+cq --runtime-upgrade-guard TRANSACTION_ID
+cq --runtime-upgrade-resume LISTENER_FD LIFECYCLE_FD CONTROL_FD SECRET_FD
+```
+
+Only the CQ runtime handover launcher may invoke these entrypoints. They are Darwin-only, excluded from public grammar, help and completion, and accept no public flags or JSON result mode. The guard takes exactly one transaction identifier and checks it against the secure persisted receipt; when that receipt records a guard PID, it must equal the current process PID. It inherits listener FD3, placeholder FD4, authenticated control FD5 and secret FD6. The placeholder is closed on return. The guard retains the listener while the supervisor changes executable and supports bounded authenticated recovery; its lifetime is at most five minutes. The secret is never an argv value.
+
+Resume takes exactly four distinct inherited descriptor numbers in the order shown. Each must parse as an integer in 100..1048576; unlike the runtime-role manifest, this released parser does not require canonical decimal spelling. CQ marks the descriptors close-on-exec, reads the secret file and authenticates an `upgrade_resume` control frame. The strict resume payload must match the persisted receipt and validate listener/lifecycle identity before resuming. Possession of numeric descriptor arguments without the descriptor contents and authority proofs grants no access. Control messages use the existing authenticated runtime transport; stdout carries no command-result document. Runtime errors return exit 1 with `cq: runtime upgrade: <error>\n` on stderr. Normal shutdown returns 0; runtime diagnostics may appear on stderr.
+
+The exact historical `cq proxy start` launch form also preserves retained-runtime startup recovery before public alias handling. For a Homebrew owner record with a validated receipt, it verifies and selects the committed candidate, or the previous artifact for other phases; interrupted handoff/verifying/rolling_back phases use guarded listener recovery. Prepared/waiting receipts become deferred when the supervisor restarts before handoff. Unsafe unproven release fails closed. With no applicable retained selection it falls through to the normal proxy start compatibility route. Extra arguments, runtime-role children and `runtime-check` must never consume startup recovery state. These rules do not introduce a public handover command.
+
+Sources: `cmd/cq/proxy_upgrade_darwin.go`, `cmd/cq/proxy_upgrade_exec_darwin.go`, `internal/proxy/runtime_upgrade_guard_darwin.go`, `internal/proxy/runtime_upgrade_resume.go`.
 
 ## Runtime role child: `cq proxy start --runtime-role`
 
@@ -122,6 +154,22 @@ Stdin is exactly one JSON document, at most 16 MiB. Required fields: `hook_event
 Success stdout is one JSON document: `{}` when no receipt exists, otherwise `{"systemMessage":"<rendered receipt>"}`. Keep existing receipt formatter. Message begins `CQ route: <state> via HTTP` or `WebSocket`, optional `; pool <name>`, optional `; account <hint> (actual)` or `(planned)`, then model/effort and route explanation, ending with shadow-comparison explanation. In the no-global frozen branch, do not wrap in the new public JSON envelope. Success exits 0; invalid input, config, HTTP or response exits 1 with `cq: <error>\n` on stderr. Input errors use `invalid Codex Stop hook input`. No help or global flag may be interpreted as hook input.
 
 Source: `cmd/cq/proxy_codex_hook.go:32`.
+
+## Dots runtime child
+
+The default-branch integration also retains the released private Dots entry point:
+
+```
+cq __dots ROLE ABSOLUTE_INSTALLATION_ROOT [ROLE_ARGUMENTS...]
+```
+
+Only CQ-owned Dots launchers and workers use this interface. It is classified before public parsing. It does not inherit public globals, help, aliases, semantic output formatting or the v2 JSON envelope. Role arguments, including stock native-executor and cloud-stdio arguments, retain their order and are passed to the released role handler. Public `cq codex dots ...` commands always use the canonical public parser.
+
+The installation root must be clean and absolute. The helper loads owned `settings.json`, requires its runtime root to equal `INSTALLATION_ROOT/runtime`, then retains the released role-specific authority and executable checks. Missing role/root or an invalid root fails before those reads. Roles are `native-broker`, `probe`, `realtime`, `relay`, `executors`, `local-executor`, `native-executor`, `cloud-stdio`, `cloud-stdio-bridge`, `account-watch`, `desktop-launch` and `desktop-recover`. This role list does not grant direct user launch authority or add public discovery.
+
+Stdin, stdout and stderr belong to the selected role's existing protocol. No successful helper completion document is added. Errors use `cq: <error>\n` on stderr. Normal completion returns 0; a preserved `CloudStdioExitError` returns its original positive code through 255; other failures return 1. Existing tests cover preservation of direct and wrapped child exit status and rejection of malformed helper invocations. Public help and completion do not advertise `__dots`.
+
+Sources: `cmd/cq/dots.go`, `internal/dots/control_helper.go`, `cmd/cq/main.go` in the integrated default-branch source. Public resource details are in [`resources/dots.md`](resources/dots.md).
 
 ## Boundary and migration coverage
 

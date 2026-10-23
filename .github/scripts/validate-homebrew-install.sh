@@ -34,6 +34,7 @@ codex_root="$HOME/.codex"
 logs_root="$HOME/Library/Logs/cq"
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/cq-homebrew-install.XXXXXX")
 probe_executable="$temporary_root/native-transport-probe"
+go_executable="$(go env GOROOT)/bin/go"
 address_file="$temporary_root/upstream-address.txt"
 upstream_pid=''
 owns_state=0
@@ -43,6 +44,10 @@ cleanup() {
   trap - EXIT
   set +e
   if [[ "$owns_state" -eq 1 ]]; then
+    if [[ "$result" -ne 0 && -f "$config_root/state/runtime-upgrade.json" ]]; then
+      jq '{phase, error_code, generation, previous_version: .previous.version, candidate_version: .candidate.version}' \
+        "$config_root/state/runtime-upgrade.json" >&2
+    fi
     if [[ -x "$installed_cq" ]]; then
       "$installed_cq" service uninstall --owner=homebrew --service-executable="$installed_cq" >/dev/null 2>&1
     fi
@@ -146,70 +151,96 @@ HOMEBREW_NO_AUTO_UPDATE=1 brew tap-new --no-git "$validation_tap" >/dev/null
 tap_root=$(brew --repository "$validation_tap")
 mkdir -p "$tap_root/Casks"
 validation_cask="$tap_root/Casks/cq.rb"
-# Legacy flight hooks cannot bootstrap launchd under current Homebrew. Test the
-# unchanged previous executable with the same supported packaging as the candidate.
-previous_template="$temporary_root/previous-cq.rb"
-ruby - "$current_cask" "$previous_cask" "$previous_version" "$previous_template" <<'RUBY'
-current, previous, version, destination = ARGV
-text = File.read(current)
-old = File.read(previous)
-current_version = text.match(/^  version "([^"]+)"$/)&.captures&.first or abort "missing version stanza"
-text.gsub!(current_version, version)
-# Preserve the published previous archive checksums for both architectures.
-checksums = old.lines.grep(/^\s*sha256 /)
-abort "missing previous checksums" if checksums.empty?
-index = 0
-text.gsub!(/^\s*sha256 .*$/) { checksums.fetch(index).tap { index += 1 }.chomp }
-abort "checksum architecture count differs" unless index == checksums.length
-File.write(destination, text)
+# Exercise the published uninstall hook; using the candidate hook for both
+# versions hides upgrade handoff failures.
+rewrite_cask "$previous_cask" "$previous_archive" "$validation_cask"
+
+validate_runtime_status() {
+  ruby - "$1" "$installed_cq" "$config_root/state/runtime-artifacts" "$2" "$3" "$("$go_executable" env GOHOSTARCH)" "$go_executable" <<'RUBY'
+require "digest"
+require "json"
+require "open3"
+
+status_json, package, runtime_root, expected_version, mode, architecture, go_executable = ARGV
+status = JSON.parse(status_json)
+if status["schema_version"] == 2
+  abort "canonical status failed" unless status["ok"] == true && status["command"] == "service status"
+  data = status.fetch("data")
+  components = data.fetch("components").to_h { |component| [component.fetch("id"), component] }
+  proxy, refresh = components.fetch("proxy"), components.fetch("token-refresh")
+  abort "canonical ownership differs" unless proxy["owner"] == "package" && refresh["owner"] == "package"
+  proxy = proxy.merge("registered" => proxy["installed"], "running" => proxy["state"] == "running", "configured_executable" => proxy["executable"])
+  refresh = refresh.merge("registered" => refresh["installed"], "configured_executable" => refresh["executable"])
+  status = data.merge("owner" => "homebrew", "executable" => package)
+elsif status["schema_version"] == 1
+  proxy, refresh = status.fetch("proxy"), status.fetch("refresh")
+else
+  abort "unsupported service status schema"
+end
+abort "service ownership executable differs" unless status["owner"] == "homebrew" && status["executable"] == package
+abort "service health differs" unless proxy["registered"] == true && proxy["running"] == true && proxy["healthy"] == true && refresh["registered"] == true && refresh["healthy"] == true && proxy["listener"] == "127.0.0.1:19280" && proxy.fetch("pid", 0) > 1
+live = proxy.fetch("live_executable")
+configured = proxy.fetch("configured_executable")
+refresh_executable = refresh.fetch("configured_executable")
+package_digest = Digest::SHA256.file(package).hexdigest
+abort "selected runtime differs from package bytes" unless File.file?(live) && Digest::SHA256.file(live).hexdigest == package_digest
+version, result = Open3.capture2(live, "--version")
+abort "selected runtime version differs" unless result.success? && version.lines.first.to_s.strip.sub(/\Acq /, "").sub(/\Av/, "") == expected_version
+
+verify_build = lambda do |path|
+  build, result = Open3.capture2(go_executable, "version", "-m", path)
+  abort "runtime build identity differs" unless result.success? && build.match?(/^\tpath\tgithub\.com\/jacobcxdev\/cq\/cmd\/cq$/) && build.match?(/^\tbuild\tGOOS=darwin$/) && build.include?("\tbuild\tGOARCH=#{architecture}\n")
+end
+verify_build.call(live)
+if File.identical?(live, package)
+  abort "candidate must run retained executable" unless mode == "legacy-or-retained"
+  abort "legacy job executable differs" unless configured == package && refresh_executable == package
+else
+  abort "active retained version differs" unless status["active_runtime_version"] == expected_version && status.fetch("pending_runtime_version", "").empty?
+  abort "refresh does not select active runtime" unless refresh_executable == live
+  [runtime_root, File.dirname(runtime_root)].each do |directory|
+    info = File.lstat(directory)
+    abort "unsafe runtime directory" unless info.directory? && info.uid == Process.uid && (info.mode & 0o7777) == 0o700 && File.realpath(directory) == directory
+  end
+  [live, configured, refresh_executable].uniq.each do |path|
+    digest = File.basename(File.dirname(path))
+    abort "runtime path differs from retained store" unless digest.match?(/\A[0-9a-f]{64}\z/) && path == File.join(runtime_root, digest, "cq") && File.realpath(path) == path
+    directory, info = File.lstat(File.dirname(path)), File.lstat(path)
+    abort "unsafe retained runtime" unless directory.directory? && directory.uid == Process.uid && (directory.mode & 0o7777) == 0o700 && info.file? && info.uid == Process.uid && info.nlink == 1 && (info.mode & 0o7777) == 0o500
+    abort "retained digest differs" unless Digest::SHA256.file(path).hexdigest == digest
+    verify_build.call(path)
+    check, result = Open3.capture2(path, "proxy", "runtime-check", "--json")
+    check = JSON.parse(check)
+    abort "retained runtime protocol differs" unless result.success? && check["schema_version"] == 1 && check["protocol_version"] == 1 && check["goos"] == "darwin" && check["goarch"] == architecture && !check.fetch("version", "").empty?
+    abort "selected runtime check version differs" if path == live && check["version"] != expected_version
+  end
+end
 RUBY
-rewrite_cask "$previous_template" "$previous_archive" "$validation_cask"
+}
 
 assert_installed() {
   local expected_version=$1
-  local stage=$2
-  if [[ "$stage" == previous ]]; then
-    local actual_version
-    actual_version=$("$installed_cq" --version)
-    actual_version=${actual_version#cq }
-    [[ "${actual_version#v}" == "$expected_version" ]]
-  else
-    "$installed_cq" version --json | jq -e --arg version "$expected_version" 'select(.schema_version == 2 and .ok == true and .command == "version") | .data.version == $version' >/dev/null
-  fi
+  local runtime_mode=${2:-legacy-or-retained}
+  local actual_version
+  actual_version=$("$installed_cq" --version)
+  actual_version=${actual_version%%$'\n'*}
+  actual_version=${actual_version#cq }
+  [[ "${actual_version#v}" == "$expected_version" ]]
   if xattr -p com.apple.quarantine "$installed_cq" >/dev/null 2>&1; then
     echo "Homebrew Cask left cq quarantined" >&2
     return 1
   fi
   local status_json=''
-  local live_executable=''
   for _ in $(seq 1 60); do
     status_json=$($installed_cq service status --json 2>/dev/null) || true
-    if [[ "$stage" == previous ]]; then
-      if jq -e --arg executable "$installed_cq" \
-        'select(.schema_version == 1) | .owner == "homebrew" and .proxy.running and .proxy.healthy and .refresh.healthy and .proxy.configured_executable == $executable and .proxy.listener == "127.0.0.1:19280" and (.proxy.pid > 0)' <<<"$status_json" >/dev/null 2>&1; then
-        live_executable=$(jq -er '.proxy.live_executable' <<<"$status_json") || true
-        if [[ -n "$live_executable" && -e "$live_executable" && "$live_executable" -ef "$installed_cq" ]]; then return 0; fi
-      fi
-    else
-    if jq -e \
-      --arg executable "$installed_cq" \
-      'select(.schema_version == 2 and .ok == true) |
-       (.data.components | map({key: .id, value: .}) | from_entries) |
-       .proxy.owner == "package" and .proxy.state == "running" and .proxy.healthy and
-       .["token-refresh"].healthy and .proxy.executable == $executable and (.proxy.pid > 0)' <<<"$status_json" >/dev/null 2>&1; then
-      local pid
-      pid=$(jq -er '.data.components[] | select(.id == "proxy") | .pid' <<<"$status_json") || true
-      live_executable=$(lsof -a -p "$pid" -d txt -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1) || true
-      if [[ -n "$live_executable" && -e "$live_executable" && "$live_executable" -ef "$installed_cq" ]] &&
-        lsof -a -p "$pid" -iTCP@127.0.0.1:19280 -sTCP:LISTEN -t >/dev/null 2>&1; then
-        return 0
-      fi
-    fi
+    if validate_runtime_status "$status_json" "$expected_version" "$runtime_mode" >"$temporary_root/runtime-status.log" 2>&1; then
+      return 0
     fi
     sleep 1
   done
   echo "CQ $expected_version Homebrew services did not become healthy" >&2
   jq . <<<"$status_json" >&2 || printf '%s\n' "$status_json" >&2
+  cat "$temporary_root/runtime-status.log" >&2
   for log in "$logs_root/proxy.log" "$logs_root/refresh.log"; do
     if [[ -f "$log" ]]; then
       echo "--- $log" >&2
@@ -233,18 +264,25 @@ if ! HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$validation_tap/cq"; then
     --predicate 'process == "launchd" AND eventMessage CONTAINS "dev.jacobcx.cq"' >&2 || true
   exit 1
 fi
-assert_installed "$previous_version" previous
+assert_installed "$previous_version"
 
 rewrite_cask "$current_cask" "$current_archive" "$validation_cask"
 HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask "$validation_tap/cq"
-assert_installed "$current_version" candidate
+assert_installed "$current_version" retained
 "$probe_executable" probe --address http://127.0.0.1:19280 --token cq-native-local
 
-find "$installed_cq" -depth -delete
+proxy_pid=$($installed_cq service status --json | jq -er 'if .schema_version == 2 then .data.components[] | select(.id == "proxy") | .pid else .proxy.pid end')
+HOMEBREW_NO_AUTO_UPDATE=1 brew reinstall --cask "$validation_tap/cq"
+assert_installed "$current_version" retained
+[[ "$($installed_cq service status --json | jq -er 'if .schema_version == 2 then .data.components[] | select(.id == "proxy") | .pid else .proxy.pid end')" == "$proxy_pid" ]]
+"$probe_executable" probe --address http://127.0.0.1:19280 --token cq-native-local
+
+preserved_config=$(shasum -a 256 "$config_root/proxy.json")
+preserved_auth=$(shasum -a 256 "$codex_root/auth.json")
 HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force cq
 for label in "$proxy_label" "$refresh_label"; do
   if launchctl print "gui/$UID/$label" >/dev/null 2>&1; then
-    echo "$label remains after Cask fallback uninstall" >&2
+    echo "$label remains after Cask uninstall" >&2
     exit 1
   fi
 done
@@ -252,5 +290,13 @@ for path in "$installed_cq" "$proxy_plist" "$refresh_plist"; do
   [[ ! -e "$path" && ! -L "$path" ]]
 done
 [[ -f "$config_root/proxy.json" && -f "$codex_root/auth.json" ]]
+[[ "$(shasum -a 256 "$config_root/proxy.json")" == "$preserved_config" && "$(shasum -a 256 "$codex_root/auth.json")" == "$preserved_auth" ]]
+for path in "$config_root/state/runtime-artifacts" "$config_root/state/runtime-snapshots" "$config_root/state/runtime-upgrade.json"; do
+  [[ ! -e "$path" && ! -L "$path" ]]
+done
+if lsof -nP -iTCP:19280 -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "CQ listener remains after Cask uninstall" >&2
+  exit 1
+fi
 
-echo "Homebrew Cask install, upgrade, transport, and fallback uninstall validation passed"
+echo "Homebrew Cask install, upgrade, reinstall, transport, and uninstall validation passed"

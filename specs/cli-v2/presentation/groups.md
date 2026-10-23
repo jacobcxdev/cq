@@ -1310,6 +1310,8 @@ Status: draft. Shared formatting in [README](README.md) applies. Every section b
 | `stop` | Stop and disable selected CQ services. |
 | `uninstall` | Stop and remove selected CQ service registrations. |
 
+**Installer boundary:** Package installers manage retained-runtime upgrades. Use `cq service status` to inspect recorded upgrade state and the observed live executable. `service upgrade`, `proxy runtime-check` and private runtime children are machine interfaces, not missing public subcommands; omit them from this child list, public examples and completion. Their exact forms belong in [the frozen machine ABI](../internal-abi.md).
+
 **Examples:**
 
 - `cq service --help` — Show all immediate subcommands and usage.

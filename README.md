@@ -165,7 +165,7 @@ Create the destination directory first. Bash must load its completion directory;
 ### Providers
 
 - **Claude** discovers stored accounts, fetches profile and usage data in parallel, refreshes eligible tokens, and reports each account.
-- **Codex** discovers system, CQ-managed, and declared read-only external accounts. Ordinary checks do not activate, remove, refresh, or rewrite system credentials. Eligible CQ-owned credentials refresh only through CQ's coordinator.
+- **Codex** discovers system, CQ-managed, and declared external accounts. Ordinary checks do not activate, remove, refresh, or rewrite system credentials. Eligible CQ-owned credentials refresh only through CQ's coordinator.
 - **Gemini** reads Antigravity Keychain credential and cached project ID concurrently, calls Antigravity OAuth and quota HTTP APIs directly, and never invokes `agy`. Credential/project stores remain read-only; refreshed tokens live only in process memory.
 
 ### Cache and history
@@ -229,6 +229,8 @@ cq codex reset use EMAIL --credit CREDIT_ID --yes
 
 CQ-owned Codex accounts live under `~/.codex/accounts/` with registry metadata. System `~/.codex/auth.json` remains distinct. Automatic quota/routing reads never switch the system account.
 
+The credential coordinator also renews explicitly declared CodexBar managed accounts within 60 seconds of access expiry. It shares CodexBar's account lock and writes renewed tokens and their fingerprint back to the declared owner home; later CodexBar login takes priority. Renewal runs in the background, preserving healthy-account routing. If every credential is unavailable, reads wait up to one second for fast repair. Other external accounts and system auth remain read-only. An ambiguous refresh outcome is retained without replay and can require owner reauthentication.
+
 `cq codex reset recommend` plans across every account shown by `cq codex account list`. It fetches fresh usage and banked-reset inventories, reports a non-actionable incomplete schedule when any portfolio input is missing, and never consumes a credit. Banked resets restore shared-window percentages without changing natural 5-hour or 7-day reset dates.
 
 `cq codex reset use EMAIL` previews selected credit, current shared usage, and current recommendation, then asks for confirmation with default No. Omit `--credit` to resume a pending attempt or select eligible credit with next expiry. Supply `--yes` only when explicit non-interactive consumption is intended.
@@ -261,6 +263,8 @@ After an explicit account switch, already-running clients or MCP servers may nee
 `cq proxy` binds to loopback, routes Claude and Codex traffic, and publishes local model metadata. It supports Anthropic Messages clients plus native Codex Responses HTTP and WebSocket traffic, including compact, search, image, and realtime/live routes used by supported clients. The retired `/app-server` compatibility endpoint returns `410 Gone` with guidance to run Codex app-server locally and route its outbound Responses traffic through cq.
 
 ### Service lifecycle and status
+
+macOS Homebrew upgrades retain the proxy listener, stop admitting new work, drain each current turn, and select verified runtime copies. Finished WebSocket chats reconnect while other turns finish. First adoption needs a maintenance window. Runtime upgrades are installer-owned; `cq service status` reports their recorded state and the observed live executable. See [Homebrew upgrades](docs/homebrew-upgrades.md).
 
 Complete installers own service installation and removal. Use `cq service` to
 inspect or restart both package-owned components together:
@@ -390,11 +394,24 @@ Session selectors accept `--session-id`, `--session-id-stdin`, or a full keyed `
 
 Pool names are case-insensitive selectors and retain their configured display casing. Higher values preserve a pool's account capacity by routing ordinary unbound work through lower-value viable accounts first. Session bindings and task affinity remain hard constraints.
 
-### Lease invalidation
+### Lease redistribution and invalidation
 
 ```bash
+cq codex proxy lease redistribute
 cq codex proxy lease invalidate
 ```
+
+Redistribution schedules all existing Codex chats for fresh account selection at
+the next safe request boundary. Active responses finish unchanged; confirmed
+included quota is preferred over unknown or exhausted accounts within existing
+pools, pins, model compatibility, and reserve rules. WebSocket account-owned
+deltas use the existing reconnect/resync path before moving. HTTP continuations
+with `previous_response_id` stay on their account until the client sends a
+portable full-history request. Pending redistribution survives a worker restart.
+
+Successful `cq codex reset use` and fresh detected quota resets schedule this
+automatically. CQ never consumes a banked reset automatically. A failed reset
+notification emits a warning without undoing or repeating reset consumption.
 
 Lease invalidation clears reusable Codex account affinity across all sessions.
 Active requests and required continuity remain unchanged. Each next eligible
@@ -490,6 +507,8 @@ cq models overlay add --provider codex --id gpt-5.5 --clone-from gpt-5.4
 cq models overlay remove --provider codex --id gpt-5.5
 cq models overlay prune
 ```
+
+The running proxy refreshes upstream models every five minutes. Each Codex fetch resolves the current installed client version, so Desktop upgrades take effect without restarting CQ. Failed fetches retain the last usable models. Use `cq models refresh` for an immediate refresh.
 
 Registry refresh merges provider sources with local overlays, validates entries, and publishes:
 
@@ -614,6 +633,16 @@ cq codex account activate
 cq codex account list
 cq codex account login
 cq codex account remove
+cq codex dots
+cq codex dots board
+cq codex dots broadcast
+cq codex dots install
+cq codex dots list
+cq codex dots prime
+cq codex dots start
+cq codex dots status
+cq codex dots stop
+cq codex dots sync
 cq codex proxy
 cq codex proxy canary
 cq codex proxy canary start
@@ -637,6 +666,7 @@ cq codex proxy hook
 cq codex proxy hook stop
 cq codex proxy lease
 cq codex proxy lease invalidate
+cq codex proxy lease redistribute
 cq codex proxy pin
 cq codex proxy pin clear
 cq codex proxy pin set
@@ -724,6 +754,63 @@ cq version
 <!-- public-command-index:end -->
 
 </details>
+
+## Multi-account Dots
+
+`cq codex dots install` defaults to the normal native app and its existing
+profile, tasks and signed-in account. Dots discovered from your CQ accounts
+share that app's sidebar. CQ runs its Go adapter from a separate private directory
+alongside installation state and loopback certificates. It does not patch or
+re-sign the installed app bundle. Native app qualification is version-pinned;
+unsupported app updates fail before launch.
+
+Native installation also creates `~/Applications/ChatGPT via CQ.app`, bundled
+with CQ. Launch it through Raycast, Spotlight or Finder to open ChatGPT with Dots.
+The launcher preserves the original app signature and opens the existing profile.
+It sets `OPENAI_BASE_URL` to CQ's configured local proxy, independently of any CQ
+entry in `~/.codex/config.toml`. `cq codex dots start` provides the same routing
+from the terminal. Opening OpenAI's original app directly bypasses the adapter.
+Neither launcher quits an already-running app; if it needs a fresh launch,
+quit ChatGPT and open **ChatGPT via CQ** again.
+If adapter startup fails, the launcher reopens the signed app so other chats remain
+available. An independent 40-second watchdog also covers stalled startup; Dots
+remain unavailable until the reported startup error is resolved.
+The previous isolated research mode remains available with `install --mode isolated`.
+
+```sh
+cq codex dots install
+cq codex dots list
+cq codex dots status
+cq codex dots prime DOT_ID
+cq codex dots prime --all
+cq codex dots broadcast "Please share a brief update on your current work."
+cq codex dots board codex://threads/THREAD_ID
+cq codex dots stop
+```
+
+Each discovered Dot receives one automatic setup attempt per installation,
+teaching the explicit relay and on-demand peer directory. Restarts, upgrades,
+renames, reboots and removing/re-adding an account do not repeat it. Unknown send
+outcomes are not automatically retried. `prime` explicitly sends a fresh reminder.
+`broadcast "MESSAGE"` sends one CQ-labelled user message to every discovered Dot
+and reports delivery per stable ID. It does not repeat setup or retry uncertain sends.
+Display names can repeat; use the stable ID from `list` when a name is ambiguous.
+`board THREAD_ID` assigns one existing local chat as a shared message board and
+notifies each Dot once. CQ mediates explicit board reads and attributed posts;
+Dots do not need separate local tasks. Run `board` to inspect or `board --clear`
+to remove the binding. Board posts start a brief acknowledgement turn in that chat.
+Account changes are watched automatically; `cq codex dots sync` requests an
+immediate reconciliation. A changed normal-profile catalogue requires an app
+restart through CQ; the watcher does not interrupt existing work. Roles and
+current work remain unknown unless reported.
+
+This optional macOS feature uses the CQ binary without Python, pip or a virtual
+environment. It requires valid read-only account credentials and already-onboarded
+Dots. It does not add empty-account onboarding slots,
+native cross-account `@` selection or persistent secondary Reboot. Secondary Dots
+use separate local executors with private account state and native task sandboxing.
+Local MCP configuration is not copied between accounts. See [Dots installation details](docs/dots.md)
+for qualification, explicit paths and lifecycle controls.
 
 ## Development
 

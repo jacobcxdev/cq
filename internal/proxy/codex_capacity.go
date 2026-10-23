@@ -96,6 +96,11 @@ type CodexCapacityObservationStream struct {
 
 // CodexCapacityLedger holds bounded capacity facts and active lease counts.
 type CodexCapacityLedger struct {
+	// OnReset is bound before serving requests.
+	OnReset         func(CodexQuotaResetEvent) error
+	resetWindows    map[codex.AccountKey]map[quota.WindowName]codexWindowFact
+	includedWindows map[codex.AccountKey]map[quota.WindowName]codexWindowFact
+	resetPending    map[codex.AccountKey]*codexQuotaResetPending
 	// Reserve is bound before serving requests.
 	Reserve *CodexReserve
 	windows map[codex.AccountKey]map[quota.WindowName]codexWindowFact
@@ -111,6 +116,12 @@ type CodexCapacityLedger struct {
 	suppressedHardFences  map[capacityFactKey]bool
 
 	observationGeneration atomic.Uint64
+}
+
+// CodexQuotaResetEvent identifies recovered included quota for one account.
+type CodexQuotaResetEvent struct {
+	AccountKey codex.AccountKey
+	EventID    string
 }
 
 // NewCodexCapacityLedger creates a ledger with a bounded cache horizon.
@@ -173,8 +184,12 @@ func (l *CodexCapacityLedger) Observe(fact CapacityFact) bool {
 	}
 
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.observeLocked(fact)
+	accepted := l.observeLocked(fact)
+	l.mu.Unlock()
+	if accepted {
+		l.observeQuotaReset(fact)
+	}
+	return accepted
 }
 
 func (l *CodexCapacityLedger) observeLocked(fact CapacityFact) bool {
@@ -268,19 +283,44 @@ func (l *CodexCapacityLedger) ObserveQuotaSnapshot(account codex.AccountKey, sna
 // authenticated usage response. Positive live evidence can lift an older hard
 // fence after a banked reset; zero usage remains advisory.
 func (l *CodexCapacityLedger) ObserveLivePositiveQuotaSnapshot(stream *CodexCapacityObservationStream, account codex.AccountKey, snap QuotaSnapshot) {
-	if l == nil || stream == nil || account == "" || len(snap.Result.Windows) == 0 {
-		return
+	l.observeLivePositiveQuotaSnapshot(stream, account, snap)
+}
+
+func (l *CodexCapacityLedger) observeLivePositiveQuotaSnapshot(stream *CodexCapacityObservationStream, account codex.AccountKey, snap QuotaSnapshot) bool {
+	if l == nil || stream == nil || account == "" || !snap.Result.IsUsable() || snap.Result.CacheAge != 0 || len(snap.Result.Windows) == 0 {
+		return false
 	}
+	confirmed := false
 	for bucket, aggregate := range capacitySnapshotAggregates(snap) {
-		if aggregate.remaining <= 0 {
-			continue
-		}
-		l.Observe(stream.Stamp(CapacityFact{
+		fact := stream.Stamp(CapacityFact{
 			AccountKey: account, Windows: aggregate.windows, Bucket: bucket,
 			RemainingPct: aggregate.remaining, Source: CapacitySourceLiveUsage,
 			ObservedAt: snap.FetchedAt, ResetAt: aggregate.reset, Confidence: CapacityConfidenceAuthoritative,
-		}))
+		})
+		if aggregate.remaining <= 0 {
+			// Authenticated zero establishes reset evidence without changing
+			// the deliberately advisory usage-zero admission policy.
+			l.observeQuotaReset(fact)
+			continue
+		}
+		if l.Observe(fact) && bucket == CapacityBucketBase && freshPositiveSharedQuota(snap, l.now(), l.maxAge) {
+			confirmed = true
+		}
 	}
+	return confirmed
+}
+
+func freshPositiveSharedQuota(snap QuotaSnapshot, now time.Time, maxAge time.Duration) bool {
+	if snap.FetchedAt.IsZero() || snap.FetchedAt.After(now) || now.Sub(snap.FetchedAt) >= maxAge {
+		return false
+	}
+	for _, name := range []quota.WindowName{quota.Window5Hour, quota.Window7Day} {
+		window, ok := snap.Result.Windows[name]
+		if !ok || window.RemainingPctExact == nil || !(windowRemaining(window) > 0 && windowRemaining(window) <= 100) || window.ResetAtUnix <= now.Unix() {
+			return false
+		}
+	}
+	return true
 }
 
 func capacitySnapshotAggregates(snap QuotaSnapshot) map[CapacityBucket]capacitySnapshotAggregate {
@@ -343,6 +383,37 @@ func (l *CodexCapacityLedger) Capacity(account codex.AccountKey, bucket Capacity
 	return CapacityView{State: CapacityUnknown, Exact: bucket == CapacityBucketBase}
 }
 
+// IncludedCapacity excludes authenticated depleted windows when selecting a
+// redistribution target; ordinary capacity may still admit extra-credit work.
+func (l *CodexCapacityLedger) IncludedCapacity(account codex.AccountKey, bucket CapacityBucket) CapacityView {
+	view := l.Capacity(account, bucket)
+	if l == nil || view.State != CapacityPositive {
+		return view
+	}
+	if bucket == "" {
+		bucket = CapacityBucketBase
+	}
+	now := l.now()
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for name, entry := range l.includedWindows[account] {
+		windowBucket := CapacityBucketBase
+		if scoped := quota.WindowBucket(name); scoped != "" {
+			windowBucket = CapacityBucket(capacityBucketModelPrefix + strings.ToLower(ParseModel(scoped)))
+		}
+		if windowBucket != bucket && !(windowBucket == CapacityBucketBase && !view.Exact) {
+			continue
+		}
+		if entry.fact.ObservedAt.After(now) || now.Sub(entry.fact.ObservedAt) >= l.maxAge || entry.window.ResetAtUnix <= now.Unix() {
+			continue
+		}
+		if windowRemaining(entry.window) == 0 {
+			return CapacityView{State: CapacityZero, RemainingPct: 0, ResetAt: time.Unix(entry.window.ResetAtUnix, 0), Source: entry.fact.Source, Exact: true}
+		}
+	}
+	return view
+}
+
 func (l *CodexCapacityLedger) capacityLocked(account codex.AccountKey, bucket CapacityBucket) (CapacityView, bool) {
 	now := l.now()
 	var selected CapacityFact
@@ -370,6 +441,15 @@ func (l *CodexCapacityLedger) capacityLocked(account codex.AccountKey, bucket Ca
 	}
 	if !haveSelected {
 		return CapacityView{}, false
+	}
+	// A fresh authenticated poll after a reset can recover capacity before
+	// an already-open WebSocket delivers its next rate-limit event.
+	if selected.Source == CapacitySourceLiveRateLimits && selected.RemainingPct == 0 {
+		live, ok := l.facts[capacityFactKey{account: account, bucket: bucket, source: CapacitySourceLiveUsage}]
+		if ok && !l.factStale(live, now) && live.ObservedAt.After(selected.ObservedAt) &&
+			(liveFactLiftsHardFence(live, selected) || liveFactLiftsObservedZero(live, selected)) {
+			selected = live
+		}
 	}
 	if haveHard && !liveFactLiftsHardFence(selected, hard) {
 		selected = hard
@@ -405,7 +485,44 @@ func liveFactLiftsHardFence(live, hard CapacityFact) bool {
 	if !capacityCursorAfter(live, hard) {
 		return false
 	}
-	return hard.ResetAt.IsZero() || live.ResetAt.IsZero() || !live.ResetAt.Before(hard.ResetAt)
+	if hard.ResetAt.IsZero() || live.ResetAt.IsZero() || !live.ResetAt.Before(hard.ResetAt) {
+		return true
+	}
+	// Shared usage carries the earliest window reset, while a hard failure
+	// can carry the later weekly reset. Compare the exact shared windows.
+	if live.Bucket != CapacityBucketBase || hard.Bucket != CapacityBucketBase || !live.ObservedAt.After(hard.ObservedAt) {
+		return false
+	}
+	matchedEpoch := false
+	for _, name := range []quota.WindowName{quota.Window5Hour, quota.Window7Day} {
+		window, ok := live.Windows[name]
+		if !ok || window.RemainingPctExact == nil || !(windowRemaining(window) > 0 && windowRemaining(window) <= 100) || window.ResetAtUnix <= live.ObservedAt.Unix() {
+			return false
+		}
+		if !time.Unix(window.ResetAtUnix, 0).Before(hard.ResetAt) {
+			matchedEpoch = true
+		}
+	}
+	return matchedEpoch
+}
+
+func liveFactLiftsObservedZero(live, zero CapacityFact) bool {
+	if live.Source != CapacitySourceLiveUsage || live.Confidence != CapacityConfidenceAuthoritative || live.RemainingPct <= 0 || !capacityCursorAfter(live, zero) {
+		return false
+	}
+	confirmed := false
+	for name, exhausted := range zero.Windows {
+		if exhausted.RemainingPctExact == nil || windowRemaining(exhausted) != 0 {
+			continue
+		}
+		restored, ok := live.Windows[name]
+		if !ok || restored.RemainingPctExact == nil || !(windowRemaining(restored) > 0 && windowRemaining(restored) <= 100) ||
+			exhausted.ResetAtUnix <= 0 || restored.ResetAtUnix < exhausted.ResetAtUnix {
+			return false
+		}
+		confirmed = true
+	}
+	return confirmed
 }
 
 // SetActiveLeases records current admitted lease count for tie-breaking.

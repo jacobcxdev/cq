@@ -747,3 +747,44 @@ func TestCLIV2RoutingDiagnosticsMalformedResourcesSkippedBeforeTail(t *testing.T
 		})
 	}
 }
+
+func TestCLIV2LeaseRedistributionKeepsTypedReceipts(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		status        int
+		body, receipt string
+		exit          int
+		code          string
+	}{
+		{"scheduled", 200, `{"scheduled_leases":3,"deferred_leases":2,"journal_generation":42}`, "", 0, ""},
+		{"empty", 200, `{"scheduled_leases":0,"deferred_leases":0,"journal_generation":0}`, "", 0, ""},
+		{"missing", 200, `{"scheduled_leases":3,"journal_generation":42}`, "", 1, "routing_io_failed"},
+		{"negative", 200, `{"scheduled_leases":-1,"deferred_leases":0,"journal_generation":42}`, "", 1, "routing_io_failed"},
+		{"unauthorised", 401, "untrusted body", "", 5, "routing_auth_failed"},
+		{"journal", 503, "untrusted body", "lease_journal_unavailable", 4, "lease_journal_unavailable"},
+		{"conflict", 503, "untrusted body", "routing_conflict", 6, "routing_conflict"},
+		{"commit", 503, "untrusted body", "routing_io_failed", 1, "routing_io_failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps := diagnosticsLeaseResponse(tc.body)
+			deps.Lease.Doer = testDoer(func(r *http.Request) (*http.Response, error) {
+				if r.Method != http.MethodPost || r.URL.Path != proxy.RuntimeCodexLeaseRedistributionPath || r.URL.Host != "127.0.0.1:19281" || r.Header.Get("Authorization") != "Bearer synthetic" {
+					t.Fatalf("unexpected redistribution request: %s %s", r.Method, r.URL)
+				}
+				return &http.Response{StatusCode: tc.status, Header: http.Header{http.CanonicalHeaderKey(proxy.CodexLeaseErrorHeader): []string{tc.receipt}}, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})
+			inv := cli.Invocation{Path: "codex proxy lease redistribute", Options: map[string][]string{"timeout": {"10s"}, "port": {"19281"}}}
+			out := handleV2RoutingDiagnosticsWithDependencies(context.Background(), inv, &cli.Session{}, deps)
+			if out.ExitCode != tc.exit || (tc.code != "" && (len(out.Errors) != 1 || out.Errors[0].Code != tc.code)) {
+				t.Fatalf("outcome=%+v", out)
+			}
+			if tc.exit == 0 {
+				if string(out.Data) != tc.body || out.Terminal == nil || !strings.Contains(out.Terminal(cli.TerminalOptions{}), "Scheduled leases") {
+					t.Fatalf("missing redistribution receipt: %+v", out)
+				}
+			} else if strings.Contains(fmt.Sprint(out.Errors), "untrusted body") || strings.Contains(fmt.Sprint(out.Errors), "invalidation") {
+				t.Fatalf("incorrect error text: %+v", out.Errors)
+			}
+		})
+	}
+}

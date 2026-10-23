@@ -192,7 +192,7 @@ func TestCLIV2PackageJQConsumers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"validate-linux-install.sh", "validate-homebrew-install.sh"} {
+	for _, name := range []string{"validate-linux-install.sh"} {
 		raw, err := os.ReadFile(filepath.Join("../../.github/scripts", name))
 		if err != nil {
 			t.Fatal(err)
@@ -228,24 +228,86 @@ func TestCLIV2PackageJQConsumers(t *testing.T) {
 			t.Fatalf("no candidate status assertion in %s", name)
 		}
 
-		if name == "validate-homebrew-install.sh" {
-			start := strings.Index(source, "'select(.schema_version == 1)")
-			if start < 0 {
-				t.Fatal("missing explicit previous release schema")
+	}
+}
+
+// Execute the real Homebrew schema/ownership/health gate before its native
+// artifact probes. The separate hermetic status script verifies artifact bytes,
+// provenance and runtime protocol; no package installer or service runs here.
+func TestCLIV2HomebrewServiceConsumerSchemas(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Homebrew package consumer uses Ruby on Unix")
+	}
+	ruby, err := exec.LookPath("ruby")
+	if err != nil {
+		t.Fatal("Ruby is required for Homebrew consumer acceptance")
+	}
+	// Resolve version-manager shims before replacing the fixture environment.
+	resolved, err := exec.Command(ruby, "-rrbconfig", "-e", "print RbConfig.ruby").Output()
+	if err != nil {
+		t.Fatalf("resolve Ruby interpreter: %v", err)
+	}
+	ruby = strings.TrimSpace(string(resolved))
+	if !filepath.IsAbs(ruby) || strings.ContainsAny(ruby, "\r\n") {
+		t.Fatal("Ruby interpreter path is not absolute")
+	}
+	raw, err := os.ReadFile("../../.github/scripts/validate-homebrew-install.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, function, ok := strings.Cut(string(raw), "validate_runtime_status() {\n")
+	if !ok {
+		t.Fatal("missing Homebrew runtime validator")
+	}
+	_, body, ok := strings.Cut(function, "<<'RUBY'\n")
+	if !ok {
+		t.Fatal("missing runtime validator body")
+	}
+	body, _, ok = strings.Cut(body, "\nRUBY\n")
+	if !ok {
+		t.Fatal("missing runtime validator end")
+	}
+	gate, _, ok := strings.Cut(body, "\nlive = proxy.fetch(\"live_executable\")")
+	if !ok {
+		t.Fatal("missing native artifact boundary")
+	}
+	canonical := `{"schema_version":2,"ok":true,"command":"service status","data":{"components":[{"id":"proxy","owner":"package","installed":true,"state":"running","healthy":true,"listener":"127.0.0.1:19280","pid":123,"executable":"/synthetic/cq","live_executable":"/synthetic/cq"},{"id":"token-refresh","owner":"package","installed":true,"healthy":true,"executable":"/synthetic/cq"}]}}`
+	legacy := `{"schema_version":1,"owner":"homebrew","executable":"/synthetic/cq","proxy":{"registered":true,"running":true,"healthy":true,"listener":"127.0.0.1:19280","pid":123},"refresh":{"registered":true,"healthy":true}}`
+	for _, tc := range []struct {
+		name  string
+		body  string
+		valid bool
+	}{
+		{"canonical", canonical, true},
+		{"legacy", legacy, true},
+		{"unknown schema", strings.Replace(legacy, `"schema_version":1`, `"schema_version":3`, 1), false},
+		{"missing schema", strings.Replace(legacy, `"schema_version":1,`, "", 1), false},
+		{"wrong canonical schema", strings.Replace(canonical, `"schema_version":2`, `"schema_version":1`, 1), false},
+		{"failed canonical envelope", strings.Replace(canonical, `"ok":true`, `"ok":false`, 1), false},
+		{"wrong command", strings.Replace(canonical, `"command":"service status"`, `"command":"proxy status"`, 1), false},
+		{"foreign proxy", strings.Replace(canonical, `"owner":"package"`, `"owner":"foreign"`, 1), false},
+		{"manual refresh", strings.Replace(canonical, `"id":"token-refresh","owner":"package"`, `"id":"token-refresh","owner":"cq"`, 1), false},
+		{"proxy absent", strings.Replace(canonical, `"installed":true`, `"installed":false`, 1), false},
+		{"proxy stopped", strings.Replace(canonical, `"state":"running"`, `"state":"stopped"`, 1), false},
+		{"proxy unhealthy", strings.Replace(canonical, `"healthy":true`, `"healthy":false`, 1), false},
+		{"nonboolean health", strings.Replace(canonical, `"healthy":true`, `"healthy":"false"`, 1), false},
+		{"refresh unhealthy", strings.Replace(canonical, `"id":"token-refresh","owner":"package","installed":true,"healthy":true`, `"id":"token-refresh","owner":"package","installed":true,"healthy":false`, 1), false},
+		{"wrong listener", strings.Replace(canonical, "127.0.0.1:19280", "127.0.0.1:19281", 1), false},
+		{"missing pid", strings.Replace(canonical, `"pid":123,`, "", 1), false},
+		{"foreign legacy owner", strings.Replace(legacy, `"owner":"homebrew"`, `"owner":"go"`, 1), false},
+		{"wrong legacy executable", strings.Replace(legacy, "/synthetic/cq", "/foreign/cq", 1), false},
+		{"legacy unhealthy", strings.Replace(legacy, `"healthy":true`, `"healthy":false`, 1), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, ruby, "-e", gate, tc.body, "/synthetic/cq", "/synthetic/state/runtime-artifacts", "0.34.99", "retained", runtime.GOARCH, "/synthetic/go")
+			cmd.Env = []string{"HOME=" + t.TempDir(), "PATH=" + filepath.Dir(ruby)}
+			output, err := cmd.CombinedOutput()
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%t err=%v output=%s", tc.valid, err, output)
 			}
-			start++
-			end := start + strings.Index(source[start:], "'")
-			query := source[start:end]
-			for _, schema := range []int{1, 2} {
-				body := fmt.Sprintf(`{"schema_version":%d,"owner":"homebrew","proxy":{"running":true,"healthy":true,"configured_executable":"/synthetic/cq","listener":"127.0.0.1:19280","pid":123},"refresh":{"healthy":true}}`, schema)
-				cmd := exec.Command(jq, "-e", "--arg", "executable", "/synthetic/cq", query)
-				cmd.Stdin = strings.NewReader(body)
-				output, err := cmd.CombinedOutput()
-				if (err == nil) != (schema == 1) {
-					t.Fatalf("previous schema%d: %v %s", schema, err, output)
-				}
-			}
-		}
+		})
 	}
 }
 

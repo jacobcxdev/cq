@@ -1,0 +1,52 @@
+cq codex dots
+Manage multi-account Dots and their private installation state.
+
+Usage
+  cq codex dots <COMMAND> [OPTIONS]
+
+Manage multi-account Dots for the configured native app or an isolated research profile.
+
+Choose a subcommand below. A bare group prints this help without reading configuration or changing
+state.
+
+--root is inherited by every Dots command and can appear before or after the leaf command.
+
+Commands
+  install
+      Install multi-account Dots for the normal native app.
+  start
+      Start Dots in the configured native app.
+  stop
+      Stop the Dots adapter after quitting the app.
+  status
+      Show Dots status.
+  sync
+      Refresh Dots account discovery.
+  list
+      List discovered Dots.
+  prime
+      Prime one Dot or all discovered Dots.
+  broadcast
+      Send a user message to every discovered Dot.
+  board
+      Show or assign one local chat as the shared Dot message board.
+
+Options
+  --root ABS_PATH
+      Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after
+      the leaf command. This is not a global CQ option.
+      Must be a clean absolute path when supplied.
+      Must not contain the home directory or overlap native app, credential or application-support
+      paths.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable. Long/short duplicates are rejected.
+
+Examples
+  Show Dots commands and inherited options.
+  cq codex dots --help

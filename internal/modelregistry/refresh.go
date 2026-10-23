@@ -132,6 +132,7 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 
 	// Categorise results.
 	freshByProvider := make(map[Provider][]Entry)
+	codexClientVersion := r.Catalog.Snapshot().CodexClientVersion
 	freshCodexRaw := make(map[string]json.RawMessage)
 	freshAnthropicRaw := make(map[string]json.RawMessage)
 	allFailed := true
@@ -140,6 +141,9 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 		if fr.err != nil {
 			diag.SourceErrors[fr.provider] = fr.err
 			continue
+		}
+		if fr.provider == ProviderCodex {
+			codexClientVersion = fr.result.CodexClientVersion
 		}
 		allFailed = false
 		freshByProvider[fr.provider] = fr.result.Entries
@@ -241,10 +245,11 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 	}
 
 	snap := Snapshot{
-		Entries:          merged.Active,
-		CodexRawByID:     codexRaw,
-		AnthropicRawByID: anthropicRaw,
-		FetchedAt:        now,
+		Entries:            merged.Active,
+		CodexRawByID:       codexRaw,
+		AnthropicRawByID:   anthropicRaw,
+		FetchedAt:          now,
+		CodexClientVersion: codexClientVersion,
 	}
 
 	if err := ValidateSnapshot(snap); err != nil {

@@ -1,0 +1,29 @@
+cq codex dots list
+List discovered Dots.
+
+Usage
+  cq codex dots list [OPTIONS]
+
+Show each discovered Dot's stable handle, display name, account, and setup state.
+
+Use a stable handle or an exact, unambiguous display name with cq codex dots prime.
+
+Options
+  --root ABS_PATH
+      Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after
+      the leaf command. This is not a global CQ option.
+      Must be a clean absolute path when supplied.
+      Must not contain the home directory or overlap native app, credential or application-support
+      paths.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable. Long/short duplicates are rejected.
+
+Examples
+  List discovered Dots.
+  cq codex dots list

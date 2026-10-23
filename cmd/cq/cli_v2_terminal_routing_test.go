@@ -61,6 +61,10 @@ var terminalRoutingFixtures = []terminalRoutingFixture{
 	{terminalFixtureRegistration{"cq codex proxy pin show", "Empty · no configured pin", "stdout", "text/cq-codex-proxy-pin-show/03-empty-no-configured-pin.txt"}, 0, "", "", ""},
 	{terminalFixtureRegistration{"cq codex proxy pin show", "Failure", "stderr", "text/cq-codex-proxy-pin-show/04-failure.txt"}, 1, "routing_io_failed", "Routing operation failed: load config.", ""},
 	{terminalFixtureRegistration{"cq codex proxy pin show", "Timeout · observation unavailable", "stderr", "text/cq-codex-proxy-pin-show/05-timeout-observation-unavailable.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", "unavailable"},
+	{terminalFixtureRegistration{"cq codex proxy lease redistribute", "Success", "stdout", "text/cq-codex-proxy-lease-redistribute/02-success.txt"}, 0, "", "", ""},
+	{terminalFixtureRegistration{"cq codex proxy lease redistribute", "Empty · no reusable affinity", "stdout", "text/cq-codex-proxy-lease-redistribute/03-empty-no-reusable-affinity.txt"}, 0, "", "", ""},
+	{terminalFixtureRegistration{"cq codex proxy lease redistribute", "Failure", "stderr", "text/cq-codex-proxy-lease-redistribute/04-failure.txt"}, 4, "lease_journal_unavailable", "Lease journal is unavailable for redistribution.", ""},
+	{terminalFixtureRegistration{"cq codex proxy lease redistribute", "Timeout · no receipt", "stderr", "text/cq-codex-proxy-lease-redistribute/05-timeout-no-receipt.txt"}, 7, "routing_timeout", "Routing operation timed out; inspect current state before retrying a mutation.", "unconfirmed"},
 	{terminalFixtureRegistration{"cq codex proxy lease invalidate", "Success", "stdout", "text/cq-codex-proxy-lease-invalidate/02-success.txt"}, 0, "", "", ""},
 	{terminalFixtureRegistration{"cq codex proxy lease invalidate", "No-op · no reusable affinity", "stdout", "text/cq-codex-proxy-lease-invalidate/03-no-op-no-reusable-affinity.txt"}, 0, "", "", ""},
 	{terminalFixtureRegistration{"cq codex proxy lease invalidate", "Failure", "stderr", "text/cq-codex-proxy-lease-invalidate/04-failure.txt"}, 4, "lease_journal_unavailable", "Lease journal is unavailable for invalidation.", ""},
@@ -330,8 +334,8 @@ func TestTerminalRoutingFixtures(t *testing.T) {
 			})
 		}
 	}
-	if len(commands) != 29 || len(seen) != 137 {
-		t.Errorf("routing coverage: %d commands, %d fixtures; want 29 and 137", len(commands), len(seen))
+	if len(commands) != 30 || len(seen) != 141 {
+		t.Errorf("routing coverage: %d commands, %d fixtures; want 30 and 141", len(commands), len(seen))
 	}
 	for _, entry := range index.Fixtures {
 		if commands[entry.Command] && entry.Scenario != "Help" && !seen[entry.File] {
@@ -381,6 +385,12 @@ func routingFixtureOutcome(f terminalRoutingFixture) cli.Outcome {
 	last := parts[len(parts)-1]
 	scenario := f.Scenario
 	switch {
+	case f.Command == "cq codex proxy lease redistribute":
+		body := `{"scheduled_leases":1240,"deferred_leases":12,"journal_generation":42}`
+		if strings.HasPrefix(scenario, "Empty") {
+			body = `{"scheduled_leases":0,"deferred_leases":0,"journal_generation":43}`
+		}
+		return handleV2RoutingDiagnosticsWithDependencies(context.Background(), cli.Invocation{Path: "codex proxy lease redistribute", Options: map[string][]string{"timeout": {"10s"}}}, &cli.Session{}, diagnosticsLeaseResponse(body))
 	case strings.Contains(f.Command, " lease "):
 		count := 1240
 		if strings.Contains(scenario, "No-op") {

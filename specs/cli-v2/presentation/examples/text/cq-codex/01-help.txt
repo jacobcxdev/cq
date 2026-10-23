@@ -1,11 +1,12 @@
 cq codex
-Manage Codex accounts, quota resets and provider-specific proxy controls.
+Manage Codex accounts, Dots, quota resets and provider-specific proxy controls.
 
 Usage
   cq codex <COMMAND> [OPTIONS]
 
 Commands
   account   Authenticate, inspect, activate and remove Codex accounts.
+  dots      Manage multi-account Dots and their private installation state.
   proxy     Control routing, quota protection and transport evidence.
   reset     Inspect, schedule and use banked quota-reset credits.
 

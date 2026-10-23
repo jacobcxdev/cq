@@ -245,6 +245,12 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 					message = "invalid Codex Responses request"
 				}
 			}
+			if errors.Is(err, ErrSessionPolicyContinuity) || failure.Reason == CodexRequestFailureSessionPolicyContinuity {
+				status = http.StatusBadRequest
+				errorType = "invalid_request_error"
+				message = "Codex session continuity conflicts with access policy"
+				failure.Reason = CodexRequestFailureSessionPolicyContinuity
+			}
 			noteCodexObservation(request.Context(), codexObservationFields{Decision: "plan_failed", Reason: string(failure.Reason)})
 			emitCodexTrace(request.Context(), CodexTraceEvent{
 				Phase: "planning", Stage: string(failure.Stage), Outcome: "error", Reason: string(failure.Reason), StatusCode: status,

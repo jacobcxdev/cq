@@ -39,7 +39,7 @@ func TestCLIV2CompleteRegistry(t *testing.T) {
 			t.Errorf("unregistered leaf %s", command.Path)
 		}
 	}
-	if count != 89 || len(cliV2Handlers) != count {
+	if count != 99 || len(cliV2Handlers) != count {
 		t.Fatalf("leaves=%d", count)
 	}
 }
@@ -90,7 +90,7 @@ func TestCLIV2IntegratedHelpAndInvalidOptionsBeforeIO(t *testing.T) {
 	for _, c := range spec.Commands {
 		paths = append(paths, c.Path)
 	}
-	if len(paths) != 127 {
+	if len(paths) != 138 {
 		t.Fatalf("help count %d", len(paths))
 	}
 	for _, path := range paths {

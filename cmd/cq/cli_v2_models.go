@@ -406,7 +406,7 @@ func buildCanonicalLocalRegistryWithControl(ctx context.Context, cfg *proxy.Conf
 	if err != nil {
 		return nil, err
 	}
-	reg, err := buildLocalRegistryFromAuthority(cfg, localRegistryDependencies{FS: state.FS, HomeDir: home, CWD: state.CWD, Roots: state.Roots, HTTPClient: client, CodexClientVersion: defaultCodexClientVersion(), ClaudeToken: firstClaudeAccessToken, CredentialAuthority: newCanonicalCodexRegistryControlAdapter(control), Env: state.Env, Stderr: io.Discard, Close: control.Close})
+	reg, err := buildLocalRegistryFromAuthority(cfg, localRegistryDependencies{FS: state.FS, HomeDir: home, CWD: state.CWD, Roots: state.Roots, HTTPClient: client, CodexClientVersion: defaultCodexRoutingClientBuild(), ClaudeToken: firstClaudeAccessToken, CredentialAuthority: newCanonicalCodexRegistryControlAdapter(control), Env: state.Env, Stderr: io.Discard, Close: control.Close})
 	if err != nil {
 		_ = control.Close()
 	}

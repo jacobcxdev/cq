@@ -28,7 +28,7 @@ var terminalHelpByPath = map[string]helpPage{
 			{Label: "auth", Description: "Refresh stored provider authentication credentials.", Details: []string{}},
 			{Label: "check", Description: "Report quota usage for selected providers.", Details: []string{}},
 			{Label: "claude", Description: "Manage Claude accounts and proxy routing pins.", Details: []string{}},
-			{Label: "codex", Description: "Manage Codex accounts, quota resets and provider-specific proxy controls.", Details: []string{}},
+			{Label: "codex", Description: "Manage Codex accounts, Dots, quota resets and provider-specific proxy controls.", Details: []string{}},
 			{Label: "completion", Description: "Print a shell completion script.", Details: []string{}},
 			{Label: "gemini", Description: "Inspect the externally managed Gemini account.", Details: []string{}},
 			{Label: "help", Description: "Show help for a command path.", Details: []string{}},
@@ -274,11 +274,12 @@ var terminalHelpByPath = map[string]helpPage{
 		},
 	},
 	"codex": {
-		Summary:     "Manage Codex accounts, quota resets and provider-specific proxy controls.",
+		Summary:     "Manage Codex accounts, Dots, quota resets and provider-specific proxy controls.",
 		Usage:       "cq codex <COMMAND> [OPTIONS]",
 		Description: []string{"Manage Codex accounts, quota resets and provider-specific proxy controls.", "Choose a subcommand below. A bare group prints this help without reading configuration or changing state."},
 		Commands: []helpEntry{
 			{Label: "account", Description: "Authenticate, inspect, activate and remove Codex accounts.", Details: []string{}},
+			{Label: "dots", Description: "Manage multi-account Dots and their private installation state.", Details: []string{}},
 			{Label: "proxy", Description: "Control Codex routing, quota protection and transport evidence.", Details: []string{}},
 			{Label: "reset", Description: "Inspect, schedule and use banked Codex quota-reset credits.", Details: []string{}},
 		},
@@ -371,6 +372,173 @@ var terminalHelpByPath = map[string]helpPage{
 			{Label: "cq codex account remove user@example.com --yes --json", Description: "Remove explicitly confirmed local credentials and emit JSON.", Details: []string{}},
 		},
 	},
+	"codex dots": {
+		Summary:     "Manage multi-account Dots and their private installation state.",
+		Usage:       "cq codex dots <COMMAND> [OPTIONS]",
+		Description: []string{"Manage multi-account Dots for the configured native app or an isolated research profile.", "Choose a subcommand below. A bare group prints this help without reading configuration or changing state.", "--root is inherited by every Dots command and can appear before or after the leaf command."},
+		Commands: []helpEntry{
+			{Label: "board", Description: "Show or assign one local chat as the shared Dot message board.", Details: []string{}},
+			{Label: "broadcast", Description: "Send a user message to every discovered Dot.", Details: []string{}},
+			{Label: "install", Description: "Install multi-account Dots for the normal native app.", Details: []string{}},
+			{Label: "list", Description: "List discovered Dots.", Details: []string{}},
+			{Label: "prime", Description: "Prime one Dot or all discovered Dots.", Details: []string{}},
+			{Label: "start", Description: "Start Dots in the configured native app.", Details: []string{}},
+			{Label: "status", Description: "Show Dots status.", Details: []string{}},
+			{Label: "stop", Description: "Stop the Dots adapter after quitting the app.", Details: []string{}},
+			{Label: "sync", Description: "Refresh Dots account discovery.", Details: []string{}},
+		},
+		Related:   []helpEntry{},
+		Arguments: []helpEntry{},
+		Options: []helpEntry{
+			{Label: "--root ABS_PATH", Description: "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.", Details: []string{"When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.", "Must be a clean absolute path when supplied.", "Must not contain the home directory or overlap native app, credential or application-support paths."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq codex dots --help", Description: "Show Dots commands and inherited options.", Details: []string{}},
+		},
+	},
+	"codex dots board": {
+		Summary:     "Show or assign one local chat as the shared Dot message board.",
+		Usage:       "cq codex dots board [THREAD] [OPTIONS]",
+		Description: []string{"Show or assign one local chat as the shared Dot message board.", "With no argument, show the shared board binding. Supply THREAD to bind an existing local chat.", "Binding a chat announces the board to discovered Dots and reports notice delivery outcomes.", "Use --clear to remove the binding."},
+		Commands:    []helpEntry{},
+		Related:     []helpEntry{},
+		Arguments: []helpEntry{
+			{Label: "THREAD", Description: "Existing local thread ID or codex://threads/ID link. Omit to show the binding.", Details: []string{"Exact lower-case UUID or codex://threads/UUID link.", "Cannot combine with --clear=true; --clear=false permits THREAD."}},
+		},
+		Options: []helpEntry{
+			{Label: "--root ABS_PATH", Description: "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.", Details: []string{"When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.", "Must be a clean absolute path when supplied.", "Must not contain the home directory or overlap native app, credential or application-support paths."}},
+			{Label: "--clear", Description: "Remove the shared message board binding.", Details: []string{"Cannot combine --clear=true with THREAD; --clear=false permits THREAD."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq codex dots board", Description: "Show the shared board binding.", Details: []string{}},
+			{Label: "cq codex dots board codex://threads/01234567-89ab-cdef-0123-456789abcdef", Description: "Bind one existing local chat as the shared board.", Details: []string{}},
+			{Label: "cq codex dots board --clear", Description: "Remove the shared board binding.", Details: []string{}},
+		},
+	},
+	"codex dots broadcast": {
+		Summary:     "Send a user message to every discovered Dot.",
+		Usage:       "cq codex dots broadcast MESSAGE [OPTIONS]",
+		Description: []string{"Send a user message to every discovered Dot.", "Send one message to every discovered Dot and report each delivery outcome.", "Acceptance confirms delivery to the adapter. Inspect unknown outcomes before retrying."},
+		Commands:    []helpEntry{},
+		Related:     []helpEntry{},
+		Arguments: []helpEntry{
+			{Label: "MESSAGE", Description: "Message to send once to every discovered Dot (1 to 3000 characters).", Details: []string{"Required.", "Valid UTF-8 containing 1 to 3000 Unicode characters; must not be whitespace-only.", "Quote a multi-word message as one argument; use -- before a message beginning with a dash."}},
+		},
+		Options: []helpEntry{
+			{Label: "--root ABS_PATH", Description: "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.", Details: []string{"When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.", "Must be a clean absolute path when supplied.", "Must not contain the home directory or overlap native app, credential or application-support paths."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq codex dots broadcast 'Please summarise your current work.'", Description: "Send one message to every discovered Dot.", Details: []string{}},
+		},
+	},
+	"codex dots install": {
+		Summary:     "Install multi-account Dots for the normal native app.",
+		Usage:       "cq codex dots install [OPTIONS]",
+		Description: []string{"Install multi-account Dots for the normal native app.", "Create the private installation, discover account profiles, and start the Dots adapter.", "The result reports whether setup is ready or needs onboarding or a normal app restart."},
+		Commands:    []helpEntry{},
+		Related:     []helpEntry{},
+		Arguments:   []helpEntry{},
+		Options: []helpEntry{
+			{Label: "--root ABS_PATH", Description: "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.", Details: []string{"When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.", "Must be a clean absolute path when supplied.", "Must not contain the home directory or overlap native app, credential or application-support paths."}},
+			{Label: "--mode MODE", Description: "Use the normal native profile or an isolated research profile. Default: native.", Details: []string{"Choices: native, isolated.", "Exact enum native or isolated."}},
+			{Label: "--app ABS_PATH", Description: "Native app bundle. Default: /Applications/ChatGPT.app.", Details: []string{"Clean absolute path."}},
+			{Label: "--system-auth ABS_PATH", Description: "Read-only native Codex authentication path. Default: ~/.codex/auth.json.", Details: []string{"Clean absolute path when supplied."}},
+			{Label: "--cq-accounts ABS_PATH", Description: "Read-only CQ Codex accounts directory. Default: ~/.codex/accounts.", Details: []string{"Clean absolute path when supplied."}},
+			{Label: "--account-source ABS_PATH", Description: "Optional read-only CodexBar account directory. Omission adds no source.", Details: []string{"Clean absolute path when supplied."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq codex dots install", Description: "Install Dots using native mode and default paths.", Details: []string{}},
+			{Label: "cq codex dots install --root /tmp/cq-dots --mode isolated", Description: "Install an isolated research profile in a separate root.", Details: []string{}},
+		},
+	},
+	"codex dots list": {
+		Summary:     "List discovered Dots.",
+		Usage:       "cq codex dots list [OPTIONS]",
+		Description: []string{"List discovered Dots.", "Show each discovered Dot's stable handle, display name, account, and setup state.", "Use a stable handle or an exact, unambiguous display name with cq codex dots prime."},
+		Commands:    []helpEntry{},
+		Related:     []helpEntry{},
+		Arguments:   []helpEntry{},
+		Options: []helpEntry{
+			{Label: "--root ABS_PATH", Description: "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.", Details: []string{"When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.", "Must be a clean absolute path when supplied.", "Must not contain the home directory or overlap native app, credential or application-support paths."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq codex dots list", Description: "List discovered Dots.", Details: []string{}},
+		},
+	},
+	"codex dots prime": {
+		Summary:     "Prime one Dot or all discovered Dots.",
+		Usage:       "cq codex dots prime [DOT] [OPTIONS]",
+		Description: []string{"Prime one Dot or all discovered Dots.", "Request setup for one Dot, or choose --all for every discovered Dot.", "Delivery acceptance confirms the request was accepted; the Dot may still be responding."},
+		Commands:    []helpEntry{},
+		Related:     []helpEntry{},
+		Arguments: []helpEntry{
+			{Label: "DOT", Description: "Stable Dot handle or exact unambiguous display name. Choose DOT or --all.", Details: []string{"Non-empty and not whitespace-only when supplied.", "Exactly one of DOT or --all must be selected."}},
+		},
+		Options: []helpEntry{
+			{Label: "--root ABS_PATH", Description: "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.", Details: []string{"When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.", "Must be a clean absolute path when supplied.", "Must not contain the home directory or overlap native app, credential or application-support paths."}},
+			{Label: "--all", Description: "Prime all discovered Dots instead of selecting DOT.", Details: []string{"Cannot combine --all=true with DOT; --all=false permits DOT."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq codex dots prime dot-handle", Description: "Prime one Dot by stable handle.", Details: []string{}},
+			{Label: "cq codex dots prime --all", Description: "Prime every discovered Dot.", Details: []string{}},
+		},
+	},
+	"codex dots start": {
+		Summary:     "Start Dots in the configured native app.",
+		Usage:       "cq codex dots start [OPTIONS]",
+		Description: []string{"Start Dots in the configured native app.", "Start the configured Dots adapter and check the native catalogue and workspace.", "If the normal app must restart or a Dot needs onboarding, the result explains what remains."},
+		Commands:    []helpEntry{},
+		Related:     []helpEntry{},
+		Arguments:   []helpEntry{},
+		Options: []helpEntry{
+			{Label: "--root ABS_PATH", Description: "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.", Details: []string{"When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.", "Must be a clean absolute path when supplied.", "Must not contain the home directory or overlap native app, credential or application-support paths."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq codex dots start", Description: "Start Dots in the configured native app.", Details: []string{}},
+		},
+	},
+	"codex dots status": {
+		Summary:     "Show Dots status.",
+		Usage:       "cq codex dots status [OPTIONS]",
+		Description: []string{"Show Dots status.", "Read the native catalogue, workspace, and adapter component status.", "Readiness describes the observed app state; it does not confirm a Dot has completed a message."},
+		Commands:    []helpEntry{},
+		Related:     []helpEntry{},
+		Arguments:   []helpEntry{},
+		Options: []helpEntry{
+			{Label: "--root ABS_PATH", Description: "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.", Details: []string{"When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.", "Must be a clean absolute path when supplied.", "Must not contain the home directory or overlap native app, credential or application-support paths."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq codex dots status", Description: "Show Dots status.", Details: []string{}},
+		},
+	},
+	"codex dots stop": {
+		Summary:     "Stop the Dots adapter after quitting the app.",
+		Usage:       "cq codex dots stop [OPTIONS]",
+		Description: []string{"Stop the Dots adapter after quitting the app.", "Quit the desktop app before stopping its Dots adapter processes.", "The result confirms when the adapter has stopped."},
+		Commands:    []helpEntry{},
+		Related:     []helpEntry{},
+		Arguments:   []helpEntry{},
+		Options: []helpEntry{
+			{Label: "--root ABS_PATH", Description: "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.", Details: []string{"When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.", "Must be a clean absolute path when supplied.", "Must not contain the home directory or overlap native app, credential or application-support paths."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq codex dots stop", Description: "Stop the Dots adapter after quitting the app.", Details: []string{}},
+		},
+	},
+	"codex dots sync": {
+		Summary:     "Refresh Dots account discovery.",
+		Usage:       "cq codex dots sync [OPTIONS]",
+		Description: []string{"Refresh Dots account discovery.", "Refresh account discovery and start or restart adapter components when needed.", "A pending normal app restart or incomplete discovery is reported in the result."},
+		Commands:    []helpEntry{},
+		Related:     []helpEntry{},
+		Arguments:   []helpEntry{},
+		Options: []helpEntry{
+			{Label: "--root ABS_PATH", Description: "Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after the leaf command. This is not a global CQ option.", Details: []string{"When omitted: Resolve ~/.local/share/cq/dots from the current user home after syntax validation.", "Must be a clean absolute path when supplied.", "Must not contain the home directory or overlap native app, credential or application-support paths."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq codex dots sync", Description: "Refresh Dots account discovery.", Details: []string{}},
+		},
+	},
 	"codex proxy": {
 		Summary:     "Control Codex routing, quota protection and transport evidence.",
 		Usage:       "cq codex proxy <COMMAND> [OPTIONS]",
@@ -381,7 +549,7 @@ var terminalHelpByPath = map[string]helpPage{
 			{Label: "fallback", Description: "Inspect, set or clear the terminal fallback account for Codex routing.", Details: []string{}},
 			{Label: "fixture", Description: "Create sanitised test fixtures from saved Codex request bodies.", Details: []string{}},
 			{Label: "hook", Description: "Produce receipt annotations for native client lifecycle hooks.", Details: []string{}},
-			{Label: "lease", Description: "Invalidate reusable Codex routing affinities.", Details: []string{}},
+			{Label: "lease", Description: "Manage reusable Codex routing affinities.", Details: []string{}},
 			{Label: "pin", Description: "Inspect, set or clear the Codex proxy account override.", Details: []string{}},
 			{Label: "policy", Description: "Export or replace the complete Codex routing-policy document.", Details: []string{}},
 			{Label: "pool", Description: "Define account pools and their relative capacity-preservation values.", Details: []string{}},
@@ -704,11 +872,12 @@ var terminalHelpByPath = map[string]helpPage{
 		},
 	},
 	"codex proxy lease": {
-		Summary:     "Invalidate reusable Codex routing affinities.",
+		Summary:     "Manage reusable Codex routing affinities.",
 		Usage:       "cq codex proxy lease <COMMAND> [OPTIONS]",
 		Description: []string{"Invalidate reusable Codex routing affinities.", "Choose a subcommand below. A bare group prints this help without reading configuration or changing state."},
 		Commands: []helpEntry{
 			{Label: "invalidate", Description: "Invalidate reusable Codex task-account affinity.", Details: []string{}},
+			{Label: "redistribute", Description: "Schedule Codex chats to rebalance across available accounts.", Details: []string{}},
 		},
 		Related:   []helpEntry{},
 		Arguments: []helpEntry{},
@@ -730,6 +899,22 @@ var terminalHelpByPath = map[string]helpPage{
 		},
 		Examples: []helpEntry{
 			{Label: "cq codex proxy lease invalidate", Description: "Expire reusable affinity without breaking required continuity.", Details: []string{}},
+		},
+	},
+	"codex proxy lease redistribute": {
+		Summary:     "Schedule Codex chats to rebalance across available accounts.",
+		Usage:       "cq codex proxy lease redistribute [OPTIONS]",
+		Description: []string{"Schedule existing Codex task-account leases for redistribution at a safe request boundary. Active work continues; required account continuity remains intact. The receipt counts scheduled leases and leases deferred until their current work finishes."},
+		Commands:    []helpEntry{},
+		Related:     []helpEntry{},
+		Arguments:   []helpEntry{},
+		Options: []helpEntry{
+			{Label: "--port PORT", Description: "Connect to the authenticated loopback proxy on this port (1–65535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset.", Details: []string{"When omitted: configured port, otherwise 19280", "Integer 1–65535.", "No configuration file is created to resolve omission."}},
+			{Label: "--timeout TIMEOUT", Description: "Maximum elapsed time for this command, including local preparation and control requests; default 10s.", Details: []string{"Default: 10s.", "Positive Go duration.", "Expiry returns exit 7; a timed-out mutation may already have committed, so inspect state before retrying."}},
+		},
+		Examples: []helpEntry{
+			{Label: "cq codex proxy lease redistribute", Description: "Schedule existing chats to rebalance without interrupting active work.", Details: []string{}},
+			{Label: "cq codex proxy lease redistribute --port 19281 --timeout 20s", Description: "Schedule redistribution through a specific running proxy with a longer deadline.", Details: []string{}},
 		},
 	},
 	"codex proxy pin": {
@@ -2021,7 +2206,7 @@ var terminalHelpByPath = map[string]helpPage{
 		Arguments:   []helpEntry{},
 		Options: []helpEntry{
 			{Label: "--component COMPONENT", Description: "Service component: all, proxy, or token-refresh. Default: all.", Details: []string{"Choices: all, proxy, token-refresh.", "Exact enum; selection never widens after validation."}},
-			{Label: "--strict", Description: "Return non-zero if selected components are not installed, not running, or unhealthy.", Details: []string{}},
+			{Label: "--strict", Description: "Return non-zero if a selected component is missing or unhealthy. A healthy periodic token-refresh service may be idle between runs.", Details: []string{}},
 			{Label: "--timeout DURATION", Description: "Maximum elapsed time, including locks, requests and local verification. Default: 10s.", Details: []string{"Positive Go duration, at most 10m; no bare number. Deadline expiry never implies rollback succeeded."}},
 		},
 		Examples: []helpEntry{

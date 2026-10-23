@@ -169,7 +169,11 @@ func initialiseCredentialOwner(ctx context.Context, coordinator *CredentialCoord
 	if err := capability.AssertOwner(); err != nil {
 		return err
 	}
-	return coordinator.RecoverCredentialState(ctx)
+	if err := coordinator.RecoverCredentialState(ctx); err != nil {
+		return err
+	}
+	coordinator.enableCodexBarRenewal()
+	return nil
 }
 
 type RefreshRPCArgs struct {
@@ -1025,11 +1029,15 @@ func OpenDefaultCanonicalCredentialControl(ctx context.Context, fs fsutil.Durabl
 	if err != nil {
 		return nil, err
 	}
-	return OpenCredentialControlPrepared(ctx, path, coordinator, func(ctx context.Context, _ *CredentialCoordinator, capability CredentialOwnerCapability) error {
+	return OpenCredentialControlPrepared(ctx, path, coordinator, func(ctx context.Context, coordinator *CredentialCoordinator, capability CredentialOwnerCapability) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		return capability.AssertOwner()
+		if err := capability.AssertOwner(); err != nil {
+			return err
+		}
+		coordinator.enableCodexBarRenewal()
+		return nil
 	})
 }
 

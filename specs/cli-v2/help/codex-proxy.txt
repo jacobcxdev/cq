@@ -19,7 +19,7 @@ Commands:
   hook
       Produce receipt annotations for native client lifecycle hooks.
   lease
-      Invalidate reusable Codex routing affinities.
+      Manage reusable Codex routing affinities.
   pin
       Inspect, set or clear the Codex proxy account override.
   policy

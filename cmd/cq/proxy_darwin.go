@@ -12,11 +12,13 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
@@ -84,6 +86,10 @@ func darwinProxyInspectionTargetForRoot(instanceRoot string) ProxyInspectionTarg
 }
 
 func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string) darwinProxyInspectionFacts {
+	return collectDarwinProxyInspectionFactsForExecutable(ctx, instanceRoot, "")
+}
+
+func collectDarwinProxyInspectionFactsForExecutable(ctx context.Context, instanceRoot, expectedExecutable string) darwinProxyInspectionFacts {
 	facts := darwinProxyInspectionFacts{
 		inspector: proxy.UnavailableFact[proxy.InspectorIdentity]("inspector_unavailable"),
 		desired:   proxy.UnavailableFact[proxy.DesiredProxyState]("config_unavailable"),
@@ -120,7 +126,7 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 	}
 	var binding installedHTTPValidationServiceBinding
 	for _, label := range []string{proxyAgentLabel, homebrewProxyAgentLabel} {
-		candidate, candidateErr := resolveInstalledHTTPValidationService(label)
+		candidate, candidateErr := resolveInstalledHTTPValidationServiceExecutable(label, expectedExecutable)
 		if candidateErr == nil {
 			if binding.label != "" {
 				facts.service = proxy.InvalidFact[proxy.ServiceState]("service_ambiguous")
@@ -134,7 +140,7 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 		return facts
 	}
 	manager := "launchagent"
-	if binding.label == homebrewProxyAgentLabel {
+	if binding.label == homebrewProxyAgentLabel || binding.runtimeExecutable != "" {
 		manager = "homebrew"
 	}
 	listenerPort := darwinProxyInspectionListenerPort(port, binding.port)
@@ -158,15 +164,27 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 		facts.service = proxy.InvalidFact[proxy.ServiceState]("service_invalid")
 		return facts
 	}
+	liveExecutable, err := darwinLiveProcessExecutable(ctx, pid)
+	if err != nil {
+		facts.service = proxy.InvalidFact[proxy.ServiceState]("process_executable_unavailable")
+		return facts
+	}
+	if binding.runtimeExecutable != "" {
+		digest, digestErr := installstate.DigestFile(liveExecutable)
+		if digestErr != nil || liveExecutable != binding.runtimeExecutable || digest != binding.executableSHA256 {
+			facts.service = proxy.InvalidFact[proxy.ServiceState]("process_executable_mismatch")
+			return facts
+		}
+	}
 	lsofOutput, err := exec.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-a", fmt.Sprintf("-iTCP:%d", listenerPort), "-sTCP:LISTEN", "-Fp").Output()
 	if err != nil || requireInstalledHTTPValidationListenerPID(lsofOutput, pid) != nil {
-		facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "running", PID: pid, Executable: executable})
+		facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "running", PID: pid, Executable: liveExecutable})
 		facts.listener = proxy.InvalidFact[proxy.ListenerState]("listener_mismatch")
 		return facts
 	}
-	facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "running", PID: pid, Executable: executable})
-	facts.listener = proxy.KnownFact(proxy.ListenerState{State: "listening", Listener: listenerAddress, PID: pid, Executable: executable})
-	facts.process = proxy.KnownFact(proxy.ProcessState{PID: pid, Executable: executable})
+	facts.service = proxy.KnownFact(proxy.ServiceState{Manager: manager, State: "running", PID: pid, Executable: liveExecutable})
+	facts.listener = proxy.KnownFact(proxy.ListenerState{State: "listening", Listener: listenerAddress, PID: pid, Executable: liveExecutable})
+	facts.process = proxy.KnownFact(proxy.ProcessState{PID: pid, Executable: liveExecutable})
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+listenerAddress+"/health", http.NoBody)
 	if err != nil {
 		return facts
@@ -180,12 +198,27 @@ func collectDarwinProxyInspectionFacts(ctx context.Context, instanceRoot string)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusOK {
-		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Reachable: true, PID: pid, Executable: executable, Health: "healthy"})
+		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Reachable: true, PID: pid, Executable: liveExecutable, Health: "healthy"})
 	} else {
-		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Reachable: true, PID: pid, Executable: executable, Health: "unhealthy"})
+		facts.runtime = proxy.KnownFact(proxy.RuntimeIdentity{Reachable: true, PID: pid, Executable: liveExecutable, Health: "unhealthy"})
 	}
 	facts.dataPlane = proxy.KnownFact(proxy.DataPlaneProof{Code: "unproven"})
 	return facts
+}
+
+func darwinLiveProcessExecutable(ctx context.Context, pid int) (string, error) {
+	if pid <= 1 {
+		return "", fmt.Errorf("invalid process PID")
+	}
+	output, err := exec.CommandContext(ctx, "/bin/ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
+	if err != nil || len(output) > 4096 {
+		return "", fmt.Errorf("process executable unavailable")
+	}
+	path := strings.TrimSpace(string(output))
+	if !filepath.IsAbs(path) || strings.ContainsAny(path, "\r\n") {
+		return "", fmt.Errorf("invalid process executable")
+	}
+	return filepath.Clean(path), nil
 }
 
 func darwinProxyInspectionListenerPort(configured, service int) int {
@@ -212,6 +245,7 @@ var runProxyLaunchctl = func(args ...string) error {
 }
 
 var currentExecutable = os.Executable
+var installMissingProxyService = runService
 
 func installProxyAgent() error {
 	if err := rejectHomebrewProxyServiceMutation("start"); err != nil {
@@ -254,11 +288,26 @@ func initialiseDarwinRuntimeLifecycle() error {
 
 func restartProxyAgent() error {
 	uid := os.Getuid()
-	if executable, executableErr := currentExecutable(); executableErr == nil && isHomebrewFormulaExecutable(executable) {
-		if err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, homebrewProxyAgentLabel)); err != nil {
-			return fmt.Errorf("launchctl kickstart Homebrew service: %w", err)
+	if executable, executableErr := currentExecutable(); executableErr == nil {
+		if isHomebrewFormulaExecutable(executable) {
+			if err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, homebrewProxyAgentLabel)); err != nil {
+				return fmt.Errorf("launchctl kickstart Homebrew service: %w", err)
+			}
+			return nil
 		}
-		return nil
+		if stable, cask := homebrewCaskExecutable(executable); cask {
+			err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, proxyAgentLabel))
+			if err == nil {
+				return nil
+			}
+			if exitErr, ok := err.(interface{ ExitCode() int }); !ok || exitErr.ExitCode() != 113 {
+				return fmt.Errorf("launchctl kickstart: %w", err)
+			}
+			if err := installMissingProxyService([]string{"install", "--owner=homebrew", "--service-executable=" + stable}); err != nil {
+				return fmt.Errorf("restore missing Homebrew CQ service: %w", err)
+			}
+			return nil
+		}
 	}
 	err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, proxyAgentLabel))
 	if err == nil {
@@ -268,6 +317,9 @@ func restartProxyAgent() error {
 		return fmt.Errorf("launchctl kickstart: %w", err)
 	}
 	if err := runProxyLaunchctl("kickstart", "-k", fmt.Sprintf("gui/%d/%s", uid, homebrewProxyAgentLabel)); err != nil {
+		if exitErr, ok := err.(interface{ ExitCode() int }); ok && exitErr.ExitCode() == 113 {
+			return fmt.Errorf("CQ service is not registered; run cq service install: %w", err)
+		}
 		return fmt.Errorf("launchctl kickstart Homebrew service: %w", err)
 	}
 	return nil
@@ -325,4 +377,20 @@ func isHomebrewFormulaExecutable(executable string) bool {
 		}
 	}
 	return false
+}
+
+func homebrewCaskExecutable(executable string) (string, bool) {
+	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
+		executable = resolved
+	}
+	if !filepath.IsAbs(executable) || filepath.Base(executable) != "cq" {
+		return "", false
+	}
+	version := filepath.Dir(executable)
+	packageDir := filepath.Dir(version)
+	caskroom := filepath.Dir(packageDir)
+	if filepath.Base(packageDir) != "cq" || filepath.Base(caskroom) != "Caskroom" {
+		return "", false
+	}
+	return filepath.Join(filepath.Dir(caskroom), "bin", "cq"), true
 }

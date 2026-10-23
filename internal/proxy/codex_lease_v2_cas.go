@@ -435,7 +435,10 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 		} else if input.PredecessorTurnHash != "" {
 			predecessorChanged = true
 		}
-		beginRequestAffinityReset := identity == beginRequest && codexLeaseAffinityInvalidationBeginRequest(old, input, storedLane, next.AffinityInvalidationGeneration)
+		beginRequestAffinityReset := identity == beginRequest && (codexLeaseAffinityInvalidationBeginRequest(old, input, storedLane, next.AffinityInvalidationGeneration) || codexLeaseRedistributionBeginRequest(old, input, storedLane))
+		if identity == beginRequest && input.RedistributionGeneration != 0 && !codexLeaseRedistributionBeginRequest(old, input, storedLane) {
+			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: invalid redistribution request provenance", ErrCodexLeaseInvalidMutation)
+		}
 		result, appended, firstAdmission, err := store.buildCodexLeaseRecordAfterImage(old, exists, input, identity == beginRequest, identity == migrateTurnStateLatch, beginRequestAffinityReset, fences[identity], now)
 		if err != nil {
 			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, err
@@ -566,6 +569,9 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 		if identity != codexLaneTupleIdentity(desiredLane, true) {
 			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: first turn admission is not lane current", ErrCodexLeaseInvalidMutation)
 		}
+		if admitted.RedistributionGeneration > desiredLane.RedistributionCompletedGeneration {
+			desiredLane.RedistributionCompletedGeneration = admitted.RedistributionGeneration
+		}
 		desiredLane.LastAdmittedAccountHash = admitted.AccountHash
 		desiredLane.LastAdmittedTurnHash = admitted.TurnHash
 		desiredLane.LastAdmittedModeEpoch = admitted.ModeEpoch
@@ -584,6 +590,9 @@ func (store *CodexLeaseStore) applyCodexLaneMutationLocked(expected CodexLeaseGe
 		}
 		if identity != codexLaneTupleIdentity(desiredLane, true) {
 			return codexLeaseJournalEnvelopeV2{}, CodexLeaseGenerationFence{}, fmt.Errorf("%w: cache admission is not lane current", ErrCodexLeaseInvalidMutation)
+		}
+		if admitted.RedistributionGeneration > desiredLane.RedistributionCompletedGeneration {
+			desiredLane.RedistributionCompletedGeneration = admitted.RedistributionGeneration
 		}
 		desiredLane.LastCacheAdmittedAt = now
 		desiredLane.LastCacheEffectiveModel = admitted.EffectiveModel
@@ -1792,6 +1801,7 @@ func sameCodexLeaseSemantics(left, right CodexJournalRecordV2) bool {
 		left.RequestedModelHash == right.RequestedModelHash &&
 		left.DispatchPermitDigest == right.DispatchPermitDigest &&
 		left.QuotaExhaustionProbe == right.QuotaExhaustionProbe &&
+		left.RedistributionGeneration == right.RedistributionGeneration &&
 		left.EffectiveModel == right.EffectiveModel &&
 		slices.Equal(left.RequiredBuckets, right.RequiredBuckets) &&
 		left.HasEncryptedState == right.HasEncryptedState &&
@@ -1847,11 +1857,11 @@ func cloneCodexCurrentRequest(request CodexCurrentRequest) CodexCurrentRequest {
 }
 
 func codexCurrentRequestIsZero(request CodexCurrentRequest) bool {
-	return request.Generation == 0 && request.RequestKind == "" && request.CompactionPhase == "" && request.RequestedModelHash == "" && request.DispatchPermitDigest == "" && !request.QuotaExhaustionProbe && request.EffectiveModel == "" && len(request.RequiredBuckets) == 0 && codexAttemptEnvelopeIsZero(request.AttemptEnvelope) && request.CurrentAttemptGeneration == 0 && request.RoutingRefs == 0 && request.AttemptRefs == 0 && request.ResponseObserverRefs == 0 && len(request.Attempts) == 0
+	return request.RedistributionGeneration == 0 && request.Generation == 0 && request.RequestKind == "" && request.CompactionPhase == "" && request.RequestedModelHash == "" && request.DispatchPermitDigest == "" && !request.QuotaExhaustionProbe && request.EffectiveModel == "" && len(request.RequiredBuckets) == 0 && codexAttemptEnvelopeIsZero(request.AttemptEnvelope) && request.CurrentAttemptGeneration == 0 && request.RoutingRefs == 0 && request.AttemptRefs == 0 && request.ResponseObserverRefs == 0 && len(request.Attempts) == 0
 }
 
 func sameCodexCurrentRequestPlan(left, right CodexCurrentRequest) bool {
-	return left.Generation == right.Generation && left.RequestKind == right.RequestKind && left.CompactionPhase == right.CompactionPhase && sameCodexLeaseOptionalDigest(left.RequestedModelHash, right.RequestedModelHash) && sameCodexLeaseOptionalDigest(left.DispatchPermitDigest, right.DispatchPermitDigest) && left.QuotaExhaustionProbe == right.QuotaExhaustionProbe && left.EffectiveModel == right.EffectiveModel && slices.Equal(left.RequiredBuckets, right.RequiredBuckets) && sameCodexAttemptEnvelope(left.AttemptEnvelope, right.AttemptEnvelope)
+	return left.RedistributionGeneration == right.RedistributionGeneration && left.Generation == right.Generation && left.RequestKind == right.RequestKind && left.CompactionPhase == right.CompactionPhase && sameCodexLeaseOptionalDigest(left.RequestedModelHash, right.RequestedModelHash) && sameCodexLeaseOptionalDigest(left.DispatchPermitDigest, right.DispatchPermitDigest) && left.QuotaExhaustionProbe == right.QuotaExhaustionProbe && left.EffectiveModel == right.EffectiveModel && slices.Equal(left.RequiredBuckets, right.RequiredBuckets) && sameCodexAttemptEnvelope(left.AttemptEnvelope, right.AttemptEnvelope)
 }
 
 func sameCodexAttemptEnvelope(left, right CodexAttemptEnvelope) bool {

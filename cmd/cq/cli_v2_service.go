@@ -40,7 +40,7 @@ func handleV2ServiceWithPreparation(parent context.Context, inv cli.Invocation, 
 	selection := serviceSelection(inv.Options["component"][0])
 	result := serviceOperationResult{Rollback: "not_needed"}
 	finish := func(err error) cli.Outcome {
-		data := v2ServiceData{Component: selection, Action: action, Components: []v2ServiceComponent{}, Rollback: result.Rollback}
+		data := v2ServiceData{Component: selection, Action: action, Components: []v2ServiceComponent{}, Rollback: result.Rollback, ActiveRuntimeVersion: result.Status.ActiveRuntimeVersion, PendingRuntimeVersion: result.Status.PendingRuntimeVersion, UpgradePhase: result.Status.UpgradePhase}
 		for _, id := range selection.components() {
 			data.Components = append(data.Components, projectV2ServiceComponent(id, result.Status.component(id), time.Now()))
 		}
@@ -74,6 +74,23 @@ func handleV2ServiceWithPreparation(parent context.Context, inv cli.Invocation, 
 		for _, c := range data.Components {
 			fmt.Fprintf(&human, "%s: %s, enabled=%s, healthy=%s\n", c.ID, c.State, v2ServiceBool(c.Enabled), v2ServiceBool(c.Healthy))
 		}
+		if data.ActiveRuntimeVersion != "" {
+			fmt.Fprintf(&human, "Active runtime: %s\n", data.ActiveRuntimeVersion)
+			if data.PendingRuntimeVersion != "" {
+				fmt.Fprintf(&human, "Pending runtime: %s\n", data.PendingRuntimeVersion)
+			}
+			if data.UpgradePhase != "" {
+				fmt.Fprintf(&human, "Upgrade: %s\n", data.UpgradePhase)
+			}
+		}
+		for _, c := range data.Components {
+			if c.LiveExecutable != nil && (c.Executable == nil || *c.LiveExecutable != *c.Executable) {
+				fmt.Fprintf(&human, "%s live binary: %s\n", c.ID, *c.LiveExecutable)
+			}
+			if c.Listener != "" {
+				fmt.Fprintf(&human, "%s listener: %s\n", c.ID, c.Listener)
+			}
+		}
 		fmt.Fprintf(&human, "\nRollback: %s\n", data.Rollback)
 		out.Human = human.String()
 		out.Terminal = func(options cli.TerminalOptions) string {
@@ -102,30 +119,35 @@ func handleV2ServiceWithPreparation(parent context.Context, inv cli.Invocation, 
 }
 
 type v2ServiceData struct {
-	Component  serviceSelection     `json:"component"`
-	Action     serviceAction        `json:"action"`
-	Components []v2ServiceComponent `json:"components"`
-	Rollback   string               `json:"rollback"`
+	ActiveRuntimeVersion  string               `json:"active_runtime_version,omitempty"`
+	PendingRuntimeVersion string               `json:"pending_runtime_version,omitempty"`
+	UpgradePhase          string               `json:"upgrade_phase,omitempty"`
+	Component             serviceSelection     `json:"component"`
+	Action                serviceAction        `json:"action"`
+	Components            []v2ServiceComponent `json:"components"`
+	Rollback              string               `json:"rollback"`
 }
 
 type v2ServiceComponent struct {
-	ID           serviceSelection `json:"id"`
-	Manager      *string          `json:"manager"`
-	Owner        string           `json:"owner"`
-	Installed    bool             `json:"installed"`
-	Enabled      *bool            `json:"enabled"`
-	State        string           `json:"state"`
-	Healthy      *bool            `json:"healthy"`
-	PID          *int             `json:"pid"`
-	Executable   *string          `json:"executable"`
-	LastRunAt    *string          `json:"last_run_at"`
-	LastExitCode *int             `json:"last_exit_code"`
-	ErrorCode    *string          `json:"error_code"`
-	ConfigDir    *string          `json:"config_dir"`
-	StateDir     *string          `json:"state_dir"`
-	CacheDir     *string          `json:"cache_dir"`
-	RuntimeDir   *string          `json:"runtime_dir"`
-	LogDir       *string          `json:"log_dir"`
+	LiveExecutable *string          `json:"live_executable,omitempty"`
+	Listener       string           `json:"listener,omitempty"`
+	ID             serviceSelection `json:"id"`
+	Manager        *string          `json:"manager"`
+	Owner          string           `json:"owner"`
+	Installed      bool             `json:"installed"`
+	Enabled        *bool            `json:"enabled"`
+	State          string           `json:"state"`
+	Healthy        *bool            `json:"healthy"`
+	PID            *int             `json:"pid"`
+	Executable     *string          `json:"executable"`
+	LastRunAt      *string          `json:"last_run_at"`
+	LastExitCode   *int             `json:"last_exit_code"`
+	ErrorCode      *string          `json:"error_code"`
+	ConfigDir      *string          `json:"config_dir"`
+	StateDir       *string          `json:"state_dir"`
+	CacheDir       *string          `json:"cache_dir"`
+	RuntimeDir     *string          `json:"runtime_dir"`
+	LogDir         *string          `json:"log_dir"`
 }
 
 func projectV2ServiceComponent(id serviceSelection, c componentStatus, now time.Time) v2ServiceComponent {
@@ -174,6 +196,10 @@ func projectV2ServiceComponent(id serviceSelection, c componentStatus, now time.
 		out.PID = &c.PID
 	}
 	out.Executable = path(c.ConfiguredExecutable)
+	if c.Running {
+		out.LiveExecutable = path(c.LiveExecutable)
+		out.Listener = c.Listener
+	}
 	if obs.LastRunAt != nil {
 		value := obs.LastRunAt.UTC().Format(time.RFC3339Nano)
 		out.LastRunAt = &value

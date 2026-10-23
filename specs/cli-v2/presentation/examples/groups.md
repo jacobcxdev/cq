@@ -357,13 +357,14 @@ Exit 0 · stdout:
 
 ```text
 cq codex
-Manage Codex accounts, quota resets and provider-specific proxy controls.
+Manage Codex accounts, Dots, quota resets and provider-specific proxy controls.
 
 Usage
   cq codex <COMMAND> [OPTIONS]
 
 Commands
   account   Authenticate, inspect, activate and remove Codex accounts.
+  dots      Manage multi-account Dots and their private installation state.
   proxy     Control routing, quota protection and transport evidence.
   reset     Inspect, schedule and use banked quota-reset credits.
 
@@ -862,7 +863,7 @@ Exit 0 · stdout:
 
 ```text
 cq codex proxy lease
-Invalidate reusable Codex routing affinities.
+Manage reusable Codex routing affinities.
 
 Usage
   cq codex proxy lease <COMMAND> [OPTIONS]
@@ -870,7 +871,8 @@ Usage
 A lease is a reusable task-to-account routing affinity.
 
 Commands
-  invalidate   Invalidate reusable Codex task-account affinity.
+  invalidate     Invalidate reusable Codex task-account affinity.
+  redistribute   Schedule fresh account selection at the next safe boundary.
 
 Global options
   -h, --help     Show this help without reading state.

@@ -188,8 +188,8 @@ func (backend *normalTransportGateBackend) serveHTTP(writer http.ResponseWriter,
 		backend.fail(writer, http.StatusMethodNotAllowed, fmt.Errorf("provider method = %q", request.Method))
 		return
 	}
-	payload, err := io.ReadAll(io.LimitReader(request.Body, maxRequestBody+1))
-	if err != nil || len(payload) > maxRequestBody {
+	payload, err := io.ReadAll(io.LimitReader(request.Body, codexWebSocketMessageMaxBytes+1))
+	if err != nil || len(payload) > codexWebSocketMessageMaxBytes {
 		backend.fail(writer, http.StatusBadRequest, errors.New("provider request unreadable"))
 		return
 	}
@@ -1456,6 +1456,62 @@ func TestNormalProxyTransportHTTPSuccessorRoutesAfterAbandonedPredecessor(t *tes
 		t.Fatalf("successor provider receipts = %#v, want one completed request", receipts)
 	}
 	harness.backend.assertNoFailure(t)
+}
+
+func TestNormalProxyTransportWebSocketOversizeFallsBackToHTTP(t *testing.T) {
+	for _, size := range []int{17_558_096, 19_049_151} {
+		t.Run(fmt.Sprint(size), func(t *testing.T) {
+			harness := newNormalTransportGateHarness(t, normalTransportGateHTTPSuccess)
+			header := http.Header{"Authorization": {"Bearer " + harness.callerToken}, "Session_id": {"oversized-session"}}
+			url := "ws" + strings.TrimPrefix(harness.proxy.URL, "http") + legacyCodexResponsesPath
+			connection, _, err := websocket.DefaultDialer.Dial(url, header)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = connection.Close() })
+			frame := normalTransportGateWSFrame("oversized-turn", "")
+			frame = append(frame[:len(frame)-1], append(bytes.Repeat([]byte(" "), size-len(frame)), '}')...)
+			if err := connection.WriteMessage(websocket.TextMessage, frame); err != nil {
+				t.Fatal(err)
+			}
+			_ = connection.SetReadDeadline(time.Now().Add(10 * time.Second))
+			if _, _, err := connection.ReadMessage(); !websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
+				t.Fatalf("oversized request close = %v, want 1009", err)
+			}
+			if receipts := harness.backend.snapshot(); len(receipts) != 0 {
+				t.Fatalf("oversized request reached provider: %d receipts", len(receipts))
+			}
+			for retry := 0; retry < 2; retry++ {
+				reconnected, response, err := websocket.DefaultDialer.Dial(url, header)
+				if reconnected != nil {
+					_ = reconnected.Close()
+				}
+				if response != nil {
+					_ = response.Body.Close()
+				}
+				if err == nil || response == nil || response.StatusCode != http.StatusUpgradeRequired {
+					t.Fatalf("reconnect %d = %v, %v; want 426 HTTP fallback", retry, response, err)
+				}
+			}
+			// The client rebuilds response.create as a streaming HTTP request.
+			httpBody := bytes.Replace(frame, []byte(`"type":"response.create",`), []byte(`"stream":true,`), 1)
+			status, body := normalTransportGateHTTPCall(t, harness, httpBody, header)
+			if status != http.StatusOK || !bytes.Contains(body, []byte(`"type":"response.completed"`)) {
+				t.Fatalf("HTTP fallback = %d %q, want completed 200", status, body)
+			}
+			receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+			if len(receipts) != 1 || receipts[0].payload != string(httpBody) {
+				t.Fatalf("HTTP fallback did not preserve request: %d receipts", len(receipts))
+			}
+			header.Set("Session_id", "unrelated-session")
+			other, _, err := websocket.DefaultDialer.Dial(url, header)
+			if err != nil {
+				t.Fatalf("unrelated session upgrade: %v", err)
+			}
+			_ = other.Close()
+			harness.backend.assertNoFailure(t)
+		})
+	}
 }
 
 func TestNormalProxyTransportHTTPRejectedTurnCanRetry(t *testing.T) {

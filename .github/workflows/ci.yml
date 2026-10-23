@@ -14,7 +14,7 @@ permissions:
 
 # Planned feature candidate only; publication remains a separate release action.
 env:
-  CQ_CANDIDATE_VERSION: 0.34.0
+  CQ_CANDIDATE_VERSION: 0.39.0
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -171,6 +171,9 @@ jobs:
         with:
           name: ci-darwin-packages
           path: dist
+
+      - name: Update Homebrew
+        run: brew update
 
       - name: Format Homebrew Cask before validation
         run: .github/scripts/format-homebrew-cask.sh dist/homebrew/Casks/cq.rb

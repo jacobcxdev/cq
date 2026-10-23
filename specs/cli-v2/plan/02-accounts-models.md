@@ -89,6 +89,8 @@ go vet ./cmd/cq ./internal/app ./internal/provider/...
 
 ## T08 — Adapt login, activation and removal transactions
 
+**Released Dots reconciliation (23 October 2026):** T08 also owns the nine Dots adapters in the table below. Reuse the released Go controller and preserve private helper protocols. The [Dots resource contract](../resources/dots.md) defines typed receipts, partial delivery and pending restart/onboarding semantics. T02 owns group/help generation; T03 owns inherited `--root` parsing. Terminal task T04 owns Dots presentation. Validate help without state access, every supplied path and selector, Unicode message bounds, group-option inheritance, empty results, incomplete receipts, controller failure with retained data, cancellation and helper exit propagation. These adapters must not execute Dots installation or send messages during tests.
+
 **Dependencies:** T07.
 
 **Files:** Create `cmd/cq/cli_v2_account_mutations.go`, `cmd/cq/cli_v2_account_mutations_test.go`. Modify `internal/app/accounts.go`; `internal/provider/codex/accounts.go`, `internal/provider/codex/credential_coordinator.go`, `internal/provider/codex/credential_control.go`, `internal/provider/codex/system_activator.go` and removal/registry coordinator files reached by SaveLogin/Activate/RemoveManaged; `internal/provider/claude/accounts.go`. Keep transaction journals and ownership formats.
@@ -105,6 +107,15 @@ go vet ./cmd/cq ./internal/app ./internal/provider/...
 | `codex account activate` | `account` | `--timeout` | [Help](../help/codex-account-activate.txt) |
 | `codex account login` | None | `--activate`, `--timeout` | [Help](../help/codex-account-login.txt) |
 | `codex account remove` | `account` | `--yes`, `--timeout` | [Help](../help/codex-account-remove.txt) |
+| `codex dots board` | `thread` | `--root`, `--clear` | [Help](../help/codex-dots-board.txt) |
+| `codex dots broadcast` | `message` | `--root` | [Help](../help/codex-dots-broadcast.txt) |
+| `codex dots install` | None | `--root`, `--mode`, `--app`, `--system-auth`, `--cq-accounts`, `--account-source` | [Help](../help/codex-dots-install.txt) |
+| `codex dots list` | None | `--root` | [Help](../help/codex-dots-list.txt) |
+| `codex dots prime` | `dot` | `--root`, `--all` | [Help](../help/codex-dots-prime.txt) |
+| `codex dots start` | None | `--root` | [Help](../help/codex-dots-start.txt) |
+| `codex dots status` | None | `--root` | [Help](../help/codex-dots-status.txt) |
+| `codex dots stop` | None | `--root` | [Help](../help/codex-dots-stop.txt) |
+| `codex dots sync` | None | `--root` | [Help](../help/codex-dots-sync.txt) |
 
 This task owns every listed command's defaults, required/repeatable flags, ranges, combinations, preconditions, effects, DTOs, exact help/examples, error precedence and acceptance cases in commands.json. Shared lexical checks are T03; this task owns file/account/authority checks and operational outcomes. Global help/json/version options apply to every row.
 
@@ -364,7 +375,7 @@ go vet ./cmd/cq ./internal/modelregistry
 
 This task owns every listed command's defaults, required/repeatable flags, ranges, combinations, preconditions, effects, DTOs, exact help/examples, error precedence and acceptance cases in commands.json. Shared lexical checks are T03; this task owns file/account/authority checks and operational outcomes. Global help/json/version options apply to every row.
 
-**Fixture arrangement:** auth-partial-write fixture commits one logical account reconciliation then fails a later token refresh for that account; changed_count must still be1. auth-boundary fixture supplies tokens with exactly30m and30m+1ns remaining. External/system Codex entries are read-only and never refreshed.
+**Fixture arrangement:** auth-partial-write fixture commits one logical account reconciliation then fails a later token refresh for that account; changed_count must still be1. auth-boundary fixture supplies tokens with exactly30m and30m+1ns remaining. System Codex entries and non-CodexBar external entries are read-only and never refreshed. Explicitly declared CodexBar managed entries retain the coordinator owner renewal capability and fences documented in resources/accounts.md.
 
 - [ ] Add the following concrete regression and the complete normative cases for this task. Use the [test harness contract](../plan.md#test-harness-contract); imports follow the shown identifiers. For non-Go baseline/release evidence tasks, execute the shown read/build checks instead of inventing a failing assertion.
 

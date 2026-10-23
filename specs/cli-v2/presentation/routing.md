@@ -367,6 +367,77 @@ Each row uses the exact shared error layout; no success card accompanies it. Con
 Numbers / times / narrow version: apply shared rules to every field in this leaf and its referenced blocks. Fields absent from its resource are not invented. Help-only and machine-output variants preserve the semantics above; redirected human output retains its existing byte contract, and JSON retains original resource names, types and nulls.
 
 
+## `cq codex proxy lease redistribute`
+
+Decision: Schedule Codex chats to rebalance across available accounts.
+
+### Help variant
+
+Title: `cq codex proxy lease redistribute`. Purpose: Schedule Codex chats to rebalance across available accounts.
+
+```text
+Usage
+  cq codex proxy lease redistribute [options]
+```
+
+
+Options, in displayed order (then shared globals):
+
+| Syntax | Help | Required / repeatable / default |
+|---|---|---|
+| `--port PORT` | Connect to the authenticated loopback proxy on this port (1–65535). If omitted, use the existing proxy configuration port, or 19280 when that field is unset. | optional; once; configured port, otherwise 19280 |
+| `--timeout TIMEOUT` | Maximum elapsed time for this command, including local preparation and control requests; default 10s. | optional; once; 10s |
+
+Behaviour content, after options:
+
+- Schedule existing task-account leases for a fresh route at a safe request boundary. Active work and required account continuity remain intact.
+- Counts describe scheduling, not completed moves. Deferred leases are a subset of scheduled leases still bound by active work or continuity.
+- No restart is required. Pending scheduling survives worker restart.
+- `--port`: Integer 1–65535.
+- `--port`: No configuration file is created to resolve omission.
+- `--timeout`: Positive Go duration.
+- `--timeout`: Expiry returns exit 7; a timed-out mutation may already have committed, so inspect state before retrying.
+
+Examples, exact command text and explanatory captions:
+
+- `cq codex proxy lease redistribute` — Schedule existing chats to rebalance without interrupting active work.
+
+Related commands: cq service status --component proxy; cq codex proxy policy show. Self-links are omitted from rendered Related commands. Deprecated aliases: `cq proxy leases redistribute` → `cq codex proxy lease redistribute`. Alias help identifies canonical path; alias execution retains existing deprecation warning on stderr.
+
+### Success variant · exit 0
+
+```text
+Codex lease redistribution scheduled
+  Scheduled leases    <scheduled_leases>
+  Deferred leases     <deferred_leases>
+  Journal generation  <journal_generation>
+
+Chats move at a safe request boundary; active work continues.
+```
+
+Counts use blue Quantity spans with digit grouping. Journal generation is a cyan Identifier, never a time or amount. Colour-free output preserves every label. At narrow widths, long values wrap beneath labels; never truncate a generation.
+
+Empty state is success with both counts zero. Deferred leases are included in the scheduled total; do not add them to it. Active work and required account continuity may defer movement until a portable request arrives. No receipt implies neither zero work nor completed moves.
+
+Timeout or interruption without a receipt emits only the shared error frame, with unconfirmed completion. No success card accompanies it. Persisted scheduling and account continuity remain authoritative.
+
+### Failure variants
+
+Each row uses the exact shared error layout; no success card accompanies it. Conditions are authoritative applicability, including family-wide codes which cannot occur for this particular action. Do not synthesise unreachable errors merely to show a variant.
+
+| Code | Exit | Condition | Message |
+|---|---:|---|---|
+| `routing_invalid_argument` | 2 | Unknown, duplicate, missing, malformed, or mutually exclusive arguments. | Invalid argument: {detail}. |
+| `routing_io_failed` | 1 | Configuration, state, or output cannot be read or written. | Routing operation failed: {detail}. |
+| `routing_timeout` | 7 | Command deadline expires. | Routing operation timed out; inspect current state before retrying a mutation. |
+| `routing_control_unavailable` | 4 | Required live proxy control is unreachable or unavailable. | Running CQ proxy control is unavailable. |
+| `routing_auth_failed` | 5 | Local proxy token missing or control rejects authentication. | Local proxy authentication failed. |
+| `routing_conflict` | 6 | State changed or runtime preconditions fail. | Routing state conflict: {detail}. |
+| `lease_journal_unavailable` | 4 | Journal writer unavailable or quarantined legacy journal cannot mutate. | Lease journal is unavailable for redistribution. |
+
+Numbers / times / narrow version: apply shared rules to every field in this leaf and its referenced blocks. Fields absent from its resource are not invented. Help-only and machine-output variants preserve the semantics above; redirected human output retains its existing byte contract, and JSON retains original resource names, types and nulls.
+
+
 ## `cq codex proxy pin clear`
 
 Decision: Clear the Codex proxy pin.

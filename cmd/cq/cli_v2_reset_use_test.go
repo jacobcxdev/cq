@@ -13,6 +13,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/provider"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/quota"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 	"io"
@@ -304,7 +305,7 @@ func TestCLIV2ResetUseIndeterminateRestartRetry(t *testing.T) {
 	}
 }
 func TestCLIV2ResetUsePostcheckWarnings(t *testing.T) {
-	for _, mode := range []string{"cleanup-reset", "cleanup-no_credit", "cleanup-nothing_to_reset", "usage", "match", "history", "cache"} {
+	for _, mode := range []string{"cleanup-reset", "cleanup-no_credit", "cleanup-nothing_to_reset", "usage", "match", "history", "cache", "redistribution"} {
 		t.Run(mode, func(t *testing.T) {
 			a, b, s, inv, store := newUseTest(t)
 			b.consume = func(context.Context, codexprov.ResetAccount, string, string) (codexprov.ConsumeResetResult, error) {
@@ -321,6 +322,8 @@ func TestCLIV2ResetUsePostcheckWarnings(t *testing.T) {
 					a.History = useFailHistory{}
 				case "cache":
 					a.Cache = useFailCache{}
+				case "redistribution":
+					a.AfterReset = func(context.Context, codexprov.AccountKey, string) error { return errors.New("secret routing error") }
 				}
 				return codexprov.ConsumeResetResult{Outcome: outcome, WindowsReset: 2}, nil
 			}
@@ -611,9 +614,23 @@ func TestCLIV2ResetUseProductionAuthority(t *testing.T) {
 		for _, phase := range []int32{1, 2, 3} {
 			t.Run(fmt.Sprintf("authority=%t/usage=%d", authorised, phase), func(t *testing.T) {
 				store, record, journal := useProductionFixture(t)
-				var usage, exchanges, consumes atomic.Int32
+				paths, err := proxy.ResolveDefaultPaths(userdirs.ConfigRoot, userdirs.StateRoot)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := proxy.SaveConfigAt(paths, &proxy.Config{Port: 19281, LocalToken: "synthetic-local"}); err != nil {
+					t.Fatal(err)
+				}
+				var usage, exchanges, consumes, redistributions atomic.Int32
 				client := testDoer(func(req *http.Request) (*http.Response, error) {
 					switch req.URL.Path {
+					case proxy.RuntimeCodexLeaseRedistributionPath:
+						redistributions.Add(1)
+						var payload proxy.CodexLeaseResetRequest
+						if err := json.NewDecoder(req.Body).Decode(&payload); err != nil || payload.AccountKey != record.Metadata.AccountKey || payload.EventID != codexprov.ResetIdempotencyKey(record.Metadata.AccountKey, "credit") || req.Header.Get("Authorization") != "Bearer synthetic-local" || req.URL.Host != "127.0.0.1:19281" {
+							t.Error("incorrect reset routing notification")
+						}
+						return resetProductionResponse(200, `{"scheduled_leases":1,"deferred_leases":0,"journal_generation":42}`), nil
 					case "/backend-api/wham/rate-limit-reset-credits":
 						return resetProductionResponse(200, `{"credits":[{"id":"credit","reset_type":"codex_rate_limits","status":"available","granted_at":"2026-09-01T00:00:00Z"}],"available_count":1}`), nil
 					case "/backend-api/wham/usage":
@@ -656,7 +673,7 @@ func TestCLIV2ResetUseProductionAuthority(t *testing.T) {
 					return newV2ResetUseDependenciesWithClient(ctx, store.FS, client)
 				})
 				if authorised {
-					if exchanges.Load() != 1 || consumes.Load() != 1 || out.ExitCode != 0 || decodeUse(t, out).Outcome != "reset" {
+					if exchanges.Load() != 1 || consumes.Load() != 1 || redistributions.Load() != 1 || out.ExitCode != 0 || decodeUse(t, out).Outcome != "reset" {
 						t.Fatalf("authority lost at usage %d: exchanges=%d consumes=%d out=%+v", phase, exchanges.Load(), consumes.Load(), out)
 					}
 				} else {

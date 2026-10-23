@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+candidate=""; predecessor=""; output=""
+while [[ $# -gt 0 ]]; do
+  [[ $# -ge 2 ]] || { echo "missing argument value: $1" >&2; exit 64; }
+  case "$1" in
+    --candidate) candidate=$2; shift 2;;
+    --predecessor) predecessor=$2; shift 2;;
+    --output-dir) output=$2; shift 2;;
+    *) echo "unknown argument: $1" >&2; exit 64;;
+  esac
+done
+[[ $(uname -s) == Darwin && -x "$candidate" && -x "$predecessor" && "$output" == /* ]] || { echo "requires macOS, executable inputs and absolute output directory" >&2; exit 64; }
+mkdir -p "$output"
+CQ_RUN_NATIVE_HOMEBREW_UPGRADE=1 CQ_UPGRADE_CANDIDATE="$candidate" CQ_UPGRADE_PREDECESSOR="$predecessor" CQ_UPGRADE_OUTPUT="$output" go test -race -count=1 -timeout=20m ./cmd/cq -run '^TestNativeHomebrewUpgradeAcceptance$'

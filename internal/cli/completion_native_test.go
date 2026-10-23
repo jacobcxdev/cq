@@ -45,6 +45,8 @@ func TestCLIV2CompletionNativeInsertion(t *testing.T) {
 				{"inline-path", "codex proxy fixture create --input=Éq", []string{"codex", "proxy", "fixture", "create", "--input=Équipe bleue.json"}},
 				{"separate-path", "codex proxy fixture create --input Éq", []string{"codex", "proxy", "fixture", "create", "--input", "Équipe bleue.json"}},
 				{"command-directory-collision", "ser", []string{"service"}},
+				{"dots-inherited-root", "codex dots --root /private/dots stat", []string{"codex", "dots", "--root", "/private/dots", "status"}},
+				{"dots-inherited-root-inline", "codex dots --root=/private/dots install --mode iso", []string{"codex", "dots", "--root=/private/dots", "install", "--mode", "isolated"}},
 			} {
 				t.Run(fixture.name, func(t *testing.T) {
 					command := exec.Command(python, "testdata/native_completion.py", binary, file, "cq "+fixture.input)

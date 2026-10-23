@@ -7,12 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
+	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
@@ -59,6 +61,7 @@ var errServiceUnavailable = errors.New("selected service platform is unavailable
 
 type componentStatus struct {
 	Observed             *serviceObservation `json:"-"`
+	PackageExecutable    string              `json:"-"`
 	ID                   string              `json:"id"`
 	Manager              string              `json:"manager"`
 	Registered           bool                `json:"registered"`
@@ -73,12 +76,15 @@ type componentStatus struct {
 }
 
 type serviceStatus struct {
-	SchemaVersion int                `json:"schema_version"`
-	Owner         installstate.Owner `json:"owner,omitempty"`
-	Executable    string             `json:"executable,omitempty"`
-	Proxy         componentStatus    `json:"proxy"`
-	Refresh       componentStatus    `json:"refresh"`
-	Conflict      string             `json:"conflict,omitempty"`
+	SchemaVersion         int                `json:"schema_version"`
+	Owner                 installstate.Owner `json:"owner,omitempty"`
+	Executable            string             `json:"executable,omitempty"`
+	Proxy                 componentStatus    `json:"proxy"`
+	Refresh               componentStatus    `json:"refresh"`
+	Conflict              string             `json:"conflict,omitempty"`
+	ActiveRuntimeVersion  string             `json:"active_runtime_version,omitempty"`
+	PendingRuntimeVersion string             `json:"pending_runtime_version,omitempty"`
+	UpgradePhase          string             `json:"upgrade_phase,omitempty"`
 }
 
 type servicePlatform interface {
@@ -138,15 +144,26 @@ type serviceStateStore interface {
 }
 
 type serviceLifecycle struct {
-	Platform         servicePlatform
-	Store            serviceStateStore
-	Executable       string
-	Version          string
-	StatusAttempts   int
-	StatusInterval   time.Duration
-	Wait             func(context.Context, time.Duration) error
-	DigestExecutable func(string) (string, error)
-	MutationLocker   installer.InstallerLocker
+	Platform              servicePlatform
+	Store                 serviceStateStore
+	Executable            string
+	Version               string
+	StatusAttempts        int
+	StatusInterval        time.Duration
+	Wait                  func(context.Context, time.Duration) error
+	DigestExecutable      func(string) (string, error)
+	MutationLocker        installer.InstallerLocker
+	RuntimeArtifacts      serviceRuntimeArtifacts
+	RuntimeApply          func(context.Context, installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error)
+	RuntimePreflight      func(context.Context, installstate.Record) error
+	RuntimeInitialise     func(context.Context) error
+	RuntimeRestoreRefresh func(context.Context, servicePlatformSnapshot) error
+	RuntimeCleanup        func(context.Context) error
+	RuntimePrune          func(context.Context) error
+	RuntimeSnapshotWrite  func(context.Context, string, []byte) error
+	RuntimeSnapshotCheck  func(context.Context, servicePlatformSnapshot) error
+	RuntimeReceipt        func() (proxy.RuntimeUpgradeReceiptV1, error)
+	RuntimeExecutable     string
 }
 
 func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installstate.Owner) (returnErr error) {
@@ -156,7 +173,30 @@ func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installsta
 	if err := lifecycle.Store.CheckClaim(owner, lifecycle.Executable); err != nil {
 		return err
 	}
-	if err := lifecycle.Platform.Preflight(ctx, lifecycle.Executable); err != nil {
+	executable := lifecycle.Executable
+	var artifact installer.RuntimeArtifact
+	if owner == installstate.OwnerHomebrew && lifecycle.RuntimeArtifacts != nil {
+		_, err := lifecycle.Store.Load()
+		if err == nil {
+			_, err = lifecycle.Upgrade(ctx, owner, lifecycle.Executable)
+			return err
+		}
+		if !errors.Is(err, installstate.ErrNotInstalled) {
+			return err
+		}
+		artifact, err = lifecycle.RuntimeArtifacts.Stage(ctx, lifecycle.Executable)
+		if err != nil {
+			return err
+		}
+		executable = artifact.Path
+		lifecycle.RuntimeExecutable = executable
+		if lifecycle.RuntimeInitialise != nil {
+			if err := lifecycle.RuntimeInitialise(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	if err := lifecycle.Platform.Preflight(ctx, executable); err != nil {
 		return fmt.Errorf("service preflight: %w", err)
 	}
 	_, err := lifecycle.Platform.Inspect(ctx)
@@ -167,13 +207,13 @@ func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installsta
 	if err != nil {
 		return fmt.Errorf("snapshot services before install: %w", err)
 	}
-	if err := lifecycle.Platform.InstallProxy(ctx, lifecycle.Executable); err != nil {
+	if err := lifecycle.Platform.InstallProxy(ctx, executable); err != nil {
 		return lifecycle.rollbackNew(ctx, restore, fmt.Errorf("install proxy service: %w", err))
 	}
 	if err := lifecycle.waitProxyHealthy(ctx); err != nil {
 		return lifecycle.rollbackNew(ctx, restore, err)
 	}
-	if err := lifecycle.Platform.InstallRefresh(ctx, lifecycle.Executable); err != nil {
+	if err := lifecycle.Platform.InstallRefresh(ctx, executable); err != nil {
 		return lifecycle.rollbackNew(ctx, restore, fmt.Errorf("install refresh service: %w", err))
 	}
 	status, err := lifecycle.waitHealthy(ctx)
@@ -184,7 +224,7 @@ func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installsta
 	if digestExecutable == nil {
 		digestExecutable = installstate.DigestFile
 	}
-	binaryDigest, err := digestExecutable(lifecycle.Executable)
+	binaryDigest, err := digestExecutable(executable)
 	if err != nil {
 		return lifecycle.rollbackNew(ctx, restore, fmt.Errorf("digest service executable: %w", err))
 	}
@@ -195,6 +235,10 @@ func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installsta
 		Executable:    lifecycle.Executable,
 		BinaryDigest:  binaryDigest,
 		Services:      []string{status.Proxy.ID, status.Refresh.ID},
+	}
+	if artifact.Path != "" {
+		record.Version = artifact.Version
+		record.BinaryDigest = artifact.SHA256
 	}
 	if err := lifecycle.Store.Save(record); err != nil {
 		return lifecycle.rollbackNew(ctx, restore, fmt.Errorf("save service ownership: %w", err))
@@ -231,7 +275,15 @@ func (lifecycle *serviceLifecycle) Snapshot(ctx context.Context, owner installst
 	if err := lifecycle.Store.CheckClaim(owner, lifecycle.Executable); err != nil {
 		return err
 	}
-	if err := lifecycle.Platform.Preflight(ctx, lifecycle.Executable); err != nil {
+	if owner == installstate.OwnerHomebrew && lifecycle.RuntimePreflight != nil {
+		record, err := lifecycle.Store.Load()
+		if err != nil {
+			return err
+		}
+		if err := lifecycle.RuntimePreflight(ctx, record); err != nil {
+			return fmt.Errorf("service snapshot preflight: %w", err)
+		}
+	} else if err := lifecycle.Platform.Preflight(ctx, lifecycle.Executable); err != nil {
 		return fmt.Errorf("service snapshot preflight: %w", err)
 	}
 	platformSnapshot, err := lifecycle.Platform.Snapshot(ctx)
@@ -250,7 +302,11 @@ func (lifecycle *serviceLifecycle) Snapshot(ctx context.Context, owner installst
 	if len(data) > maxServiceSnapshotBytes {
 		return fmt.Errorf("service snapshot exceeds size limit")
 	}
-	if err := fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, path, data); err != nil {
+	write := func() error { return fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, path, data) }
+	if owner == installstate.OwnerHomebrew && lifecycle.RuntimeSnapshotWrite != nil {
+		write = func() error { return lifecycle.RuntimeSnapshotWrite(ctx, path, data) }
+	}
+	if err := write(); err != nil {
 		return fmt.Errorf("write service snapshot: %w", err)
 	}
 	return nil
@@ -279,6 +335,11 @@ func (lifecycle *serviceLifecycle) Restore(ctx context.Context, owner installsta
 	if snapshot.SchemaVersion != serviceSnapshotSchemaVersion || snapshot.Owner != owner || snapshot.Executable != lifecycle.Executable {
 		return fmt.Errorf("service snapshot identity differs")
 	}
+	if owner == installstate.OwnerHomebrew && lifecycle.RuntimeSnapshotCheck != nil {
+		if err := lifecycle.RuntimeSnapshotCheck(ctx, snapshot.Platform); err != nil {
+			return fmt.Errorf("service snapshot runtime preflight: %w", err)
+		}
+	}
 	if err := lifecycle.Platform.Restore(ctx, snapshot.Platform); err != nil {
 		return fmt.Errorf("restore services: %w", err)
 	}
@@ -305,8 +366,26 @@ func (lifecycle *serviceLifecycle) Status(ctx context.Context) (serviceStatus, e
 	if err == nil {
 		status.Owner = record.Owner
 		status.Executable = record.Executable
+		if lifecycle.RuntimeArtifacts != nil {
+			status.ActiveRuntimeVersion = record.Version
+		}
 	} else if !errors.Is(err, installstate.ErrNotInstalled) {
 		return serviceStatus{}, fmt.Errorf("load service ownership: %w", err)
+	}
+	if lifecycle.RuntimeReceipt != nil {
+		receipt, err := lifecycle.RuntimeReceipt()
+		if err == nil {
+			status.UpgradePhase = receipt.Phase
+			status.ActiveRuntimeVersion = receipt.Previous.Version
+			if receipt.Phase == "committed" {
+				status.ActiveRuntimeVersion = receipt.Candidate.Version
+			} else if receipt.Phase != "rolled_back" && receipt.Phase != "failed" {
+				status.PendingRuntimeVersion = receipt.Candidate.Version
+			}
+		}
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return serviceStatus{}, err
+		}
 	}
 	return status, nil
 }
@@ -343,12 +422,18 @@ func (lifecycle *serviceLifecycle) Uninstall(ctx context.Context, owner installs
 	if digestExecutable == nil {
 		digestExecutable = installstate.DigestFile
 	}
-	digest, err := digestExecutable(lifecycle.Executable)
-	if err != nil || digest != record.BinaryDigest {
-		return fmt.Errorf("%w: installed executable digest differs", installstate.ErrOwnershipConflict)
-	}
-	if err := lifecycle.Platform.Preflight(ctx, lifecycle.Executable); err != nil {
-		return fmt.Errorf("service ownership preflight: %w", err)
+	if owner == installstate.OwnerHomebrew && lifecycle.RuntimePreflight != nil {
+		if err := lifecycle.RuntimePreflight(ctx, record); err != nil {
+			return err
+		}
+	} else {
+		digest, err := digestExecutable(lifecycle.Executable)
+		if err != nil || digest != record.BinaryDigest {
+			return fmt.Errorf("%w: installed executable digest differs", installstate.ErrOwnershipConflict)
+		}
+		if err := lifecycle.Platform.Preflight(ctx, lifecycle.Executable); err != nil {
+			return fmt.Errorf("service ownership preflight: %w", err)
+		}
 	}
 	status, err := lifecycle.Platform.Inspect(ctx)
 	if err != nil {
@@ -359,12 +444,17 @@ func (lifecycle *serviceLifecycle) Uninstall(ctx context.Context, owner installs
 		return fmt.Errorf("%w: recorded service identifiers differ", installstate.ErrOwnershipConflict)
 	}
 
+	restore, err := lifecycle.Platform.PrepareRollback(ctx)
+	if err != nil {
+		return fmt.Errorf("snapshot services before uninstall: %w", err)
+	}
+
 	removeErr := errors.Join(
 		wrapServiceError("remove refresh service", lifecycle.Platform.RemoveRefresh(ctx)),
 		wrapServiceError("remove proxy service", lifecycle.Platform.RemoveProxy(ctx)),
 	)
 	if removeErr != nil {
-		return removeErr
+		return lifecycle.rollbackNew(ctx, restore, removeErr)
 	}
 	status, err = lifecycle.Platform.Inspect(ctx)
 	if err != nil {
@@ -372,6 +462,11 @@ func (lifecycle *serviceLifecycle) Uninstall(ctx context.Context, owner installs
 	}
 	if status.Proxy.Registered || status.Refresh.Registered {
 		return fmt.Errorf("services remain registered after uninstall")
+	}
+	if owner == installstate.OwnerHomebrew && lifecycle.RuntimeCleanup != nil {
+		if err := lifecycle.RuntimeCleanup(ctx); err != nil {
+			return fmt.Errorf("clean retained runtimes: %w", err)
+		}
 	}
 	if err := lifecycle.Store.Remove(); err != nil {
 		return fmt.Errorf("remove service ownership: %w", err)
@@ -445,7 +540,7 @@ func (lifecycle *serviceLifecycle) waitHealthy(ctx context.Context) (serviceStat
 	var inspectErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		status, inspectErr = lifecycle.Platform.Inspect(ctx)
-		if inspectErr == nil && status.healthyFor(lifecycle.Executable) {
+		if inspectErr == nil && lifecycle.servicesHealthy(status) {
 			return status, nil
 		}
 		if attempt+1 < attempts {
@@ -488,7 +583,7 @@ func (lifecycle *serviceLifecycle) waitProxyHealthy(ctx context.Context) error {
 	var inspectErr error
 	for attempt := 0; attempt < attempts; attempt++ {
 		status, inspectErr = lifecycle.Platform.Inspect(ctx)
-		if inspectErr == nil && status.proxyHealthyFor(lifecycle.Executable) {
+		if inspectErr == nil && lifecycle.proxyHealthy(status) {
 			return nil
 		}
 		if attempt+1 < attempts {
@@ -513,7 +608,9 @@ func (lifecycle *serviceLifecycle) rollbackNew(ctx context.Context, restore serv
 	if restore == nil {
 		return errors.Join(cause, fmt.Errorf("service rollback is unavailable"))
 	}
-	return errors.Join(cause, wrapServiceError("restore previous services", restore(ctx)))
+	recovery, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	return errors.Join(cause, wrapServiceError("restore previous services", restore(recovery)))
 }
 
 func (lifecycle *serviceLifecycle) validate(owner installstate.Owner) error {
@@ -662,6 +759,21 @@ func (lifecycle *serviceLifecycle) Selected(ctx context.Context, action serviceA
 		return result, loadErr
 	}
 	recordExists := loadErr == nil
+	if recordExists && record.Owner == installstate.OwnerHomebrew && lifecycle.RuntimeReceipt != nil {
+		status.ActiveRuntimeVersion = record.Version
+		receipt, receiptErr := lifecycle.RuntimeReceipt()
+		if receiptErr == nil {
+			status.UpgradePhase = receipt.Phase
+			status.ActiveRuntimeVersion = receipt.Previous.Version
+			if receipt.Phase == "committed" {
+				status.ActiveRuntimeVersion = receipt.Candidate.Version
+			} else if receipt.Phase != "rolled_back" && receipt.Phase != "failed" {
+				status.PendingRuntimeVersion = receipt.Candidate.Version
+			}
+		} else if !errors.Is(receiptErr, os.ErrNotExist) {
+			return result, receiptErr
+		}
+	}
 	defer func() {
 		if recordExists {
 			result.Status = selectedServiceOwnership(result.Status, selection, record)
@@ -692,7 +804,7 @@ func (lifecycle *serviceLifecycle) Selected(ctx context.Context, action serviceA
 	}
 	for _, id := range components {
 		c := status.component(id)
-		if c.Registered && (c.Observed == nil || (c.Observed.Owner != "cq" && c.Observed.Owner != "package") || !recordExists || !record.HasService(c.ID) || !sameServiceExecutable(c.ConfiguredExecutable, record.Executable)) {
+		if c.Registered && (c.Observed == nil || (c.Observed.Owner != "cq" && c.Observed.Owner != "package") || !recordExists || !record.HasService(c.ID) || !selectedServiceExecutableMatches(c, record)) {
 			return result, installstate.ErrOwnershipConflict
 		}
 		if (action == serviceStart || action == serviceRestart) && !c.Registered {
@@ -1015,10 +1127,18 @@ func (lifecycle *serviceLifecycle) waitSelected(ctx context.Context, action serv
 	return c, ErrServiceUnhealthy
 }
 
+// The native adapter sets PackageExecutable only after verifying retained runtime
+// bytes and their ownership record. A retained bootstrap can differ from both
+// the package symlink and the currently selected runtime.
+func selectedServiceExecutableMatches(c componentStatus, record installstate.Record) bool {
+	return sameServiceExecutable(c.ConfiguredExecutable, record.Executable) ||
+		(record.Owner == installstate.OwnerHomebrew && c.PackageExecutable != "" && sameServiceExecutable(c.PackageExecutable, record.Executable))
+}
+
 func selectedServiceOwnership(status serviceStatus, selection serviceSelection, record installstate.Record) serviceStatus {
 	for _, id := range selection.components() {
 		c := status.component(id)
-		if c.Registered && c.Observed != nil && c.Observed.Owner == "cq" && record.HasService(c.ID) && sameServiceExecutable(c.ConfiguredExecutable, record.Executable) {
+		if c.Registered && c.Observed != nil && c.Observed.Owner == "cq" && record.HasService(c.ID) && selectedServiceExecutableMatches(c, record) {
 			obs := *c.Observed
 			if record.Owner != installstate.OwnerManual {
 				obs.Owner = "package"

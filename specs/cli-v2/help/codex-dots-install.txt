@@ -1,0 +1,75 @@
+Install multi-account Dots for the normal native app.
+
+Usage: cq codex dots install [OPTIONS]
+
+Install multi-account Dots for the normal native app.
+
+Create the private installation, discover account profiles, and start the Dots adapter.
+
+The result reports whether setup is ready or needs onboarding or a normal app restart.
+
+Options:
+  --root ABS_PATH
+      Private Dots installation directory (default ~/.local/share/cq/dots). Accept
+      before or after the leaf command. This is not a global CQ option.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      When omitted: Resolve ~/.local/share/cq/dots from the current user home after
+      syntax validation.
+      Constraint: Must be a clean absolute path when supplied.
+      Constraint: Must not contain the home directory or overlap native app, credential
+      or application-support paths.
+  --mode MODE
+      Use the normal native profile or an isolated research profile. Default: native.
+      Type: enum. Required: false. Repeatable: false.
+      Default: "native".
+      Choices: native, isolated.
+      Constraint: Exact enum native or isolated.
+  --app ABS_PATH
+      Native app bundle. Default: /Applications/ChatGPT.app.
+      Type: path. Required: false. Repeatable: false.
+      Default: "/Applications/ChatGPT.app".
+      Constraint: Clean absolute path.
+  --system-auth ABS_PATH
+      Read-only native Codex authentication path. Default: ~/.codex/auth.json.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Clean absolute path when supplied.
+  --cq-accounts ABS_PATH
+      Read-only CQ Codex accounts directory. Default: ~/.codex/accounts.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Clean absolute path when supplied.
+  --account-source ABS_PATH
+      Optional read-only CodexBar account directory. Omission adds no source.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Clean absolute path when supplied.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex dots install
+      Install Dots using native mode and default paths.
+  cq codex dots install --root /tmp/cq-dots --mode isolated
+      Install an isolated research profile in a separate root.

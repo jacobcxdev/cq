@@ -57,6 +57,7 @@ type CredentialCoordinator struct {
 	refreshMu        sync.Mutex
 	refreshFlights   map[string]*refreshFlight
 	refreshRetained  map[CandidateID]retainedRefresh
+	codexBarRenewal  *codexBarRenewal
 }
 
 // LegacyManagedMigrationResult reports explicit, revision-fenced upgrades of
@@ -162,6 +163,7 @@ func NewCredentialCoordinatorWithAuthority(store *ManagedStore, stateDir string,
 		_ = mutation.Close()
 		return nil, err
 	}
+	coordinator.enableCodexBarRenewal()
 	return coordinator, nil
 }
 
@@ -206,7 +208,35 @@ func (c *CredentialCoordinator) List(ctx context.Context) (Inventory, error) {
 	if err := ctx.Err(); err != nil {
 		return Inventory{}, err
 	}
+	var renewalDone <-chan struct{}
+	if c.codexBarRenewal != nil && c.RefreshExchange != nil {
+		renewalDone = c.codexBarRenewal.start(ctx, c.ExternalSources, c.RefreshExchange, c.Now)
+	}
 	inventory, err := discoverAuthoritativeInventoryWithSources(ctx, c.Store.FS, c.ExternalSources...)
+	if err == nil && renewalDone != nil {
+		now := time.Now()
+		if c.Now != nil {
+			now = c.Now()
+		}
+		ready := false
+		for _, account := range inventory.Accounts {
+			for _, candidate := range account.Candidates {
+				ready = ready || CandidateAvailabilityAt(candidate, now) == CandidateReady
+			}
+		}
+		if !ready {
+			// Give fast expiry repair a chance without consuming the read
+			// deadline. Healthy inventory never waits for another account.
+			timer := time.NewTimer(time.Second)
+			select {
+			case <-renewalDone:
+				inventory, err = discoverAuthoritativeInventoryWithSources(ctx, c.Store.FS, c.ExternalSources...)
+			case <-timer.C:
+			case <-ctx.Done():
+			}
+			timer.Stop()
+		}
+	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return Inventory{}, ctxErr
 	}

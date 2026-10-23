@@ -1,6 +1,6 @@
 # Routing CLI v2 resources and migration
 
-This is a proposed specification, not an implementation claim. Sources are the released v0.32.5 extraction `release v0.32.5 source`; current checkout also has the pin interception regression documented in the audit. Thirty command leaves appear in `../commands.json`. Global envelope, parser, JSON, error and help rules come from the ../README.md.
+This is a proposed specification, not an implementation claim. Sources are the released v0.32.5 extraction `release v0.32.5 source`; current checkout also has the pin interception regression documented in the audit. Routing command leaves appear in `../commands.json`. Global envelope, parser, JSON, error and help rules come from the ../README.md.
 
 ## Shared resource conventions
 
@@ -180,7 +180,7 @@ Reserve workflow: run `cq codex proxy reserve windows`, select an exact returned
 
 ## Migration coverage
 
-Canonical mapping per leaf is in JSON. Provider-last pin/default, root proxy prime/reserve/trace, plural leases invalidate and nested policy pool/session paths all receive exact aliases. `proxy policy status` becomes `codex proxy policy show`; shared initialise becomes root-owned proxy state initialise. `proxy policy` input --state-root becomes --state-dir; canonical flags must not retain the old spelling except inside deprecated aliases. Historical malformed/no-op tails are errors, not behaviours to preserve.
+Canonical mapping per leaf is in JSON. Provider-last pin/default, root proxy prime/reserve/trace, plural leases invalidate/redistribute and nested policy pool/session paths all receive exact aliases. `proxy policy status` becomes `codex proxy policy show`; shared initialise becomes root-owned proxy state initialise. `proxy policy` input --state-root becomes --state-dir; canonical flags must not retain the old spelling except inside deprecated aliases. Historical malformed/no-op tails are errors, not behaviours to preserve.
 
 ## Unicode pool names and hook safety
 
@@ -189,3 +189,9 @@ Pool names retain supported Unicode and spaces; do not tighten their grammar to 
 ## Optional computed defaults
 
 For integer options whose default depends on configuration, JSON `default` is null and `omission_resolution` states the exact resolver. Port omission resolves existing configured port, then 19280 only when unset; pool-set value omission preserves an existing pool value or chooses 0 for a new pool. Null is a specification marker here, never the value sent to runtime.
+
+## Lease redistribution receipt
+
+`cq codex proxy lease redistribute` returns required fields `scheduled_leases` (integer >= 0), `deferred_leases` (integer >= 0) and `journal_generation` (uint64). Deferred leases are a subset of scheduled leases whose active work or required continuity still binds them to an account. The counts describe durable scheduling, never completed account moves. Zero scheduled leases is successful empty work; missing journal authority is an error, not a zero receipt.
+
+Active requests finish unchanged. Portable successors choose from current eligible capacity within pool, pin, model and reserve constraints. Required account continuity remains intact: an HTTP continuation using `previous_response_id` stays bound until a portable request arrives. Pending redistribution survives worker restart. A timeout without a receipt has unconfirmed completion and must not be rendered as zero or success. The legacy `cq proxy leases redistribute` spelling maps to this canonical command and preserves optional `--port`.

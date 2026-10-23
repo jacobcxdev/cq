@@ -1,0 +1,6 @@
+Codex lease redistribution scheduled
+  Scheduled leases    0
+  Deferred leases     0
+  Journal generation  43
+
+Chats move at a safe request boundary; active work continues.

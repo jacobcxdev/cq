@@ -112,6 +112,11 @@ func codexCallerBearerExpiry(accessToken string) time.Time {
 }
 
 var runProxyRuntimeRoleFn = runProxyRuntimeRole
+
+var runPlatformRuntimeUpgradeEntry = func([]string) (bool, error) { return false, nil }
+var configurePlatformRuntimeUpgrade = func(context.Context, *proxy.RuntimeSupervisor, *os.File, proxy.LifecycleHolderProof) error {
+	return nil
+}
 var newProxyRuntimeWorkerLauncherFn = func(proxy.RuntimeRoleManifestV1, proxy.LifecycleHolderProof) (proxy.RuntimeWorkerLauncher, error) {
 	return nil, proxy.ErrRuntimeRoleUnavailable
 }
@@ -508,15 +513,16 @@ type proxyCommandOptions struct {
 }
 
 type proxyRegistryDependencies struct {
-	FS                  fsutil.FileSystem
-	HomeDir             string
-	Roots               userdirs.Roots
-	HTTPClient          httputil.Doer
-	CodexClientVersion  string
-	ClaudeToken         func() (string, error)
-	CredentialAuthority codexRegistryCredentialAuthority
-	Env                 func(string) string
-	Stderr              io.Writer
+	FS                        fsutil.FileSystem
+	HomeDir                   string
+	Roots                     userdirs.Roots
+	HTTPClient                httputil.Doer
+	CodexClientVersion        string
+	ResolveCodexClientVersion func() string
+	ClaudeToken               func() (string, error)
+	CredentialAuthority       codexRegistryCredentialAuthority
+	Env                       func(string) string
+	Stderr                    io.Writer
 }
 
 func newProxyRegistryPipeline(cfg *proxy.Config, deps proxyRegistryDependencies) (*registryPipeline, error) {
@@ -524,16 +530,17 @@ func newProxyRegistryPipeline(cfg *proxy.Config, deps proxyRegistryDependencies)
 		return nil, fmt.Errorf("registry pipeline: missing proxy config")
 	}
 	return newRegistryPipelineWithCodexAuthority(registryPipelineOptions{
-		FS:                 deps.FS,
-		HomeDir:            deps.HomeDir,
-		Roots:              deps.Roots,
-		ClaudeUpstream:     cfg.ClaudeUpstream,
-		CodexUpstream:      cfg.CodexUpstream,
-		HTTPClient:         deps.HTTPClient,
-		CodexClientVersion: deps.CodexClientVersion,
-		ClaudeToken:        deps.ClaudeToken,
-		Env:                deps.Env,
-		Stderr:             deps.Stderr,
+		FS:                        deps.FS,
+		HomeDir:                   deps.HomeDir,
+		Roots:                     deps.Roots,
+		ClaudeUpstream:            cfg.ClaudeUpstream,
+		CodexUpstream:             cfg.CodexUpstream,
+		HTTPClient:                deps.HTTPClient,
+		CodexClientVersion:        deps.CodexClientVersion,
+		ResolveCodexClientVersion: deps.ResolveCodexClientVersion,
+		ClaudeToken:               deps.ClaudeToken,
+		Env:                       deps.Env,
+		Stderr:                    deps.Stderr,
 	}, deps.CredentialAuthority)
 }
 
@@ -1070,6 +1077,15 @@ func runProxyStartWithContext(ctx context.Context, opts proxyCommandOptions, rea
 	}
 	codexCapacityRefresher.IntervalForAccount = codexReserve.RefreshInterval
 	codexCapacityRefresher.OnInventory = codexReserve.ObserveInventory
+	if codexContinuity != nil {
+		codexCapacity.OnReset = func(event proxy.CodexQuotaResetEvent) error {
+			_, err := codexContinuity.Coordinator.RedistributeTaskAffinitiesForReset(proxyCtx, event.AccountKey, event.EventID)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "cq: Codex reset redistribution unavailable; retry pending")
+			}
+			return err
+		}
+	}
 	codexRefreshDone := make(chan struct{})
 	go func() {
 		defer close(codexRefreshDone)
@@ -1097,15 +1113,16 @@ func runProxyStartWithContext(ctx context.Context, opts proxyCommandOptions, rea
 	var pipeline *registryPipeline
 	if homeErr == nil {
 		pipeline, err = newProxyRegistryPipeline(cfg, proxyRegistryDependencies{
-			FS:                  fsys,
-			HomeDir:             homeDir,
-			Roots:               roots,
-			HTTPClient:          refreshClient,
-			CodexClientVersion:  codexClientBuild,
-			ClaudeToken:         firstClaudeAccessToken,
-			CredentialAuthority: newCodexRegistryControlAdapter(credentialControl),
-			Env:                 os.Getenv,
-			Stderr:              os.Stderr,
+			FS:                        fsys,
+			HomeDir:                   homeDir,
+			Roots:                     roots,
+			HTTPClient:                refreshClient,
+			CodexClientVersion:        codexClientBuild,
+			ResolveCodexClientVersion: defaultCodexRoutingClientBuild,
+			ClaudeToken:               firstClaudeAccessToken,
+			CredentialAuthority:       newCodexRegistryControlAdapter(credentialControl),
+			Env:                       os.Getenv,
+			Stderr:                    os.Stderr,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: registry: configure: %v (registry disabled)\n", err)
@@ -1146,7 +1163,8 @@ func runProxyStartWithContext(ctx context.Context, opts proxyCommandOptions, rea
 		}
 		initialRefreshCancel()
 		if pipeline.StartReconciler != nil {
-			pipeline.StartReconciler(ctx)
+			registryDone := pipeline.StartReconciler(proxyCtx)
+			defer func() { proxyCancel(); <-registryDone }()
 		}
 	}
 
@@ -1193,6 +1211,7 @@ func runProxyStartWithContext(ctx context.Context, opts proxyCommandOptions, rea
 	var codexRoutes proxy.CodexHTTPRequestRouteSnapshotter
 	var codexPlanRuntime proxy.CodexHTTPRequestPlanRuntime
 	var codexLeaseInvalidator proxy.CodexLeaseInvalidator
+	var codexLeaseRedistributor proxy.CodexLeaseRedistributor
 	var sessionPolicy *proxy.SessionPolicyResolver
 	var cyberEligibility *proxy.CyberEligibilityStore
 	var dispatchPermits proxy.CallerDispatchPermitAuthority
@@ -1200,6 +1219,7 @@ func runProxyStartWithContext(ctx context.Context, opts proxyCommandOptions, rea
 		codexRoutes = codexContinuity.Coordinator
 		codexPlanRuntime = codexContinuity.Runtime
 		codexLeaseInvalidator = codexContinuity.Coordinator
+		codexLeaseRedistributor = codexContinuity.Coordinator
 	}
 	if resilienceState != nil {
 		sessionPolicy = resilienceState.Routing.Resolver()
@@ -1334,6 +1354,13 @@ func runProxyStartWithContext(ctx context.Context, opts proxyCommandOptions, rea
 		SessionPolicy:                    sessionPolicy,
 		CodexTurnReceipts:                codexTurnReceipts,
 		CodexLeaseInvalidator:            codexLeaseInvalidator,
+		CodexLeaseRedistributor:          codexLeaseRedistributor,
+		CodexResetCapacityRefresh: func(ctx context.Context, account codexprov.AccountKey) error {
+			if !codexCapacityRefresher.ForceRefresh(ctx, []codexprov.AccountKey{account}) || codexCapacity.Capacity(account, proxy.CapacityBucketBase).State != proxy.CapacityPositive {
+				return errors.New("fresh included quota unavailable")
+			}
+			return nil
+		},
 	}
 	if resilienceState != nil {
 		srv.RoutingPolicy = resilienceState.Routing
@@ -1378,6 +1405,19 @@ func serveRuntimeSupervisor(ctx context.Context, listener net.Listener, handler 
 		return proxy.ErrRuntimeSupervisorUnavailable
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second}
+	if tcp, ok := listener.(*net.TCPListener); ok {
+		paused := proxy.NewRuntimeUpgradeListener(tcp)
+		connections := proxy.NewRuntimeUpgradeConnections()
+		paused.SetConnectionTracker(connections)
+		server.ConnState = connections.ConnState
+		listener = paused
+		if supervisor, ok := handler.(*proxy.RuntimeSupervisor); ok {
+			if err := supervisor.SetUpgradeIngress(paused, connections, server.SetKeepAlivesEnabled); err != nil {
+				return err
+			}
+		}
+	}
+
 	serveResult := make(chan error, 1)
 	go func() {
 		defer func() {

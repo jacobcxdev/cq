@@ -131,7 +131,9 @@ func Parse(argv []string) (Invocation, *ParseError) {
 	}
 	p.defaults(spec)
 	p.consume("role")
-	p.consume("clear")
+	if p.in.Path != "codex dots board" {
+		p.consume("clear")
+	}
 	p.consume("human")
 	p.consume("legacy-duration")
 	p.aliasWarnings()
@@ -183,7 +185,21 @@ func (p *parser) globals(argv []string) []argvToken {
 func (p *parser) resolve(tokens []argvToken) (string, []argvToken, bool) {
 	path := ""
 	help := false
-	for i, t := range tokens {
+	var inherited []argvToken
+	for i := 0; i < len(tokens); i++ {
+		t := tokens[i]
+		// Dots retains its released group-scoped root option on either side
+		// of the leaf. Scan it with leaf options so duplicate detection and
+		// original argument positions remain consistent.
+		name, _, equals := splitOption(t.text)
+		if path == "codex dots" && name == "--root" && !t.literal {
+			inherited = append(inherited, t)
+			if !equals && i+1 < len(tokens) && tokens[i+1].position == t.position+1 && !tokens[i+1].literal && !strings.HasPrefix(tokens[i+1].text, "-") {
+				i++
+				inherited = append(inherited, tokens[i])
+			}
+			continue
+		}
 		if t.text == "help" && !help {
 			help = true
 			continue
@@ -195,7 +211,7 @@ func (p *parser) resolve(tokens []argvToken) (string, []argvToken, bool) {
 		if knownParsePath(child) {
 			path = child
 			if isParseLeaf(path) {
-				return path, tokens[i+1:], help
+				return path, append(inherited, tokens[i+1:]...), help
 			}
 			continue
 		}
@@ -206,13 +222,13 @@ func (p *parser) resolve(tokens []argvToken) (string, []argvToken, bool) {
 			p.in.Path = path
 			name, _, _ := splitOption(t.text)
 			p.issue(t.position, "unknown_option", unknownOption(name, path), false)
-			return path, nil, help
+			return path, inherited, help
 		}
 		p.in.Path = path
 		p.unknownCommand(t, path)
-		return path, nil, help
+		return path, inherited, help
 	}
-	return path, nil, help
+	return path, inherited, help
 }
 
 func (p *parser) scan(spec CommandSpec, tokens []argvToken) {

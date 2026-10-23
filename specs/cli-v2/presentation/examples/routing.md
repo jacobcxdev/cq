@@ -1102,6 +1102,130 @@ Error · Routing operation timed out; inspect current state before retrying a mu
 
 Exit: `7`.
 
+## `cq codex proxy lease redistribute`
+
+### Help
+
+Invocation: `cq codex proxy lease redistribute --help`
+
+Stdout:
+
+```text
+cq codex proxy lease redistribute
+Schedule Codex chats to rebalance across available accounts.
+
+Usage
+  cq codex proxy lease redistribute [options]
+
+Schedule existing chats to choose accounts again at a safe request boundary.
+Active work continues; required account continuity remains intact. Deferred leases
+are included in the scheduled total. Counts describe scheduling, not completed moves.
+Requires authenticated live control and a writable migrated lease journal. No restart.
+
+Options
+  --port PORT
+      Authenticated loopback proxy port, integer 1–65535.
+      Omit to use the configured port, or 19280 when unset. Does not create configuration.
+  --timeout TIMEOUT
+      Maximum total elapsed time, including preparation and control requests. Default: 10s.
+      Positive Go duration, for example 500ms or 30s. Expiry exits 7.
+      A timed-out write may have committed; inspect current state before retrying.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default false; accept a bare flag, =true or =false.
+  Options occur once unless marked repeatable; duplicate long/short spellings count together.
+
+Related commands
+  cq codex proxy lease invalidate
+  cq proxy status
+
+Examples
+  Schedule existing chats to rebalance without interrupting active work.
+  cq codex proxy lease redistribute
+
+  Schedule through a specific running proxy with a longer deadline.
+  cq codex proxy lease redistribute --port 19281 --timeout 20s
+```
+
+Stderr: empty.
+
+Exit: `0`.
+
+### Success
+
+Invocation: `cq codex proxy lease redistribute`
+
+Stdout:
+
+```text
+Codex lease redistribution scheduled
+  Scheduled leases    1,240
+  Deferred leases     12
+  Journal generation  42
+
+Chats move at a safe request boundary; active work continues.
+```
+
+Stderr: empty.
+
+Exit: `0`.
+
+### Empty · no reusable affinity
+
+Invocation: `cq codex proxy lease redistribute`
+
+Stdout:
+
+```text
+Codex lease redistribution scheduled
+  Scheduled leases    0
+  Deferred leases     0
+  Journal generation  43
+
+Chats move at a safe request boundary; active work continues.
+```
+
+Stderr: empty.
+
+Exit: `0`.
+
+### Failure
+
+Invocation: `cq codex proxy lease redistribute`
+
+Stdout: empty.
+
+Stderr:
+
+```text
+Error · Lease journal is unavailable for redistribution.
+  Code: lease_journal_unavailable
+  Command: cq codex proxy lease redistribute
+```
+
+Exit: `4`.
+
+### Timeout · no receipt
+
+Invocation: `cq codex proxy lease redistribute --timeout 1ms`
+
+Stdout: empty.
+
+Stderr:
+
+```text
+Error · Routing operation timed out; inspect current state before retrying a mutation.
+  Code: routing_timeout
+  Command: cq codex proxy lease redistribute
+  Result: unconfirmed
+```
+
+Exit: `7`.
+
+
 ## `cq codex proxy policy apply`
 
 ### Help

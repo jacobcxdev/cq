@@ -505,6 +505,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, err)
 	}
 	defer releasePlanning()
+	displacedTurnState := ""
 	// Recheck after acquiring the lane gate: an earlier request may have moved
 	// this turn to another account while this request waited for planning.
 	if factory.TransportKind == "http" && protocol.Metadata.Found && protocol.Metadata.Strong && protocol.HasTurnState && protocol.PreviousResponseID == "" {
@@ -516,6 +517,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, resolveErr)
 			}
 			if stale {
+				displacedTurnState = protocol.TurnState
 				inspection.Release()
 				withoutState := input.Headers.Clone()
 				deleteCodexTurnStateHeader(withoutState)
@@ -541,6 +543,49 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanRouteSnapshot, ErrCodexLeaseAuthorityMismatch)
 	}
 	boundSnapshot := snapshot
+	redistributionGeneration := uint64(0)
+	if input.ExpectedBound == nil && snapshot.RedistributionGeneration != 0 && protocol.Metadata.Strong && metadata.RequestKind == CodexRequestTurn && protocol.PreviousResponseID == "" && !protocol.HasPreviousResponseID {
+		positive := factory.redistributionInventory(ctx, protocol, snapshot, inventory)
+		portable := !protocol.HasTurnState
+		if protocol.HasTurnState && len(positive.Accounts) != 0 && factory.TransportKind == "http" {
+			if resolver, ok := factory.Runtime.(interface {
+				redistributionTurnState(context.Context, LeaseKey, CodexLeaseAuthorityPolicy, string) (bool, error)
+			}); ok {
+				recognised, resolveErr := resolver.redistributionTurnState(ctx, key, factory.Authority, protocol.TurnState)
+				if resolveErr != nil {
+					return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, resolveErr)
+				}
+				if recognised {
+					inspection.Release()
+					withoutState := input.Headers.Clone()
+					deleteCodexTurnStateHeader(withoutState)
+					inspection, err = factory.inspect(ctx, input.Encoded, withoutState)
+					if err != nil {
+						return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+					}
+					protocol, err = inspection.Protocol()
+					if err != nil {
+						return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+					}
+					portable = true
+				}
+			}
+		}
+		if portable && len(positive.Accounts) != 0 {
+			redistributionGeneration = snapshot.RedistributionGeneration
+			inventory = positive
+			ingressContinuity = nil
+			snapshot.BoundAccountKey = ""
+			snapshot.BoundIdentity = CodexJournalRecordIdentity{}
+			snapshot.BoundRecordGeneration = 0
+			snapshot.BoundChoice = RouteChoice{}
+			snapshot.BoundRequiresAccount = false
+			snapshot.AffinityAccountKey = ""
+			snapshot.AffinityRequiresAccount = false
+			snapshot.AffinityEffectiveModel = ""
+			snapshot.AffinityPresent = false
+		}
+	}
 	snapshot = codexHTTPRequestDetachPortableUnavailableRoute(snapshot, protocol, input.ExpectedBound)
 	snapshot = codexHTTPRequestDetachInvalidatedPortableRoute(snapshot, protocol, input.ExpectedBound)
 
@@ -755,7 +800,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 			}
 		}
 	}
-	if expectedBound == nil && authenticatedCodexCaller && snapshot.BoundAccountKey == "" &&
+	if redistributionGeneration == 0 && expectedBound == nil && authenticatedCodexCaller && snapshot.BoundAccountKey == "" &&
 		boundSnapshot.Classification == CodexRestoredLaneCurrent && !boundSnapshot.RestartableFailedHead &&
 		boundSnapshot.BoundAccountKey == choice.AccountKey && boundSnapshot.BoundIdentity.Authoritative &&
 		boundSnapshot.BoundRecordGeneration != 0 && containsCodexHTTPRequestAccountKey(boundSnapshot.QuotaExhaustedAccountKeys, choice.AccountKey) {
@@ -839,6 +884,8 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		permitDigest = permit.Digest
 	}
 	leasePlan := codexHTTPRequestLeasePlan(key, accounts, factory.Authority, protocol, choice, dispatch, expectedBound, continuityAccountKey != "" || authenticatedBoundContinuation, authenticatedCallerContinuity, permitDigest, quotaExhaustionProbe)
+	leasePlan.RedistributionGeneration = redistributionGeneration
+	leasePlan.Evidence.displacedTurnState = displacedTurnState
 	leasePlan.ingressContinuity = ingressContinuity
 	emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_begin", Outcome: "started", AccountHint: codexTraceAccountHint(choice.AccountKey)})
 	handle, err := factory.Runtime.BeginRequestContext(ctx, leasePlan)

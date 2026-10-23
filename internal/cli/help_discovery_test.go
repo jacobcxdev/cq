@@ -51,8 +51,8 @@ func TestHelpListsExactDirectChildren(t *testing.T) {
 			t.Errorf("%q reference children = %v, want %v", path, got, want)
 		}
 	}
-	if groups != 37 {
-		t.Fatalf("checked %d groups, want 37", groups)
+	if groups != 38 {
+		t.Fatalf("checked %d groups, want 38", groups)
 	}
 }
 

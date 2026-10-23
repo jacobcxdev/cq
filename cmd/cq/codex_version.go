@@ -17,6 +17,11 @@ import (
 // rejecting it; verified to be accepted by /models.
 const fallbackCodexClientVersion = "0.124.0"
 
+var (
+	probeCodexBinaryVersionFn  = probeCodexBinaryVersion
+	probeCodexDesktopVersionFn = probeCodexDesktopVersion
+)
+
 // codexVersionResolver resolves the Codex client_version string used when
 // querying the upstream /models endpoint. Dependencies are injected so the
 // resolver can be tested without filesystem or subprocess side effects.
@@ -81,7 +86,7 @@ func defaultCodexClientVersion() string {
 	return codexVersionResolver{
 		FS:                fsys,
 		CachePath:         cachePath,
-		SubprocessVersion: probeCodexBinaryVersion,
+		SubprocessVersion: probeCodexBinaryVersionFn,
 		Fallback:          fallbackCodexClientVersion,
 	}.Resolve()
 }
@@ -91,9 +96,9 @@ func defaultCodexClientVersion() string {
 // its client_version may omit a Desktop prerelease suffix.
 func defaultCodexRoutingClientBuild() string {
 	return codexRoutingBuildResolver{
-		DesktopVersion:    probeCodexDesktopVersion,
+		DesktopVersion:    probeCodexDesktopVersionFn,
 		CachedVersion:     cachedCodexClientVersion,
-		SubprocessVersion: probeCodexBinaryVersion,
+		SubprocessVersion: probeCodexBinaryVersionFn,
 		Fallback:          fallbackCodexClientVersion,
 	}.Resolve()
 }

@@ -9,6 +9,7 @@
     "claude proxy pin": "groups.md",
     "codex": "groups.md",
     "codex account": "groups.md",
+    "codex dots": "dots.md",
     "codex proxy": "groups.md",
     "codex proxy canary": "groups.md",
     "codex proxy credential-endpoint": "groups.md",
@@ -197,6 +198,114 @@
         "account_removal_partial"
       ]
     },
+    "codex dots board": {
+      "document": "dots.md",
+      "help": true,
+      "declared_errors": [
+        "dots_invalid_argument",
+        "dots_operation_failed",
+        "dots_result_invalid",
+        "dots_result_missing",
+        "dots_timeout",
+        "interrupted"
+      ]
+    },
+    "codex dots broadcast": {
+      "document": "dots.md",
+      "help": true,
+      "declared_errors": [
+        "dots_invalid_argument",
+        "dots_operation_failed",
+        "dots_result_invalid",
+        "dots_result_missing",
+        "dots_timeout",
+        "interrupted"
+      ]
+    },
+    "codex dots install": {
+      "document": "dots.md",
+      "help": true,
+      "declared_errors": [
+        "dots_invalid_argument",
+        "dots_operation_failed",
+        "dots_result_invalid",
+        "dots_result_missing",
+        "dots_timeout",
+        "interrupted"
+      ]
+    },
+    "codex dots list": {
+      "document": "dots.md",
+      "help": true,
+      "declared_errors": [
+        "dots_invalid_argument",
+        "dots_operation_failed",
+        "dots_result_invalid",
+        "dots_result_missing",
+        "dots_timeout",
+        "interrupted"
+      ]
+    },
+    "codex dots prime": {
+      "document": "dots.md",
+      "help": true,
+      "declared_errors": [
+        "dots_invalid_argument",
+        "dots_operation_failed",
+        "dots_result_invalid",
+        "dots_result_missing",
+        "dots_timeout",
+        "interrupted"
+      ]
+    },
+    "codex dots start": {
+      "document": "dots.md",
+      "help": true,
+      "declared_errors": [
+        "dots_invalid_argument",
+        "dots_operation_failed",
+        "dots_result_invalid",
+        "dots_result_missing",
+        "dots_timeout",
+        "interrupted"
+      ]
+    },
+    "codex dots status": {
+      "document": "dots.md",
+      "help": true,
+      "declared_errors": [
+        "dots_invalid_argument",
+        "dots_operation_failed",
+        "dots_result_invalid",
+        "dots_result_missing",
+        "dots_timeout",
+        "interrupted"
+      ]
+    },
+    "codex dots stop": {
+      "document": "dots.md",
+      "help": true,
+      "declared_errors": [
+        "dots_invalid_argument",
+        "dots_operation_failed",
+        "dots_result_invalid",
+        "dots_result_missing",
+        "dots_timeout",
+        "interrupted"
+      ]
+    },
+    "codex dots sync": {
+      "document": "dots.md",
+      "help": true,
+      "declared_errors": [
+        "dots_invalid_argument",
+        "dots_operation_failed",
+        "dots_result_invalid",
+        "dots_result_missing",
+        "dots_timeout",
+        "interrupted"
+      ]
+    },
     "codex proxy canary start": {
       "document": "runtime.md",
       "help": true,
@@ -346,6 +455,19 @@
       ]
     },
     "codex proxy lease invalidate": {
+      "document": "routing.md",
+      "help": true,
+      "declared_errors": [
+        "routing_invalid_argument",
+        "routing_io_failed",
+        "routing_timeout",
+        "routing_control_unavailable",
+        "routing_auth_failed",
+        "routing_conflict",
+        "lease_journal_unavailable"
+      ]
+    },
+    "codex proxy lease redistribute": {
       "document": "routing.md",
       "help": true,
       "declared_errors": [

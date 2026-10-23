@@ -1,4 +1,4 @@
-Invalidate reusable Codex routing affinities.
+Manage reusable Codex routing affinities.
 
 Usage: cq codex proxy lease <COMMAND> [OPTIONS]
 
@@ -10,6 +10,8 @@ or changing state.
 Commands:
   invalidate
       Invalidate reusable Codex task-account affinity.
+  redistribute
+      Schedule Codex chats to rebalance across available accounts.
 
 Global options:
   -h, --help

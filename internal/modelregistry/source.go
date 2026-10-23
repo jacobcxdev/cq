@@ -18,6 +18,8 @@ type SourceResult struct {
 	AnthropicRawByID map[string]json.RawMessage
 	// FetchedAt is the wall-clock time the data was retrieved.
 	FetchedAt time.Time
+	// CodexClientVersion identifies the client used for this model response.
+	CodexClientVersion string
 	// MalformedEntries is the count of raw model entries that were skipped
 	// because they failed to unmarshal or had an empty slug/ID.
 	MalformedEntries int

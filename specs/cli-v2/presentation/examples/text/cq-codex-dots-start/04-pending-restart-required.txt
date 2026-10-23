@@ -1,0 +1,4 @@
+Codex Dots · start
+  Started: No
+  Restart required: Yes
+  Detail: Quit the app, then run cq codex dots start.

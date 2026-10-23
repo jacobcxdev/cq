@@ -13,7 +13,7 @@ Commands:
   claude
       Manage Claude accounts and proxy routing pins.
   codex
-      Manage Codex accounts, quota resets and provider-specific proxy controls.
+      Manage Codex accounts, Dots, quota resets and provider-specific proxy controls.
   completion
       Print a shell completion script.
   gemini

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
@@ -36,10 +37,10 @@ func runProxyRescueContext(ctx context.Context, args []string, output io.Writer)
 		}
 		return &proxy.Config{Port: bootstrap.Port, LocalToken: bootstrap.LocalToken}, nil
 	}
-	return runProxyRescueWithDependencies(ctx, args, output, load, client)
+	return runProxyRescueWithDependencies(ctx, args, output, load, client, restartProxyAgent)
 }
 
-func runProxyRescueWithDependencies(ctx context.Context, args []string, output io.Writer, load func() (*proxy.Config, error), doer httputil.Doer) error {
+func runProxyRescueWithDependencies(ctx context.Context, args []string, output io.Writer, load func() (*proxy.Config, error), doer httputil.Doer, restart func() error) error {
 	if ctx == nil || output == nil || load == nil || doer == nil || len(args) == 0 {
 		return errors.New("usage: cq proxy rescue <enter|exit|status> [--port PORT]")
 	}
@@ -59,7 +60,16 @@ func runProxyRescueWithDependencies(ctx context.Context, args []string, output i
 			return errors.New("proxy rescue: invalid port")
 		}
 	}
-	body, err := requestProxyRescue(ctx, args[0], port, load, doer)
+	var recoverListener func(context.Context) error
+	if restart != nil {
+		recoverListener = func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return restart()
+		}
+	}
+	body, err := requestProxyRescueWithRecovery(ctx, args[0], port, load, doer, recoverListener)
 	if err != nil {
 		return err
 	}
@@ -79,6 +89,11 @@ func (e *proxyRescueError) Error() string { return e.cause.Error() }
 func (e *proxyRescueError) Unwrap() error { return e.cause }
 
 func requestProxyRescue(ctx context.Context, action string, port int, load func() (*proxy.Config, error), doer httputil.Doer) ([]byte, error) {
+	return requestProxyRescueWithRecovery(ctx, action, port, load, doer, nil)
+}
+
+func requestProxyRescueWithRecovery(ctx context.Context, action string, port int, load func() (*proxy.Config, error), doer httputil.Doer, restart func(context.Context) error) ([]byte, error) {
+	recoverListener := action == "enter" && port == 0 && restart != nil
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -114,10 +129,41 @@ func requestProxyRescue(ctx context.Context, action string, port int, load func(
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
 	response, err := doer.Do(request)
+	if errors.Is(err, syscall.ECONNREFUSED) && recoverListener {
+		if response != nil && response.Body != nil {
+			response.Body.Close()
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if restartErr := restart(ctx); restartErr != nil {
+			return nil, fmt.Errorf("restore CQ service for rescue: %w", restartErr)
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, proxyRescueControlTimeout)
+		defer cancel()
+		for errors.Is(err, syscall.ECONNREFUSED) {
+			select {
+			case <-waitCtx.Done():
+				return nil, fmt.Errorf("proxy rescue listener did not start after service recovery: %w", waitCtx.Err())
+			case <-time.After(100 * time.Millisecond):
+			}
+			response, err = doer.Do(request.Clone(waitCtx))
+			if err != nil && response != nil && response.Body != nil {
+				response.Body.Close()
+				response = nil
+			}
+		}
+	}
 	if response != nil && response.Body != nil {
 		defer response.Body.Close()
 	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return nil, fmt.Errorf("proxy rescue requires a running listener; run cq proxy restart first: %w", err)
+		}
 		return nil, err
 	}
 	if response == nil {

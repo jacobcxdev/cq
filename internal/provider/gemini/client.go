@@ -14,8 +14,8 @@ import (
 
 const (
 	oauthTokenURL        = "https://oauth2.googleapis.com/token"
-	loadCodeAssistURL    = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-	retrieveQuotaURL     = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+	loadCodeAssistURL    = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+	retrieveQuotaURL     = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
 	antigravityUserAgent = "antigravity/cli/cq"
 )
 

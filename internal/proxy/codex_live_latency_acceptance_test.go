@@ -55,7 +55,7 @@ func TestCodexLiveProxyLatencyMatchesDirect(t *testing.T) {
 			}
 			direct = append(direct, time.Since(started))
 
-			proxyIsolation := newCodexTaskAffinityAcceptanceIsolation(t, credential.localToken)
+			proxyIsolation := newCodexLiveAcceptanceIsolation(t, credential.localToken)
 			beforeWebSockets, beforeResponses, _ := traffic.snapshot()
 			started = time.Now()
 			if err := runCodexTaskAffinityAcceptanceTurnForTransport(ctx, codexTaskAffinityAcceptanceRunner{}, client, listener.URL, proxyIsolation, false, webSocket, output); err != nil {
@@ -87,7 +87,10 @@ func runCodexLiveDirectLatencyTurn(ctx context.Context, client codexInstalledExe
 		return fmt.Errorf("direct Codex executable changed")
 	}
 	outputPath := filepath.Join(isolation.root, strings.ToLower(output)+".txt")
-	args := codexAcceptanceExecArgumentsForTransport(DefaultCodexUpstream, isolation.work, outputPath, webSocket)
+	args, err := codexLiveAcceptanceExecArguments(DefaultCodexUpstream, isolation.work, outputPath, webSocket)
+	if err != nil {
+		return err
+	}
 	args = slices.DeleteFunc(args, func(value string) bool { return value == "--ephemeral" })
 	args[len(args)-1] = "Reply with exactly " + output + " and no other text."
 	environment := append(codexAcceptanceBaseEnvironment(isolation.home, isolation.codexHome, isolation.tmp, isolation.cache, isolation.config),

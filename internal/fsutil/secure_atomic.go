@@ -118,6 +118,16 @@ func SecureAtomicWriteInDirectoryChecked(inspector SecurePathInspector, director
 	return secureAtomicWriteInDirectory(inspector, directory, name, data, beforeReplace, nil, false)
 }
 
+// SecureAtomicWriteInOwnerControlledDirectoryChecked retains the same private
+// file guarantees in an existing 0700 or 0755 owner directory. Its canonical
+// directory identity is checked throughout the transaction without changing
+// the directory's permissions.
+func SecureAtomicWriteInOwnerControlledDirectoryChecked(inspector SecurePathInspector, directory SecureDirectory, path, name string, data []byte, beforeReplace func() error) error {
+	return secureAtomicWriteInDirectory(inspector, directory, name, data, beforeReplace, func() error {
+		return ValidateOwnerControlledDirectoryHandle(inspector, directory, path)
+	}, false)
+}
+
 // SecureAtomicCreateInDirectory publishes data under a previously absent name.
 // The final rename is an atomic no-replace operation, so a concurrent creator
 // wins without its bytes being overwritten.

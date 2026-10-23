@@ -2171,6 +2171,51 @@ Absent is an observed state, not a fabricated empty success. Default exit 0 mean
 | proxy_indeterminate | 4 | Proxy readiness could not be determined. | --strict and state indeterminate. |
 | proxy_status_timeout | 7 | Operation timed out; inspect state before retrying. | The declared total operational deadline expires. Retain completed observations or known mutation outcomes; do not infer rollback. |
 
+## Shared service runtime evidence
+
+This conditional block applies to all six public service commands below, including retained observations after a failure. Fields are defined in [ServiceOperationV2 and ServiceComponentV2](../resources/root.md#serviceoperationv2). No extra field appears when the corresponding optional resource value is absent; existing no-metadata layouts remain unchanged.
+
+After the component table and before the individual component details, render the available recorded runtime metadata in this exact order:
+
+```text
+Active runtime  {active_runtime_version}
+Pending runtime {pending_runtime_version}
+Upgrade         {upgrade_phase}
+```
+
+The active version is cyan identity text. The pending version is amber. Upgrade phase is green only for committed, red for failed, and amber for every other phase. A recorded active version or committed phase is not proof of a running or healthy service; the component table retains its observed state and health. Omit the pending line for committed, rolled_back and failed. Deferred retains the pending candidate without claiming current execution.
+
+In each component detail block, after Logs, append `Live binary {live_executable}` only when a live path is available and differs from Executable (or the configured path is unknown). Append `Listener {listener}` whenever a live listener is observed. Live binary paths use ordinary body text; listener addresses are cyan identity text. Executable always means the native definition's configured path. Never relabel it as the live process. JSON includes a known live executable even when it equals the configured path. Stopped or uninstalled components omit both live fields; unknown live evidence must not invent a path or imply health. Long paths wrap without truncation at the usual widths.
+
+Hand-crafted committed example, showing only the conditional additions to an otherwise complete proxy status result:
+
+```text
+Active runtime  0.35.1
+Upgrade         committed
+
+proxy
+  Executable  /Users/river/.local/state/cq/runtime-artifacts/1111111111111111111111111111111111111111111111111111111111111111/cq
+  Live binary /Users/river/.local/state/cq/runtime-artifacts/2222222222222222222222222222222222222222222222222222222222222222/cq
+  Listener    127.0.0.1:19280
+```
+
+Hand-crafted deferred example, before handover; the component still reports the observed predecessor and its normal health:
+
+```text
+Active runtime  0.35.0
+Pending runtime 0.35.1
+Upgrade         deferred
+```
+
+Hand-crafted failed example; the table must still show the actual state, and a failure diagnostic keeps its normal stderr/exit contract:
+
+```text
+Active runtime  0.35.0
+Upgrade         failed
+```
+
+Service help explains that package installers manage retained-runtime upgrades and `cq service status` reports recorded upgrade state separately from observed live process identity. Package-only `service upgrade`, `proxy runtime-check` and private runtime children are excluded from public command lists, examples and completion; their exact contracts are in [the machine ABI](../internal-abi.md).
+
 ## `cq service install`
 
 ```text
@@ -2220,6 +2265,8 @@ Component       State        Auto-start  Health    PID
 proxy           {state}      {enabled}   {healthy} {pid|null-label}
 token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
 
+{Optional recorded runtime block, as specified above}
+
 {For each selected component, in proxy/token-refresh order:}
 {id}
   Installed   {installed}
@@ -2234,6 +2281,7 @@ token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
   Cache       {cache_dir|null-label}
   Runtime     {runtime_dir|null-label}
   Logs        {log_dir|null-label}
+  {Conditional Live binary and Listener fields, as specified above}
 
 Rollback · {rollback}
 ```
@@ -2305,6 +2353,8 @@ Component       State        Auto-start  Health    PID
 proxy           {state}      {enabled}   {healthy} {pid|null-label}
 token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
 
+{Optional recorded runtime block, as specified above}
+
 {For each selected component, in proxy/token-refresh order:}
 {id}
   Installed   {installed}
@@ -2319,6 +2369,7 @@ token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
   Cache       {cache_dir|null-label}
   Runtime     {runtime_dir|null-label}
   Logs        {log_dir|null-label}
+  {Conditional Live binary and Listener fields, as specified above}
 
 Rollback · {rollback}
 ```
@@ -2388,6 +2439,8 @@ Component       State        Auto-start  Health    PID
 proxy           {state}      {enabled}   {healthy} {pid|null-label}
 token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
 
+{Optional recorded runtime block, as specified above}
+
 {For each selected component, in proxy/token-refresh order:}
 {id}
   Installed   {installed}
@@ -2402,6 +2455,7 @@ token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
   Cache       {cache_dir|null-label}
   Runtime     {runtime_dir|null-label}
   Logs        {log_dir|null-label}
+  {Conditional Live binary and Listener fields, as specified above}
 
 Rollback · {rollback}
 ```
@@ -2429,7 +2483,7 @@ Start is not install: a missing registration fails. Green success requires selec
 Usage: cq service status [OPTIONS]
 ```
 
-**User decision:** What did status do to each selected service, and was any rollback verified?
+**User decision:** Which services are installed and healthy, which runtime is selected, and which executable is actually running?
 
 **Help lead:** Inspect selected CQ service components.
 
@@ -2447,13 +2501,13 @@ No positional parameters.
 
 - `--component COMPONENT`: Service component: all, proxy, or token-refresh. Default: all.
   Exact enum; selection never widens after validation.
-- `--strict`: Return non-zero if selected components are not installed, not running, or unhealthy. Default: false.
+- `--strict`: Return non-zero if any selected component is missing or unhealthy. A healthy periodic token-refresh job may be idle. Default: false.
 - `--timeout DURATION`: Maximum elapsed time, including locks, requests and local verification. Default: 10s.
   Positive Go duration, at most 10m; no bare number. Deadline expiry never implies rollback succeeded.
 
 **Effect and scope copy:**
 
-- Inspect selected definitions, desired enablement, process and health without writes.
+- Inspect selected definitions, desired enablement, process and health without writes. Show recorded runtime versions and upgrade phase when available; distinguish configured Executable from an observed differing Live binary and Listener.
 - Default exit0 means inspection completed. --strict requires every selected component installed and healthy: proxy running; token-refresh enabled with a successful latest scheduled run within 35 minutes (idle between runs is normal); no actual model acceptance calls.
 
 **Examples:**
@@ -2472,6 +2526,8 @@ Component       State        Auto-start  Health    PID
 proxy           {state}      {enabled}   {healthy} {pid|null-label}
 token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
 
+{Optional recorded runtime block, as specified above}
+
 {For each selected component, in proxy/token-refresh order:}
 {id}
   Installed   {installed}
@@ -2486,6 +2542,7 @@ token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
   Cache       {cache_dir|null-label}
   Runtime     {runtime_dir|null-label}
   Logs        {log_dir|null-label}
+  {Conditional Live binary and Listener fields, as specified above}
 
 Rollback · {rollback}
 ```
@@ -2557,6 +2614,8 @@ Component       State        Auto-start  Health    PID
 proxy           {state}      {enabled}   {healthy} {pid|null-label}
 token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
 
+{Optional recorded runtime block, as specified above}
+
 {For each selected component, in proxy/token-refresh order:}
 {id}
   Installed   {installed}
@@ -2571,6 +2630,7 @@ token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
   Cache       {cache_dir|null-label}
   Runtime     {runtime_dir|null-label}
   Logs        {log_dir|null-label}
+  {Conditional Live binary and Listener fields, as specified above}
 
 Rollback · {rollback}
 ```
@@ -2642,6 +2702,8 @@ Component       State        Auto-start  Health    PID
 proxy           {state}      {enabled}   {healthy} {pid|null-label}
 token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
 
+{Optional recorded runtime block, as specified above}
+
 {For each selected component, in proxy/token-refresh order:}
 {id}
   Installed   {installed}
@@ -2656,6 +2718,7 @@ token-refresh   {state}      {enabled}   {healthy} {pid|null-label}
   Cache       {cache_dir|null-label}
   Runtime     {runtime_dir|null-label}
   Logs        {log_dir|null-label}
+  {Conditional Live binary and Listener fields, as specified above}
 
 Rollback · {rollback}
 ```

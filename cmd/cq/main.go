@@ -23,6 +23,25 @@ var version = "dev"
 var geminiOAuthClientSecret string
 
 func main() {
+	// Dots helpers retain their native streaming protocol; public Dots commands
+	// belong to the canonical parser below.
+	if len(os.Args) > 1 && os.Args[1] == "__dots" {
+		_, err := runCodexDotsEntry(os.Args[1:], os.Stdout, os.Stderr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+			os.Exit(dotsExitCode(err))
+		}
+		return
+	}
+	// This recognises only private handover entries and exact launchd startup.
+	if handled, err := runPlatformRuntimeUpgradeEntry(os.Args[1:]); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: runtime upgrade: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	if handled, exit := dispatchMachineABI(os.Args[1:]); handled {
 		os.Exit(exit)
 	}

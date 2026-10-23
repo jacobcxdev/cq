@@ -21,6 +21,7 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/cli"
 	"github.com/jacobcxdev/cq/internal/installstate"
+	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
@@ -236,7 +237,13 @@ func TestDarwinServiceRestartsAndRemovesBothJobs(t *testing.T) {
 		{"kickstart", "-k", "gui/501/" + agentLabel},
 		{"kickstart", "-k", "gui/501/" + proxyAgentLabel},
 		{"bootout", "gui/501/" + agentLabel},
-		{"bootout", "gui/501/" + proxyAgentLabel},
+	}
+	for range 10 {
+		want = append(want, []string{"print", "gui/501/" + agentLabel})
+	}
+	want = append(want, []string{"bootout", "gui/501/" + proxyAgentLabel})
+	for range 10 {
+		want = append(want, []string{"print", "gui/501/" + proxyAgentLabel})
 	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("launchctl calls = %#v, want %#v", runner.calls, want)
@@ -245,6 +252,36 @@ func TestDarwinServiceRestartsAndRemovesBothJobs(t *testing.T) {
 		if _, err := os.Stat(platform.plistPath(label)); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("plist %s remains: %v", label, err)
 		}
+	}
+}
+
+func TestDarwinServiceWaitsForBootoutBeforeRemovingDefinition(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	runner.pendingBootout = map[string]int{proxyAgentLabel: 3}
+	if err := platform.RemoveProxy(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := platform.Preflight(context.Background(), platform.executable); err != nil {
+		t.Fatalf("upgrade preflight after delayed bootout: %v", err)
+	}
+}
+
+func TestDarwinServiceKeepsDefinitionWhenBootoutDoesNotFinish(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	runner.pendingBootout = map[string]int{proxyAgentLabel: 1000}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := platform.RemoveProxy(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RemoveProxy() error = %v, want deadline", err)
+	}
+	if _, err := os.Stat(platform.plistPath(proxyAgentLabel)); err != nil {
+		t.Fatalf("managed definition was removed before bootout finished: %v", err)
 	}
 }
 
@@ -348,11 +385,13 @@ func newDarwinServiceHarness(t *testing.T) (*darwinServicePlatform, *fakeDarwinL
 }
 
 type fakeDarwinLaunchctl struct {
-	calls    [][]string
-	loaded   map[string]bool
-	runs     map[string]int
-	disabled map[string]bool
-	failOnce map[string]error
+	calls                  [][]string
+	loaded                 map[string]bool
+	pendingBootout         map[string]int
+	runs                   map[string]int
+	disabled               map[string]bool
+	failOnce               map[string]error
+	rejectPendingBootstrap bool
 }
 
 func (runner *fakeDarwinLaunchctl) Run(_ context.Context, args ...string) ([]byte, error) {
@@ -378,7 +417,11 @@ func (runner *fakeDarwinLaunchctl) Run(_ context.Context, args ...string) ([]byt
 		return nil, nil
 	case "print":
 		label := filepath.Base(args[1])
-		if !runner.loaded[label] {
+		loaded := runner.loaded[label] || runner.pendingBootout[label] > 0
+		if runner.pendingBootout[label] > 0 {
+			runner.pendingBootout[label]--
+		}
+		if !loaded {
 			return nil, darwinLaunchctlExitError(113)
 		}
 		if label == agentLabel {
@@ -396,6 +439,9 @@ func (runner *fakeDarwinLaunchctl) Run(_ context.Context, args ...string) ([]byt
 		label := strings.TrimSuffix(filepath.Base(args[2]), ".plist")
 		if runner.disabled[label] {
 			return nil, fmt.Errorf("service disabled")
+		}
+		if runner.rejectPendingBootstrap && runner.pendingBootout[label] > 0 {
+			return nil, errors.New("job still unloading")
 		}
 		runner.loaded[label] = true
 		return nil, nil
@@ -1088,7 +1134,7 @@ func TestDarwinServiceSelectedUninstallCancellation(t *testing.T) {
 	}
 }
 
-func TestDarwinServiceLegacyUninstallCancellation(t *testing.T) {
+func TestDarwinServiceLegacyUninstallPreservesDefinitionOnCancellation(t *testing.T) {
 	for _, label := range []string{proxyAgentLabel, agentLabel} {
 		t.Run(label, func(t *testing.T) {
 			p, _ := newSelectedDarwinHarness(t)
@@ -1102,8 +1148,8 @@ func TestDarwinServiceLegacyUninstallCancellation(t *testing.T) {
 			if err := remove(ctx); !errors.Is(err, context.Canceled) {
 				t.Fatalf("remove=%v", err)
 			}
-			if _, err := os.Stat(p.plistPath(label)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("legacy definition remains: %v", err)
+			if _, err := os.Stat(p.plistPath(label)); err != nil {
+				t.Fatalf("cancelled removal lost definition: %v", err)
 			}
 		})
 	}
@@ -1420,5 +1466,40 @@ func TestDarwinServiceEnabledPolicyFormats(t *testing.T) {
 				t.Fatalf("invalid policy accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestDarwinServiceRestoreWaitsForUnloadingJob(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := platform.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.pendingBootout = map[string]int{proxyAgentLabel: 3}
+	runner.rejectPendingBootstrap = true
+	if err := platform.Restore(context.Background(), snapshot); err != nil {
+		t.Fatalf("restore bootstrapped before unload: %v", err)
+	}
+	if !runner.loaded[proxyAgentLabel] {
+		t.Fatal("previous job not restored")
+	}
+}
+
+func TestDarwinSelectedProxyRetainsMismatchedLiveExecutable(t *testing.T) {
+	roots := userdirs.Roots{Config: filepath.Join(t.TempDir(), "config")}
+	if err := proxy.SaveConfigAt(proxy.PathsForRoots(roots), &proxy.Config{Port: 19280, LocalToken: "synthetic-local"}); err != nil {
+		t.Fatal(err)
+	}
+	status := inspectDarwinSelectedProxyRuntimeWith(context.Background(), "/expected/cq", roots, 42, func(_ context.Context, command string, _ ...string) ([]byte, error) {
+		if command != "/bin/ps" {
+			t.Fatalf("inspected listener after executable mismatch: %s", command)
+		}
+		return []byte("/observed/previous/cq\n"), nil
+	}, nil)
+	if status.Healthy || status.LiveExecutable != "/observed/previous/cq" || status.Listener != "" {
+		t.Fatalf("lost mismatched live process evidence: %+v", status)
 	}
 }

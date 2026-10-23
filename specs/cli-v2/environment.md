@@ -63,7 +63,7 @@ No `XDG_STATE_HOME` or `XDG_RUNTIME_DIR` override is implemented. Setting either
 | Claude capability cache | (CLAUDE_CONFIG_DIR resolved or H/.claude)/cache/model-capabilities.json |
 | Codex system credentials | H/.codex/auth.json |
 | CQ-managed Codex credentials | H/.codex/accounts/; owned candidate files and registry.json |
-| Codex external credentials | Existing declared read-only source paths from account inventory; neither CODEX_HOME nor CLI account selection grants ownership |
+| Codex external credentials | Existing declared source paths from account inventory; read-only except for coordinator-owned renewal of explicitly declared CodexBar managed accounts (see resources/accounts.md). Neither CODEX_HOME nor CLI account selection grants ownership |
 | Codex model cache | (CODEX_HOME resolved or H/.codex)/models_cache.json |
 | Antigravity project cache | H/.gemini/antigravity-cli/cache/default_project_id.txt |
 | Gemini native credential entry | OS credential service `gemini`, account `antigravity`; not an environment variable or user-supplied token file |
@@ -89,6 +89,8 @@ Default upstreams: `https://api.anthropic.com` and `https://chatgpt.com/backend-
 ## Service process environments
 
 Interactive shell environment belongs to the invoking process; already-running launchd/systemd/Windows services do not automatically inherit later shell exports. Installing or restarting a service is not permission to copy arbitrary shell variables or credentials into service definitions. Canonical installation records the resolved non-secret roots and executable identity needed by the selected component through its existing managed launch definition/authority mechanism; status reports the installed component's actual roots, not assumptions from today's shell.
+
+Legacy macOS Homebrew LaunchAgents with an absent or empty environment dictionary have one narrow compatibility path: after validating the package owner record and retained-artifact selection under the same installation, service inspection may recover that installation's roots. A definition with a malformed or partial environment dictionary, an unverified artifact, or foreign ownership remains indeterminate. This is installed-authority recovery, not permission to substitute arbitrary current shell roots. Newly written definitions still bind all required roots and the refresh-completion marker explicitly.
 
 No new public environment-forwarding flag is introduced. When an installed process has different root configuration, operations target its declared authority or return conflict; they must not silently create a second live account/authority namespace. Account cache-home overrides do not retarget existing listener identity. Exact environment binding/persistence belongs to the shared service schema and requires validation against its platform definitions.
 

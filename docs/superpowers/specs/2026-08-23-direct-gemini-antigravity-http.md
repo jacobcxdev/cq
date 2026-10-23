@@ -110,7 +110,7 @@ performs the approximately 0.06-0.10s refresh exchange again.
 When cached project ID is usable, CQ skips project discovery. Otherwise it
 sends:
 
-`POST https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`
+`POST https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`
 
 with exact JSON body:
 
@@ -124,9 +124,12 @@ refresh.
 
 ### Quota request
 
+Use the production host for both calls. The daily host can omit Gemini buckets
+while reporting third-party quotas for the same account and project.
+
 CQ sends:
 
-`POST https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`
+`POST https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary`
 
 with JSON body containing the resolved project:
 

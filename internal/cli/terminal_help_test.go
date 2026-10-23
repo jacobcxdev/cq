@@ -123,7 +123,7 @@ func TestAuthoredHelpFixtures(t *testing.T) {
 			}
 		})
 	}
-	if count != 127 {
+	if count != 138 {
 		t.Fatalf("covered %d help pages", count)
 	}
 }
@@ -193,7 +193,7 @@ func TestAuthoredGroupFailureFixtures(t *testing.T) {
 			}
 		})
 	}
-	if count != 41 {
+	if count != 42 {
 		t.Fatalf("covered %d group failure fixtures", count)
 	}
 }
@@ -301,7 +301,7 @@ func TestAuthoredPureCatalogueFixtures(t *testing.T) {
 			}
 		})
 	}
-	if count != 174 {
+	if count != 186 {
 		t.Fatalf("covered %d pure catalogue fixtures", count)
 	}
 }

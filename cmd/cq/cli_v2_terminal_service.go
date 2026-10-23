@@ -64,6 +64,23 @@ func terminalService(data v2ServiceData, exit int, o cli.TerminalOptions) string
 		})
 	}
 	out.WriteString(cli.TerminalTable(o, []string{"Component", "State", "Auto-start", "Health", "PID"}, rows))
+	if data.ActiveRuntimeVersion != "" {
+		out.WriteByte('\n')
+		out.WriteString(cli.TerminalLine(o, 0, cli.Span{Text: "Active runtime  "}, cli.Span{Text: data.ActiveRuntimeVersion, Role: cli.Identity}))
+		if data.PendingRuntimeVersion != "" {
+			out.WriteString(cli.TerminalLine(o, 0, cli.Span{Text: "Pending runtime "}, cli.Span{Text: data.PendingRuntimeVersion, Role: cli.Attention}))
+		}
+		if data.UpgradePhase != "" {
+			role := cli.Attention
+			if data.UpgradePhase == "committed" {
+				role = cli.Confirmed
+			}
+			if data.UpgradePhase == "failed" {
+				role = cli.Failed
+			}
+			out.WriteString(cli.TerminalLine(o, 0, cli.Span{Text: "Upgrade         "}, cli.Span{Text: data.UpgradePhase, Role: role}))
+		}
+	}
 	for _, c := range components {
 		out.WriteByte('\n')
 		out.WriteString(cli.TerminalLine(o, 0, cli.Span{Text: string(c.ID), Role: cli.Heading}))
@@ -86,6 +103,12 @@ func terminalService(data v2ServiceData, exit int, o cli.TerminalOptions) string
 		}
 		for _, field := range fields {
 			out.WriteString(cli.TerminalLine(o, 2, cli.Span{Text: fmt.Sprintf("%-12s", field.label)}, field.value))
+		}
+		if c.LiveExecutable != nil && (c.Executable == nil || *c.LiveExecutable != *c.Executable) {
+			out.WriteString(cli.TerminalLine(o, 2, cli.Span{Text: "Live binary "}, cli.Span{Text: *c.LiveExecutable}))
+		}
+		if c.Listener != "" {
+			out.WriteString(cli.TerminalLine(o, 2, cli.Span{Text: "Listener    "}, cli.Span{Text: c.Listener, Role: cli.Identity}))
 		}
 	}
 	out.WriteByte('\n')

@@ -32,6 +32,7 @@ func lookupV2Rescue(path string) (cli.Handler, bool) {
 }
 
 type v2RescueDependencies struct {
+	Restart    func(context.Context) error
 	LoadConfig func() (*proxy.Config, error)
 	Doer       httputil.Doer
 	Inspect    func(context.Context, string) (proxy.OperationCoordinatorInspectionV1, error)
@@ -60,6 +61,12 @@ var prepareV2RescueDependencies = func(ctx context.Context, inv cli.Invocation) 
 				return nil, err
 			}
 			return &proxy.Config{Port: cfg.Port, LocalToken: cfg.LocalToken}, nil
+		},
+		Restart: func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return restartProxyAgent()
 		},
 		Doer: &http.Client{
 			Transport:     &http.Transport{Proxy: nil, DisableKeepAlives: true},
@@ -170,7 +177,7 @@ func handleV2RescueWithPreparation(parent context.Context, inv cli.Invocation, _
 	if values := inv.Options["port"]; len(values) > 0 {
 		port, _ = strconv.Atoi(values[0])
 	}
-	body, err := requestProxyRescue(ctx, strings.TrimPrefix(inv.Path, "proxy rescue "), port, deps.LoadConfig, deps.Doer)
+	body, err := requestProxyRescueWithRecovery(ctx, strings.TrimPrefix(inv.Path, "proxy rescue "), port, deps.LoadConfig, deps.Doer, deps.Restart)
 	if err != nil {
 		return finish(cli.Outcome{}, err)
 	}

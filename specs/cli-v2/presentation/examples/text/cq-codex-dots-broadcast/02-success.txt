@@ -1,0 +1,5 @@
+Codex Dots · broadcast
+  Broadcast: broadcast-example
+Deliveries
+  dot-one · accepted
+  Name: One

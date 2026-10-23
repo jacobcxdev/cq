@@ -1,0 +1,68 @@
+Show or assign one local chat as the shared Dot message board.
+
+Usage: cq codex dots board [THREAD] [OPTIONS]
+
+Show or assign one local chat as the shared Dot message board.
+
+With no argument, show the shared board binding. Supply THREAD to bind an existing local
+chat.
+
+Binding a chat announces the board to discovered Dots and reports notice delivery
+outcomes.
+
+Use --clear to remove the binding.
+
+Arguments:
+  THREAD
+      Existing local thread ID or codex://threads/ID link. Omit to show the binding.
+      Type: string. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Exact lower-case UUID or codex://threads/UUID link.
+      Constraint: Cannot combine with --clear=true; --clear=false permits THREAD.
+
+Options:
+  --root ABS_PATH
+      Private Dots installation directory (default ~/.local/share/cq/dots). Accept
+      before or after the leaf command. This is not a global CQ option.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      When omitted: Resolve ~/.local/share/cq/dots from the current user home after
+      syntax validation.
+      Constraint: Must be a clean absolute path when supplied.
+      Constraint: Must not contain the home directory or overlap native app, credential
+      or application-support paths.
+  --clear
+      Remove the shared message board binding.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Cannot combine --clear=true with THREAD; --clear=false permits THREAD.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex dots board
+      Show the shared board binding.
+  cq codex dots board codex://threads/01234567-89ab-cdef-0123-456789abcdef
+      Bind one existing local chat as the shared board.
+  cq codex dots board --clear
+      Remove the shared board binding.

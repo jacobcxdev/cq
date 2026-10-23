@@ -1,0 +1,40 @@
+cq codex dots prime
+Prime one Dot or all discovered Dots.
+
+Usage
+  cq codex dots prime [DOT] [OPTIONS]
+
+Request setup for one Dot, or choose --all for every discovered Dot.
+
+Delivery acceptance confirms the request was accepted; the Dot may still be responding.
+
+Arguments
+  DOT
+      Stable Dot handle or exact unambiguous display name. Choose DOT or --all.
+      Non-empty and not whitespace-only when supplied.
+      Exactly one of DOT or --all must be selected.
+
+Options
+  --root ABS_PATH
+      Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after
+      the leaf command. This is not a global CQ option.
+      Must be a clean absolute path when supplied.
+      Must not contain the home directory or overlap native app, credential or application-support
+      paths.
+  --all
+      Prime all discovered Dots instead of selecting DOT.
+      Cannot combine --all=true with DOT; --all=false permits DOT.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable. Long/short duplicates are rejected.
+
+Examples
+  Prime one Dot by stable handle.
+  cq codex dots prime dot-handle
+  Prime every discovered Dot.
+  cq codex dots prime --all

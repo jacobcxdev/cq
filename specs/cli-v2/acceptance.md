@@ -154,6 +154,83 @@ These are implementation requirements, not claims that the current binary passes
 - [ ] External-only account fails account_read_only.
 - [ ] Active credentials removal never activates another account.
 
+## `cq codex dots`
+
+- [ ] Bare group, -h and --help produce identical text and exit 0 without state access.
+- [ ] --root is inherited before and after every leaf; repeated root options are rejected.
+
+## `cq codex dots board`
+
+- [ ] --help performs no credential, configuration, filesystem, service or network access.
+- [ ] Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.
+- [ ] --root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.
+- [ ] --json emits exactly one canonical v2 envelope; diagnostics remain on stderr.
+- [ ] Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion.
+
+## `cq codex dots broadcast`
+
+- [ ] --help performs no credential, configuration, filesystem, service or network access.
+- [ ] Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.
+- [ ] --root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.
+- [ ] --json emits exactly one canonical v2 envelope; diagnostics remain on stderr.
+- [ ] Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion.
+
+## `cq codex dots install`
+
+- [ ] --help performs no credential, configuration, filesystem, service or network access.
+- [ ] Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.
+- [ ] --root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.
+- [ ] --json emits exactly one canonical v2 envelope; diagnostics remain on stderr.
+- [ ] Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion.
+
+## `cq codex dots list`
+
+- [ ] --help performs no credential, configuration, filesystem, service or network access.
+- [ ] Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.
+- [ ] --root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.
+- [ ] --json emits exactly one canonical v2 envelope; diagnostics remain on stderr.
+- [ ] Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion.
+
+## `cq codex dots prime`
+
+- [ ] --help performs no credential, configuration, filesystem, service or network access.
+- [ ] Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.
+- [ ] --root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.
+- [ ] --json emits exactly one canonical v2 envelope; diagnostics remain on stderr.
+- [ ] Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion.
+
+## `cq codex dots start`
+
+- [ ] --help performs no credential, configuration, filesystem, service or network access.
+- [ ] Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.
+- [ ] --root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.
+- [ ] --json emits exactly one canonical v2 envelope; diagnostics remain on stderr.
+- [ ] Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion.
+
+## `cq codex dots status`
+
+- [ ] --help performs no credential, configuration, filesystem, service or network access.
+- [ ] Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.
+- [ ] --root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.
+- [ ] --json emits exactly one canonical v2 envelope; diagnostics remain on stderr.
+- [ ] Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion.
+
+## `cq codex dots stop`
+
+- [ ] --help performs no credential, configuration, filesystem, service or network access.
+- [ ] Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.
+- [ ] --root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.
+- [ ] --json emits exactly one canonical v2 envelope; diagnostics remain on stderr.
+- [ ] Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion.
+
+## `cq codex dots sync`
+
+- [ ] --help performs no credential, configuration, filesystem, service or network access.
+- [ ] Unknown options, duplicate scalar options and extra positionals fail with exit 2 before state access.
+- [ ] --root is accepted before and after the leaf; global --json/-j and --help/-h work in every supported position.
+- [ ] --json emits exactly one canonical v2 envelope; diagnostics remain on stderr.
+- [ ] Pending restart/onboarding or incomplete observations retain their receipt and a dots_incomplete warning; delivery acceptance is not reported as completion.
+
 ## `cq codex proxy`
 
 - [ ] Bare group, -h and --help produce identical text and exit 0 without state access.
@@ -297,6 +374,14 @@ These are implementation requirements, not claims that the current binary passes
 
 - [ ] All argument and help rules in the global contract apply.
 - [ ] --help performs no state access and succeeds without configuration.
+
+## `cq codex proxy lease redistribute`
+
+- [ ] All argument and help rules in the global contract apply.
+- [ ] --help performs no state access and succeeds without configuration.
+- [ ] Require scheduled_leases, deferred_leases and journal_generation in a successful control receipt; reject unknown fields, negative counts and trailing JSON.
+- [ ] Retain typed authentication, journal, conflict and persistence errors without exposing response bodies.
+- [ ] Cancellation or expiry must not dispatch a later control mutation.
 
 ## `cq codex proxy pin`
 

@@ -7,7 +7,7 @@ import pathlib
 import re
 
 ROOT = pathlib.Path(__file__).resolve().parent
-SOURCES = ('groups.md', 'accounts.md', 'routing.md', 'runtime.md')
+SOURCES = ('groups.md', 'accounts.md', 'routing.md', 'runtime.md', 'dots.md')
 
 
 def collect():

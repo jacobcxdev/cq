@@ -31,6 +31,15 @@ func assembleCLIV2() map[string]cli.Handler {
 		"codex account list",
 		"codex account login",
 		"codex account remove",
+		"codex dots install",
+		"codex dots start",
+		"codex dots stop",
+		"codex dots status",
+		"codex dots sync",
+		"codex dots list",
+		"codex dots prime",
+		"codex dots broadcast",
+		"codex dots board",
 		"codex proxy canary start",
 		"codex proxy canary status",
 		"codex proxy canary stop",
@@ -46,6 +55,7 @@ func assembleCLIV2() map[string]cli.Handler {
 		"codex proxy fixture create",
 		"codex proxy hook stop",
 		"codex proxy lease invalidate",
+		"codex proxy lease redistribute",
 		"codex proxy pin clear",
 		"codex proxy pin set",
 		"codex proxy pin show",
@@ -108,7 +118,7 @@ func assembleCLIV2() map[string]cli.Handler {
 		"service uninstall",
 		"version",
 	}
-	families := []cli.Lookup{lookupV2Auth, lookupV2AccountInspection, lookupV2AccountMutation, lookupV2Canary, lookupV2Hook, lookupV2Endpoint, lookupV2Candidate, lookupV2Rescue, lookupV2Reserve, lookupV2Service, lookupV2Policy, lookupV2RoutingDiagnostics, lookupV2Models, lookupV2ResetInspection, lookupV2ResetUse, lookupV2Validation, lookupV2Selection, lookupV2Proxy}
+	families := []cli.Lookup{lookupV2Dots, lookupV2Auth, lookupV2AccountInspection, lookupV2AccountMutation, lookupV2Canary, lookupV2Hook, lookupV2Endpoint, lookupV2Candidate, lookupV2Rescue, lookupV2Reserve, lookupV2Service, lookupV2Policy, lookupV2RoutingDiagnostics, lookupV2Models, lookupV2ResetInspection, lookupV2ResetUse, lookupV2Validation, lookupV2Selection, lookupV2Proxy}
 	handlers := map[string]cli.Handler{
 		"check": handleV2Check,
 		// Run owns pure utility execution before operational lookup.

@@ -92,18 +92,11 @@ homebrew_casks:
             exit 1
           fi
         elif [[ "$action" == uninstall ]]; then
-          if [[ -x "$source" && "$target" -ef "$source" ]]; then
-            "$source" service uninstall --owner=homebrew "--service-executable=$target"
-          elif [[ -e "$target" || -L "$target" ]]; then
-            if [[ ! -L "$target" || "$(readlink "$target")" != "$source" ]]; then
-              echo "refusing to uninstall a different CQ executable: $target" >&2
-              exit 1
-            fi
+          if [[ ! -x "$source" || ! "$target" -ef "$source" ]]; then
+            echo "CQ removal requires its verified package executable: $source" >&2
+            exit 1
           fi
-          /bin/launchctl bootout "gui/$UID/dev.jacobcx.cq.proxy" >/dev/null 2>&1 || true
-          /bin/launchctl bootout "gui/$UID/dev.jacobcx.cq.refresh" >/dev/null 2>&1 || true
-          /bin/rm -f "$HOME/Library/LaunchAgents/dev.jacobcx.cq.proxy.plist" \
-                     "$HOME/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist"
+          "$source" service uninstall --owner=homebrew "--service-executable=$target"
         else
           echo "unknown Homebrew lifecycle action: $action" >&2
           exit 64
@@ -116,10 +109,46 @@ homebrew_casks:
           "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq",
         ],
       }
-      uninstall script: {
+      uninstall(script: {
         executable: "/bin/bash",
         args: [
           "-c", cq_lifecycle_script, "cq-homebrew-lifecycle", "uninstall",
           "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq",
         ],
-      }
+      }).tap do
+        # Keep callback setup attached to its declaration through formatting.
+        # Saved Ruby metadata retains this instance-scoped compatibility bridge.
+        unless cask.method(:uninstall_flight_blocks?).arity == 0
+          raise "CQ upgrade requires supported Homebrew metadata persistence"
+        end
+        cask.define_singleton_method(:uninstall_flight_blocks?) { true }
+        cq_uninstall = cask.artifacts.find { |artifact| artifact.is_a?(::Cask::Artifact::Uninstall) }
+        cq_parameters = cq_uninstall.method(:uninstall_phase).parameters.map(&:last)
+        unless %i[command successor reinstall].all? { |parameter| cq_parameters.include?(parameter) }
+          raise "CQ upgrade requires a supported Homebrew uninstall callback"
+        end
+        if cq_uninstall.respond_to?(:dispatch_uninstall_directive)
+          cq_parameters = cq_uninstall.method(:dispatch_uninstall_directive).parameters.map(&:last)
+          unless %i[command successor].all? { |parameter| cq_parameters.include?(parameter) }
+            raise "CQ upgrade requires a supported Homebrew uninstall callback"
+          end
+        end
+        cq_uninstall.singleton_class.prepend(Module.new do
+          # Newer Homebrew groups directives without calling uninstall_phase.
+          define_method(:dispatch_uninstall_directive) do |directive, command:, successor: nil, **kwargs|
+            return if successor && successor.token == cask.token
+
+            super(directive, command: command, successor: successor, **kwargs) # rubocop:disable Style/SuperArguments
+          end
+
+          define_method(:uninstall_phase) do |command:, successor: nil, reinstall: false, **kwargs|
+            return if successor && successor.token == cask.token
+            if reinstall
+              raise "CQ reinstall requires a same-token Homebrew successor"
+            end
+
+            # define_method requires explicit argument forwarding to super.
+            super(command: command, successor: successor, reinstall: reinstall, **kwargs) # rubocop:disable Style/SuperArguments
+          end
+        end)
+      end

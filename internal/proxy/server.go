@@ -107,6 +107,7 @@ type Server struct {
 	// CodexWebSocketBroker owns readiness-gated terminating WebSocket routing.
 	// Nil fails closed when WebSocket enforcement is effective.
 	CodexWebSocketBroker CodexWebSocketRoutingHandler
+	codexWSHTTPFallback  codexWSHTTPFallback
 	// CodexNativeHTTP may claim readiness-gated or retained-fence native traffic.
 	// Nil or a declined untouched request preserves the off/observe path below.
 	CodexNativeHTTP CodexNativeHTTPRoutingHandler
@@ -172,7 +173,9 @@ type Server struct {
 	CodexTurnReceipts *CodexTurnReceiptStore
 	// CodexLeaseInvalidator remains worker-owned and is reachable only through
 	// authenticated local control routed by the supervisor.
-	CodexLeaseInvalidator CodexLeaseInvalidator
+	CodexLeaseInvalidator     CodexLeaseInvalidator
+	CodexLeaseRedistributor   CodexLeaseRedistributor
+	CodexResetCapacityRefresh func(context.Context, codex.AccountKey) error
 }
 
 type codexWebSocketRoutingProvider interface {
@@ -401,6 +404,7 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("POST "+RuntimePolicyPoolPath, s.handlePolicyPoolControl)
 	mux.HandleFunc("POST "+RuntimePolicySessionDigestPath, s.handlePolicySessionDigest)
 	mux.HandleFunc("POST "+RuntimeCodexLeaseInvalidationPath, s.handleCodexLeaseInvalidation)
+	mux.HandleFunc("POST "+RuntimeCodexLeaseRedistributionPath, s.handleCodexLeaseRedistribution)
 	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptPath, s.handleCodexTurnReceipt)
 	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptV2Path, s.handleCodexTurnReceipt)
 	mux.HandleFunc(codexResponsesPath, s.handleCodexResponsesRoute)
@@ -440,18 +444,47 @@ func (s *Server) RuntimeHandler() (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runtimeDrainHandler{Handler: handler, server: s}, nil
+	gate := NewRuntimeUpgradeAdmission()
+	// Passthrough WebSockets retain their HTTP admission until the socket closes.
+	// A nonnil broker must explicitly support reversible turn admission.
+	compatible := s.CodexWebSocketBroker == nil
+	if broker, ok := s.CodexWebSocketBroker.(interface {
+		SetRuntimeUpgradeAdmission(*RuntimeUpgradeAdmission)
+	}); ok {
+		broker.SetRuntimeUpgradeAdmission(gate)
+		compatible = true
+	}
+	return runtimeDrainHandler{Handler: handler, server: s, upgrade: gate, upgradeCompatible: compatible}, nil
 }
 
 type runtimeDrainHandler struct {
 	http.Handler
-	server *Server
+	server            *Server
+	upgrade           *RuntimeUpgradeAdmission
+	upgradeCompatible bool
 }
 
 func (handler runtimeDrainHandler) BeginDrain() {
 	if drainer, ok := handler.server.CodexWebSocketBroker.(interface{ BeginDrain() }); ok {
 		drainer.BeginDrain()
 	}
+}
+
+func (handler runtimeDrainHandler) RuntimeUpgradeAdmission() *RuntimeUpgradeAdmission {
+	return handler.upgrade
+}
+func (handler runtimeDrainHandler) PrepareUpgrade(ctx context.Context) error {
+	if !handler.upgradeCompatible {
+		return ErrRuntimeUpgradeUnsupported
+	}
+	return handler.upgrade.Pause(ctx)
+}
+func (handler runtimeDrainHandler) AwaitUpgradeQuiescence(ctx context.Context) error {
+	return handler.upgrade.AwaitQuiescence(ctx)
+}
+func (handler runtimeDrainHandler) ResumeUpgrade(context.Context) error {
+	handler.upgrade.Resume()
+	return nil
 }
 
 func bearerToken(r *http.Request) string {
@@ -1243,6 +1276,13 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		s.emitDiagnostics(event)
 	}()
 
+	fallbackKey := codexWSHTTPFallbackKey(r.Header)
+	if webSocketEnforcing && s.codexWSHTTPFallback.required(fallbackKey) {
+		statusCode = http.StatusUpgradeRequired
+		diagError = diagnosticsErrorCode("invalid_request_error", "Codex WebSocket request requires HTTP")
+		writeError(w, statusCode, "invalid_request_error", "Codex WebSocket request requires HTTP")
+		return
+	}
 	if webSocketEnforcing && s.CodexWebSocketBroker == nil {
 		statusCode = http.StatusServiceUnavailable
 		diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing unavailable")
@@ -1287,6 +1327,9 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	clientConn.SetReadLimit(codexWebSocketMessageMaxBytes)
 
 	if webSocketEnforcing {
+		if release, ok := r.Context().Value(runtimeUpgradeRequestReleaseKey{}).(func()); ok {
+			release()
+		}
 		brokerContext := withCodexWSFrameObservationSink(r.Context(), func(diagnostics *routeDiagnostics) {
 			s.emitCodexWebSocketFrameObservation(diagnostics)
 		})
@@ -1304,6 +1347,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(os.Stderr, "cq: Codex route trace transport=websocket session=%s event=%s stage=%s reason=%s origin=%s frame_type=%s frame_size=%s frame_detail=%s event_type=%s error_status=%s error_type=%s error_code=%s\n", sessionKey, decision, failure.Stage, failure.Reason, failure.Origin, failure.FrameType, failure.FrameSize, failure.FrameDetail, failure.EventType, failure.ErrorStatus, failure.ErrorType, failure.ErrorCode)
 			closeCode, closeReason := websocket.CloseInternalServerErr, "upstream error"
 			if failure.FrameSize == codexWSFrameSizeOversize || failure.Reason == codexWebSocketFailureReasonMessageTooBig {
+				s.codexWSHTTPFallback.remember(fallbackKey)
 				closeCode, closeReason = websocket.CloseMessageTooBig, "message too big"
 				diagError = diagnosticsErrorCode("invalid_request_error", "Codex WebSocket request exceeded upstream size limit")
 			} else {

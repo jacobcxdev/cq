@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -262,5 +265,131 @@ func TestBetterTokenCandidate(t *testing.T) {
 				t.Errorf("betterTokenCandidate() = (%q, %d), want (%q, %d)", gotToken, gotExpires, tt.wantToken, tt.wantExpires)
 			}
 		})
+	}
+}
+
+func TestRegistryBackgroundRefreshDiscoversUpgradeAndStops(t *testing.T) {
+	var version atomic.Value
+	version.Store("0.158.0")
+	var blocked atomic.Bool
+	entered := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if blocked.Load() {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-r.Context().Done()
+			return
+		}
+		if r.URL.Query().Get("client_version") == "0.159.0" {
+			_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-6.1-sol","visibility":"list"}]}`))
+		} else {
+			_, _ = w.Write([]byte(`{"models":[{"slug":"gpt-6-sol"}]}`))
+		}
+	}))
+	defer srv.Close()
+	fsys := fsutil.NewMemFS()
+	pipeline, err := newRegistryPipeline(registryPipelineOptions{
+		FS: fsys, HomeDir: "/home/test", Roots: testCQRoots(),
+		HTTPClient: srv.Client(), CodexUpstream: srv.URL,
+		ClaudeToken:               func() (string, error) { return "", errors.New("not configured") },
+		CodexToken:                func() (string, error) { return "token", nil },
+		ResolveCodexClientVersion: func() string { return version.Load().(string) },
+		RefreshInterval:           10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := make(chan struct{}, 100)
+	publish := pipeline.Publish
+	pipeline.Publish = func() { publish(); published <- struct{}{} }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := pipeline.StartReconciler(ctx)
+	defer func() { cancel(); <-done }()
+	if again := pipeline.StartReconciler(ctx); again != done {
+		t.Fatal("duplicate reconciler")
+	}
+	waitPublished := func() {
+		t.Helper()
+		select {
+		case <-published:
+		case <-time.After(5 * time.Second):
+			t.Fatal("background refresh did not publish")
+		}
+	}
+	waitPublished()
+	version.Store("0.159.0")
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case <-published:
+			data, err := fsys.ReadFile("/home/test/.codex/models_cache.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cache struct {
+				ClientVersion string `json:"client_version"`
+				Models        []struct {
+					Slug string `json:"slug"`
+				} `json:"models"`
+			}
+			if err := json.Unmarshal(data, &cache); err != nil {
+				t.Fatal(err)
+			}
+			if cache.ClientVersion != "0.159.0" || len(cache.Models) != 1 || cache.Models[0].Slug != "gpt-6.1-sol" {
+				continue
+			}
+		case <-deadline:
+			t.Fatal("client upgrade was not discovered and published")
+		}
+		break
+	}
+	blocked.Store(true)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no in-flight refresh")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refresh ignored cancellation")
+	}
+}
+
+func TestRegistryBackgroundRefreshRetainsModelsAfterFailure(t *testing.T) {
+	pipeline, err := newRegistryPipeline(registryPipelineOptions{
+		FS: fsutil.NewMemFS(), HomeDir: "/home/test", Roots: testCQRoots(), HTTPClient: http.DefaultClient,
+		ClaudeToken:     func() (string, error) { return "", errors.New("not configured") },
+		CodexToken:      func() (string, error) { return "", errors.New("not configured") },
+		RefreshInterval: time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Refresher.Anthropic = nil
+	calls := make(chan struct{}, 10)
+	pipeline.Refresher.Codex = modelregistry.SourceFunc(func(context.Context) (modelregistry.SourceResult, error) {
+		calls <- struct{}{}
+		return modelregistry.SourceResult{}, errors.New("upstream unavailable")
+	})
+	pipeline.Catalog.Replace(modelregistry.Snapshot{Entries: []modelregistry.Entry{{ID: "gpt-6.1-sol", Provider: modelregistry.ProviderCodex}}})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := pipeline.StartReconciler(ctx)
+	defer func() { cancel(); <-done }()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-calls:
+		case <-time.After(5 * time.Second):
+			t.Fatal("background refresh did not retry")
+		}
+	}
+	cancel()
+	<-done
+	snap := pipeline.Catalog.Snapshot()
+	if len(snap.Entries) != 1 || snap.Entries[0].ID != "gpt-6.1-sol" {
+		t.Fatalf("lost cached models: %+v", snap.Entries)
 	}
 }

@@ -247,6 +247,7 @@ go vet ./cmd/cq ./internal/proxy
 | Canonical command | Positional parameters | Local options | Exact help |
 | --- | --- | --- | --- |
 | `codex proxy lease invalidate` | None | `--port`, `--timeout` | [Help](../help/codex-proxy-lease-invalidate.txt) |
+| `codex proxy lease redistribute` | None | `--port`, `--timeout` | [Help](../help/codex-proxy-lease-redistribute.txt) |
 | `codex proxy trace` | None | `--session`, `--trace`, `--since`, `--tail`, `--follow`, `--payload`, `--timeout` | [Help](../help/codex-proxy-trace.txt) |
 
 This task owns every listed command's defaults, required/repeatable flags, ranges, combinations, preconditions, effects, DTOs, exact help/examples, error precedence and acceptance cases in commands.json. Shared lexical checks are T03; this task owns file/account/authority checks and operational outcomes. Global help/json/version options apply to every row.

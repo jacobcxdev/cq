@@ -43,12 +43,13 @@ type CodexResetCache interface {
 }
 
 type CodexResetApp struct {
-	Backend  CodexResetBackend
-	Usage    CodexResetUsage
-	History  CodexResetHistory
-	Attempts CodexResetAttempts
-	Cache    CodexResetCache
-	Clock    Clock
+	AfterReset func(context.Context, codexprov.AccountKey, string) error
+	Backend    CodexResetBackend
+	Usage      CodexResetUsage
+	History    CodexResetHistory
+	Attempts   CodexResetAttempts
+	Cache      CodexResetCache
+	Clock      Clock
 }
 
 type CodexResetPublicError struct {
@@ -321,6 +322,13 @@ func (a *CodexResetApp) ExecuteUse(ctx context.Context, plan CodexResetUsePlan) 
 	case codexprov.ConsumeReset, codexprov.ConsumeAlreadyRedeemed:
 		a.finishResetAttempt(ctx, &result, account, selection.Credit.ID)
 		a.refreshAfterReset(ctx, &result, account, plan.CurrentWindows)
+		if a.AfterReset != nil {
+			if _, err := observeReset(ctx, func() (struct{}, error) {
+				return struct{}{}, callResetRouting(ctx, a.AfterReset, account.AccountKey, codexprov.ResetIdempotencyKey(account.AccountKey, selection.Credit.ID))
+			}); err != nil {
+				result.Warnings = append(result.Warnings, CodexResetWarning{Code: "redistribution_failed"})
+			}
+		}
 	case codexprov.ConsumeNothingToReset, codexprov.ConsumeNoCredit:
 		a.finishResetAttempt(ctx, &result, account, selection.Credit.ID)
 	default:
@@ -328,6 +336,15 @@ func (a *CodexResetApp) ExecuteUse(ctx context.Context, plan CodexResetUsePlan) 
 		return result, resetAppError("consume_indeterminate", errors.New("unknown reset consume outcome"))
 	}
 	return result, nil
+}
+
+func callResetRouting(ctx context.Context, notify func(context.Context, codexprov.AccountKey, string) error, account codexprov.AccountKey, eventID string) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errors.New("reset routing notification panic")
+		}
+	}()
+	return notify(ctx, account, eventID)
 }
 
 func callResetConsume(ctx context.Context, backend CodexResetBackend, account codexprov.ResetAccount, creditID, idempotencyKey string) (codexprov.ConsumeResetResult, bool, error) {

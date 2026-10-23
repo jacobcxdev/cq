@@ -17,6 +17,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/provider"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/quota"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
@@ -191,7 +192,22 @@ func newV2ResetDependenciesWithClient(ctx context.Context, recommend bool, fs fs
 	if err != nil {
 		return v2ResetDependencies{}, err
 	}
-	return newV2ResetDependenciesWithControl(recommend, fs, client, control)
+	deps, err := newV2ResetDependenciesWithControl(recommend, fs, client, control)
+	if err == nil {
+		deps.app.AfterReset = func(ctx context.Context, account codexprov.AccountKey, eventID string) error {
+			return notifyProxyCodexResetWithDependencies(ctx, account, eventID, proxyLeaseDependencies{
+				LoadConfig: func() (*proxy.Config, error) {
+					paths, err := proxy.ResolveDefaultPaths(userdirs.ConfigRoot, userdirs.StateRoot)
+					if err != nil {
+						return nil, err
+					}
+					return proxy.LoadExistingConfigAt(paths)
+				},
+				Doer: client,
+			})
+		}
+	}
+	return deps, err
 }
 
 func newV2ResetDependenciesWithControl(recommend bool, fs fsutil.DurableFileSystem, client httputil.Doer, control *codexprov.CredentialControl) (v2ResetDependencies, error) {

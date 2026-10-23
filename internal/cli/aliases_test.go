@@ -43,7 +43,7 @@ func TestCLIV2AliasCompatibility(t *testing.T) {
 	if e = json.Unmarshal(b, &inventory); e != nil {
 		t.Fatal(e)
 	}
-	if len(rows) != 92 || len(inventory) != len(rows) {
+	if len(rows) != 93 || len(inventory) != len(rows) {
 		t.Fatal("migration inventory incomplete")
 	}
 	for i, row := range rows {

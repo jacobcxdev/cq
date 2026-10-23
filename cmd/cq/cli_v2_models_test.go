@@ -485,6 +485,10 @@ func TestCLIV2ModelsProxyAuthority(t *testing.T) {
 }
 
 func TestCLIV2ModelsCanonicalCredentialAuthority(t *testing.T) {
+	oldDesktop, oldBinary := probeCodexDesktopVersionFn, probeCodexBinaryVersionFn
+	probeCodexDesktopVersionFn = func() (string, bool) { return "0.159.0", true }
+	probeCodexBinaryVersionFn = func() (string, bool) { return "0.159.0", true }
+	t.Cleanup(func() { probeCodexDesktopVersionFn, probeCodexBinaryVersionFn = oldDesktop, oldBinary })
 	for _, remote := range []bool{false, true} {
 		for _, mode := range []string{"owned", "denied", "pending-before", "pending-after", "cancelled"} {
 			t.Run(fmt.Sprintf("remote=%t/%s", remote, mode), func(t *testing.T) {
