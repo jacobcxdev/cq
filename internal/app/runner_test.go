@@ -64,6 +64,74 @@ func (h *captureHistory) UpdateAndGetEstimates(_ context.Context, results map[st
 	return nil, nil, nil
 }
 
+type detachedHistory struct {
+	started chan struct{}
+	release chan struct{}
+	rows    chan map[string][]quota.Result
+}
+
+func (h *detachedHistory) UpdateAndGetEstimates(_ context.Context, rows map[string][]quota.Result, _ int64) (history.BurnRates, history.RateEstimates, error) {
+	close(h.started)
+	<-h.release
+	h.rows <- rows
+	return nil, nil, errors.New("late history failure")
+}
+
+func TestRunnerCancelledHistoryRetainsUnannotatedInput(t *testing.T) {
+	recent := 0.01
+	input := []quota.Result{{AccountID: "account", Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
+		quota.Window7Day: {RemainingPct: 80, RecentBurnRate: &recent},
+	}}}
+	h := &detachedHistory{started: make(chan struct{}), release: make(chan struct{}), rows: make(chan map[string][]quota.Result, 1)}
+	defer close(h.release)
+	runner := &Runner{
+		Clock: fixedClock(time.Unix(1000, 0)), History: h,
+		Services: map[provider.ID]provider.Services{provider.Codex: {Usage: &mockProvider{results: input}}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type outcome struct {
+		report   Report
+		warnings []ReportWarning
+		err      error
+	}
+	completed := make(chan outcome, 1)
+	go func() {
+		report, warnings, err := runner.BuildReportObserved(ctx, RunRequest{Providers: []provider.ID{provider.Codex}, Refresh: true})
+		completed <- outcome{report, warnings, err}
+	}()
+	select {
+	case <-h.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("history did not start")
+	}
+	cancel()
+	var got outcome
+	select {
+	case got = <-completed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancellation waited for detached history")
+	}
+	if got.err != nil || len(got.warnings) != 0 || len(got.report.Providers) != 1 || len(got.report.Providers[0].Results) != 1 {
+		t.Fatalf("cancelled report = %+v", got)
+	}
+	reported := got.report.Providers[0].Results[0].Windows[quota.Window7Day]
+	if reported.RemainingPct != 80 || reported.RecentBurnRate != nil {
+		t.Fatalf("report retained an unavailable estimate or lost observed quota: %+v", reported)
+	}
+	// Report annotation and subsequent consumers must not mutate input retained
+	// by a history operation that outlives cancellation.
+	got.report.Providers[0].Results[0].Windows[quota.Window7Day] = quota.Window{RemainingPct: 1}
+	h.release <- struct{}{}
+	retained := (<-h.rows)["codex"][0].Windows[quota.Window7Day]
+	if retained.RemainingPct != 80 || retained.RecentBurnRate == nil || *retained.RecentBurnRate != recent {
+		t.Fatalf("detached history input mutated: %+v", retained)
+	}
+	if original := input[0].Windows[quota.Window7Day]; original.RemainingPct != 80 || original.RecentBurnRate == nil || *original.RecentBurnRate != recent {
+		t.Fatalf("provider input mutated: %+v", original)
+	}
+}
+
 func (c *mockCache) Get(_ context.Context, id string) ([]quota.Result, bool, error) {
 	if c.getErr != nil {
 		return nil, false, c.getErr

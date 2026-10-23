@@ -1,0 +1,53 @@
+Select the native client default Claude account.
+
+Usage: cq claude account activate ACCOUNT [OPTIONS]
+
+Resolve exactly one stored account, then activate its credentials for the native client.
+Existing clients may need reconnection to load them.
+
+This command does not pin proxy routing, rebind sessions, sign out other accounts or
+change upstream account state.
+
+Arguments:
+  ACCOUNT
+      Select one Claude account by its unique email, matched case-insensitively after
+      trimming. Ambiguous identities are rejected; no alias or opaque-key syntax is
+      accepted.
+      Type: string. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Non-empty if supplied.
+      Constraint: Resolve against one current provider inventory; never choose the first
+      ambiguous match.
+
+Options:
+  --timeout DURATION
+      Limit total command work to this duration (default 30s; minimum 1s; maximum 10m).
+      Type: duration. Required: false. Repeatable: false.
+      Default: "30s".
+      Constraint: Go duration syntax; 1s <= value <= 10m
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq claude account activate user@example.com
+      Select the unique account with this email.

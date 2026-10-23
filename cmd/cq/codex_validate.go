@@ -11,7 +11,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
-const codexCaptureInputLimit = 10 << 20
+const codexCaptureInputLimit = 2 << 20
 
 var runCodexInstalledWebSocketValidationFn = proxy.RunCodexInstalledWebSocketValidation
 
@@ -62,7 +62,7 @@ func runCodexValidate(args []string) error {
 		return fmt.Errorf("read Codex capture input: %w", err)
 	}
 	if len(body) > codexCaptureInputLimit {
-		return fmt.Errorf("Codex capture input exceeds 10 MiB")
+		return fmt.Errorf("Codex capture input exceeds 2 MiB")
 	}
 	fixture, err := proxy.BuildSanitisedCodexFixture(body, contentEncoding, metadata, time.Now())
 	if err != nil {

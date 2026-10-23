@@ -1,0 +1,3 @@
+Error · Cannot access model registry state: cannot read overlays.
+  Code: models_store_failed
+  Command: cq models overlay prune

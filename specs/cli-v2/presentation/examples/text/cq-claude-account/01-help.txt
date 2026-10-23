@@ -1,0 +1,31 @@
+cq claude account
+Authenticate, inspect, activate and remove Claude accounts.
+
+Usage
+  cq claude account <COMMAND> [OPTIONS]
+
+An account is a local credential identity. Activation selects the native
+client default; proxy pinning is a separate routing choice.
+
+Commands
+  activate   Select the native client default Claude account.
+  list       List locally configured Claude accounts.
+  login      Authenticate and store a Claude account.
+  remove     Remove local Claude account credentials.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help claude   Claude commands.
+
+Examples
+  Inspect configured accounts
+  cq claude account list
+
+  Inspect login options
+  cq claude account login --help

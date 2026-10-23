@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -779,4 +780,89 @@ func (fsys *replaceInstalledHTTPValidationDirectoryFS) OpenSecureDirectory(path 
 		return nil, fsys.err
 	}
 	return directory, nil
+}
+
+func TestProxyHTTPValidationCanonicalAttestationRaceAndCleanup(t *testing.T) {
+	for _, failure := range []string{"changed", "restart", "cleanup", "timeout"} {
+		t.Run(failure, func(t *testing.T) {
+			f := newValidationHTTPFixture(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			calls := 0
+			f.ops.validate = func(context.Context, int) (installedHTTPValidationCandidateAuthority, error) {
+				calls++
+				a := f.authority
+				if calls == 2 && failure == "changed" {
+					a.pid++
+				}
+				return a, nil
+			}
+			f.ops.restart = func(context.Context, string) error {
+				f.restarts++
+				if failure == "timeout" {
+					cancel()
+					return context.Canceled
+				}
+				return errors.New("synthetic restart failure")
+			}
+			if failure == "cleanup" {
+				f.ops.invalidate = func() error { f.invalidations++; return errors.New("synthetic cleanup failure") }
+			}
+			err := runCanonicalProxyValidateHTTPWithOperations(ctx, 19281, "cq-test", f.ops)
+			if err == nil {
+				t.Fatal("failure accepted")
+			}
+			if failure == "changed" && (!errors.Is(err, errValidationCandidateChanged) || f.restarts != 0) {
+				t.Fatal("changed candidate restarted")
+			}
+			if f.invalidations != 1 {
+				t.Fatal("stale readiness not invalidated")
+			}
+			if _, err := os.Stat(f.store.path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatal("failed request not cancelled")
+			}
+			entries, err := os.ReadDir(filepath.Dir(f.store.path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			poisoned := false
+			for _, entry := range entries {
+				if strings.HasPrefix(entry.Name(), "cancelled-") {
+					poisoned = true
+				}
+			}
+			if !poisoned {
+				t.Fatal("cancellation tombstone absent")
+			}
+		})
+	}
+}
+func TestProxyHTTPValidationCanonicalProductionPortBeforeIO(t *testing.T) {
+	err := runCanonicalProxyValidateHTTPWithOperations(context.Background(), 19280, "build", canonicalHTTPValidationOperations{})
+	if err == nil {
+		t.Fatal("production port accepted")
+	}
+}
+func TestProxyHTTPValidationCancellationHonoursBudget(t *testing.T) {
+	f := newValidationHTTPFixture(t)
+	if err := fsutil.EnsureSecureDirectory(f.store.fs, filepath.Dir(f.store.path)); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := f.store.fs.OpenSecureDirectory(filepath.Dir(f.store.path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	lock, err := fsutil.AcquireExclusiveLockInDirectory(f.store.fs, directory, installedHTTPValidationLockName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err = acquireInstalledHTTPValidationCancellationLockContext(ctx, f.store, directory)
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > time.Second {
+		t.Fatalf("cancellation exceeded budget: %v", err)
+	}
 }

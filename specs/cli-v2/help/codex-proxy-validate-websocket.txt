@@ -1,0 +1,77 @@
+Validate WebSocket routing with an isolated installed Codex client.
+
+Usage: cq codex proxy validate websocket --client-build CLIENT_BUILD [OPTIONS]
+
+Runs the exact installed Codex client against temporary loopback listeners and a
+synthetic upstream. Checks the executable build before recording readiness evidence.
+
+Does not restart the configured proxy or send requests to a provider. Success means the
+isolated exercise passed; it is not live production traffic evidence.
+
+Options:
+  --client-build CLIENT_BUILD
+      Expected Codex client version; required. Must match the recorded or exercised
+      client version byte for byte; arbitrary build labels are not accepted.
+      Type: string. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Match ^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$; reject
+      whitespace.
+      Constraint: Require byte-for-byte equality with the evidence or executed client
+      version; no whitespace trimming, case folding, prefix matching or arbitrary label
+      substitution.
+  --client-executable CLIENT_EXECUTABLE
+      Codex executable to exercise. Default: search ChatGPT.app, Codex.app, then PATH,
+      in that order.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: If supplied, resolve to absolute regular executable file.
+      Constraint: Default order: /Applications/ChatGPT.app/Contents/Resources/codex,
+      /Applications/Codex.app/Contents/Resources/codex, then executable codex found
+      through PATH.
+      Constraint: Observed version must equal --client-build.
+  --state-dir STATE_DIR
+      Read or write readiness evidence in this absolute directory. Default: the resolved
+      CQ proxy state directory.
+      Type: path. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: If present, nonempty canonical absolute directory; reject symlink
+      traversal.
+      Constraint: If omitted, use ResolveDefaultPaths().StateDir; this is not the
+      runtime resilience-state directory.
+  --timeout TIMEOUT
+      Maximum elapsed operation time, including preparation, requests and cleanup.
+      Default: 5m. Range: 30s..30m. Reserve the final 5s within this budget for cleanup;
+      interactive confirmation time is excluded.
+      Type: duration. Required: false. Repeatable: false.
+      Default: "5m".
+      Constraint: Go duration; 30s <= value <=30m.
+      Constraint: Reserve 5s within the configured timeout for cleanup; the main
+      exercise must stop no later than timeout minus 5s.
+      Constraint: Use one monotonic deadline from operation preparation through cleanup;
+      nested requests cannot extend it.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex proxy validate websocket --client-build 0.146.0 --client-executable /opt/homebrew/bin/codex
+      Exercise the selected installed executable without touching the live service.

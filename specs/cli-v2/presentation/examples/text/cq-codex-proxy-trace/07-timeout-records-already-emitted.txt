@@ -1,0 +1,3 @@
+Error · Trace reading timed out.
+  Code: trace_timeout
+  Command: cq codex proxy trace

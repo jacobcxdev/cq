@@ -2,23 +2,15 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
-	"os"
-	"path/filepath"
 	"reflect"
-	"runtime"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/alecthomas/kong"
 	"github.com/jacobcxdev/cq/internal/app"
-	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -30,6 +22,11 @@ func TestCacheTTL(t *testing.T) {
 		want  time.Duration
 	}{
 		{"empty string", "", 30 * time.Second},
+		{"plus", "+30", 30 * time.Second},
+		{"plus nondefault", "+31", 31 * time.Second},
+		{"whitespace", " 30", 30 * time.Second},
+		{"suffix", "30s", 30 * time.Second},
+		{"overflow", "9999999999999999999999999", 30 * time.Second},
 		{"valid 60", "60", 60 * time.Second},
 		{"valid 0", "0", 0},
 		{"negative clamped to 0", "-5", 0},
@@ -76,78 +73,6 @@ func TestAccountManager(t *testing.T) {
 	})
 }
 
-// --- GetActiveCredentials ---
-
-func TestGetActiveCredentials(t *testing.T) {
-	writeCredentials := func(t *testing.T, dir string, token, email string) {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o700); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		creds := keyring.ClaudeCredentials{
-			ClaudeAiOauth: &keyring.ClaudeOAuth{
-				AccessToken: token,
-				Email:       email,
-			},
-		}
-		data, err := json.MarshalIndent(creds, "", "  ")
-		if err != nil {
-			t.Fatalf("marshal: %v", err)
-		}
-		path := filepath.Join(dir, ".claude", ".credentials.json")
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
-
-	t.Run("valid credentials file returns token and email", func(t *testing.T) {
-		dir := t.TempDir()
-		t.Setenv("HOME", dir)
-		writeCredentials(t, dir, "mytoken123", "user@example.com")
-
-		tok, email := app.GetActiveCredentials()
-		if tok != "mytoken123" {
-			t.Errorf("token = %q, want mytoken123", tok)
-		}
-		if email != "user@example.com" {
-			t.Errorf("email = %q, want user@example.com", email)
-		}
-	})
-
-	t.Run("missing file returns empty strings", func(t *testing.T) {
-		dir := t.TempDir()
-		t.Setenv("HOME", dir)
-
-		tok, email := app.GetActiveCredentials()
-		if tok != "" {
-			t.Errorf("token = %q, want empty", tok)
-		}
-		if email != "" {
-			t.Errorf("email = %q, want empty", email)
-		}
-	})
-
-	t.Run("invalid JSON returns empty strings", func(t *testing.T) {
-		dir := t.TempDir()
-		t.Setenv("HOME", dir)
-		if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o700); err != nil {
-			t.Fatalf("mkdir: %v", err)
-		}
-		path := filepath.Join(dir, ".claude", ".credentials.json")
-		if err := os.WriteFile(path, []byte("not valid json {{{"), 0o600); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-
-		tok, email := app.GetActiveCredentials()
-		if tok != "" {
-			t.Errorf("token = %q, want empty", tok)
-		}
-		if email != "" {
-			t.Errorf("email = %q, want empty", email)
-		}
-	})
-}
-
 // --- isTerminal ---
 
 func TestIsTerminal(t *testing.T) {
@@ -160,179 +85,6 @@ func TestIsTerminal(t *testing.T) {
 }
 
 // --- dispatch ---
-
-func TestDispatchUnknownCommandReturnsError(t *testing.T) {
-	// We need a kong.Context whose Command() returns something not in the switch.
-	// Define a minimal CLI type with a single command that dispatch doesn't handle.
-	type unknownCLI struct {
-		Bogus struct{} `cmd:""`
-	}
-	var cli unknownCLI
-	// Parse "bogus" against our stub CLI to get a real *kong.Context.
-	kctx, err := kong.New(&cli,
-		kong.Writers(io.Discard, io.Discard),
-		kong.Exit(func(int) {}),
-	)
-	if err != nil {
-		t.Fatalf("kong.New: %v", err)
-	}
-	parsed, err := kctx.Parse([]string{"bogus"})
-	if err != nil {
-		t.Fatalf("kctx.Parse: %v", err)
-	}
-
-	// dispatch expects a *kong.Context; pass our real CLI as well (unused for
-	// the default branch).
-	var mainCLI CLI
-	dispatchErr := dispatch(parsed, &mainCLI)
-	if dispatchErr == nil {
-		t.Fatal("dispatch returned nil error for unknown command, want non-nil")
-	}
-}
-
-func TestDispatchCodexAccountsJSON(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	tempRoot := os.TempDir()
-	if runtime.GOOS == "darwin" {
-		tempRoot = "/private/tmp"
-	}
-	shortConfigDir, err := os.MkdirTemp(tempRoot, "cq-accounts-")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(shortConfigDir) })
-	t.Setenv("XDG_CONFIG_HOME", shortConfigDir)
-
-	for _, args := range [][]string{
-		{"codex", "accounts", "--json"},
-		{"--json", "codex", "accounts"},
-	} {
-		var cli CLI
-		kctx, err := kong.New(&cli,
-			kong.Writers(io.Discard, io.Discard),
-			kong.Exit(func(int) {}),
-		)
-		if err != nil {
-			t.Fatalf("kong.New: %v", err)
-		}
-		parsed, err := kctx.Parse(args)
-		if err != nil {
-			t.Fatalf("Parse(%v): %v", args, err)
-		}
-
-		reader, writer, err := os.Pipe()
-		if err != nil {
-			t.Fatal(err)
-		}
-		originalStdout := os.Stdout
-		os.Stdout = writer
-		dispatchErr := dispatch(parsed, &cli)
-		_ = writer.Close()
-		os.Stdout = originalStdout
-		output, readErr := io.ReadAll(reader)
-		_ = reader.Close()
-		if dispatchErr != nil {
-			t.Fatalf("dispatch(%v): %v", args, dispatchErr)
-		}
-		if readErr != nil {
-			t.Fatal(readErr)
-		}
-
-		var accounts []provider.Account
-		if err := json.Unmarshal(output, &accounts); err != nil {
-			t.Fatalf("dispatch(%v) output is not JSON: %v", args, err)
-		}
-		if accounts == nil || len(accounts) != 0 {
-			t.Fatalf("dispatch(%v) accounts = %#v, want []", args, accounts)
-		}
-	}
-}
-
-func TestCLIParsesRemoveCommands(t *testing.T) {
-	var cli CLI
-	kctx, err := kong.New(&cli,
-		kong.Writers(io.Discard, io.Discard),
-		kong.Exit(func(int) {}),
-	)
-	if err != nil {
-		t.Fatalf("kong.New: %v", err)
-	}
-
-	tests := []struct {
-		name string
-		args []string
-		want string
-	}{
-		{name: "claude remove", args: []string{"claude", "remove", "user@example.com"}, want: "claude remove <email>"},
-		{name: "codex remove", args: []string{"codex", "remove", "user@example.com"}, want: "codex remove <email>"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			parsed, err := kctx.Parse(tt.args)
-			if err != nil {
-				t.Fatalf("Parse(%v): %v", tt.args, err)
-			}
-			if got := parsed.Command(); got != tt.want {
-				t.Fatalf("Command() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestCLIParsesProxyCodexDefault(t *testing.T) {
-	tests := []struct {
-		name          string
-		args          []string
-		wantClear     bool
-		wantReference string
-	}{
-		{name: "status", args: []string{"proxy", "default", "codex"}},
-		{name: "clear", args: []string{"proxy", "default", "codex", "--clear"}, wantClear: true},
-		{name: "reference", args: []string{"proxy", "default", "codex", "person@example.test"}, wantReference: "person@example.test"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var cli CLI
-			kctx, err := kong.New(&cli,
-				kong.Writers(io.Discard, io.Discard),
-				kong.Exit(func(int) {}),
-			)
-			if err != nil {
-				t.Fatalf("kong.New: %v", err)
-			}
-
-			parsed, err := kctx.Parse(tt.args)
-			if err != nil {
-				t.Fatalf("Parse(%v): %v", tt.args, err)
-			}
-			if got := parsed.Command(); !strings.HasPrefix(got, "proxy default codex") ||
-				(tt.wantReference != "" && !strings.Contains(got, "<account-reference>")) {
-				t.Fatalf("Command() = %q, want proxy default codex command for %q", got, tt.wantReference)
-			}
-			if cli.Proxy.Default.Codex.Clear != tt.wantClear {
-				t.Fatalf("Clear = %t, want %t", cli.Proxy.Default.Codex.Clear, tt.wantClear)
-			}
-			if cli.Proxy.Default.Codex.Reference != tt.wantReference {
-				t.Fatalf("Reference = %q, want %q", cli.Proxy.Default.Codex.Reference, tt.wantReference)
-			}
-		})
-	}
-
-	var cli CLI
-	kctx, err := kong.New(&cli,
-		kong.Writers(io.Discard, io.Discard),
-		kong.Exit(func(int) {}),
-	)
-	if err != nil {
-		t.Fatalf("kong.New: %v", err)
-	}
-
-	if _, err := kctx.Parse([]string{"proxy", "codex-default"}); err == nil {
-		t.Fatal("Parse(proxy codex-default) error = nil, want unknown command")
-	}
-}
 
 func TestParseProxyCommandOptionsPort(t *testing.T) {
 	opts, err := parseProxyCommandOptions([]string{"--port", "19281", "--migrate-legacy-managed"})
@@ -349,7 +101,11 @@ func TestParseProxyCommandOptionsPort(t *testing.T) {
 
 func TestRunProxyStartAvoidsDirectClaudeStorageCalls(t *testing.T) {
 	file := parseGoFile(t, "proxy.go")
-	body := findFuncBody(t, file, "runProxyStart")
+	wrapper := findFuncBody(t, file, "runProxyStart")
+	if !hasIdentifier(wrapper, "runProxyStartWithContext") {
+		t.Fatal("legacy startup must delegate to the shared implementation")
+	}
+	body := findFuncBody(t, file, "runProxyStartWithContext")
 
 	if hasQualifiedSelector(body, "keyring", "DiscoverClaudeAccounts") {
 		t.Fatal("runProxyStart should not call keyring.DiscoverClaudeAccounts directly")
@@ -383,7 +139,11 @@ func TestListProxyCodexStartupInventoryPreservesCandidates(t *testing.T) {
 
 func TestRunProxyStartDoesNotReachCodexCredentialMutators(t *testing.T) {
 	file := parseGoFile(t, "proxy.go")
-	body := findFuncBody(t, file, "runProxyStart")
+	wrapper := findFuncBody(t, file, "runProxyStart")
+	if !hasIdentifier(wrapper, "runProxyStartWithContext") {
+		t.Fatal("legacy startup must delegate to the shared implementation")
+	}
+	body := findFuncBody(t, file, "runProxyStartWithContext")
 
 	for _, selector := range codexCredentialMutationSelectors(body) {
 		t.Errorf("runProxyStart must not reference Codex credential mutation selector %s", selector)
@@ -395,7 +155,11 @@ func TestRunProxyStartDoesNotReachCodexCredentialMutators(t *testing.T) {
 
 func TestRunProxyStartDoesNotLogLocalToken(t *testing.T) {
 	file := parseGoFile(t, "proxy.go")
-	body := findFuncBody(t, file, "runProxyStart")
+	wrapper := findFuncBody(t, file, "runProxyStart")
+	if !hasIdentifier(wrapper, "runProxyStartWithContext") {
+		t.Fatal("legacy startup must delegate to the shared implementation")
+	}
+	body := findFuncBody(t, file, "runProxyStartWithContext")
 
 	if hasQualifiedSelector(body, "cfg", "LocalToken") || hasStringLiteral(body, "cq: proxy token: %s\n") {
 		t.Fatal("runProxyStart must not print the local proxy token")

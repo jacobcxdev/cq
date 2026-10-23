@@ -300,6 +300,21 @@ func TestCodexSource_PreservesRawJSON(t *testing.T) {
 	}
 }
 
+func TestModelSourcePriorityPresence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"models":[{"slug":"known","priority":0},{"slug":"unknown"},{"slug":"ranked","priority":-1}]}`))
+	}))
+	defer server.Close()
+	source := CodexSource{Client: server.Client(), BaseURL: server.URL, Token: func(context.Context) (string, error) { return "fixture", nil }}
+	result, err := source.Fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Entries) != 3 || !result.Entries[0].PriorityKnown || result.Entries[1].PriorityKnown || !result.Entries[2].PriorityKnown {
+		t.Fatalf("field presence lost: %+v", result.Entries)
+	}
+}
+
 func TestCodexSourceResolvesClientVersionOnEveryFetch(t *testing.T) {
 	version := "0.158.0"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

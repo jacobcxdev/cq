@@ -1,0 +1,5 @@
+Codex Dots · install
+  Installed: Yes
+  Native catalogue: Ready
+  System app modified: No
+  Profiles: 2

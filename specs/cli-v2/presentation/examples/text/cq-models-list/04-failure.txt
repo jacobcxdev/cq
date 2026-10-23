@@ -1,0 +1,3 @@
+Error · Cannot access model registry state: invalid local registry data.
+  Code: models_store_failed
+  Command: cq models list

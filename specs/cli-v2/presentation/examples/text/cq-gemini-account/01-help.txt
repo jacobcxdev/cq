@@ -1,0 +1,25 @@
+cq gemini account
+Show the single externally managed Gemini account.
+
+Usage
+  cq gemini account <COMMAND> [OPTIONS]
+
+Gemini credentials are managed externally. CQ does not add, activate or
+remove Gemini accounts.
+
+Commands
+  show   Show the externally managed Gemini account.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help gemini   Gemini commands.
+
+Examples
+  Inspect the discovered account
+  cq gemini account show

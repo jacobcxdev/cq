@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -53,18 +54,18 @@ type DefaultPaths struct {
 }
 
 func PathsForRoots(roots userdirs.Roots) DefaultPaths {
-	return DefaultPaths{
-		ConfigFile:      filepath.Join(roots.Config, "proxy.json"),
-		RescueBootstrap: filepath.Join(roots.State, proxyRescueBootstrapName),
-		StateDir:        roots.State,
-		CacheDir:        roots.Cache,
-		RuntimeDir:      roots.Runtime,
-		LogsDir:         roots.Logs,
+	paths := DefaultPaths{StateDir: roots.State, CacheDir: roots.Cache, RuntimeDir: roots.Runtime, LogsDir: roots.Logs}
+	if roots.Config != "" {
+		paths.ConfigFile = filepath.Join(roots.Config, "proxy.json")
 	}
+	if roots.State != "" {
+		paths.RescueBootstrap = filepath.Join(roots.State, proxyRescueBootstrapName)
+	}
+	return paths
 }
 
-func ResolveDefaultPaths() (DefaultPaths, error) {
-	roots, err := userdirs.Default()
+func ResolveDefaultPaths(wanted ...userdirs.Root) (DefaultPaths, error) {
+	roots, err := userdirs.Default(wanted...)
 	if err != nil {
 		return DefaultPaths{}, fmt.Errorf("resolve CQ proxy paths: %w", err)
 	}
@@ -219,16 +220,26 @@ func (c *Config) setDefaults() {
 	}
 }
 
+// ErrLocalTokenRequired identifies absent caller authority without exposing credentials.
+var ErrLocalTokenRequired = errors.New("local_token is required")
+
 func (c *Config) validate() error {
 	if c.LocalToken == "" {
-		return fmt.Errorf("local_token is required")
+		return ErrLocalTokenRequired
 	}
-	if _, err := url.Parse(c.ClaudeUpstream); err != nil {
-		return fmt.Errorf("invalid claude_upstream URL: %w", err)
+	for _, upstream := range []struct{ name, value string }{{"claude_upstream", c.ClaudeUpstream}, {"codex_upstream", c.CodexUpstream}} {
+		u, err := url.Parse(upstream.value)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.Opaque != "" {
+			return fmt.Errorf("invalid %s URL: must use HTTP or HTTPS with a host", upstream.name)
+		}
+		if port := u.Port(); port != "" {
+			n, err := strconv.Atoi(port)
+			if err != nil || n < 1 || n > 65535 {
+				return fmt.Errorf("invalid %s URL: port must be between 1 and 65535", upstream.name)
+			}
+		}
 	}
-	if _, err := url.Parse(c.CodexUpstream); err != nil {
-		return fmt.Errorf("invalid codex_upstream URL: %w", err)
-	}
+
 	switch c.HeadroomMode {
 	case "", "token", "cache":
 		// valid
@@ -245,13 +256,13 @@ func (c *Config) validate() error {
 		return fmt.Errorf("invalid codex_lease_retention_days %d: must be between 1 and 365", c.CodexLeaseRetentionDays)
 	}
 	if c.CodexContinuityStateDir != "" {
-		if !fsutil.IsCleanAbsoluteNonRootPath(c.CodexContinuityStateDir) {
-			return fmt.Errorf("invalid codex_continuity_state_dir %q: must be a clean absolute non-root path", c.CodexContinuityStateDir)
+		if !fsutil.IsCleanAbsoluteNonRootPath(c.CodexContinuityStateDir) || strings.IndexByte(c.CodexContinuityStateDir, 0) >= 0 {
+			return fmt.Errorf("invalid codex_continuity_state_dir: must be a clean absolute non-root path")
 		}
 	}
 	if c.ProxyResilienceStateDir != "" {
-		if !fsutil.IsCleanAbsoluteNonRootPath(c.ProxyResilienceStateDir) {
-			return fmt.Errorf("invalid proxy_resilience_state_dir %q: must be a clean absolute non-root path", c.ProxyResilienceStateDir)
+		if !fsutil.IsCleanAbsoluteNonRootPath(c.ProxyResilienceStateDir) || strings.IndexByte(c.ProxyResilienceStateDir, 0) >= 0 {
+			return fmt.Errorf("invalid proxy_resilience_state_dir: must be a clean absolute non-root path")
 		}
 	}
 	seenRoutingAccounts := make(map[codex.AccountKey]bool, len(c.CodexRoutingAccountKeys))
@@ -274,7 +285,7 @@ func (c *Config) validate() error {
 
 // LoadConfig reads proxy config from disk, generating defaults on first run.
 func LoadConfig() (*Config, error) {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.ConfigRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -287,39 +298,54 @@ func LoadConfig() (*Config, error) {
 
 // LoadExistingConfig reads proxy config without creating state when absent.
 func LoadExistingConfig() (*Config, error) {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.ConfigRoot)
 	if err != nil {
 		return nil, err
 	}
+	return LoadExistingConfigAt(paths)
+}
+
+// LoadExistingConfigAt reads the captured configuration path without creating it.
+func LoadExistingConfigAt(paths DefaultPaths) (*Config, error) {
 	return loadConfigFile(paths.ConfigFile)
 }
 
 // LoadProxyRescueBootstrapConfig reads only authority needed to keep rescue
 // control available when normal proxy configuration cannot be loaded.
 func LoadProxyRescueBootstrapConfig() (*ProxyRescueBootstrapConfig, error) {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.ConfigRoot, userdirs.StateRoot)
 	if err != nil {
 		return nil, err
 	}
+	return loadProxyRescueBootstrapConfigAt(paths, validateProxyRescueBootstrap)
+}
+
+// LoadCanonicalProxyRescueBootstrapConfigAt reads captured authority paths without
+// changing the legacy bootstrap validation or persisting canonical defaults.
+func LoadCanonicalProxyRescueBootstrapConfigAt(paths DefaultPaths) (*ProxyRescueBootstrapConfig, error) {
+	return loadProxyRescueBootstrapConfigAt(paths, validateCanonicalProxyRescueBootstrap)
+}
+
+func loadProxyRescueBootstrapConfigAt(paths DefaultPaths, validate func(*ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error)) (*ProxyRescueBootstrapConfig, error) {
 	data, err := os.ReadFile(paths.RescueBootstrap)
 	if errors.Is(err, os.ErrNotExist) {
-		return loadProxyRescueBootstrapFromNormalConfig(paths.ConfigFile)
+		return loadProxyRescueBootstrapFromNormalConfigWithValidation(paths.ConfigFile, validate)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read proxy rescue bootstrap: %w", err)
 	}
-	bootstrap, decodeErr := decodeProxyRescueBootstrap(data)
+	bootstrap, decodeErr := decodeProxyRescueBootstrapWithValidation(data, validate)
 	if decodeErr == nil {
 		return bootstrap, nil
 	}
-	fallback, fallbackErr := loadProxyRescueBootstrapFromNormalConfig(paths.ConfigFile)
+	fallback, fallbackErr := loadProxyRescueBootstrapFromNormalConfigWithValidation(paths.ConfigFile, validate)
 	if fallbackErr == nil {
 		return fallback, nil
 	}
 	return nil, errors.Join(decodeErr, fallbackErr)
 }
 
-func loadProxyRescueBootstrapFromNormalConfig(configPath string) (*ProxyRescueBootstrapConfig, error) {
+func loadProxyRescueBootstrapFromNormalConfigWithValidation(configPath string, validate func(*ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error)) (*ProxyRescueBootstrapConfig, error) {
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("read proxy config: %w", err)
@@ -335,7 +361,7 @@ func loadProxyRescueBootstrapFromNormalConfig(configPath string) (*ProxyRescueBo
 	if minimal.Port == 0 {
 		minimal.Port = DefaultPort
 	}
-	return validateProxyRescueBootstrap(&ProxyRescueBootstrapConfig{
+	return validate(&ProxyRescueBootstrapConfig{
 		SchemaVersion: 1,
 		LocalToken:    minimal.LocalToken,
 		StateRoot:     minimal.ProxyResilienceStateDir,
@@ -344,6 +370,10 @@ func loadProxyRescueBootstrapFromNormalConfig(configPath string) (*ProxyRescueBo
 }
 
 func decodeProxyRescueBootstrap(data []byte) (*ProxyRescueBootstrapConfig, error) {
+	return decodeProxyRescueBootstrapWithValidation(data, validateProxyRescueBootstrap)
+}
+
+func decodeProxyRescueBootstrapWithValidation(data []byte, validate func(*ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error)) (*ProxyRescueBootstrapConfig, error) {
 	if len(data) > proxyRescueBootstrapMax {
 		return nil, errors.New("proxy rescue bootstrap exceeds size limit")
 	}
@@ -356,7 +386,7 @@ func decodeProxyRescueBootstrap(data []byte) (*ProxyRescueBootstrapConfig, error
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, errors.New("parse proxy rescue bootstrap: trailing value")
 	}
-	return validateProxyRescueBootstrap(&bootstrap)
+	return validate(&bootstrap)
 }
 
 func validateProxyRescueBootstrap(bootstrap *ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error) {
@@ -368,6 +398,28 @@ func validateProxyRescueBootstrap(bootstrap *ProxyRescueBootstrapConfig) (*Proxy
 		return nil, errors.New("proxy rescue bootstrap state root invalid")
 	}
 	return bootstrap, nil
+}
+
+func validateCanonicalProxyRescueBootstrap(bootstrap *ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error) {
+	if bootstrap == nil {
+		return validateProxyRescueBootstrap(nil)
+	}
+	candidate := *bootstrap
+	if candidate.Port == 0 {
+		candidate.Port = DefaultPort
+	}
+	// Validate the authority shape before classifying missing authentication.
+	if candidate.SchemaVersion != 1 || candidate.Port < 1 || candidate.Port > 65535 {
+		return nil, errors.New("proxy rescue bootstrap invalid")
+	}
+	clean := filepath.Clean(candidate.StateRoot)
+	if candidate.StateRoot == "" || !filepath.IsAbs(candidate.StateRoot) || clean != candidate.StateRoot || clean == string(filepath.Separator) {
+		return nil, errors.New("proxy rescue bootstrap state root invalid")
+	}
+	if candidate.LocalToken == "" {
+		return nil, ErrLocalTokenRequired
+	}
+	return &candidate, nil
 }
 
 func loadConfigFile(path string) (*Config, error) {
@@ -419,24 +471,43 @@ func SaveConfig(cfg *Config) error {
 	if cfg == nil {
 		return fmt.Errorf("proxy config is nil")
 	}
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.ConfigRoot, userdirs.StateRoot)
 	if err != nil {
 		return err
+	}
+	return SaveConfigAt(paths, cfg)
+}
+
+// SaveConfigAt persists through captured paths, including rescue bootstrap state.
+// ConfigSaveResult records completed config publication even when subsequent
+// rescue-bootstrap persistence fails. An empty result on error is not a
+// guarantee that an earlier write had no effects.
+type ConfigSaveResult struct{ Published bool }
+
+func SaveConfigAt(paths DefaultPaths, cfg *Config) error {
+	_, err := SaveConfigAtWithResult(paths, cfg)
+	return err
+}
+
+func SaveConfigAtWithResult(paths DefaultPaths, cfg *Config) (result ConfigSaveResult, returnErr error) {
+	if cfg == nil {
+		return result, fmt.Errorf("proxy config is nil")
 	}
 	saved := *cfg
 	saved.setDefaults()
 	if err := saved.validate(); err != nil {
-		return err
+		return result, err
 	}
 	if err := saveConfig(paths.ConfigFile, &saved); err != nil {
-		return err
+		return result, err
 	}
+	result.Published = true
 	bootstrapPath := paths.RescueBootstrap
 	if saved.ProxyResilienceStateDir == "" {
 		if err := os.Remove(bootstrapPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("remove proxy rescue bootstrap: %w", err)
+			return result, fmt.Errorf("remove proxy rescue bootstrap: %w", err)
 		}
-		return nil
+		return result, nil
 	}
 	bootstrap, err := json.Marshal(ProxyRescueBootstrapConfig{
 		SchemaVersion: 1,
@@ -445,12 +516,12 @@ func SaveConfig(cfg *Config) error {
 		Port:          saved.Port,
 	})
 	if err != nil {
-		return fmt.Errorf("marshal proxy rescue bootstrap: %w", err)
+		return result, fmt.Errorf("marshal proxy rescue bootstrap: %w", err)
 	}
 	if err := fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, bootstrapPath, bootstrap); err != nil {
-		return fmt.Errorf("write proxy rescue bootstrap: %w", err)
+		return result, fmt.Errorf("write proxy rescue bootstrap: %w", err)
 	}
-	return nil
+	return result, nil
 }
 
 func saveConfig(path string, cfg *Config) error {

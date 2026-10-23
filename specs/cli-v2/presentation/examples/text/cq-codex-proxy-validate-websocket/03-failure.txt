@@ -1,0 +1,3 @@
+Error · The Codex executable does not match --client-build.
+  Code: validation_build_mismatch
+  Command: cq codex proxy validate websocket

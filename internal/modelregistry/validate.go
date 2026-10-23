@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 // ValidateSnapshot returns an error if snap contains the same non-empty model
@@ -59,5 +61,28 @@ func ValidateSnapshot(snap Snapshot) error {
 	for i, c := range conflicts {
 		parts[i] = fmt.Sprintf("%s (%s)", c.id, strings.Join(c.providers, ", "))
 	}
-	return fmt.Errorf("model registry contains duplicate model IDs across providers: %s", strings.Join(parts, "; "))
+	return &ConflictError{Detail: strings.Join(parts, "; "), ID: conflicts[0].id, Providers: conflicts[0].providers}
+}
+
+// ValidateModelID checks an exact CLI/storage identity without normalising it.
+func ValidateModelID(id string) error {
+	if id == "" || !utf8.ValidString(id) || strings.TrimSpace(id) != id {
+		return fmt.Errorf("invalid model ID")
+	}
+	for _, r := range id {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("invalid model ID")
+		}
+	}
+	return nil
+}
+
+type ConflictError struct {
+	Detail    string   `json:"-"`
+	ID        string   `json:"id"`
+	Providers []string `json:"providers"`
+}
+
+func (e *ConflictError) Error() string {
+	return "model registry contains duplicate model IDs across providers: " + e.Detail
 }

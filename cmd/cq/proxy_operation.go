@@ -10,11 +10,12 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 var inspectOperatorOperation = defaultInspectOperatorOperation
 var inspectCandidateReceipt = func(ctx context.Context, root, attemptID string) (proxy.CandidateReceiptInspectionV1, error) {
-	return proxy.InspectCandidateReceiptState(ctx, fsutil.OSFileSystem{}, root, attemptID)
+	return lookupCandidateReceipt(ctx, fsutil.OSFileSystem{}, root, attemptID)
 }
 
 type operatorOperationEnvelopeV1 struct {
@@ -38,7 +39,15 @@ type operatorOperationResultV1 struct {
 }
 
 func defaultInspectOperatorOperation(ctx context.Context, operationID, _ string) (proxy.OperationCoordinatorInspectionV1, error) {
-	cfg, err := proxy.LoadExistingConfig()
+	paths, err := proxy.ResolveDefaultPaths(userdirs.ConfigRoot)
+	if err != nil {
+		return proxy.OperationCoordinatorInspectionV1{}, err
+	}
+	return inspectOperatorOperationAt(ctx, operationID, paths)
+}
+
+func inspectOperatorOperationAt(ctx context.Context, operationID string, paths proxy.DefaultPaths) (proxy.OperationCoordinatorInspectionV1, error) {
+	cfg, err := proxy.LoadExistingConfigAt(paths)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return proxy.OperationCoordinatorInspectionV1{}, nil
@@ -128,4 +137,15 @@ func runCandidateReceiptLookup(ctx context.Context, output io.Writer, arguments 
 	}
 	_, err := fmt.Fprintf(output, "candidate receipt: %s\nstate: %s\n", arguments.AttemptID, state)
 	return exitCode, err
+}
+
+// lookupCandidateReceipt returns typed authenticated state, without rendering,
+// locking, repairing, or selecting another attempt.
+func lookupCandidateReceipt(ctx context.Context, fsys fsutil.FileSystem, root, attemptID string) (proxy.CandidateReceiptInspectionV1, error) {
+	result, err := proxy.InspectCandidateReceiptState(ctx, fsys, root, attemptID)
+	var pathErr *os.PathError
+	if err != nil && ctx.Err() == nil && !errors.As(err, &pathErr) && !errors.Is(err, fsutil.ErrSecureCapabilityUnavailable) {
+		return result, errors.Join(proxy.ErrCandidateLifecycleInvalid, err)
+	}
+	return result, err
 }

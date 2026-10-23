@@ -82,7 +82,7 @@ func TestProxyCodexHookForwardsOnlyCorrelationAndWritesExactReceipt(t *testing.T
 	if len(outbound) != 2 || outbound["session_id"] != "session-1" || outbound["turn_id"] != "turn-2" {
 		t.Fatalf("outbound = %#v", outbound)
 	}
-	want := "{\"systemMessage\":\"CQ route: completed via WebSocket; pool protected; account codex:0123456789ab (actual); Sol/High; warm affinity. Shadow: no-affinity comparison favoured account codex:abcdef123456.\"}\n"
+	want := "{\"systemMessage\":\"CQ route: completed via WebSocket; pool \\\"protected\\\"; account codex:0123456789ab (actual); Sol/High; warm affinity. Shadow: no-affinity comparison favoured account codex:abcdef123456.\"}\n"
 	if got := output.String(); got != want {
 		t.Fatalf("output = %q, want %q", got, want)
 	}

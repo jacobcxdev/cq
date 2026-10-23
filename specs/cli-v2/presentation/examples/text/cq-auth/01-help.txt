@@ -1,0 +1,24 @@
+cq auth
+Refresh stored provider authentication credentials.
+
+Usage
+  cq auth <COMMAND> [OPTIONS]
+
+Commands
+  refresh   Refresh eligible stored Claude and Codex OAuth credentials.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq claude account   Add, inspect, select and remove Claude accounts.
+  cq codex account    Add, inspect, select and remove Codex accounts.
+  cq gemini account   Inspect the externally managed Gemini account.
+
+Examples
+  Inspect refresh scope and options
+  cq auth refresh --help

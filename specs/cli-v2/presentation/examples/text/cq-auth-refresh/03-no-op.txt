@@ -1,0 +1,9 @@
+Authentication refresh
+  Provider  Refreshed  Unchanged  Need login  Failed
+  Codex             0          1           0       0
+
+  alex@example.test · Unchanged · Expiry unknown
+    Reference: account-alex
+    Credentials: Unchanged
+
+No credentials needed refreshing.

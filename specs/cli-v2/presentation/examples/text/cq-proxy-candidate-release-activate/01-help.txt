@@ -1,0 +1,45 @@
+cq proxy candidate release activate
+Activate the target release inside an isolated candidate.
+
+Usage
+  cq proxy candidate release activate --state-dir STATE_DIR --release-digest DIGEST
+    --validation-run-id RUN_ID --confirm-artifact-switch [OPTIONS]
+
+Unavailable in this build.
+Syntax is validated, then exit 4 before state access. No transition, receipt or evidence is created.
+
+Options
+  --state-dir STATE_DIR
+      Required existing candidate directory from prepare. Absolute, clean, non-root,
+      current-user-owned; no symlink; parent owner-controlled. Never defaults to shared state.
+  --release-digest DIGEST
+      Required verified target bundle digest from prepare; exactly 64 lowercase hex characters.
+      Must match the prepared target, not the bundle file hash.
+  --validation-run-id VALIDATION_RUN_ID
+      Required exact stored run identifier: 64 lowercase hexadecimal characters.
+      Obtain from prepare or status; this is an identifier, not a file hash.
+  --confirm-artifact-switch
+      Required; must be true. Authorise replacement of this candidate runtime only.
+  --timeout DURATION
+      Total budget including cleanup. Default: 90s; Go duration 90s–2m inclusive.
+      Reserve final 30s within this budget for cleanup.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq proxy candidate status
+
+Examples
+  Demonstrate the unavailable result with syntactically valid inputs:
+  cq proxy candidate release activate \
+  --state-dir /Users/alex/cq-candidate-29280 \
+  --release-digest abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd \
+  --validation-run-id 1234567812345678123456781234567812345678123456781234567812345678 \
+    --confirm-artifact-switch

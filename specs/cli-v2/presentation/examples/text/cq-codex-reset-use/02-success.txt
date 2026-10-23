@@ -1,0 +1,12 @@
+Codex reset · Completed
+  Account        account-alex
+  Credit         credit-september-01
+  Windows reset  1
+
+  7d
+    Remaining before  5%
+    Remaining after   100%
+    Reset before      in 2d 18h · 26 Sep 2026, 10:30 BST (UTC+01:00)
+    Reset after       in 2d 18h · 26 Sep 2026, 10:30 BST (UTC+01:00)
+    Period before     7d
+    Period after      7d

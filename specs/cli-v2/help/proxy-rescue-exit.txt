@@ -1,0 +1,52 @@
+Request return to normal proxy traffic.
+
+Usage: cq proxy rescue exit [OPTIONS]
+
+Rescue is a supervisor-wide fallback mode; its control affects the shared listener, not
+only Codex.
+
+Transitions may still be draining when this command returns. Inspect status to
+distinguish normal, rescue_draining, rescue and rescue_exit_draining.
+
+Options:
+  --port PORT
+      Loopback control port. Default: the configured rescue bootstrap port, or 19280
+      when its value is zero.
+      Type: integer. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Integer 1..65535; omission resolves existing bootstrap configuration
+      without creating it.
+  --timeout TIMEOUT
+      Maximum elapsed operation time, including preparation, requests and cleanup.
+      Default: 30s. Range: 1s..5m. Interactive confirmation time is excluded.
+      Type: duration. Required: false. Repeatable: false.
+      Default: "30s".
+      Constraint: Go duration, 1s <= value <= 5m.
+      Constraint: Use one monotonic deadline from operation preparation through cleanup;
+      nested requests cannot extend it.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq proxy rescue exit
+      Ask the configured proxy to resume normal traffic.

@@ -1,0 +1,3 @@
+Error · The installed candidate service is unavailable.
+  Code: validation_candidate_unavailable
+  Command: cq codex proxy validate http

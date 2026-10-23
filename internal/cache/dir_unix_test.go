@@ -5,7 +5,6 @@ package cache
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -22,14 +21,10 @@ func TestDefaultDir(t *testing.T) {
 		}
 	})
 
-	t.Run("XDG_CACHE_HOME relative path falls through", func(t *testing.T) {
+	t.Run("relative XDG fails", func(t *testing.T) {
 		t.Setenv("XDG_CACHE_HOME", "./relative")
-		got, err := DefaultDir()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Contains(got, "relative") {
-			t.Errorf("relative XDG path should be ignored, got %q", got)
+		if _, err := DefaultDir(); err == nil {
+			t.Fatal("relative XDG accepted")
 		}
 	})
 
@@ -53,4 +48,21 @@ func TestDefaultDir(t *testing.T) {
 			}
 		}
 	})
+}
+func TestCacheUserDirsOnlyUsesCacheInputs(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "absent")
+	t.Setenv("XDG_CACHE_HOME", dir)
+	t.Setenv("XDG_CONFIG_HOME", "invalid-unused")
+	t.Setenv("HOME", "")
+	got, err := DefaultDir()
+	if err != nil || got != filepath.Join(dir, "cq") {
+		t.Fatalf("dir %q, %v", got, err)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("lookup created directories: %v", err)
+	}
+	t.Setenv("XDG_CACHE_HOME", "relative-private")
+	if _, err := DefaultDir(); err == nil {
+		t.Fatal("invalid cache accepted")
+	}
 }

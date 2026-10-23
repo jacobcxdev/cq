@@ -1,0 +1,4 @@
+Codex login · Partial
+  Credentials: Saved
+  Account: alex@example.test
+  Native default: Unknown

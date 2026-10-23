@@ -1,0 +1,4 @@
+Error · Native clone source codex/missing-code was not found;
+  run cq models refresh and cq models list --provider codex.
+  Code: models_clone_not_found
+  Command: cq models overlay add

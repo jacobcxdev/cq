@@ -1,0 +1,72 @@
+Show one session-to-pool binding.
+
+Usage: cq codex proxy session show [OPTIONS]
+
+Use exactly one selector: raw --session-id, exact bytes on --session-id-stdin, or a full
+keyed --digest. Session identifiers are not printed in normal output; bindings expose
+only keyed digests.
+
+Options:
+  --session-id SESSION_ID
+      Exact raw session identifier. Use exactly one session selector; prefer --session-
+      id-stdin to avoid placing the identifier in shell history.
+      Type: string. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: UTF-8 encoded input must contain 1–4096 bytes; preserve exact bytes.
+      Constraint: Mutually exclusive with --session-id-stdin and --digest.
+  --session-id-stdin
+      Read the exact UTF-8 session identifier from stdin, 1–4096 bytes. No newline is
+      removed; use printf rather than echo.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Input must be valid UTF-8 containing 1–4096 bytes when true.
+      Constraint: Mutually exclusive with --session-id and --digest.
+  --digest DIGEST
+      Existing full keyed session digest; exactly 64 lowercase hexadecimal characters.
+      Obtain it with cq codex proxy session digest.
+      Type: digest. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: 64 lowercase hexadecimal characters.
+      Constraint: Mutually exclusive with --session-id and --session-id-stdin.
+  --port PORT
+      Connect to the authenticated loopback proxy on this port (1–65535). If omitted,
+      use the existing proxy configuration port, or 19280 when that field is unset.
+      Type: integer. Required: false. Repeatable: false.
+      Default: null.
+      When omitted: configured port, otherwise 19280
+      Constraint: Integer 1–65535.
+      Constraint: No configuration file is created to resolve omission.
+  --timeout TIMEOUT
+      Maximum elapsed time for this command, including local preparation and control
+      requests; default 10s.
+      Type: duration. Required: false. Repeatable: false.
+      Default: "10s".
+      Constraint: Positive Go duration.
+      Constraint: Expiry returns exit 7; a timed-out mutation may already have
+      committed, so inspect state before retrying.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex proxy session show --session-id example-session
+      Uses a literal example session; bind needs prepared work pool.

@@ -1,0 +1,3 @@
+Error · Authentication is required for the selected providers.
+  Code: check_authentication
+  Command: cq check

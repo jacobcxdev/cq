@@ -1,0 +1,3 @@
+Error · No Codex canary is recorded.
+  Code: canary_missing
+  Command: cq codex proxy canary status

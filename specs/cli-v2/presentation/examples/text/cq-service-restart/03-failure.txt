@@ -1,0 +1,3 @@
+Error · Service component token-refresh is unhealthy.
+  Code: service_unhealthy
+  Command: cq service restart

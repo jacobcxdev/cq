@@ -1,0 +1,22 @@
+cq gemini
+Inspect the externally managed Gemini account.
+
+Usage
+  cq gemini <COMMAND> [OPTIONS]
+
+Commands
+  account   Show the single externally managed Gemini account.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help   All commands.
+
+Examples
+  Inspect Gemini account discovery
+  cq gemini account show

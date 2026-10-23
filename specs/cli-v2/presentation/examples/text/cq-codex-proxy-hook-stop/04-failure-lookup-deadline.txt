@@ -1,0 +1,3 @@
+Error · The Codex turn receipt lookup timed out.
+  Code: hook_timeout
+  Command: cq codex proxy hook stop

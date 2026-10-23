@@ -1,0 +1,35 @@
+cq proxy candidate
+Manage isolated candidate state and inspect release evidence.
+
+Usage
+  cq proxy candidate <COMMAND> [OPTIONS]
+
+A candidate has isolated runtime state for evaluating a release.
+Client-safety refresh and release transitions are currently unavailable.
+
+Commands
+  client-safety   Client-isolation measurements; currently unavailable.
+  prepare         Prepare an isolated release candidate without starting it.
+  receipt         Inspect a retained candidate attempt receipt.
+  release         Release activation and qualification; unavailable.
+  remove          Delete stopped candidate state and retained receipts.
+  start           Start the exact release bound to an isolated candidate.
+  status          Show retained state for one isolated candidate.
+  stop            Stop a candidate after its client has stopped.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help proxy   Shared proxy commands.
+
+Examples
+  Inspect candidate-selection arguments
+  cq proxy candidate status --help
+
+  Inspect retained receipt lookup
+  cq proxy candidate receipt show --help

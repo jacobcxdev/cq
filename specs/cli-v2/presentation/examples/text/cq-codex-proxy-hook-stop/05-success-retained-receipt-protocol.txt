@@ -1,0 +1,1 @@
+{"systemMessage":"CQ route: completed via WebSocket; account codex:0123456789ab (actual); Sol/High; warm affinity. Shadow: no-affinity comparison agreed."}

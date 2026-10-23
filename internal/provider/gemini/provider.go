@@ -49,8 +49,14 @@ func newProvider(client httputil.Doer, fsys fsutil.FileSystem, reader credential
 
 // DiscoverAccounts reports the externally managed Antigravity identity when
 // its Keychain entry is present. It does not parse credentials or use network.
-func (p *Provider) DiscoverAccounts(_ context.Context) ([]provider.Account, error) {
+func (p *Provider) DiscoverAccounts(ctx context.Context) ([]provider.Account, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	_, err := p.credentials.Get(antigravityKeychainService, antigravityKeychainAccount)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
 	if err != nil {
 		if isCredentialNotFound(err) {
 			return nil, nil

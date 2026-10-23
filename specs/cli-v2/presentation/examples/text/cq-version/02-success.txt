@@ -1,0 +1,4 @@
+CQ 1.0.0
+  Revision    0123456789abcdef0123456789abcdef01234567
+  Source      Clean
+  CLI schema  2

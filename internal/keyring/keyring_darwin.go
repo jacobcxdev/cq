@@ -3,15 +3,21 @@
 package keyring
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 )
 
 // discoverPlatformKeychain discovers existing Claude Code keychain entries on macOS.
 func discoverPlatformKeychain(seen map[string]bool) []ClaudeOAuth {
+	return discoverPlatformKeychainContext(context.Background(), seen)
+}
+func discoverPlatformKeychainContext(ctx context.Context, seen map[string]bool) []ClaudeOAuth {
 	var accounts []ClaudeOAuth
 
 	services := []string{"Claude Code-credentials"}
@@ -20,7 +26,7 @@ func discoverPlatformKeychain(seen map[string]bool) []ClaudeOAuth {
 	}
 
 	for _, service := range services {
-		out, err := exec.Command("security", "find-generic-password",
+		out, err := exec.CommandContext(ctx, "security", "find-generic-password",
 			"-s", service, "-w").Output()
 		if err != nil {
 			if service != "Claude Code-credentials" {
@@ -60,6 +66,12 @@ func parseKeychainEntry(raw string) *ClaudeOAuth {
 // UpdateKeychainEntry updates a macOS keychain entry with plaintext JSON,
 // matching Claude Code's `security add-generic-password -w` writes.
 func UpdateKeychainEntry(service string, creds *ClaudeCredentials) error {
+	return updateKeychainEntryContext(context.Background(), service, creds)
+}
+func updateKeychainEntryContext(ctx context.Context, service string, creds *ClaudeCredentials) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	data, err := json.Marshal(creds)
 	if err != nil {
 		return err
@@ -68,7 +80,7 @@ func UpdateKeychainEntry(service string, creds *ClaudeCredentials) error {
 	if user == "" {
 		user = "unknown"
 	}
-	return exec.Command("security", "add-generic-password",
+	return exec.CommandContext(ctx, "security", "add-generic-password",
 		"-U", "-s", service, "-a", user, "-w", string(data)).Run()
 }
 
@@ -174,4 +186,78 @@ slotLoop:
 		}
 	}
 	return nil
+}
+
+// Inspection distinguishes absent items (security exit 44) from denied access.
+func inspectPlatformKeychainAccounts(ctx context.Context) ([]claudeInspectionSource, error) {
+	return inspectClaudePlatformServices(ctx, func(ctx context.Context, service string) ([]byte, error) {
+		data, err := exec.CommandContext(ctx, "security", "find-generic-password", "-s", service, "-w").Output()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 44 {
+			return nil, os.ErrNotExist
+		}
+		return data, err
+	})
+}
+
+var claudeKeychainAccountLabel = regexp.MustCompile(`"acct"<blob>="([^"\r\n]*)"`)
+
+func removePlatformClaudeAccountContext(ctx context.Context, evidence []ClaudeOAuth) (bool, error) {
+	return removePlatformClaudeAccountWith(ctx, evidence, func(ctx context.Context, args ...string) ([]byte, error) {
+		data, err := exec.CommandContext(ctx, "security", args...).Output()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) && exit.ExitCode() == 44 {
+			return nil, os.ErrNotExist
+		}
+		return data, err
+	})
+}
+func removePlatformClaudeAccountWith(ctx context.Context, evidence []ClaudeOAuth, run func(context.Context, ...string) ([]byte, error)) (bool, error) {
+	changed := false
+	for _, service := range claudePlatformServices() {
+		for {
+			if err := ctx.Err(); err != nil {
+				return changed, err
+			}
+			data, err := run(ctx, "find-generic-password", "-s", service, "-w")
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if err != nil {
+				return changed, err
+			}
+			account := parseKeychainEntry(strings.TrimSpace(string(data)))
+			if account == nil {
+				return changed, errors.New("Claude keychain entry unavailable")
+			}
+			if !matchesClaudeEvidence(*account, evidence) {
+				break
+			}
+			metadata, err := run(ctx, "find-generic-password", "-s", service)
+			if err != nil {
+				return changed, err
+			}
+			match := claudeKeychainAccountLabel.FindSubmatch(metadata)
+			if len(match) != 2 {
+				return changed, errors.New("Claude keychain identity unavailable")
+			}
+			// Pin the account label and revalidate material, then delete that exact item.
+			data, err = run(ctx, "find-generic-password", "-s", service, "-a", string(match[1]), "-w")
+			if err != nil {
+				return changed, err
+			}
+			account = parseKeychainEntry(strings.TrimSpace(string(data)))
+			if account == nil || !matchesClaudeEvidence(*account, evidence) {
+				return changed, ErrClaudeIdentityChanged
+			}
+			if err := ctx.Err(); err != nil {
+				return changed, err
+			}
+			if _, err = run(ctx, "delete-generic-password", "-s", service, "-a", string(match[1])); err != nil {
+				return changed, err
+			}
+			changed = true
+		}
+	}
+	return changed, nil
 }

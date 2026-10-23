@@ -1,0 +1,3 @@
+Error · Session binding not found.
+  Code: session_binding_not_found
+  Command: cq codex proxy session show

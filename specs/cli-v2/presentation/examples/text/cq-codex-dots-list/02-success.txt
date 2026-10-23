@@ -1,0 +1,5 @@
+Codex Dots · list
+  One · dot-one
+    Account: primary · Setup: accepted
+  Two · dot-two
+    Account: secondary · Setup: not_attempted

@@ -5,13 +5,22 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	gokeyring "github.com/zalando/go-keyring"
 
 	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
+	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
@@ -108,5 +117,172 @@ func TestAccountListManagerUsesSharedCodexInventory(t *testing.T) {
 	}
 	if len(accounts) != 1 || accounts[0].Email != "a@example.com" || !accounts[0].Active {
 		t.Fatalf("accounts = %+v", accounts)
+	}
+}
+
+type canonicalLoginAdmin struct {
+	active          bool
+	activationCalls int
+	observeErr      error
+	activationErr   error
+	committed       bool
+}
+
+func (a *canonicalLoginAdmin) SaveLogin(context.Context, codexprov.LoginCredential) (codexprov.CandidateRef, codexprov.Revision, error) {
+	return codexprov.CandidateRef{AccountKey: "exact", CandidateID: "candidate"}, "revision", nil
+}
+func (a *canonicalLoginAdmin) Activate(context.Context, codexprov.CandidateRef, codexprov.Revision) (codexprov.ActivationResult, error) {
+	a.activationCalls++
+	if a.committed {
+		a.active = true
+	}
+	return codexprov.ActivationResult{SystemCommitted: a.committed}, a.activationErr
+}
+func (a *canonicalLoginAdmin) Adopt(context.Context, codexprov.SystemSnapshot) (codexprov.CandidateRef, codexprov.Revision, error) {
+	panic("unexpected adoption")
+}
+func (a *canonicalLoginAdmin) RemoveManaged(context.Context, codexprov.AccountKey, codexprov.RevisionSet, bool) (codexprov.RemovalResult, error) {
+	panic("unexpected removal")
+}
+func (a *canonicalLoginAdmin) List(ctx context.Context) (codexprov.Inventory, error) {
+	if a.observeErr != nil {
+		return codexprov.Inventory{}, a.observeErr
+	}
+	return codexprov.Inventory{Accounts: []codexprov.LogicalAccount{{Key: "exact", Identity: codexprov.AccountIdentity{AccountID: "account", UserID: "user"}, Active: a.active}}}, ctx.Err()
+}
+func TestSaveLoginCodexObservedDefaultAndUnknownOutcome(t *testing.T) {
+	for _, mode := range []string{"relogin-active", "observe-failed", "activated-observe-failed", "activation-unknown", "activation-unknown-active", "activation-failed"} {
+		t.Run(mode, func(t *testing.T) {
+			admin := &canonicalLoginAdmin{active: mode == "relogin-active" || mode == "activation-unknown-active", committed: mode == "activated-observe-failed"}
+			activate := strings.HasPrefix(mode, "activat")
+			if strings.Contains(mode, "observe-failed") {
+				admin.observeErr = errors.New("private observation")
+			}
+			if strings.HasPrefix(mode, "activation-unknown") {
+				admin.activationErr = &codexprov.MutationOutcomeUnknown{Err: context.DeadlineExceeded}
+			}
+			if mode == "activation-failed" {
+				admin.activationErr = errors.New("private activation")
+			}
+			result, err := LoginCodex(context.Background(), nil, activate, func(context.Context, httputil.Doer) (*auth.CodexTokenResponse, *auth.CodexClaims, error) {
+				return &auth.CodexTokenResponse{AccessToken: "secret"}, &auth.CodexClaims{AccountID: "account", UserID: "user"}, nil
+			}, admin)
+			if !result.CredentialsSaved {
+				t.Fatal("save receipt lost")
+			}
+			switch mode {
+			case "relogin-active":
+				if err != nil || !result.Account.Active || result.Activated || !result.AccountObserved || admin.activationCalls != 0 {
+					t.Fatalf("relogin=%+v err=%v", result, err)
+				}
+			case "observe-failed", "activated-observe-failed":
+				if !errors.Is(err, ErrAccountLoginPostcheck) || result.AccountObserved || result.Activated != admin.committed {
+					t.Fatalf("postcheck=%+v err=%v", result, err)
+				}
+			case "activation-unknown", "activation-unknown-active":
+				if result.ActivationKnown || result.Activated || !errors.Is(err, context.DeadlineExceeded) || admin.activationCalls != 1 || result.Account.Active != admin.active {
+					t.Fatal("unknown activation became false")
+				}
+			case "activation-failed":
+				if !result.ActivationKnown || result.Activated || !errors.Is(err, ErrAccountActivation) {
+					t.Fatal("definite rejection became uncertain")
+				}
+			}
+		})
+	}
+}
+func TestSaveLoginClaudeObservedDefaultAndAmbiguousEmail(t *testing.T) {
+	for _, mode := range []string{"relogin-active", "duplicate-email", "observe-failed", "activated-observe-failed"} {
+		t.Run(mode, func(t *testing.T) {
+			writes, stores := 0, 0
+			active := mode == "relogin-active"
+			inspections := 0
+			account := keyring.ClaudeOAuth{AccountUUID: "uuid", Email: "user@example.com", AccessToken: "secret"}
+			accounts := &claudeprov.Accounts{Mutations: &claudeprov.AccountMutationOperations{
+				Store: func(context.Context, *keyring.ClaudeOAuth) error { stores++; return nil },
+				Inspect: func(context.Context) ([]keyring.ClaudeAccountInspection, error) {
+					inspections++
+					if mode == "observe-failed" || mode == "activated-observe-failed" && writes > 0 {
+						return nil, errors.New("private observation")
+					}
+					rows := []keyring.ClaudeAccountInspection{{Account: account, Active: active, Sources: []string{"cq_managed"}}}
+					if mode == "duplicate-email" {
+						other := account
+						other.AccountUUID = "other"
+						rows = append(rows, keyring.ClaudeAccountInspection{Account: other})
+					}
+					return rows, nil
+				},
+				Write: func(context.Context, *keyring.ClaudeCredentials) error { writes++; active = true; return nil }, Update: func(context.Context, string, *keyring.ClaudeCredentials) error { return nil },
+			}}
+			result, err := LoginClaude(context.Background(), nil, mode == "activated-observe-failed", func(context.Context, httputil.Doer) (*auth.TokenResponse, *auth.Profile, error) {
+				return &auth.TokenResponse{AccessToken: "secret"}, &auth.Profile{AccountUUID: "uuid", Email: "user@example.com"}, nil
+			}, accounts)
+			if !result.CredentialsSaved || stores == 0 {
+				t.Fatal("save omitted")
+			}
+			switch mode {
+			case "relogin-active":
+				if err != nil || !result.Account.Active || result.Activated || writes != 0 {
+					t.Fatal("default login changed native projection")
+				}
+			case "duplicate-email":
+				if err != nil || !result.AccountObserved || result.Reference != "" {
+					t.Fatal("ambiguous email invented selector")
+				}
+			default:
+				if !errors.Is(err, ErrAccountLoginPostcheck) || result.AccountObserved {
+					t.Fatal("unobserved account fabricated")
+				}
+			}
+		})
+	}
+}
+
+func TestSaveLoginClaudeAfterRealRemovalInspection(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix test executable fixture")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	bin := filepath.Join(home, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "security"), []byte("#!/bin/sh\nexit 44\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	gokeyring.MockInit()
+	ctx := context.Background()
+	removed := keyring.ClaudeOAuth{AccountUUID: "removed", Email: "removed@example.com", AccessToken: "removed-secret"}
+	remaining := keyring.ClaudeOAuth{AccountUUID: "remaining", Email: "remaining@example.com", AccessToken: "remaining-secret"}
+	for _, account := range []keyring.ClaudeOAuth{removed, remaining} {
+		if err := keyring.StoreCQAccountContext(ctx, &account); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := keyring.WriteCredentialsFileContext(ctx, &keyring.ClaudeCredentials{ClaudeAiOauth: &removed}); err != nil {
+		t.Fatal(err)
+	}
+	accounts := &claudeprov.Accounts{Mutations: &claudeprov.AccountMutationOperations{Inspect: keyring.InspectClaudeAccounts, Store: keyring.StoreCQAccountContext, Write: keyring.WriteCredentialsFileContext, Update: func(context.Context, string, *keyring.ClaudeCredentials) error { return nil }, Remove: keyring.RemoveClaudeAccountContext}}
+	result, err := accounts.RemoveSelected(ctx, removed)
+	if err != nil || !result.ActiveRemoved {
+		t.Fatalf("remove=%+v error=%v", result, err)
+	}
+	rows, err := keyring.InspectClaudeAccounts(ctx)
+	if err != nil || len(rows) != 1 || rows[0].Account.AccountUUID != "remaining" || rows[0].Active {
+		t.Fatalf("real inspection after cleared native file: rows=%d error=%v", len(rows), err)
+	}
+	activated, err := accounts.ActivateSelected(ctx, rows[0])
+	if err != nil || !activated.Active {
+		t.Fatalf("remaining activation=%+v error=%v", activated, err)
+	}
+	login, err := LoginClaude(ctx, nil, false, func(context.Context, httputil.Doer) (*auth.TokenResponse, *auth.Profile, error) {
+		return &auth.TokenResponse{AccessToken: "remaining-new"}, &auth.Profile{AccountUUID: remaining.AccountUUID, Email: remaining.Email}, nil
+	}, accounts)
+	if err != nil || !login.CredentialsSaved || !login.AccountObserved || !login.Account.Active || login.Activated {
+		t.Fatalf("default login after removal=%+v error=%v", login, err)
 	}
 }

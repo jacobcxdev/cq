@@ -1,0 +1,42 @@
+cq codex proxy validate websocket
+Validate WebSocket routing with an isolated installed Codex client.
+
+Usage
+  cq codex proxy validate websocket --client-build CLIENT_BUILD [OPTIONS]
+
+Exercises an isolated installed client and records readiness only after all gates and cleanup pass.
+Failure invalidates selected WebSocket readiness; no stale success fallback.
+
+Options
+  --client-build CLIENT_BUILD
+      Required exact executable version, such as 0.114.0. Must match evidence byte for byte.
+      Format: major.minor.patch, optionally followed by - or + and ASCII letters, digits, dots
+      or hyphens. No whitespace, trimming, case folding, prefix matching or arbitrary labels.
+  --client-executable PATH
+      Default: /Applications/ChatGPT.app/Contents/Resources/codex, then
+      /Applications/Codex.app/Contents/Resources/codex, then codex on PATH.
+      Explicit value resolves to an absolute regular executable; its version must match.
+  --state-dir PATH
+      Default: resolved CQ proxy state directory, not runtime resilience state.
+      If supplied, a nonempty canonical absolute directory without symlink traversal.
+  --timeout DURATION
+      Total monotonic budget including preparation, requests and cleanup. Default: 5m.
+      Go duration from 30s to 30m inclusive. Final 5s reserved inside this budget for cleanup.
+      Interactive confirmation time excluded; nested requests cannot extend the deadline.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq codex proxy readiness show
+  cq codex proxy fixture create
+
+Examples
+  Validate the installed client version:
+  cq codex proxy validate websocket --client-build 0.114.0

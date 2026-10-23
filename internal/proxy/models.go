@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/modelregistry"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // ModelMetadata is the minimal capability shape used by the proxy model catalogue,
@@ -96,25 +97,19 @@ type claudeModelCapabilitiesCache struct {
 }
 
 func WriteClaudeCodeModelCapabilitiesCache() error {
-	configHome, err := claudeConfigDir()
+	paths, err := userdirs.DefaultClientPaths("claude")
 	if err != nil {
 		return err
 	}
-	return writeClaudeModelCapabilitiesCache(filepath.Join(configHome, "cache", "model-capabilities.json"), nil)
+	return writeClaudeModelCapabilitiesCache(paths.ClaudeCapabilities, nil)
 }
 
 func claudeConfigDir() (string, error) {
-	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
-		if filepath.IsAbs(dir) {
-			return dir, nil
-		}
-		return filepath.Abs(dir)
-	}
-	home, err := os.UserHomeDir()
+	paths, err := userdirs.DefaultClientPaths("claude")
 	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
+		return "", err
 	}
-	return filepath.Join(home, ".claude"), nil
+	return filepath.Dir(filepath.Dir(paths.ClaudeCapabilities)), nil
 }
 
 func writeClaudeModelCapabilitiesCache(path string, extra []ModelMetadata) error {

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -16,6 +17,9 @@ func runCodexInstalledVersionCommandWithRunner(
 	expected codexInstalledExecutableProof,
 	runner codexInstalledVersionRunner,
 ) ([]byte, error) {
+	return runCodexInstalledVersionCommandWithCleanup(ctx, nil, path, expected, runner)
+}
+func runCodexInstalledVersionCommandWithCleanup(ctx, cleanup context.Context, path string, expected codexInstalledExecutableProof, runner codexInstalledVersionRunner) (output []byte, returnErr error) {
 	if ctx == nil || ctx.Err() != nil || path != expected.path || !expected.valid() || !filepath.IsAbs(path) || runner == nil {
 		return nil, codexInstalledAttestationError(ctx)
 	}
@@ -29,8 +33,9 @@ func runCodexInstalledVersionCommandWithRunner(
 	if err != nil {
 		return nil, codexInstalledAttestationError(ctx)
 	}
-	defer func() { _ = removeCodexInstalledHTTPClientTempRoot(root) }()
-	output, err := runner.Run(commandCtx, codexAcceptanceCommand{
+	defer func() { returnErr = errors.Join(returnErr, removeCodexInstalledHTTPClientTempRoot(root)) }()
+	output, err = runner.Run(commandCtx, codexAcceptanceCommand{
+		cleanupContext:     cleanup,
 		executable:         path,
 		expectedExecutable: expected,
 		args:               []string{"--version"},

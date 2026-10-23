@@ -470,3 +470,46 @@ func TestCodexModelsResponse_TruncationPolicyPresent(t *testing.T) {
 		}
 	}
 }
+
+func TestPublishCodexCacheInferredPriorityPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		known bool
+		want  int
+	}{
+		{"known-zero", true, 0},
+		{"unknown-zero-fallback", false, 99},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			native := Entry{Provider: ProviderCodex, ID: "family-1", Source: SourceNative, PriorityKnown: tc.known}
+			overlay := InferOverlayMetadata(Entry{Provider: ProviderCodex, ID: "family-2", Source: SourceOverlay}, []Entry{native})
+			if overlay.InferredFrom != "family-1" || overlay.CloneFrom != "" || overlay.PriorityKnown != tc.known {
+				t.Fatalf("inference fixture: %+v", overlay)
+			}
+			fs := fsutil.NewMemFS()
+			if err := PublishCodexCache(fs, "/cache.json", Snapshot{Entries: []Entry{native, overlay}}, time.Now(), "test"); err != nil {
+				t.Fatal(err)
+			}
+			data, err := fs.ReadFile("/cache.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope struct {
+				Models []struct {
+					Slug     string `json:"slug"`
+					Priority *int   `json:"priority"`
+				} `json:"models"`
+			}
+			if err := json.Unmarshal(data, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if len(envelope.Models) != 2 || envelope.Models[1].Slug != "family-2" {
+				t.Fatalf("published models: %+v", envelope.Models)
+			}
+			priority := envelope.Models[1].Priority
+			if priority == nil || *priority != tc.want {
+				t.Fatalf("published inferred priority = %v, want %d; payload %s", priority, tc.want, data)
+			}
+		})
+	}
+}

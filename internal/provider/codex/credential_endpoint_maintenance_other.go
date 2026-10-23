@@ -25,3 +25,11 @@ func ResumeLegacyCredentialEndpointTransition(context.Context, string, LegacyCre
 func FinaliseLegacyCredentialEndpointTransition(context.Context, string, LegacyCredentialEndpointTransitionTicket) error {
 	return ErrCredentialEndpointMaintenanceUnsupported
 }
+
+func ReopenLegacyCredentialEndpointTransition(context.Context, string, LegacyCredentialEndpointTransitionTicket, DrainAuthority) (LegacyCredentialEndpointTransitionStatus, error) {
+	return LegacyCredentialEndpointTransitionStatus{}, ErrCredentialEndpointMaintenanceUnsupported
+}
+
+func ResumeLegacyCredentialEndpointTransitionForAction(context.Context, string, LegacyCredentialEndpointTransitionTicket, DrainAuthority, LegacyCredentialEndpointAction) (*LegacyCredentialEndpointTransition, error) {
+	return nil, ErrCredentialEndpointMaintenanceUnsupported
+}

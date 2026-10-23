@@ -1,0 +1,26 @@
+cq codex proxy policy
+Export or replace the complete Codex routing-policy document.
+
+Usage
+  cq codex proxy policy <COMMAND> [OPTIONS]
+
+Commands
+  apply   Apply a complete Codex routing-policy document.
+  show    Show the complete Codex routing-policy document.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex proxy   Codex proxy controls.
+
+Examples
+  Inspect the complete configured policy
+  cq codex proxy policy show
+
+  Inspect replacement validation and file inputs
+  cq codex proxy policy apply --help

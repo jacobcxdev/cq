@@ -1,0 +1,2 @@
+Gemini account · Not configured
+  Set up authentication in Antigravity.

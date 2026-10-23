@@ -1,0 +1,3 @@
+Error · Codex reset credentials are unavailable.
+  Code: codex_reset_credentials_unavailable
+  Command: cq codex reset recommend

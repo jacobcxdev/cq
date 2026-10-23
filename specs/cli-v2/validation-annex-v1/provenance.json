@@ -1,0 +1,24 @@
+{
+  "source_root": "/Users/jacob/Developer/src/github/jacobcxdev/cq",
+  "head": "dc976e6591d2b729185a80b974f55300dea255c2",
+  "snapshot": "Working-tree source snapshot; immutable annex copies govern referenced legacy algorithms. Canonical spec changes override copied legacy behaviour.",
+  "files": [
+    "codex_fixture.go",
+    "codex_zstd.go",
+    "codex_protocol.go",
+    "codex_turn_metadata.go",
+    "codex_readiness.go",
+    "codex_canary.go",
+    "codex_canary_stop.go",
+    "codex_canary_promotion.go",
+    "codex_installed_ws_validation.go",
+    "codex_installed_http_validation.go",
+    "codex_installed_acceptance_harness.go",
+    "codex_installed_process_attestation.go",
+    "codex_installed_http_route_audit.go",
+    "diag.go",
+    "operation_inspection.go",
+    "runtime_control.go",
+    "runtime_supervisor.go"
+  ]
+}

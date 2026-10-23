@@ -1,0 +1,33 @@
+cq claude account activate
+Select the native client default Claude account.
+
+Usage
+  cq claude account activate ACCOUNT [options]
+
+Requires managed activatable credentials unless already active.
+Existing clients may need reconnection. Proxy pins and session bindings do not change.
+Selecting the already active account succeeds without changing credentials.
+
+Arguments
+  ACCOUNT  Unique known email, case-insensitive after trimming.
+           Empty, ambiguous and unstable references are rejected; no keys or aliases.
+
+Options
+  --timeout DURATION  Total work deadline. Default: 30s; range: 1s to 10m.
+                      Use Go duration syntax; bare numbers are invalid.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq claude account list
+  cq claude proxy pin show
+
+Examples
+  Select the known account
+    cq claude account activate alex@example.test
+  Allow one minute
+    cq claude account activate alex@example.test --timeout 1m

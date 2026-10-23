@@ -1,0 +1,8 @@
+Proxy rescue · rescue_draining
+  Generation         12
+  Active requests    0
+  Draining sessions  2
+
+Draining sessions
+  session:123456789abc
+  session:abcdef123456

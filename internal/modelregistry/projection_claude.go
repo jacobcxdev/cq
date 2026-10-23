@@ -20,8 +20,9 @@ type claudeCapability struct {
 // claudeCapabilitiesCache is the on-disk format of Claude Code's
 // model-capabilities cache. The timestamp must be a numeric Unix second.
 type claudeCapabilitiesCache struct {
-	Timestamp int64              `json:"timestamp"`
-	Models    []claudeCapability `json:"models"`
+	CQNative  *cacheNativeProvenance `json:"cq_native,omitempty"`
+	Timestamp int64                  `json:"timestamp"`
+	Models    []claudeCapability     `json:"models"`
 }
 
 // ClaudeCapabilitiesProjection builds the model-capabilities payload from the
@@ -61,6 +62,7 @@ func ClaudeCapabilitiesProjection(snap Snapshot, timestamp int64) claudeCapabili
 // Any previous string-formatted timestamp is replaced by a numeric Unix second.
 func PublishClaudeCapabilities(fsys fsutil.FileSystem, path string, snap Snapshot, now time.Time) error {
 	payload := ClaudeCapabilitiesProjection(snap, now.Unix())
+	payload.CQNative = nativeProvenance(snap, ProviderAnthropic, payload.Models)
 
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {

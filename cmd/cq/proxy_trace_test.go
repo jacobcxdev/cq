@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -185,5 +187,97 @@ func TestProxyTraceRequiresConfiguredLog(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "diagnostics log is not configured") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestProxyTraceEmitterWriteFailuresAcrossFollowPaths(t *testing.T) {
+	for _, mode := range []string{"first-poll", "append", "retained-bridge"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "trace")
+			if mode != "first-poll" {
+				if err := os.WriteFile(path, []byte(proxyTraceTestRecord("initial")), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, follower, err := readProxyTraceRecordsForFollow(path, proxyTraceFilter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer follower.Close()
+			switch mode {
+			case "first-poll":
+				if err := os.WriteFile(path+".1", []byte(proxyTraceTestRecord("retained")), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(proxyTraceTestRecord("current")), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "append":
+				file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = file.WriteString(proxyTraceTestRecord("appended"))
+				closeErr := file.Close()
+				if err != nil || closeErr != nil {
+					t.Fatal(err, closeErr)
+				}
+			case "retained-bridge":
+				rotateProxyTraceTestLog(t, path, proxyTraceTestRecord("new-one"))
+				rotateProxyTraceTestLog(t, path, proxyTraceTestRecord("new-two"))
+			}
+			failure := errors.New("synthetic output failure")
+			calls := 0
+			err = follower.readAvailableWithEmitter(path, proxyTraceFilter{}, func(proxyTraceRecord) error { calls++; return failure }, nil)
+			if !errors.Is(err, failure) || calls != 1 {
+				t.Fatalf("err=%v emit calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestProxyTraceTypedHistoryGaps(t *testing.T) {
+	for _, mode := range []string{"checkpoint", "follow", "incomplete"} {
+		t.Run(mode, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "trace")
+			if err := os.WriteFile(path, []byte(proxyTraceTestRecord("initial")), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			if mode == "checkpoint" {
+				_, _, err = readProxyTraceRecordsForFollowWithHook(path, proxyTraceFilter{}, func() {
+					for i := 0; i < 5; i++ {
+						rotateProxyTraceTestLog(t, path, proxyTraceTestRecord(fmt.Sprint(i)))
+					}
+				})
+			} else {
+				_, follower, readErr := readProxyTraceRecordsForFollow(path, proxyTraceFilter{})
+				if readErr != nil {
+					t.Fatal(readErr)
+				}
+				defer follower.Close()
+				if mode == "incomplete" {
+					file, openErr := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+					if openErr != nil {
+						t.Fatal(openErr)
+					}
+					_, writeErr := file.WriteString(`{"trace_id":"partial"`)
+					closeErr := file.Close()
+					if writeErr != nil || closeErr != nil {
+						t.Fatal(writeErr, closeErr)
+					}
+					rotateProxyTraceTestLog(t, path, proxyTraceTestRecord("next"))
+				} else {
+					for i := 0; i < 5; i++ {
+						rotateProxyTraceTestLog(t, path, proxyTraceTestRecord(fmt.Sprint(i)))
+					}
+				}
+				err = follower.ReadAvailable(path, proxyTraceFilter{}, io.Discard, true)
+			}
+			var gap *proxyTraceHistoryGap
+			if !errors.As(err, &gap) {
+				t.Fatalf("gap error=%T %v", err, err)
+			}
+		})
 	}
 }

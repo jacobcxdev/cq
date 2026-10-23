@@ -1,0 +1,6 @@
+Proxy operation · result_available
+  Operation         0123456789abcdef0123456789abcdef
+  Phase             terminal
+  Result available  yes
+  Result digest     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  Recovery support  unavailable

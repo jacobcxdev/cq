@@ -1,0 +1,3 @@
+Warning · Credential refresh completed partially; inspect provider results.
+  Code: auth_refresh_partial
+  Command: cq auth refresh

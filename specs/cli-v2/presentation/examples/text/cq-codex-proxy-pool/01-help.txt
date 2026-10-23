@@ -1,0 +1,27 @@
+cq codex proxy pool
+Define account pools and their relative capacity-preservation values.
+
+Usage
+  cq codex proxy pool <COMMAND> [OPTIONS]
+
+Commands
+  rename   Rename a pool without changing its identity.
+  set      Create a pool or replace its account membership.
+  value    Set a pool's relative capacity-preservation value.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex proxy   Codex proxy controls.
+
+Examples
+  Inspect pool membership syntax
+  cq codex proxy pool set --help
+
+  Inspect how relative preservation values work
+  cq codex proxy pool value --help

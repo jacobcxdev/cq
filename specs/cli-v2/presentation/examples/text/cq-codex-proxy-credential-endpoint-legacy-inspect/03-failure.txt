@@ -1,0 +1,3 @@
+Error · Credential endpoint or transition does not exist.
+  Code: endpoint_not_found
+  Command: cq codex proxy credential-endpoint legacy inspect

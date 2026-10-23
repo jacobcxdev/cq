@@ -3,6 +3,7 @@
 package keyring
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -174,6 +175,7 @@ func anonCredBlob(t *testing.T, accessToken, refreshToken string) string {
 // for the anonymous-entry re-adoption gap.
 //
 // Scenario:
+//
 //  1. "Claude Code-credentials" holds two entries in the same service slot:
 //     - slot[0]: an identified entry for user@example.com (has Email set)
 //     - slot[1]: an anonymous entry (no Email, no UUID) whose RefreshToken
@@ -404,6 +406,7 @@ func TestRemovePlatformKeychainLeavesNoSurvivingEntry(t *testing.T) {
 // never reaches slot[1]. The identified entry survives and remains re-adoptable.
 //
 // Scenario:
+//
 //  1. "Claude Code-credentials" holds two blobs in order:
 //     - slot[0]: anonymous blob (no Email, no UUID) whose RefreshToken matches
 //     the target account's refresh token. Claude Code wrote this blob after a
@@ -430,7 +433,7 @@ func TestAnonymousEntryBeforeIdentifiedBlocksRemoval(t *testing.T) {
 	binDir := t.TempDir()
 	stateDir := t.TempDir()
 	homeDir := t.TempDir()
-	t.Setenv("HOME", homeDir)
+	setKeyringTestHome(t, homeDir)
 
 	const (
 		targetEmail  = "user@example.com"
@@ -562,4 +565,74 @@ func TestParseKeychainEntry(t *testing.T) {
 			t.Errorf("expected nil for empty accessToken, got %+v", got)
 		}
 	})
+}
+
+func TestInspectClaudePlatformKeychainUsesOnlyReadCommands(t *testing.T) {
+	dir := t.TempDir()
+	// A private executable replaces security; the real Keychain is never opened.
+	script := `#!/bin/sh
+if [ "$1" != "find-generic-password" ]; then exit 70; fi
+if [ "$3" = "Claude Code-credentials-10" ]; then
+ printf '%s\n' '{"claudeAiOauth":{"accessToken":"private-test-token","accountUUID":"id"}}'
+ exit 0
+fi
+exit 44
+`
+	if err := os.WriteFile(filepath.Join(dir, "security"), []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	rows, err := inspectPlatformKeychainAccounts(context.Background())
+	if err != nil || len(rows) != 1 || rows[0].account.AccountUUID != "id" {
+		t.Fatalf("rows=%d err=%v", len(rows), err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "security"), []byte("#!/bin/sh\nexit 36\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspectPlatformKeychainAccounts(context.Background()); err == nil {
+		t.Fatal("denied access treated as missing item")
+	}
+}
+
+func TestRemovalExactPlatformPinsAccountLabelAndAffinity(t *testing.T) {
+	account := ClaudeOAuth{AccountUUID: "uuid", Email: "user@example.com", AccessToken: "fresh"}
+	older := account
+	older.AccessToken = "older"
+	anonymous := ClaudeOAuth{AccessToken: "older"}
+	other := ClaudeOAuth{AccountUUID: "other", Email: account.Email, AccessToken: "different"}
+	entries := map[string]*ClaudeOAuth{"Claude Code-credentials": &anonymous, "Claude Code-credentials-2": &other}
+	deleted := []string{}
+	changed, err := removePlatformClaudeAccountWith(context.Background(), []ClaudeOAuth{account, older}, func(ctx context.Context, args ...string) ([]byte, error) {
+		service := ""
+		label := ""
+		password := false
+		for i, arg := range args {
+			if arg == "-s" {
+				service = args[i+1]
+			}
+			if arg == "-a" {
+				label = args[i+1]
+			}
+			password = password || arg == "-w"
+		}
+		row := entries[service]
+		if row == nil {
+			return nil, os.ErrNotExist
+		}
+		if args[0] == "delete-generic-password" {
+			if label != "exact-os-user" {
+				t.Fatal("unqualified platform delete")
+			}
+			deleted = append(deleted, service)
+			delete(entries, service)
+			return nil, nil
+		}
+		if password {
+			return json.Marshal(ClaudeCredentials{ClaudeAiOauth: row})
+		}
+		return []byte(`    "acct"<blob>="exact-os-user"`), nil
+	})
+	if err != nil || !changed || len(deleted) != 1 || entries["Claude Code-credentials-2"] == nil {
+		t.Fatalf("changed=%t err=%v deleted=%v", changed, err, deleted)
+	}
 }

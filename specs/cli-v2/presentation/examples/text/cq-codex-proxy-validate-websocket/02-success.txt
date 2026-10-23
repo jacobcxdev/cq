@@ -1,0 +1,29 @@
+WebSocket validation · passed
+  Client build  0.114.0
+  Validated     0s ago · 23 Sep 2026, 16:30:00 BST (UTC+01:00)
+  CQ build      1.0.0
+  Gates passed  9
+
+Evidence
+  Version             3
+  Transport           websocket
+  Parser schema       1
+  Lease schema        3
+  Semantics revision  websocket-terminating-routing-v1
+  Retry budget        1
+  Fixture SHA-256      858d90f3e827194cdfc0dbf5e11d35dfb25e7afc395cf547f17a30936889f9f9
+  CQ executable       —
+  Client executable   —
+  Service identity    —
+  Service kind        —
+  Installed result    passed
+  Completed gates
+    admitted-no-migration
+    canonical-terminal-error
+    compression-subprotocol
+    installed-isolated-client
+    persistent-account-upstream
+    portable-pre-admission-hard429-rotation
+    same-account-candidate-auth-recovery
+    strong-frame-authority
+    upstream-generation-fence

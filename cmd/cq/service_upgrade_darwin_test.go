@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -389,7 +390,7 @@ func TestDarwinRetainedInspectionAndValidationAfterUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	roots := userdirs.Roots{State: filepath.Join(root, "state")}
+	roots := userdirs.Roots{Config: filepath.Join(root, "config"), State: filepath.Join(root, "state"), Cache: filepath.Join(root, "cache"), Runtime: filepath.Join(root, "runtime"), Logs: filepath.Join(root, "logs")}
 	artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: roots}
 	retained := make([]installer.RuntimeArtifact, 0, 2)
 	sources := make([]string, 0, 2)
@@ -458,6 +459,66 @@ func TestDarwinRetainedInspectionAndValidationAfterUpgrade(t *testing.T) {
 	upgraded, err := resolve("")
 	if err != nil || upgraded.executableSHA256 != retained[1].SHA256 || upgraded.runtimeExecutable != retained[1].Path || upgraded.serviceSHA256 == initial.serviceSHA256 {
 		t.Fatalf("compatible runtime unavailable from package CLI: %+v %v", upgraded, err)
+	}
+
+	// The public CLI must recognise the package-owned retained bootstrap even
+	// though exec handover changed the live executable and package symlink.
+	platform, runner := newDarwinServiceHarness(t)
+	platform.roots, platform.executable = roots, link
+	proxyDefinition := darwinLaunchAgentDefinition{Label: proxyAgentLabel, ProgramArguments: []string{retained[0].Path, "proxy", "start"}, StandardErrorPath: filepath.Join(root, "proxy.log")}
+	proxyData, err := renderDarwinLaunchAgent(proxyDefinition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(platform.plistPath(proxyAgentLabel)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteDarwinLaunchAgent(platform.plistPath(proxyAgentLabel), proxyData); err != nil {
+		t.Fatal(err)
+	}
+	runner.loaded[proxyAgentLabel] = true
+	if err := proxy.SaveConfigAt(proxy.PathsForRoots(roots), &proxy.Config{Port: 19280, LocalToken: "synthetic-local"}); err != nil {
+		t.Fatal(err)
+	}
+	livePath := retained[1].Path
+	platform.inspectSelectedProxy = func(ctx context.Context, configured string, observedRoots userdirs.Roots, pid int) componentStatus {
+		if configured != retained[0].Path || observedRoots != roots {
+			t.Fatalf("wrong bootstrap/roots: %s %+v", configured, observedRoots)
+		}
+		return inspectDarwinSelectedProxyRuntimeWith(ctx, configured, observedRoots, pid, func(_ context.Context, command string, _ ...string) ([]byte, error) {
+			if command == "/bin/ps" {
+				return []byte(livePath + "\n"), nil
+			}
+			return []byte(fmt.Sprintf("p%d\n", pid)), nil
+		}, modelHTTPFunc(func(request *http.Request) (*http.Response, error) {
+			body := `{"status":"ok"}`
+			if request.URL.Path == proxy.RuntimeRescueStatusPath {
+				body = `{"mode":"normal"}`
+			}
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}))
+	}
+	selectedStatus, err := platform.InspectSelected(context.Background(), serviceProxy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedStatus = selectedServiceOwnership(selectedStatus, serviceProxy, record)
+	if selectedStatus.Proxy.Observed.Owner != "package" || !selectedStatus.Proxy.Healthy || selectedStatus.Proxy.LiveExecutable != retained[1].Path || selectedStatus.Proxy.ConfiguredExecutable != retained[0].Path {
+		t.Fatalf("canonical retained status: %+v", selectedStatus.Proxy)
+	}
+	if err := platform.PreflightSelected(context.Background(), link, serviceProxy); err != nil {
+		t.Fatalf("retained package preflight: %v", err)
+	}
+	livePath = retained[0].Path
+	staleStatus, err := platform.InspectSelected(context.Background(), serviceProxy)
+	if err != nil || staleStatus.Proxy.Healthy || staleStatus.Proxy.LiveExecutable != retained[0].Path {
+		t.Fatalf("stale live binary evidence: %+v %v", staleStatus.Proxy, err)
+	}
+	livePath = retained[1].Path
+	foreign := record
+	foreign.Executable = sources[0]
+	if selectedServiceExecutableMatches(selectedStatus.Proxy, foreign) {
+		t.Fatal("retained authority matched foreign package")
 	}
 	requestStore := installedHTTPValidationRequestStore{fs: fsutil.OSFileSystem{}, path: filepath.Join(roots.State, "validation", "request.json"), now: time.Now, random: rand.Reader, resolveService: resolve}
 	if err := createInstalledHTTPValidationRequest(requestStore, retained[1].Version); err != nil {
@@ -530,4 +591,89 @@ func TestDarwinRuntimeUpgradeStatusProbe(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestDarwinExistingRuntimeInspectionReadOnly(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	source := filepath.Join(root, "package-cq")
+	command := exec.Command("go", "build", "-o", source, "-ldflags", "-X main.version=0.34.0", ".")
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build fixture: %v %s", err, out)
+	}
+	store := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: userdirs.Roots{State: filepath.Join(root, "state")}}
+	artifact, err := store.Stage(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockPath := filepath.Join(store.Roots.State, "runtime-artifacts.lock")
+	snapshot := func() string {
+		t.Helper()
+		var state strings.Builder
+		err := filepath.WalkDir(store.Roots.State, func(path string, _ os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			info, err := os.Lstat(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&state, "%s %s %d %d\n", path, info.Mode(), info.Size(), info.ModTime().UnixNano())
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state.String()
+	}
+	t.Run("missing lock remains absent", func(t *testing.T) {
+		if err := os.Remove(lockPath); err != nil {
+			t.Fatal(err)
+		}
+		before := snapshot()
+		observed, err := darwinExistingRuntimeArtifact(context.Background(), store, artifact.Path)
+		if err != nil || observed != artifact {
+			t.Fatalf("inspect retained runtime: %+v %v", observed, err)
+		}
+		if after := snapshot(); after != before {
+			t.Fatalf("inspection wrote runtime state:\nbefore %s\nafter %s", before, after)
+		}
+	})
+	t.Run("staging lock does not block inspection", func(t *testing.T) {
+		lock, err := store.Lock()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer lock.Close()
+		before := snapshot()
+		observed, err := darwinExistingRuntimeArtifact(context.Background(), store, artifact.Path)
+		if err != nil || observed != artifact {
+			t.Fatalf("inspection depended on staging lock: %+v %v", observed, err)
+		}
+		if after := snapshot(); after != before {
+			t.Fatalf("inspection changed locked state:\nbefore %s\nafter %s", before, after)
+		}
+	})
+	t.Run("tampered digest never stages another artifact", func(t *testing.T) {
+		data, err := os.ReadFile(artifact.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(artifact.Path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(artifact.Path, append(data, 0), 0o500); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(artifact.Path, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		before := snapshot()
+		if _, err := darwinExistingRuntimeArtifact(context.Background(), store, artifact.Path); err == nil {
+			t.Error("tampered retained digest accepted")
+		}
+		if after := snapshot(); after != before {
+			t.Fatalf("inspection staged tampered runtime:\nbefore %s\nafter %s", before, after)
+		}
+	})
 }

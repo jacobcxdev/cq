@@ -1,0 +1,29 @@
+cq codex proxy pin
+Inspect, set or clear the Codex proxy account override.
+
+Usage
+  cq codex proxy pin <COMMAND> [OPTIONS]
+
+A pin chooses an account for new or unbound routed work.
+
+Commands
+  clear   Clear the Codex proxy pin.
+  set     Set the Codex proxy pin.
+  show    Show the Codex proxy pin.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex proxy   Codex proxy controls.
+
+Examples
+  Inspect the current pin
+  cq codex proxy pin show
+
+  Inspect account-selection syntax
+  cq codex proxy pin set --help

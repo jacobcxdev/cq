@@ -1,0 +1,31 @@
+cq codex proxy credential-endpoint legacy inspect
+Inspect the legacy Codex credential socket and migration state.
+
+Usage
+  cq codex proxy credential-endpoint legacy inspect [OPTIONS]
+
+Maintains the current user's Codex credential.sock, not the HTTP listener.
+No arbitrary socket path. Requires a supported local Unix backend.
+Input identity and owner must still match the retained proof.
+Observe the refused legacy socket and return an identity snapshot. No transition.
+
+Options
+  --timeout TIMEOUT
+      Total deadline including cleanup. Default: 30s; Go duration from 1s to 5m inclusive.
+      Cleanup reserve: 0s. Expiry does not prove rollback or an unchanged journal.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq codex proxy credential-endpoint legacy inspect
+
+Examples
+  Inspect the exact local endpoint:
+  cq codex proxy credential-endpoint legacy inspect

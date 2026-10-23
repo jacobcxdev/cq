@@ -1,0 +1,8 @@
+Saved Codex pin configuration.
+Codex pin · not configured
+  Account key  not configured
+  Source       Saved configuration
+  Application  Live process acknowledgement not checked
+
+Restart required: yes
+Next: cq service restart --component proxy

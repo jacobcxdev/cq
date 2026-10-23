@@ -1,0 +1,33 @@
+cq codex proxy reserve
+Protect remaining quota on the current Codex system account.
+
+Usage
+  cq codex proxy reserve <COMMAND> [OPTIONS]
+
+Commands
+  clear     Remove the system-account reserve configuration.
+  disable   Disable the reserve until a verified reset.
+  enable    Enable the configured system-account reserve.
+  set       Set the system-account quota reserve.
+  status    Show reserve state and evidence.
+  windows   List observed system-account quota window selectors.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex proxy   Codex proxy controls.
+
+Examples
+  Inspect reserve protection and evidence
+  cq codex proxy reserve status
+
+  Find available quota windows
+  cq codex proxy reserve windows
+
+  Inspect threshold syntax before changing protection
+  cq codex proxy reserve set --help

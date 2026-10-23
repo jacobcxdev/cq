@@ -1,0 +1,3 @@
+Error · Proxy is not reachable at 127.0.0.1:19280.
+  Code: proxy_unreachable
+  Command: cq proxy health

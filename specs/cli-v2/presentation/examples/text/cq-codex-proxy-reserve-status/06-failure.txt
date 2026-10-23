@@ -1,0 +1,3 @@
+Error · Running CQ proxy control is unavailable.
+  Code: routing_control_unavailable
+  Command: cq codex proxy reserve status

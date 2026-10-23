@@ -1,0 +1,35 @@
+cq codex dots broadcast
+Send a user message to every discovered Dot.
+
+Usage
+  cq codex dots broadcast MESSAGE [OPTIONS]
+
+Send one message to every discovered Dot and report each delivery outcome.
+
+Acceptance confirms delivery to the adapter. Inspect unknown outcomes before retrying.
+
+Arguments
+  MESSAGE
+      Message to send once to every discovered Dot (1 to 3000 characters).
+      Valid UTF-8 containing 1 to 3000 Unicode characters; must not be whitespace-only.
+      Quote a multi-word message as one argument; use -- before a message beginning with a dash.
+
+Options
+  --root ABS_PATH
+      Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after
+      the leaf command. This is not a global CQ option.
+      Must be a clean absolute path when supplied.
+      Must not contain the home directory or overlap native app, credential or application-support
+      paths.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable. Long/short duplicates are rejected.
+
+Examples
+  Send one message to every discovered Dot.
+  cq codex dots broadcast 'Please summarise your current work.'

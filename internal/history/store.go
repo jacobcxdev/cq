@@ -134,7 +134,11 @@ func New(fs fsutil.FileSystem, dir string) (*Store, error) {
 // load reads the on-disk BurnState. Missing file, corrupt JSON, or a schema
 // version mismatch all return an empty (but non-nil) BurnState — cold start.
 // I/O errors other than NotExist are surfaced so callers can log them.
-func (s *Store) load() (*BurnState, error) {
+func (s *Store) load() (*BurnState, error) { return s.loadObserved(context.Background(), nil) }
+func (s *Store) loadObserved(ctx context.Context, warning func(string, string)) (*BurnState, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	data, err := s.fs.ReadFile(s.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -145,7 +149,11 @@ func (s *Store) load() (*BurnState, error) {
 	var state BurnState
 	if err := json.Unmarshal(data, &state); err != nil {
 		// Corrupt file: degrade to cold start rather than failing.
-		fmt.Fprintf(os.Stderr, "cq: history file corrupt, starting fresh: %v\n", err)
+		if warning != nil {
+			warning("history_decode_failed", "Quota history could not be decoded; starting fresh.")
+		} else {
+			fmt.Fprintf(os.Stderr, "cq: history file corrupt, starting fresh: %v\n", err)
+		}
 		return emptyState(), nil
 	}
 	if state.Version != schemaVersion {
@@ -159,15 +167,26 @@ func (s *Store) load() (*BurnState, error) {
 
 // save writes state to disk using the atomic tmp+rename pattern so readers
 // never see a torn file.
-func (s *Store) save(state *BurnState) error {
+func (s *Store) save(state *BurnState) error { return s.saveContext(context.Background(), state) }
+func (s *Store) saveContext(ctx context.Context, state *BurnState) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	state.Version = schemaVersion
 	data, err := json.Marshal(state)
 	if err != nil {
 		return fmt.Errorf("marshal history: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	tmp := s.path + ".tmp"
 	if err := s.fs.WriteFile(tmp, data, 0o600); err != nil {
 		return fmt.Errorf("write history tmp: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		s.fs.Remove(tmp)
+		return err
 	}
 	if err := s.fs.Rename(tmp, s.path); err != nil {
 		s.fs.Remove(tmp)
@@ -202,9 +221,29 @@ func (s *Store) UpdateAndGetEstimates(
 	providerResults map[string][]quota.Result,
 	nowEpoch int64,
 ) (BurnRates, RateEstimates, error) {
-	_ = ctx // reserved for future cancellation support
+	return s.updateAndGetEstimates(ctx, providerResults, nowEpoch, nil)
+}
 
-	state, err := s.load()
+// UpdateAndGetEstimatesObserved preserves confidence metadata while routing
+// optional history diagnostics through the caller's safe warning sink.
+func (s *Store) UpdateAndGetEstimatesObserved(ctx context.Context, providerResults map[string][]quota.Result, nowEpoch int64, warning func(string, string)) (BurnRates, RateEstimates, error) {
+	return s.updateAndGetEstimates(ctx, providerResults, nowEpoch, warning)
+}
+
+// UpdateAndGetBurnRatesObserved reports optional persistence diagnostics through
+// a safe caller-owned sink, without changing history arithmetic or file format.
+func (s *Store) UpdateAndGetBurnRatesObserved(ctx context.Context, providerResults map[string][]quota.Result, nowEpoch int64, warning func(string, string)) (BurnRates, error) {
+	rates, _, err := s.updateAndGetEstimates(ctx, providerResults, nowEpoch, warning)
+	return rates, err
+}
+func (s *Store) updateAndGetEstimates(ctx context.Context, providerResults map[string][]quota.Result, nowEpoch int64, warning func(string, string)) (BurnRates, RateEstimates, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	state, err := s.loadObserved(ctx, warning)
+	if ctx.Err() != nil {
+		return nil, nil, ctx.Err()
+	}
 	if err != nil {
 		// load already degraded to empty on parse/missing errors, so a
 		// non-nil error here means a real I/O failure. Keep going with the
@@ -331,7 +370,7 @@ func (s *Store) UpdateAndGetEstimates(
 	// Persist — log and continue on write failure so this run's gauge still
 	// benefits from the in-memory state.
 	var saveErr error
-	if err := s.save(state); err != nil {
+	if err := s.saveContext(ctx, state); err != nil {
 		saveErr = err
 	}
 

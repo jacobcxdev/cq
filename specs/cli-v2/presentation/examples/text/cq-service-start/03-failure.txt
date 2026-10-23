@@ -1,0 +1,3 @@
+Error · Service component proxy is not installed.
+  Code: service_not_installed
+  Command: cq service start

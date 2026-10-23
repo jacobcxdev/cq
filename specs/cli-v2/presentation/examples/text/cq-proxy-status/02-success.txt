@@ -1,0 +1,38 @@
+Proxy · ready    live
+  Observed  0s ago · 23 Sep 2026, 16:30:00 BST (UTC+01:00)
+  Elapsed   24ms
+  State     /Users/alex/cq-runtime
+
+Evidence
+  Inspector · known
+    Executable  /opt/homebrew/bin/cq
+    Version     1.0.0
+    Commit      1234567890abcdef1234567890abcdef12345678
+    Digest      1111111111111111111111111111111111111111111111111111111111111111
+  Desired · known
+    Manager     homebrew
+    Configured  yes
+    Listener    127.0.0.1:19280
+  Service · known
+    Manager     homebrew
+    State       running
+    Executable  /opt/homebrew/bin/cq
+    PID         4217
+  Listener · known
+    State       listening
+    Listener    127.0.0.1:19280
+    Executable  /opt/homebrew/bin/cq
+    PID         4217
+  Process · known
+    PID         4217
+    Executable  /opt/homebrew/bin/cq
+  Runtime · known
+    Reachable   yes
+    PID         4217
+    Executable  /opt/homebrew/bin/cq
+    Health      healthy
+  Data plane · known
+    Proven      no
+    Code        unproven
+
+Readiness inspection does not establish model-traffic acceptance.

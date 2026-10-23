@@ -1,0 +1,3 @@
+Warning · Credentials were saved, but native client activation failed.
+  Code: account_login_partial
+  Command: cq claude account login

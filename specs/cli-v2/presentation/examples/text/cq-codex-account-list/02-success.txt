@@ -1,0 +1,11 @@
+Codex accounts · 1
+
+  alex@example.test
+  Reference       account-alex
+  Account ID      acct_alex_01
+  Email           alex@example.test
+  Native default  Active
+  Identity        Stable
+  Sources         cq_managed
+  Aliases         none
+  Tier            codex_pro_20x

@@ -11,7 +11,7 @@ func Dir(roots userdirs.Roots) string { return roots.Cache }
 
 // DefaultDir returns the shared cache directory used by cq.
 func DefaultDir() (string, error) {
-	roots, err := userdirs.Default()
+	roots, err := userdirs.Default(userdirs.CacheRoot)
 	if err != nil {
 		return "", fmt.Errorf("resolve CQ cache directory: %w", err)
 	}

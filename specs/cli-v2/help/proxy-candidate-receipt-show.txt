@@ -1,0 +1,54 @@
+Show the authenticated receipt for one candidate validation attempt.
+
+Usage: cq proxy candidate receipt show --state-dir STATE_DIR --attempt-id ATTEMPT_ID [OPTIONS]
+
+Look up an exact retained attempt identifier. A receipt reports its recorded result;
+lookup performs no live validation.
+
+Options:
+  --state-dir STATE_DIR
+      Candidate state directory created by prepare. Required; absolute, clean, current-
+      user-owned path. Never defaults to shared proxy state.
+      Type: path. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Absolute, lexically clean path; not /; no symbolic link; owned by
+      current user; parent owner-controlled.
+  --attempt-id ATTEMPT_ID
+      Exact attempt identifier returned by candidate validation; required, 32 lowercase
+      hexadecimal characters. No latest-attempt fallback.
+      Type: string. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Exactly 32 lowercase hexadecimal characters.
+  --timeout TIMEOUT
+      Total deadline, including cleanup. Default: 10s. Allowed: 1s..30s inclusive; 0s
+      reserved for cleanup.
+      Type: duration. Required: false. Repeatable: false.
+      Default: "10s".
+      Constraint: Go duration syntax; 1s <= value <= 30s; cleanup reserve 0s; deadline
+      cancellation must not leave an unrecorded mutation.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq proxy candidate receipt show --state-dir "$CANDIDATE" --attempt-id "$ATTEMPT_ID"
+      Uses inputs prepared in the candidate workflow in the versioned annex notes.

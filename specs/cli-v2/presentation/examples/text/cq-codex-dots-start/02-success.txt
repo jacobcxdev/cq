@@ -1,0 +1,6 @@
+Codex Dots · start
+  Native catalogue: Ready
+  Account watcher: Running
+  Relay: Running
+  System app modified: No
+  Profiles: 2

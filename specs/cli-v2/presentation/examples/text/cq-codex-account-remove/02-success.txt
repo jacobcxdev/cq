@@ -1,0 +1,4 @@
+Codex local credentials · Removed
+  Reference           account-alex
+  Native credentials  Removed
+  External sources    none

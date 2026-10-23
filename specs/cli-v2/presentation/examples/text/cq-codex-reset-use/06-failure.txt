@@ -1,0 +1,3 @@
+Error · Selected reset credit is unavailable; no replacement credit was consumed.
+  Code: codex_reset_credit_not_found
+  Command: cq codex reset use

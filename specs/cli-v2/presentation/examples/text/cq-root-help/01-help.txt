@@ -1,0 +1,46 @@
+cq
+Check provider quotas and manage accounts, routing and services.
+
+Usage
+  cq [COMMAND] [OPTIONS]
+
+Without a command, check Claude, Codex and Gemini quotas.
+
+Quotas
+  check        Report quota usage for selected providers.
+
+Providers
+  claude       Manage Claude accounts and proxy routing pins.
+  codex        Manage Codex accounts, resets and proxy controls.
+  gemini       Inspect the externally managed Gemini account.
+
+Operations
+  auth         Refresh stored provider authentication credentials.
+  models       Inspect model registries and publish cache updates.
+  proxy        Run and inspect the shared proxy and its state.
+  service      Manage proxy and token-refresh background services.
+
+Utilities
+  completion   Print a shell completion script.
+  help         Show help for a command path.
+  version      Show CQ build identity.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Examples
+  Show all provider quotas
+  cq
+
+  Fetch fresh Codex quotas
+  cq check codex --fresh
+
+  Find reserve and other Codex proxy controls
+  cq codex proxy --help
+
+  Inspect service installation options
+  cq help service install

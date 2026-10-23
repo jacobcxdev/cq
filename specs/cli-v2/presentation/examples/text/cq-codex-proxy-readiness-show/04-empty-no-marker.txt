@@ -1,0 +1,3 @@
+Error · No HTTP readiness evidence is recorded.
+  Code: readiness_missing
+  Command: cq codex proxy readiness show

@@ -1,0 +1,34 @@
+cq codex account activate
+Select the native client default Codex account.
+
+Usage
+  cq codex account activate ACCOUNT [options]
+
+Requires managed activatable credentials unless already active.
+Existing clients may need reconnection. Proxy pins and session bindings do not change.
+Selecting the already active account succeeds without changing credentials.
+
+Arguments
+  ACCOUNT  Exact opaque key, unique email or existing CQ alias. Exact keys win.
+           Email and alias matching ignores case and surrounding whitespace.
+           Empty, ambiguous and unstable references are rejected.
+
+Options
+  --timeout DURATION  Total work deadline. Default: 30s; range: 1s to 10m.
+                      Use Go duration syntax; bare numbers are invalid.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq codex account list
+  cq codex proxy pin show
+
+Examples
+  Select the known account
+    cq codex account activate alex@example.test
+  Allow one minute
+    cq codex account activate alex@example.test --timeout 1m

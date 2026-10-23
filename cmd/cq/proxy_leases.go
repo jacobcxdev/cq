@@ -48,7 +48,7 @@ func runProxyLeasesWithDependencies(ctx context.Context, args []string, output i
 	var result any
 	switch args[0] {
 	case "invalidate":
-		path, result = proxy.RuntimeCodexLeaseInvalidationPath, &proxy.CodexLeaseInvalidationResult{}
+		path = proxy.RuntimeCodexLeaseInvalidationPath
 	case "redistribute":
 		path, result = proxy.RuntimeCodexLeaseRedistributionPath, &proxy.CodexLeaseRedistributionResult{}
 	default:
@@ -65,8 +65,18 @@ func runProxyLeasesWithDependencies(ctx context.Context, args []string, output i
 			return errors.New("proxy leases: invalid port")
 		}
 	}
-	if err := proxyLeaseRequest(ctx, port, path, http.NoBody, result, deps); err != nil {
-		return err
+	if path == proxy.RuntimeCodexLeaseInvalidationPath {
+		value, err := requestProxyLeaseInvalidation(ctx, port, deps)
+		if err != nil {
+			return err
+		}
+		result = value
+	} else {
+		value, err := requestProxyLeaseRedistribution(ctx, port, http.NoBody, deps)
+		if err != nil {
+			return err
+		}
+		result = value
 	}
 	return json.NewEncoder(output).Encode(result)
 }
@@ -82,20 +92,37 @@ func notifyProxyCodexResetWithDependencies(ctx context.Context, accountKey codex
 	if err != nil {
 		return err
 	}
-	var result proxy.CodexLeaseRedistributionResult
-	return proxyLeaseRequest(ctx, 0, proxy.RuntimeCodexLeaseRedistributionPath, bytes.NewReader(body), &result, deps)
+	_, err = requestProxyLeaseRedistribution(ctx, 0, bytes.NewReader(body), deps)
+	return err
 }
 
-func proxyLeaseRequest(ctx context.Context, port int, path string, payload io.Reader, result any, deps proxyLeaseDependencies) error {
+type proxyLeaseError struct {
+	kind   string
+	status int
+	code   string
+}
+
+func (e *proxyLeaseError) Error() string { return "proxy lease control failed" }
+
+func proxyLeaseRequest(ctx context.Context, port int, path string, payload io.Reader, deps proxyLeaseDependencies) ([]byte, error) {
 	if ctx == nil || deps.LoadConfig == nil || deps.Doer == nil {
-		return errors.New("proxy lease control unavailable")
+		return nil, &proxyLeaseError{kind: "io"}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	cfg, err := deps.LoadConfig()
-	if err != nil {
-		return err
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
-	if cfg == nil {
-		return errors.New("proxy lease control configuration unavailable")
+	if errors.Is(err, proxy.ErrLocalTokenRequired) {
+		return nil, &proxyLeaseError{kind: "auth"}
+	}
+	if err != nil || cfg == nil {
+		return nil, &proxyLeaseError{kind: "io"}
+	}
+	if cfg.LocalToken == "" {
+		return nil, &proxyLeaseError{kind: "auth"}
 	}
 	if port == 0 {
 		port = cfg.Port
@@ -105,35 +132,71 @@ func proxyLeaseRequest(ctx context.Context, port int, path string, payload io.Re
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", port, path), payload)
 	if err != nil {
-		return err
+		return nil, &proxyLeaseError{kind: "io"}
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
 	if payload != http.NoBody {
 		request.Header.Set("Content-Type", "application/json")
 	}
 	response, err := deps.Doer.Do(request)
+	if response != nil && response.Body != nil {
+		defer response.Body.Close()
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if err != nil {
-		return err
+		return nil, &proxyLeaseError{kind: "control"}
 	}
-	if response == nil || response.Body == nil {
-		return errors.New("proxy lease control response unavailable")
+	if response == nil {
+		return nil, &proxyLeaseError{kind: "control"}
 	}
-	defer response.Body.Close()
+	// Classify the status and allowlisted receipt before touching an unused body.
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = httputil.ReadBody(response.Body)
-		return fmt.Errorf("proxy lease control failed: HTTP %d", response.StatusCode)
+		return nil, &proxyLeaseError{status: response.StatusCode, code: response.Header.Get(proxy.CodexLeaseErrorHeader)}
+	}
+	if response.Body == nil {
+		return nil, &proxyLeaseError{kind: "io"}
 	}
 	body, err := httputil.ReadBody(response.Body)
 	if err != nil {
-		return err
+		return nil, &proxyLeaseError{kind: "io"}
+	}
+	return body, nil
+}
+func requestProxyLeaseInvalidation(ctx context.Context, port int, deps proxyLeaseDependencies) (proxy.CodexLeaseInvalidationResult, error) {
+	var zero proxy.CodexLeaseInvalidationResult
+	body, err := proxyLeaseRequest(ctx, port, proxy.RuntimeCodexLeaseInvalidationPath, http.NoBody, deps)
+	if err != nil {
+		return zero, err
+	}
+	var result struct {
+		InvalidatedLeases *int    `json:"invalidated_leases"`
+		JournalGeneration *uint64 `json:"journal_generation"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(result); err != nil {
-		return errors.New("proxy lease control response invalid")
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF || result.InvalidatedLeases == nil || result.JournalGeneration == nil || *result.InvalidatedLeases < 0 {
+		return zero, &proxyLeaseError{kind: "io"}
 	}
-	if decoder.Decode(&struct{}{}) != io.EOF {
-		return errors.New("proxy lease control response invalid")
+	return proxy.CodexLeaseInvalidationResult{InvalidatedLeases: *result.InvalidatedLeases, JournalGeneration: *result.JournalGeneration}, nil
+}
+
+func requestProxyLeaseRedistribution(ctx context.Context, port int, payload io.Reader, deps proxyLeaseDependencies) (proxy.CodexLeaseRedistributionResult, error) {
+	var zero proxy.CodexLeaseRedistributionResult
+	body, err := proxyLeaseRequest(ctx, port, proxy.RuntimeCodexLeaseRedistributionPath, payload, deps)
+	if err != nil {
+		return zero, err
 	}
-	return nil
+	var result struct {
+		ScheduledLeases   *int    `json:"scheduled_leases"`
+		DeferredLeases    *int    `json:"deferred_leases"`
+		JournalGeneration *uint64 `json:"journal_generation"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&result) != nil || decoder.Decode(&struct{}{}) != io.EOF || result.ScheduledLeases == nil || result.DeferredLeases == nil || result.JournalGeneration == nil || *result.ScheduledLeases < 0 || *result.DeferredLeases < 0 {
+		return zero, &proxyLeaseError{kind: "io"}
+	}
+	return proxy.CodexLeaseRedistributionResult{ScheduledLeases: *result.ScheduledLeases, DeferredLeases: *result.DeferredLeases, JournalGeneration: *result.JournalGeneration}, nil
 }

@@ -161,13 +161,13 @@ func TestWindowsMSIPackageOwnsCompleteLifecycle(t *testing.T) {
 	}
 }
 
-func TestReleaseArchivesContainOnlyCQExecutable(t *testing.T) {
+func TestReleaseArchivesContainCQAndCanonicalDocumentation(t *testing.T) {
 	releaser, err := os.ReadFile("../../.goreleaser.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(releaser), "    files:\n      - none*\n") {
-		t.Fatal("GoReleaser archives include default metadata files")
+	if !strings.Contains(string(releaser), "    files:\n      - README.md\n      - specs/cli-v2/COMMANDS.md\n") {
+		t.Fatal("GoReleaser archives lack the exact canonical documentation allowlist")
 	}
 }
 
@@ -462,17 +462,17 @@ func TestCICoversSupportedNativePlatforms(t *testing.T) {
 			t.Errorf("CI uses forbidden platform bypass %q", forbidden)
 		}
 	}
-	if strings.Contains(text, `grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1`) {
-		t.Error("CI uses pipefail-unsafe previous-tag selection")
+	if !strings.Contains(text, "CQ_CANDIDATE_VERSION: 0.39.0") || !strings.Contains(text, `current_version="${CQ_CANDIDATE_VERSION}-ci"`) || strings.Contains(text, "1.0.0") {
+		t.Error("CI must keep both candidate paths on the planned 0.x release line")
 	}
-	if !strings.Contains(text, "done < <(git tag --sort=-v:refname)") {
-		t.Error("CI does not use pipe-safe previous-tag selection")
+	if !strings.Contains(text, "go test -race -count=1 ./internal/userdirs ./internal/fsutil") {
+		t.Error("CI missing native Windows root and filesystem race gates")
 	}
 	if count := strings.Count(text, "runs-on: macos-15"); count != 2 {
 		t.Fatalf("CI has %d macOS jobs, want Codex and Homebrew only", count)
 	}
-	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 1 {
-		t.Fatalf("full race suite appears in %d job definitions, want Linux matrix only", count)
+	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 2 {
+		t.Fatalf("full race suite appears in %d job definitions, want CLI contract and native Linux matrix", count)
 	}
 }
 
@@ -617,18 +617,28 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	homebrewText := string(homebrewInstall)
+	pidQuery := `if .schema_version == 2 then .data.components[] | select(.id == "proxy") | .pid else .proxy.pid end`
+	pidCapture := `proxy_pid=$($installed_cq service status --json | jq -er '` + pidQuery + `')`
+	pidGuard := `[[ "$($installed_cq service status --json | jq -er '` + pidQuery + `')" == "$proxy_pid" ]]`
 	for _, required := range []string{
 		`Digest::SHA256.file(live).hexdigest == package_digest`,
 		`status["active_runtime_version"] == expected_version`,
 		`Digest::SHA256.file(path).hexdigest == digest`,
 		`brew reinstall --cask "$validation_tap/cq"`,
-		`"$($installed_cq service status --json | jq -er '.proxy.pid')" == "$proxy_pid"`,
+		pidCapture,
+		pidGuard,
 		`jq . <<<"$status_json" >&2`,
 		`tail -n 80 "$log" >&2`,
 	} {
 		if !strings.Contains(homebrewText, required) {
 			t.Errorf("Homebrew installation script missing identity/diagnostic proof %q", required)
 		}
+	}
+	pidCaptureIndex := strings.Index(homebrewText, pidCapture)
+	reinstallIndex := strings.Index(homebrewText, `brew reinstall --cask "$validation_tap/cq"`)
+	pidGuardIndex := strings.Index(homebrewText, pidGuard)
+	if pidCaptureIndex < 0 || reinstallIndex < pidCaptureIndex || pidGuardIndex < reinstallIndex {
+		t.Error("Homebrew reinstall does not preserve the captured proxy PID identity")
 	}
 	linuxText := string(linux)
 	for _, required := range []string{
@@ -648,7 +658,7 @@ func TestNativeInstallationScriptsHaveExactCleanupGuards(t *testing.T) {
 		`export CODEX_HOME="$HOME/.codex"`,
 		`use_existing_user_manager=${CQ_LINUX_USE_EXISTING_USER_MANAGER:-}`,
 		`if [[ "$use_existing_user_manager" == "1" ]]; then`,
-		`[[ "$("$installed_cq" --version)" == "$version" ]]`,
+		`"$installed_cq" version --json`,
 	} {
 		if !strings.Contains(linuxText, required) {
 			t.Errorf("Linux installation script missing cleanup/proof %q", required)

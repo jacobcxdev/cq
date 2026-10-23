@@ -1,0 +1,53 @@
+Request startup validation of an installed candidate HTTP listener.
+
+Usage: cq codex proxy validate http --port PORT [OPTIONS]
+
+Requires an installed candidate service on an explicitly selected non-live port.
+Restarts only that verified candidate service in one-shot validation mode.
+
+Success means the request was durably recorded and the restart was accepted; it does not
+mean validation passed. Use cq codex proxy readiness show --client-build BUILD to
+inspect recorded evidence after startup.
+
+Options:
+  --port PORT
+      Installed candidate loopback port; required. The live port 19280 is forbidden.
+      Type: integer. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: 1..65535 except 19280.
+      Constraint: Must match verified loaded candidate service label, process and
+      listener binding.
+  --timeout TIMEOUT
+      Maximum elapsed operation time, including preparation, requests and cleanup.
+      Default: 30s. Range: 1s..5m. Interactive confirmation time is excluded.
+      Type: duration. Required: false. Repeatable: false.
+      Default: "30s".
+      Constraint: Go duration, 1s <= value <= 5m.
+      Constraint: Use one monotonic deadline from operation preparation through cleanup;
+      nested requests cannot extend it.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex proxy validate http --port 19281
+      Request validation of an already installed candidate service on port 19281.

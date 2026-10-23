@@ -73,12 +73,16 @@ type ResetScheduleObjective struct {
 }
 
 type ResetScheduleBlocker struct {
-	Code         string
-	AccountEmail string
-	AccountID    string
+	AccountReference string `json:"-"`
+	Code             string
+	AccountEmail     string
+	AccountID        string
 }
 
 type ResetSchedule struct {
+	// ObjectiveComputed distinguishes a calculated zero from an unavailable result.
+	ObjectiveComputed bool `json:"-"`
+
 	GeneratedAt time.Time
 	Horizon     time.Time
 	Exact       bool
@@ -90,16 +94,18 @@ type ResetSchedule struct {
 }
 
 type ResetScheduleItem struct {
-	AccountEmail  string
-	AccountID     string
-	CreditID      string
-	UseAt         time.Time
-	UseBy         time.Time
-	Status        ResetScheduleStatus
-	Confidence    ResetScheduleConfidence
-	RestoredPct   map[quota.WindowName]float64
-	AvoidedGapSec int64
-	ReasonCodes   []ResetScheduleReason
+	AccountReference string     `json:"-"`
+	CreditExpiresAt  *time.Time `json:"-"`
+	AccountEmail     string
+	AccountID        string
+	CreditID         string
+	UseAt            time.Time
+	UseBy            time.Time
+	Status           ResetScheduleStatus
+	Confidence       ResetScheduleConfidence
+	RestoredPct      map[quota.WindowName]float64
+	AvoidedGapSec    int64
+	ReasonCodes      []ResetScheduleReason
 }
 
 type simulationWindow struct {
@@ -161,7 +167,7 @@ func normaliseResetScheduleInput(input ResetScheduleInput) (simulationState, []R
 	allCredits := make([]ResetScheduleCreditInput, 0)
 	for _, inputAccount := range input.Accounts {
 		blocker := func(code string) {
-			blockers = append(blockers, ResetScheduleBlocker{Code: code, AccountEmail: inputAccount.Email, AccountID: inputAccount.AccountID})
+			blockers = append(blockers, ResetScheduleBlocker{AccountReference: inputAccount.Key, Code: code, AccountEmail: inputAccount.Email, AccountID: inputAccount.AccountID})
 		}
 		if inputAccount.Key == "" {
 			blocker("missing_account_key")
@@ -604,6 +610,7 @@ func RecommendResetSchedule(input ResetScheduleInput) ResetSchedule {
 	node, exact := searchResetSchedule(state)
 	result.Exact = exact
 	result.Objective = node.state.objective
+	result.ObjectiveComputed = true
 	consumed := make(map[string]resetSearchConsumption, len(node.consumptions))
 	for _, consumption := range node.consumptions {
 		consumed[consumption.creditID] = consumption
@@ -944,6 +951,7 @@ func projectResetScheduleItems(
 				status = ResetDueNow
 			}
 			item := ResetScheduleItem{
+				AccountReference: record.accountKey, CreditExpiresAt: record.credit.ExpiresAt,
 				AccountEmail: record.email, AccountID: record.accountID, CreditID: id,
 				UseAt: useAt, UseBy: consumption.useBy, Status: status, Confidence: confidence,
 				RestoredPct: consumption.restored, AvoidedGapSec: consumption.avoidedGap,
@@ -959,6 +967,7 @@ func projectResetScheduleItems(
 			status = ResetDeferred
 		}
 		items = append(items, ResetScheduleItem{
+			AccountReference: record.accountKey, CreditExpiresAt: record.credit.ExpiresAt,
 			AccountEmail: record.email, AccountID: record.accountID, CreditID: id,
 			Status: status, Confidence: confidence,
 		})

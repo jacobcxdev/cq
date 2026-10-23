@@ -791,3 +791,39 @@ func codexAuthWithRefresh(access, accountID, idToken, refresh string) []byte {
 	data, _ := json.Marshal(doc)
 	return data
 }
+
+func TestRefreshCommittedMaterialSurvivesReceiptFailure(t *testing.T) {
+	c, _, ref, rev := testRefreshRecord(t)
+	c.RefreshExchange = successfulRefresh
+	c.RefreshMutations = &recoveringRefreshRecorder{completeFailures: 1}
+	result, err := c.RefreshCanonical(context.Background(), ref, rev)
+	if err == nil {
+		t.Fatal("missing receipt failure")
+	}
+	saved, loadErr := c.loadRef(ref)
+	if loadErr != nil || saved.Credential.AccessToken != "refreshed-access" {
+		t.Fatal("fixture did not commit refreshed material")
+	}
+	if !result.CredentialsChanged {
+		t.Fatal("committed credentials lost on receipt failure")
+	}
+	var persistence *RefreshPersistenceError
+	if !errors.As(mutationFailure(err).err(), &persistence) {
+		t.Fatal("RPC lost typed persistence failure")
+	}
+}
+func TestRefreshMaterialCommitSurvivesDirectorySyncFailure(t *testing.T) {
+	c, fs, ref, revision := testRefreshRecord(t)
+	c.RefreshExchange = func(ctx context.Context, token string) (*auth.CodexTokenResponse, error) {
+		fs.failStep = "directory sync"
+		return successfulRefresh(ctx, token)
+	}
+	r, err := c.RefreshCanonical(context.Background(), ref, revision)
+	loaded, loadErr := c.loadRef(ref)
+	if loadErr != nil || loaded.Credential.AccessToken != "refreshed-access" {
+		t.Fatal("fixture did not commit material before sync failure")
+	}
+	if err == nil || !r.CredentialsChanged {
+		t.Fatal("post-rename failure lost committed credential evidence")
+	}
+}

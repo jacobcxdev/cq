@@ -1,0 +1,20 @@
+Codex reset credits · Complete
+
+  alex@example.test
+    Reference: account-alex
+    Account ID: acct_alex_01
+    Available: 1 credit
+
+    Credit       credit-september-01
+    Type         codex_rate_limits
+    Status       available
+    Supported    Yes
+    Granted      2d ago · 21 Sep 2026, 16:30 BST (UTC+01:00)
+    Expires      in 2d · 25 Sep 2026, 16:30 BST (UTC+01:00)
+
+  sam@example.test
+    Reference: account-sam
+    Account ID: acct_sam_01
+    Available: 0 credits
+
+    No reset credits.

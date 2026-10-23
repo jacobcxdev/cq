@@ -1,0 +1,33 @@
+cq codex proxy readiness show
+Check retained HTTP readiness evidence for an exact Codex build.
+
+Usage
+  cq codex proxy readiness show --client-build CLIENT_BUILD [options]
+
+Read the local HTTP marker against this CQ executable, client build, parser and lease schemas,
+routing semantics, retry budget and fixture hash. Success means the retained tuple matches;
+no new request or live health check occurs. Does not create or renew evidence.
+
+Options
+  --client-build CLIENT_BUILD
+      Required. Exact client version: three numeric components, optional -suffix or +suffix.
+      Suffix characters: ASCII letters, digits, dot and hyphen. No whitespace or arbitrary labels.
+      Byte-for-byte match: no trimming, case folding or prefix matching.
+  --state-dir STATE_DIR
+      Nonempty canonical absolute directory; reject symlink traversal.
+      Omit to use the resolved CQ proxy state directory, not the runtime resilience directory.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default false; accept a bare flag, =true or =false.
+  Options occur once unless marked repeatable; duplicate long/short spellings count together.
+
+Related commands
+  cq codex proxy validate http --help
+  cq service status --component proxy
+
+Examples
+  Inspect retained evidence for this exact client version.
+  cq codex proxy readiness show --client-build 0.146.0

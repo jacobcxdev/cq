@@ -1,0 +1,3 @@
+Error · Unknown option: --verbose. Run cq version --help.
+  Code: unknown_option
+  Command: cq version

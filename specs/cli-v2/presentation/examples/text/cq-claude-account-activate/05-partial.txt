@@ -1,0 +1,3 @@
+Claude native client default · Partial
+  Credentials changed
+  Metadata verification: incomplete

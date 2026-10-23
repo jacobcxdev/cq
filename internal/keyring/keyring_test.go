@@ -1,8 +1,11 @@
 package keyring
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -10,6 +13,9 @@ import (
 
 func setKeyringTestHome(t *testing.T, dir string) {
 	t.Helper()
+	old := resolveCredentialHome
+	t.Cleanup(func() { resolveCredentialHome = old })
+	resolveCredentialHome = func() (string, error) { return dir, nil }
 	t.Setenv("HOME", dir)
 	t.Setenv("USERPROFILE", dir)
 }
@@ -1470,4 +1476,151 @@ func TestHash8(t *testing.T) {
 			t.Errorf("len(Hash8(\"\")) = %d, want 8", len(h))
 		}
 	})
+}
+
+func TestKeyringObservedDiagnosticsAreSafe(t *testing.T) {
+	home := t.TempDir()
+	setKeyringTestHome(t, home)
+	var warnings []string
+	ctx := WithDiagnostics(context.Background(), func(code, message string) { warnings = append(warnings, code+":"+message) })
+	path := filepath.Join(home, "private-manifest")
+	if err := os.WriteFile(path, []byte("credential-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadManifestContext(ctx, path); got != nil {
+		t.Fatal("corrupt manifest accepted")
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude", ".credentials.json"), []byte("credential-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	BackfillCredentialsFileContext(ctx, &ClaudeOAuth{})
+	// A file used as a directory forces a real optional persistence failure.
+	if err := saveManifestContext(ctx, filepath.Join(path, "manifest"), nil); err == nil {
+		t.Fatal("expected directory failure")
+	}
+	if len(warnings) != 3 {
+		t.Fatalf("warning count=%d", len(warnings))
+	}
+	for _, warning := range warnings {
+		if strings.Contains(warning, "credential-secret") || strings.Contains(warning, home) {
+			t.Fatal("private diagnostic value leaked")
+		}
+	}
+	if !strings.HasPrefix(warnings[0], "manifest_decode_failed:") || !strings.HasPrefix(warnings[1], "credential_decode_failed:") || !strings.HasPrefix(warnings[2], "manifest_directory_failed:") {
+		t.Fatal(warnings)
+	}
+}
+func TestKeyringCancelledContextStopsBeforeAccess(t *testing.T) {
+	old := resolveCredentialHome
+	defer func() { resolveCredentialHome = old }()
+	resolveCredentialHome = func() (string, error) {
+		t.Error("cancelled operation resolved home")
+		return "", errors.New("forbidden")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if rows := DiscoverClaudeAccountsContext(ctx); len(rows) != 0 {
+		t.Fatal("cancelled discovery returned rows")
+	}
+	BackfillCredentialsFileContext(ctx, &ClaudeOAuth{})
+	PersistRefreshedTokenContext(ctx, &ClaudeOAuth{AccountUUID: "not-real"})
+	if err := StoreCQAccountContext(ctx, &ClaudeOAuth{AccountUUID: "not-real"}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if err := WriteCredentialsFileContext(ctx, &ClaudeCredentials{}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if err := updateKeychainEntryContext(ctx, "not-real", &ClaudeCredentials{}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+}
+func TestKeyringCancellationAfterHomePreventsPersistence(t *testing.T) {
+	home := t.TempDir()
+	old := resolveCredentialHome
+	defer func() { resolveCredentialHome = old }()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resolveCredentialHome = func() (string, error) { cancel(); return home, nil }
+	if err := WriteCredentialsFileContext(ctx, &ClaudeCredentials{}); !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	if entries, err := os.ReadDir(home); err != nil || len(entries) != 0 {
+		t.Fatal("credential directory created after cancellation")
+	}
+}
+
+func TestRemovalExactClaudeRetainsPartialAndProtectsIdentity(t *testing.T) {
+	for _, mode := range []string{"success", "delete-fails", "manifest-fails", "native-replaced", "uuid-collision", "cancelled"} {
+		t.Run(mode, func(t *testing.T) {
+			account := ClaudeOAuth{AccountUUID: "uuid", Email: "Mixed@example.com", AccessToken: "secret"}
+			native, _ := json.Marshal(ClaudeCredentials{ClaudeAiOauth: &account})
+			raw, _ := json.Marshal(account)
+			manifest, _ := json.Marshal([]manifestEntry{{UUID: "uuid", Email: " mixed@EXAMPLE.com "}})
+			deleted, written := 0, 0
+			reads := 0
+			ops := claudeRemovalIO{
+				inspect: func(context.Context) ([]ClaudeAccountInspection, error) {
+					return []ClaudeAccountInspection{{Account: account}}, nil
+				},
+				manifest: func() (string, error) { return "/manifest", nil }, home: func() (string, error) { return "/isolated", nil },
+				read: func(path string) ([]byte, error) {
+					if path == "/manifest" {
+						return manifest, nil
+					}
+					reads++
+					if mode == "native-replaced" && reads > 1 {
+						other := ClaudeOAuth{AccountUUID: "other", Email: account.Email}
+						return json.Marshal(ClaudeCredentials{ClaudeAiOauth: &other})
+					}
+					return native, nil
+				},
+				get: func(string, string) (string, error) {
+					if mode == "uuid-collision" {
+						other := account
+						other.AccountUUID = "other"
+						data, _ := json.Marshal(other)
+						return string(data), nil
+					}
+					return string(raw), nil
+				},
+				delete: func(string, string) error {
+					if mode == "delete-fails" {
+						return errors.New("private-keychain-failure")
+					}
+					deleted++
+					return nil
+				},
+				saveManifest: func(context.Context, string, []manifestEntry) error {
+					if mode == "manifest-fails" {
+						return errors.New("private-manifest-failure")
+					}
+					return nil
+				},
+				write: func(context.Context, *ClaudeCredentials) error { written++; return nil }, platform: func(context.Context, []ClaudeOAuth) (bool, error) { return false, nil },
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if mode == "cancelled" {
+				cancel()
+			}
+			result, err := removeClaudeAccountContext(ctx, account, ops)
+			switch mode {
+			case "success":
+				if err != nil || !result.Changed || !result.ActiveRemoved || deleted != 1 || written != 1 {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+			case "manifest-fails", "native-replaced":
+				if err == nil || !result.Changed || result.ActiveRemoved || written != 0 {
+					t.Fatal("partial result lost or replacement removed")
+				}
+			default:
+				if err == nil || result.Changed || deleted != 0 || written != 0 {
+					t.Fatalf("unexpected mutation result=%+v err=%v", result, err)
+				}
+			}
+		})
+	}
 }

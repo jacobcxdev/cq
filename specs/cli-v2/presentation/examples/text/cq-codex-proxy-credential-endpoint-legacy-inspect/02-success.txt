@@ -1,0 +1,7 @@
+Credential endpoint · legacy_refused
+  Path    /Users/alex/Library/Application Support/cq/codex/credential.sock
+  Kind    snapshot
+  Ticket  none
+
+Identity observed.
+Use --json to retain the exact structured proof.

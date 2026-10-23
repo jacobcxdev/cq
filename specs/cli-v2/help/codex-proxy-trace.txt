@@ -1,0 +1,88 @@
+Read or follow retained Codex request traces.
+
+Usage: cq codex proxy trace [OPTIONS]
+
+Read configured local log files without contacting or changing the proxy. Filters
+combine with logical AND; apply tail after filtering retained history.
+
+JSON mode is an explicit JSONL stream exception: emit one CLI v2 envelope containing
+data.record for each event, then exactly one terminal envelope containing data.end.
+Successful completion uses ok=true, errors=[], exit 0. Timeout uses ok=false with
+trace_timeout, exit 7; interruption uses ok=false with trace_interrupted, exit 130. No
+second error envelope follows a terminal envelope.
+
+Follow preserves records across retained rotation. If logs rotate beyond retained
+history, report a gap instead of silently claiming continuity. Payload mode reads
+already captured request/response content.
+
+Options:
+  --session SESSION
+      Match a raw session ID or codex://threads/ID against privacy-safe session/thread
+      keys. Omission matches all sessions.
+      Type: string. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: After trimming surrounding whitespace and extracting the final slash-
+      delimited component, selector must be nonempty.
+      Constraint: Use existing privacy key derivation for raw and codex://threads/ID
+      forms; reject empty normalised input rather than dropping the filter.
+  --trace TRACE
+      Match this exact trace ID. Omission matches all trace IDs.
+      Type: string. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Nonempty trace ID.
+  --since SINCE
+      Include records at or after command-start time minus this positive duration.
+      Omission imposes no lower time bound.
+      Type: duration. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Positive Go duration.
+  --tail TAIL
+      Return the newest N matching retained records before following; default 200. Use 0
+      for all matching retained records.
+      Type: integer. Required: false. Repeatable: false.
+      Default: 200.
+      Constraint: Integer >=0.
+  --follow
+      Continue reading new records and rotated logs until interrupted. No proxy
+      connection is opened.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+  --payload
+      Read the existing opt-in payload log instead of causal route events. This may
+      display recorded user content; it does not enable capture.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+  --timeout TIMEOUT
+      Optional maximum elapsed reading/following time; omission has no command deadline.
+      Expiry returns exit 7.
+      Type: duration. Required: false. Repeatable: false.
+      Default: null.
+      Constraint: Positive Go duration when specified.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex proxy trace --since 15m --tail 50
+      Read the latest 50 matching records from the last 15 minutes.
+  cq codex proxy trace --session codex://threads/example-session --follow --json
+      Follow one session using explicit JSONL envelopes.

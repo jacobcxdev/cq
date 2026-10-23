@@ -22,20 +22,25 @@ import (
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
-func TestProxyCandidatePrepareStatusStartStop(t *testing.T) {
+// Legacy injected effects exercise storage plumbing, not public v2 capability.
+func TestProxyCandidateLegacyInjectedPrepareStatusStartStop(t *testing.T) {
 	base := t.TempDir()
+	bundleBody, bundle := operationalCandidateBundleForTest(t, "target", strings.Repeat("a", 40))
 	root := filepath.Join(base, "candidate")
 	files := map[string]string{
 		"source.json":   `{"port":29280}`,
-		"release.json":  `{"release":"target"}`,
+		"release.json":  string(bundleBody),
 		"codex":         "synthetic executable",
-		"registry.json": `{"clients":[]}`,
+		"registry.json": string(candidateTestRegistry(t)),
 		"policy.json":   `{"generation":1}`,
 	}
 	for name, body := range files {
 		if err := os.WriteFile(filepath.Join(base, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.Chmod(filepath.Join(base, "codex"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	deps := candidateCommandDependencies{
 		FS: fsutil.OSFileSystem{}, Random: rand.Reader, Now: time.Now,
@@ -56,7 +61,7 @@ func TestProxyCandidatePrepareStatusStartStop(t *testing.T) {
 		"proxy", "candidate", "prepare", "--instance-state-root", root, "--port", "29280",
 		"--source-config", filepath.Join(base, "source.json"),
 		"--target-release-bundle", filepath.Join(base, "release.json"),
-		"--target-release-set", strings.Repeat("a", 64), "--client-build", "codex-test",
+		"--target-release-set", bundle.Digest, "--client-build", "codex-test",
 		"--client-executable", filepath.Join(base, "codex"),
 		"--local-token-client-registry", filepath.Join(base, "registry.json"),
 		"--credential-mode", "none", "--policy-snapshot", filepath.Join(base, "policy.json"),
@@ -101,16 +106,21 @@ func TestProxyCandidatePrepareStatusStartStop(t *testing.T) {
 	}
 }
 
-func TestProxyCandidateBarrierArtifactValidationAndRemoval(t *testing.T) {
+// These legacy injected effects are not qualification or public v2 success proof.
+func TestProxyCandidateLegacyInjectedTransitionsAndRemoval(t *testing.T) {
 	base := t.TempDir()
+	bundleBody, bundle := operationalCandidateBundleForTest(t, "target", strings.Repeat("a", 40))
 	root := filepath.Join(base, "candidate")
 	for name, body := range map[string]string{
-		"source.json": `{"port":29281}`, "release.json": `{"release":"target"}`,
-		"codex": "synthetic executable", "registry.json": `{"clients":[]}`,
+		"source.json": `{"port":29281}`, "release.json": string(bundleBody),
+		"codex": "synthetic executable", "registry.json": string(candidateTestRegistry(t)),
 	} {
 		if err := os.WriteFile(filepath.Join(base, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if err := os.Chmod(filepath.Join(base, "codex"), 0o700); err != nil {
+		t.Fatal(err)
 	}
 	removed := false
 	deps := candidateCommandDependencies{
@@ -147,7 +157,7 @@ func TestProxyCandidateBarrierArtifactValidationAndRemoval(t *testing.T) {
 	prepare, err := ClassifyProxyCommand([]string{
 		"proxy", "candidate", "prepare", "--instance-state-root", root, "--port", "29281",
 		"--source-config", filepath.Join(base, "source.json"), "--target-release-bundle", filepath.Join(base, "release.json"),
-		"--target-release-set", strings.Repeat("a", 64), "--client-build", "codex-test", "--client-executable", filepath.Join(base, "codex"),
+		"--target-release-set", bundle.Digest, "--client-build", "codex-test", "--client-executable", filepath.Join(base, "codex"),
 		"--local-token-client-registry", filepath.Join(base, "registry.json"), "--credential-mode", "none", "150s",
 	})
 	if err != nil {

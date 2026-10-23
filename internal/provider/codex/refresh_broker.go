@@ -16,9 +16,10 @@ import (
 type RefreshExchange func(context.Context, string) (*auth.CodexTokenResponse, error)
 
 type RefreshResult struct {
-	Ref      CandidateRef
-	Revision Revision
-	Material CredentialMaterial
+	CredentialsChanged bool
+	Ref                CandidateRef
+	Revision           Revision
+	Material           CredentialMaterial
 }
 
 // CredentialReferenceRefresher refreshes credentials without exposing material
@@ -147,6 +148,27 @@ func (c *CredentialCoordinator) refreshOnce(ctx context.Context, ref CandidateRe
 	if err := c.finishPendingRemovalLocked(ctx); err != nil {
 		return RefreshResult{}, err
 	}
+	return c.refreshLocked(ctx, ref, expected)
+}
+
+// RefreshCanonical never joins legacy recovery flights. The coordinator mutex
+// serialises the same candidate, and the revision is checked under that lock.
+func (c *CredentialCoordinator) RefreshCanonical(ctx context.Context, ref CandidateRef, expected Revision) (RefreshResult, error) {
+	if err := c.lockMutation(ctx); err != nil {
+		return RefreshResult{}, err
+	}
+	defer c.mu.Unlock()
+	if _, pending, err := c.Journal.Load(); err != nil {
+		return RefreshResult{}, err
+	} else if pending {
+		return RefreshResult{}, ErrStaleRevision
+	}
+	return c.refreshLocked(ctx, ref, expected)
+}
+func (c *CredentialCoordinator) refreshLocked(ctx context.Context, ref CandidateRef, expected Revision) (RefreshResult, error) {
+	if err := ctx.Err(); err != nil {
+		return RefreshResult{}, err
+	}
 	record, err := c.loadRef(ref)
 	if err != nil {
 		return RefreshResult{}, err
@@ -174,7 +196,7 @@ func (c *CredentialCoordinator) refreshOnce(ctx context.Context, ref CandidateRe
 		return RefreshResult{}, err
 	}
 	if c.RefreshMutations == nil || c.CredentialOwner == nil {
-		return RefreshResult{}, errors.New("Codex refresh mutation authority unavailable")
+		return RefreshResult{}, ErrCredentialAuthorityUnavailable
 	}
 	selection, err := c.RefreshMutations.SelectRefreshMutation(operationID, ref, expected, fullRefreshMutationCapacity())
 	if err != nil {
@@ -288,19 +310,21 @@ func (c *CredentialCoordinator) retryRetainedLocked(ctx context.Context, record 
 		}
 		if err := c.Store.Commit(&record, record.Metadata.Revision); err != nil {
 			c.restoreRotationUncertain(&record, retained.operationID)
-			return RefreshResult{}, true, &RefreshPersistenceError{Err: err}
+			var commit *CommitError
+			changed := errors.As(err, &commit) && commit.Committed
+			return RefreshResult{CredentialsChanged: changed}, true, &RefreshPersistenceError{Err: err}
 		}
 		retained.materialCommitted = true
 		c.retainRefresh(record.Metadata.CandidateID, retained)
 	}
 	if err := c.completeRefreshMutation(retained.operationID, retained.commitDigest); err != nil {
-		return RefreshResult{}, true, &RefreshPersistenceError{Err: err}
+		return RefreshResult{CredentialsChanged: retained.materialCommitted}, true, &RefreshPersistenceError{Err: err}
 	}
 	c.clearRetained(record.Metadata.CandidateID)
 	if retained.resultErr != nil {
 		return RefreshResult{}, true, retained.resultErr
 	}
-	return RefreshResult{Ref: recordRef(record), Revision: record.Metadata.Revision, Material: record.Credential}, true, nil
+	return RefreshResult{CredentialsChanged: retained.materialCommitted, Ref: recordRef(record), Revision: record.Metadata.Revision, Material: record.Credential}, true, nil
 }
 
 func (c *CredentialCoordinator) persistRefreshAttempt(retained retainedRefresh) error {
@@ -386,4 +410,10 @@ type definitiveRefreshError interface{ RefreshDefinitive() bool }
 func isDefinitiveRefreshError(err error) bool {
 	var definitive definitiveRefreshError
 	return errors.As(err, &definitive) && definitive.RefreshDefinitive()
+}
+
+// OpenDefaultCanonicalCredentialRefreshControl admits an owner without replaying
+// unrelated credential recovery; refresh still uses the owned OAuth exchange.
+func OpenDefaultCanonicalCredentialRefreshControl(ctx context.Context, fs fsutil.DurableFileSystem, client httputil.Doer) (*CredentialControl, error) {
+	return openDefaultCredentialRefreshControl(ctx, fs, client, OpenDefaultCanonicalCredentialControl)
 }

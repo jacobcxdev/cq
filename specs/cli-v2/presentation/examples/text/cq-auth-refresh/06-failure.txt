@@ -1,0 +1,3 @@
+Error · Codex credential authority is unavailable.
+  Code: auth_authority_unavailable
+  Command: cq auth refresh

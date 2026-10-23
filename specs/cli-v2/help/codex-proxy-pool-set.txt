@@ -1,0 +1,80 @@
+Create a pool or replace its account membership.
+
+Usage: cq codex proxy pool set NAME --account ACCOUNT [OPTIONS]
+
+Pools contain Codex accounts. Names are case-insensitive selectors, while display casing
+is preserved.
+
+Higher values preserve pool capacity by preferring lower-value viable accounts for
+ordinary unbound work. Values are not quota percentages; session bindings and required
+affinity remain constraints.
+
+Arguments:
+  NAME
+      Case-insensitive pool name; preserve configured display casing.
+      Type: string. Required: true. Repeatable: false.
+      Default: null.
+      Constraint: Valid UTF-8, contains at least one non-whitespace character, contains
+      no control characters.
+
+Options:
+  --account ACCOUNT
+      Unique Codex account email, CQ alias, or opaque AccountKey from cq codex account
+      list. The reference resolves once; only AccountKey is stored. Repeat --account for
+      each member; membership is replaced, not appended.
+      Type: account-reference. Required: true. Repeatable: true.
+      Default: null.
+      Constraint: Nonempty.
+      Constraint: Resolve to exactly one known Codex account.
+      Constraint: Ambiguous email is rejected; use alias or AccountKey.
+      Constraint: At least one member; duplicate resolved accounts rejected.
+  --value VALUE
+      Relative capacity-preservation value, 0–4294967295. Higher values preserve this
+      pool by preferring lower-value viable accounts for ordinary unbound work. If
+      omitted, preserve an existing pool value or use 0 for a new pool.
+      Type: integer. Required: false. Repeatable: false.
+      Default: null.
+      When omitted: existing value, otherwise 0
+      Constraint: Unsigned 32-bit integer.
+  --port PORT
+      Connect to the authenticated loopback proxy on this port (1–65535). If omitted,
+      use the existing proxy configuration port, or 19280 when that field is unset.
+      Type: integer. Required: false. Repeatable: false.
+      Default: null.
+      When omitted: configured port, otherwise 19280
+      Constraint: Integer 1–65535.
+      Constraint: No configuration file is created to resolve omission.
+  --timeout TIMEOUT
+      Maximum elapsed time for this command, including local preparation and control
+      requests; default 10s.
+      Type: duration. Required: false. Repeatable: false.
+      Default: "10s".
+      Constraint: Positive Go duration.
+      Constraint: Expiry returns exit 7; a timed-out mutation may already have
+      committed, so inspect state before retrying.
+
+Global options:
+  -h, --help
+      Show help for the resolved command or group and exit 0 without reading state.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -j, --json
+      Emit the documented JSON envelope; disable terminal prompts. Help remains plain
+      text. Explicit stream and hook exceptions are documented per command.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+  -v, --version
+      Show CQ version and exit 0 without reading state. With --json, use the version
+      command envelope.
+      Type: boolean. Required: false. Repeatable: false.
+      Default: false.
+      Constraint: Accept bare flag or =true / =false. Duplicate long/short spellings are
+      the same option and are rejected.
+
+Examples:
+  cq codex proxy pool set work --account "$ACCOUNT_REFERENCE" --value 10
+      Uses the account_reference and work pool preparation in routing notes.

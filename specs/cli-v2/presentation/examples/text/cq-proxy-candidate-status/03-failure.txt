@@ -1,0 +1,3 @@
+Error · Candidate state or receipt does not exist.
+  Code: candidate_not_found
+  Command: cq proxy candidate status

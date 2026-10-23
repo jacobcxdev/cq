@@ -20,7 +20,8 @@ import (
 const codexStopHookInputMax = 16 << 20
 
 var (
-	codexStopHookPoolPattern        = regexp.MustCompile(`^[a-z][a-z0-9_-]{0,63}$`)
+	errCodexStopHookInput           = errors.New("invalid Codex Stop hook input")
+	errCodexStopHookAuth            = errors.New("Codex turn receipt lookup was not authorised")
 	codexStopHookAccountHintPattern = regexp.MustCompile(`^codex:[0-9a-f]{12}$`)
 )
 
@@ -52,34 +53,24 @@ func runProxyCodexStopHook(ctx context.Context, input io.Reader, output io.Write
 	body, err := io.ReadAll(io.LimitReader(input, codexStopHookInputMax+1))
 	if err != nil || len(body) > codexStopHookInputMax {
 		clear(body)
-		return errors.New("invalid Codex Stop hook input")
+		return errCodexStopHookInput
 	}
 	defer clear(body)
-	var hook struct {
-		HookEventName string `json:"hook_event_name"`
-		SessionID     string `json:"session_id"`
-		TurnID        string `json:"turn_id"`
+	hook, err := decodeCodexStopHookEvent(body)
+	if err != nil {
+		return errCodexStopHookInput
 	}
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	if err := decoder.Decode(&hook); err != nil {
-		return errors.New("invalid Codex Stop hook input")
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("invalid Codex Stop hook input")
-	}
+
 	session := []byte(hook.SessionID)
 	turn := []byte(hook.TurnID)
 	hook.SessionID = ""
 	hook.TurnID = ""
 	defer clear(session)
 	defer clear(turn)
-	if hook.HookEventName != "Stop" || !validCodexStopHookID(session) || !validCodexStopHookID(turn) {
-		return errors.New("invalid Codex Stop hook input")
-	}
 
 	cfg, err := deps.LoadConfig()
 	if err != nil {
-		return fmt.Errorf("load proxy config: %w", err)
+		return errors.New("proxy configuration unavailable")
 	}
 	if cfg == nil || cfg.LocalToken == "" {
 		return errors.New("proxy configuration unavailable")
@@ -107,22 +98,37 @@ func runProxyCodexStopHook(ctx context.Context, input io.Reader, output io.Write
 	request.Header.Set("Content-Type", "application/json")
 	response, err := deps.Doer.Do(request)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return context.DeadlineExceeded
+		}
+		if errors.Is(err, context.Canceled) {
+			return context.Canceled
+		}
 		return errors.New("Codex turn receipt lookup unavailable")
 	}
-	if response == nil || response.Body == nil {
+	if response == nil {
 		return errors.New("Codex turn receipt lookup unavailable")
 	}
-	defer response.Body.Close()
+	if response.Body != nil {
+		defer response.Body.Close()
+	}
+	if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+		return errCodexStopHookAuth
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("Codex turn receipt lookup returned status %d", response.StatusCode)
+	}
+	if response.Body == nil {
+		return errors.New("Codex turn receipt lookup unavailable")
+	}
 	responseBody, err := httputil.ReadBody(response.Body)
 	if err != nil {
 		return errors.New("Codex turn receipt lookup unavailable")
 	}
 	defer clear(responseBody)
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("Codex turn receipt lookup returned status %d", response.StatusCode)
-	}
+
 	var lookup proxy.CodexTurnReceiptLookupV2
-	decoder = json.NewDecoder(bytes.NewReader(responseBody))
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&lookup); err != nil {
 		return errors.New("invalid Codex turn receipt response")
@@ -184,7 +190,7 @@ func validCodexTurnReceiptLookup(lookup proxy.CodexTurnReceiptLookupV2) bool {
 	default:
 		return false
 	}
-	if receipt.Pool != "" && !codexStopHookPoolPattern.MatchString(receipt.Pool) {
+	if !utf8.ValidString(receipt.Pool) {
 		return false
 	}
 	if receipt.PlannedAccountHint != "" && !codexStopHookAccountHintPattern.MatchString(receipt.PlannedAccountHint) {
@@ -220,7 +226,8 @@ func formatCodexTurnReceipt(receipt proxy.CodexTurnReceiptV2) string {
 	}
 	segments := []string{fmt.Sprintf("CQ route: %s via %s", receipt.State, transport)}
 	if receipt.Pool != "" {
-		segments = append(segments, "pool "+receipt.Pool)
+		pool, _ := json.Marshal(receipt.Pool)
+		segments = append(segments, "pool "+string(pool))
 	}
 	accountHint := receipt.ActualAccountHint
 	accountKind := "actual"
@@ -299,4 +306,64 @@ func codexTurnReceiptReason(reason proxy.CodexTurnReceiptRouteReason) string {
 	default:
 		return "selected route"
 	}
+}
+
+// Only required selectors are retained. Unknown event fields remain opaque and
+// never reach control requests or diagnostics.
+type codexStopHookEvent struct{ HookEventName, SessionID, TurnID string }
+
+func decodeCodexStopHookEvent(body []byte) (codexStopHookEvent, error) {
+	var event codexStopHookEvent
+	if !utf8.Valid(body) {
+		return event, errCodexStopHookInput
+	}
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return event, errCodexStopHookInput
+	}
+	seen := map[string]bool{}
+	for decoder.More() {
+		key, err := decoder.Token()
+		if err != nil {
+			return event, errCodexStopHookInput
+		}
+		var target *string
+		switch key {
+		case "hook_event_name":
+			target = &event.HookEventName
+		case "session_id":
+			target = &event.SessionID
+		case "turn_id":
+			target = &event.TurnID
+		}
+		if target != nil {
+			name := key.(string)
+			if seen[name] {
+				return event, errCodexStopHookInput
+			}
+			seen[name] = true
+			var value *string
+			if decoder.Decode(&value) != nil || value == nil {
+				return event, errCodexStopHookInput
+			}
+			*target = *value
+		} else {
+			var ignored json.RawMessage
+			if decoder.Decode(&ignored) != nil {
+				return event, errCodexStopHookInput
+			}
+			clear(ignored)
+		}
+	}
+	if token, err = decoder.Token(); err != nil || token != json.Delim('}') {
+		return event, errCodexStopHookInput
+	}
+	if err = decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return event, errCodexStopHookInput
+	}
+	if event.HookEventName != "Stop" || !validCodexStopHookID([]byte(event.SessionID)) || !validCodexStopHookID([]byte(event.TurnID)) {
+		return event, errCodexStopHookInput
+	}
+	return event, nil
 }

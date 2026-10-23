@@ -272,7 +272,7 @@ func TestRuntimeSupervisorDegradedRescueRelaysHTTPAndWebSocketOverTransport(t *t
 	if err := json.Unmarshal(enterBody, &entered); err != nil {
 		t.Fatalf("decode rescue control response %q: %v", enterBody, err)
 	}
-	if entered.Mode != TrafficModeRescue {
+	if entered.Mode != TrafficModeRescueDraining && entered.Mode != TrafficModeRescue {
 		t.Fatalf("rescue control = %d mode=%q body=%q", enterResponse.StatusCode, entered.Mode, enterBody)
 	}
 	waitForRuntimeMode(t, supervisor, TrafficModeRescue)

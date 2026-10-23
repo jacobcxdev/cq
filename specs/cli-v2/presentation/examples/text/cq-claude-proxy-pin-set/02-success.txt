@@ -1,0 +1,4 @@
+Claude proxy pin · Configured
+  Account          alex@example.test
+  Application      Hot reload · asynchronous
+  Restart required No

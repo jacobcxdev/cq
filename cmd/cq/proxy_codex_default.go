@@ -87,7 +87,7 @@ func runProxyCodexDefaultWithDependencies(
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
 		}
-		cfg.CodexRoutingDefaultAccountKey = ""
+		applyProxySelection(cfg, proxySelectionIntent{provider: "codex", kind: "fallback", action: "clear"}, "")
 		if err := deps.SaveConfig(cfg); err != nil {
 			return fmt.Errorf("save config: %w", err)
 		}
@@ -113,7 +113,7 @@ func runProxyCodexDefaultWithDependencies(
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	cfg.CodexRoutingDefaultAccountKey = accountKey
+	applyProxySelection(cfg, proxySelectionIntent{provider: "codex", kind: "fallback", action: "set", reference: args[0]}, string(accountKey))
 	if err := deps.SaveConfig(cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}

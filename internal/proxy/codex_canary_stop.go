@@ -431,3 +431,230 @@ func validCodexCanaryFinalisation(state CodexCanaryState) bool {
 		hex.EncodeToString(countersDigest) == state.Finalisation.CountersDigest &&
 		hmac.Equal(countersDigest, wantCountersDigest[:])
 }
+
+// withCodexCanaryPublisherLock serialises canonical start/stop publishers only.
+func withCodexCanaryPublisherLock(fsys fsutil.DurableFileSystem, path string, action func() error) (err error) {
+	if fsys == nil || path == "" {
+		return ErrCodexCanaryStopUnavailable
+	}
+	inspector, inspectorOK := fsys.(fsutil.SecurePathInspector)
+	opener, openerOK := fsys.(fsutil.SecureDirectoryOpener)
+	if !inspectorOK || !openerOK {
+		return ErrCodexCanaryStopUnavailable
+	}
+	directoryPath := filepath.Dir(path)
+	if err = fsutil.ValidateSecureDirectory(fsys, directoryPath); err != nil {
+		return ErrCodexCanaryStopUnavailable
+	}
+	directory, err := opener.OpenSecureDirectory(directoryPath)
+	if err != nil {
+		return ErrCodexCanaryStopUnavailable
+	}
+	defer func() {
+		if directory.Close() != nil {
+			err = ErrCodexCanaryStopUnavailable
+		}
+	}()
+	if err = validateCodexCanaryRetainedDirectory(fsys, inspector, directory, directoryPath); err != nil {
+		return ErrCodexCanaryStopUnavailable
+	}
+	lock, err := fsutil.AcquireExclusiveLockInDirectory(inspector, directory, ".codex-canary-stop-request.lock")
+	if err != nil {
+		return ErrCodexCanaryStopUnavailable
+	}
+	defer func() {
+		if lock.Close() != nil {
+			err = ErrCodexCanaryStopUnavailable
+		}
+	}()
+	if err = validateCodexCanaryRetainedDirectory(fsys, inspector, directory, directoryPath); err != nil {
+		return ErrCodexCanaryStopUnavailable
+	}
+	return action()
+}
+
+// RequestCodexCanaryStopOnce preserves the frozen publisher and serving claim
+// protocol. Legacy RequestCodexCanaryStop callers do not share its lock.
+func RequestCodexCanaryStopOnce(fsys fsutil.DurableFileSystem, path string, protected []CodexCanaryProtection, now time.Time) error {
+	if now.IsZero() {
+		return ErrCodexCanaryStopUnavailable
+	}
+	return withCodexCanaryPublisherLock(fsys, path, func() error {
+		recorder, err := OpenCodexCanary(fsys, path, protected)
+		if err != nil {
+			return ErrCodexCanaryStopUnavailable
+		}
+		if err = recorder.ValidateProtectedState(); err != nil {
+			return err
+		}
+		if !recorder.State().Active {
+			return nil
+		}
+		requested, err := recorder.StopRequested(now)
+		if err != nil {
+			return err
+		}
+		if requested {
+			return nil
+		}
+		err = RequestCodexCanaryStop(fsys, path, protected, now)
+		// A legacy publisher may have won. Normalise only verified matching intent.
+		if errors.Is(err, ErrCodexCanaryStopAlreadyRequested) {
+			requested, err = recorder.StopRequested(now)
+			if err == nil && !requested {
+				return ErrCodexCanaryStopUnavailable
+			}
+		}
+		return err
+	})
+}
+
+// StopRequested verifies matching signed intent without writing or claiming it.
+// Read request before inflight so the service's atomic rename cannot hide intent.
+func (recorder *CodexCanaryRecorder) StopRequested(now time.Time) (requested bool, err error) {
+	if recorder == nil || recorder.fs == nil || now.IsZero() {
+		return false, ErrCodexCanaryStopUnavailable
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	inspector, inspectorOK := recorder.fs.(fsutil.SecurePathInspector)
+	opener, openerOK := recorder.fs.(fsutil.SecureDirectoryOpener)
+	if !inspectorOK || !openerOK {
+		return false, ErrCodexCanaryStopUnavailable
+	}
+	directory, err := opener.OpenSecureDirectory(codexCanaryStopDirectoryPath(recorder.path))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, ErrCodexCanaryStopUnavailable
+	}
+	defer func() {
+		if directory.Close() != nil {
+			requested = false
+			err = ErrCodexCanaryStopUnavailable
+		}
+	}()
+	var digest [sha256.Size]byte
+	for _, name := range []string{codexCanaryStopRequestName, codexCanaryStopInflightName} {
+		claimed, readErr := readCodexCanaryStopRequest(inspector, directory, name, recorder, now.UTC(), name == codexCanaryStopInflightName)
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return false, ErrCodexCanaryStopUnavailable
+		}
+		if requested && digest != claimed.digest {
+			return false, ErrCodexCanaryStopUnavailable
+		}
+		requested = true
+		digest = claimed.digest
+	}
+	return requested, nil
+}
+
+// StartCodexCanaryOnce retires only intent authenticated by the completed run's
+// finalisation, under both canonical publisher and legacy serving-owner locks.
+func StartCodexCanaryOnce(fsys fsutil.DurableFileSystem, path string, protected []CodexCanaryProtection, tuple CodexCanaryTuple, now time.Time) (recorder *CodexCanaryRecorder, err error) {
+	if fsys == nil || path == "" || now.IsZero() {
+		return nil, ErrCodexCanaryStopUnavailable
+	}
+	if err = fsutil.EnsureSecureDirectory(fsys, filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+	err = withCodexCanaryPublisherLock(fsys, path, func() error {
+		var startErr error
+		recorder, startErr = startCodexCanary(fsys, path, protected, tuple, now, func(existing *CodexCanaryRecorder) error {
+			if existing != nil {
+				if err := existing.ValidateProtectedState(); err != nil {
+					return err
+				}
+			}
+			return retireCodexCanaryStopIntent(fsys, path, existing, now)
+		})
+		return startErr
+	})
+	if err != nil && recorder != nil {
+		_ = recorder.Close()
+		recorder = nil
+	}
+	return recorder, err
+}
+
+func retireCodexCanaryStopIntent(fsys fsutil.DurableFileSystem, path string, existing *CodexCanaryRecorder, now time.Time) (err error) {
+	inspector, inspectorOK := fsys.(fsutil.SecurePathInspector)
+	opener, openerOK := fsys.(fsutil.SecureDirectoryOpener)
+	if !inspectorOK || !openerOK {
+		return ErrCodexCanaryStopUnavailable
+	}
+	directoryPath := codexCanaryStopDirectoryPath(path)
+	directory, err := opener.OpenSecureDirectory(directoryPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return ErrCodexCanaryStopUnavailable
+	}
+	defer func() {
+		if directory.Close() != nil {
+			err = ErrCodexCanaryStopUnavailable
+		}
+	}()
+	remover, ok := directory.(fsutil.IdentityBoundRemover)
+	if !ok {
+		return ErrCodexCanaryStopUnavailable
+	}
+	if err = validateCodexCanaryRetainedDirectory(fsys, inspector, directory, directoryPath); err != nil {
+		return ErrCodexCanaryStopUnavailable
+	}
+	type intent struct {
+		name     string
+		data     []byte
+		identity fsutil.SecureFileIdentity
+	}
+	var intents []intent
+	for _, name := range []string{codexCanaryStopRequestName, codexCanaryStopInflightName} {
+		data, identity, readErr := fsutil.ReadSecureFileInDirectoryWithIdentity(inspector, directory, name, codexCanaryStateMaxBytes)
+		if errors.Is(readErr, os.ErrNotExist) {
+			continue
+		}
+		if readErr != nil {
+			return ErrCodexCanaryStopUnavailable
+		}
+		if existing == nil || existing.state.Active || existing.state.Finalisation == nil {
+			return ErrCodexCanaryStopUnavailable
+		}
+		// Finalisation already binds the claimed intent; its original request TTL
+		// cannot revoke authority to retire that exact completed-run proof.
+		claimed, readErr := readCodexCanaryStopRequest(inspector, directory, name, existing, now.UTC(), true)
+		digest := sha256.Sum256(append([]byte("cq-codex-canary-stop-request-v1\x00"), data...))
+		if readErr != nil || claimed.digest != digest || hex.EncodeToString(digest[:]) != existing.state.Finalisation.StopRequestDigest {
+			return ErrCodexCanaryStopUnavailable
+		}
+		intents = append(intents, intent{name, data, identity})
+	}
+	// Validate every artifact before deleting any, and retain each exact identity.
+	for _, item := range intents {
+		data, identity, readErr := fsutil.ReadSecureFileInDirectoryWithIdentity(inspector, directory, item.name, codexCanaryStateMaxBytes)
+		if readErr != nil || identity != item.identity || !bytes.Equal(data, item.data) {
+			return ErrCodexCanaryStopUnavailable
+		}
+	}
+	if err = validateCodexCanaryRetainedDirectory(fsys, inspector, directory, directoryPath); err != nil {
+		return ErrCodexCanaryStopUnavailable
+	}
+	for _, item := range intents {
+		if err = remover.RemoveChecked(item.name, item.identity); err != nil {
+			return ErrCodexCanaryStopUnavailable
+		}
+	}
+	if len(intents) > 0 {
+		if err = directory.Sync(); err != nil {
+			return ErrCodexCanaryStopUnavailable
+		}
+	}
+	if err = validateCodexCanaryRetainedDirectory(fsys, inspector, directory, directoryPath); err != nil {
+		return ErrCodexCanaryStopUnavailable
+	}
+	return nil
+}

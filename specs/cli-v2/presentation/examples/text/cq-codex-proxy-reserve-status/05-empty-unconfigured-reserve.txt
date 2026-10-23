@@ -1,0 +1,21 @@
+Codex reserve · not configured
+  Scope          Current system account only
+  Account        alex@example.test
+  Account key    acct-alex
+  Window         not configured
+  Protected      not configured
+  Remaining      unknown
+  Enabled        no
+  Routing        not excluded by reserve
+  Reason         none
+  Reset          unknown
+  Observed       unknown
+
+System-account windows
+  Window     7d
+  Remaining  12.5%
+  Reset      in 2h 15m · 23 Sep 2026, 18:45 BST (UTC+01:00)
+
+  Window     7d:gpt-reserve
+  Remaining  100%
+  Reset      in 7d · 30 Sep 2026, 16:30 BST (UTC+01:00)

@@ -1,0 +1,78 @@
+cq proxy candidate prepare
+Prepare an isolated release candidate without starting it.
+
+Usage
+  cq proxy candidate prepare --state-dir STATE_DIR --port PORT --source-config PATH
+    --target-release-bundle PATH --release-digest DIGEST --client-build CLIENT_BUILD
+    --client-executable PATH --client-registry PATH [OPTIONS]
+
+Input files require absolute clean non-root paths, no symlinks, current-user ownership,
+owner-controlled parents and no group/other writes. Structured JSON rejects unknown/missing fields,
+duplicate keys, invalid UTF-8 and trailing JSON; canonical documents have no trailing newline.
+Preparation binds supplied attestations; it does not apply their contents, import/refresh
+  credentials,
+start a listener, or modify the shared installed service. Inputs come from the release system.
+
+Required options
+  --state-dir STATE_DIR
+      New candidate directory under an owner-controlled parent. Absolute clean non-root path;
+      no symlink or existing candidate state. Never defaults to shared state.
+  --port PORT
+      Integer 1–65535 except 19280; must not match any active shared/candidate listener.
+  --source-config PATH
+      Source attestation bytes, 1–1,048,576 B. Hash recorded; contents not applied.
+  --target-release-bundle PATH
+      Signed OperationalReleaseBundleV1, purpose target; 1–16,777,216 B.
+  --release-digest DIGEST
+      Exactly 64 lowercase hex characters; equals verified target bundle's digest field.
+      Not SHA-256 of the bundle file.
+  --client-build CLIENT_BUILD
+      Nonempty UTF-8 without NUL/controls. Exact executable provenance and independently
+      measured build, byte for byte; no trimming, aliases, case folding or arbitrary labels.
+  --client-executable PATH
+      Absolute clean regular executable, 1–536,870,912 B; no symlink/group/other writes.
+      Stable identity through opening. File and trusted parent may belong to current user or root.
+  --client-registry PATH
+      Canonical ClientSenderRegistryV1 describing every sender/transport; 1–65,536 B.
+
+Options
+  --credential-mode MODE
+      none or read-only. Default: none. read-only requires --credential-manifest and true
+      --confirm-read-only-credentials; none forbids both.
+  --credential-manifest PATH
+      Credential attestation bytes, 1–1,048,576 B; only with read-only mode.
+      No importing or refreshing credentials.
+  --confirm-read-only-credentials
+      Assert attested credentials permit read-only access. Does not authorise refresh.
+      Default: false; explicit false equals omission.
+  --policy-snapshot PATH
+      Optional attestation bytes, 1–1,048,576 B. Omission records no digest; contents not applied.
+  --confirm-payload-capture
+      Authorise capture only in this candidate workflow. Default: false; omission prohibits it.
+      Preparation itself captures nothing. Explicit false equals omission.
+  --timeout DURATION
+      Total budget including cleanup. Default: 150s; Go duration 150s–5m inclusive.
+      Reserve final 30s within that budget for cleanup; no unrecorded mutation on cancellation.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq proxy candidate status
+  cq proxy candidate remove
+
+Examples
+  Bind supplied release-system inputs without starting a listener:
+  cq proxy candidate prepare \
+  --state-dir /Users/alex/cq-candidate-29280 --port 29280 \
+  --source-config /Users/alex/cq-inputs/source-config.bin \
+  --target-release-bundle /Users/alex/cq-inputs/target.json \
+  --release-digest abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd \
+  --client-build 0.114.0 --client-executable /Users/alex/bin/codex \
+  --client-registry /Users/alex/cq-inputs/client-registry.json

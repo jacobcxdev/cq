@@ -1,0 +1,48 @@
+cq codex proxy pool set
+Create or replace Codex pool membership.
+
+Usage
+  cq codex proxy pool set NAME --account ACCOUNT [--account ACCOUNT] [options]
+
+Validate all input, then publish one atomic live policy update. No restart.
+Equivalent repeated membership/value updates retain equivalent policy. Rename preserves identity
+and bindings. Existing account continuity still takes precedence.
+
+Arguments
+  NAME
+      Required. Pool to create or replace.
+      Pool names are case-insensitive; display casing is preserved.
+      Valid UTF-8, at least one non-whitespace character, no control characters.
+
+Options
+  --account ACCOUNT
+      Required, repeatable. Unique Codex email, CQ alias or opaque AccountKey.
+      Nonempty; resolve each reference once to exactly one known account. Store AccountKeys only.
+      At least one member; reject duplicate resolved accounts and ambiguous references.
+      Replaces membership rather than appending.
+  --value VALUE
+      Integer 0–4294967295. Higher values preserve this pool relative to lower-value viable pools.
+      Omit to retain the existing value, or use 0 for a new pool. Not a capacity multiplier.
+  --port PORT
+      Authenticated loopback proxy port, integer 1–65535.
+      Omit to use the configured port, or 19280 when unset. Does not create configuration.
+  --timeout TIMEOUT
+      Maximum total elapsed time, including preparation and control requests. Default: 10s.
+      Positive Go duration, for example 500ms or 30s. Expiry exits 7.
+      A timed-out write may have committed; inspect current state before retrying.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default false; accept a bare flag, =true or =false.
+  Options occur once unless marked repeatable; duplicate long/short spellings count together.
+
+Related commands
+  cq codex account list
+  cq codex proxy policy show
+  cq codex proxy session bind --help
+
+Examples
+  Replace work membership with Alex and Sam.
+  cq codex proxy pool set work --account alex@example.test --account sam@example.test --value 10

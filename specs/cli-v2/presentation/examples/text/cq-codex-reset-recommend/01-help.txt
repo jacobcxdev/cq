@@ -1,0 +1,29 @@
+cq codex reset recommend
+Recommend when to use Codex reset credits.
+
+Usage
+  cq codex reset recommend [options]
+
+Read fresh portfolio inputs and compute advisory timing for all visible accounts.
+Does not consume credits. Incomplete inputs expose blockers, not actionable times.
+No options change the scheduler objective, algorithm or planning horizon.
+
+Options
+  --timeout DURATION  Total work deadline. Default: 120s; range: 1s to 10m.
+                      Go duration syntax; bare numbers are invalid.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq codex reset list
+  cq codex reset use
+
+Examples
+  Compute advisory timing
+    cq codex reset recommend
+  Inspect the structured schedule
+    cq codex reset recommend --json --timeout 120s

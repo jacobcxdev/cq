@@ -1,0 +1,4 @@
+Claude proxy pin · Configured
+  Account          alex@example.test
+  Application      Saved configuration only
+  Restart required No

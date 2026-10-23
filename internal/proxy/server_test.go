@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -5233,5 +5234,73 @@ func TestServer_NativeCodex_HeadroomNil_NoCompression(t *testing.T) {
 	}
 	if string(gotBody) != originalBody {
 		t.Errorf("upstream body = %s, want original (no compression when nil)", gotBody)
+	}
+}
+
+func TestRuntimeSupervisorServerReadyFailureClosesListener(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("ready output failed")
+	called := false
+	server := &Server{RuntimeNormalHandler: http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}), ServingAttestor: NewServingAttestor(), Ready: func(address string) error {
+		called = true
+		if address != listener.Addr().String() {
+			t.Errorf("address=%s", address)
+		}
+		return sentinel
+	}}
+	if err := server.ServeAdoptedListener(context.Background(), listener); !errors.Is(err, sentinel) {
+		t.Fatalf("err=%v", err)
+	}
+	if !called {
+		t.Fatal("ready omitted")
+	}
+	connection, err := net.DialTimeout("tcp", listener.Addr().String(), 50*time.Millisecond)
+	if err == nil {
+		connection.Close()
+		t.Fatal("listener leaked")
+	}
+}
+func TestRuntimeSupervisorServerInvalidHandlerNeverReady(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Config: &Config{ClaudeUpstream: "://invalid"}, Ready: func(string) error { t.Fatal("ready before handler initialisation"); return nil }}
+	if err := server.ServeAdoptedListener(context.Background(), listener); err == nil {
+		t.Fatal("accepted invalid handler")
+	}
+	connection, err := net.DialTimeout("tcp", listener.Addr().String(), 50*time.Millisecond)
+	if err == nil {
+		connection.Close()
+		t.Fatal("listener leaked")
+	}
+}
+
+func TestRuntimeSupervisorServerExternalSignalCancellation(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	cause := errors.New("caller termination")
+	server := &Server{
+		ExternallyManagedSignals: true,
+		RuntimeNormalHandler:     http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}),
+		Ready:                    func(string) error { cancel(cause); return nil },
+	}
+	if err := server.ServeAdoptedListener(ctx, listener); err != nil {
+		t.Fatal(err)
+	}
+	if context.Cause(ctx) != cause {
+		t.Fatal("caller cause was replaced")
+	}
+	connection, err := net.DialTimeout("tcp", listener.Addr().String(), 50*time.Millisecond)
+	if err == nil {
+		connection.Close()
+		t.Fatal("listener leaked after caller cancellation")
 	}
 }

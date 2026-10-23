@@ -190,3 +190,54 @@ func writeInstallState(t *testing.T, store Store, data string) {
 type fileSystemOnly struct {
 	fsutil.FileSystem
 }
+
+func TestServiceOwnershipSelectedUpdates(t *testing.T) {
+	record := validRecord(filepath.Join(t.TempDir(), executableName()))
+	record.Services = []string{"native.proxy", "native.refresh"}
+	original := record.WithServices()
+	removed := record.WithoutServices("native.proxy")
+	if !reflect.DeepEqual(removed.Services, []string{"native.refresh"}) {
+		t.Fatalf("services=%v", removed.Services)
+	}
+	restored := removed.WithServices("native.proxy", "native.refresh")
+	if !reflect.DeepEqual(restored.Services, []string{"native.refresh", "native.proxy"}) {
+		t.Fatalf("services=%v", restored.Services)
+	}
+	if !reflect.DeepEqual(record, original) {
+		t.Fatal("original mutated")
+	}
+	for _, got := range []Record{removed, restored} {
+		if err := got.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		got.Services = record.Services
+		if !reflect.DeepEqual(got, record) {
+			t.Fatal("ownership identity changed")
+		}
+	}
+	empty := record.WithoutServices("native.proxy", "native.refresh")
+	if len(empty.Services) != 0 || !errors.Is(empty.Validate(), ErrInvalidRecord) {
+		t.Fatal("empty ownership should be removed")
+	}
+}
+
+func TestServiceOwnershipSelectedPersistence(t *testing.T) {
+	store := Store{FS: fsutil.OSFileSystem{}, Roots: userdirs.Roots{State: newStateRoot(t)}}
+	original := validRecord(filepath.Join(t.TempDir(), executableName()))
+	original.Services = []string{"native.proxy", "native.refresh"}
+	selected := original.WithoutServices("native.proxy")
+	if err := store.Save(selected); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load()
+	if err != nil || !reflect.DeepEqual(got, selected) {
+		t.Fatalf("loaded=%+v err=%v", got, err)
+	}
+	if err := store.Save(original); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.Load()
+	if err != nil || !reflect.DeepEqual(got, original) {
+		t.Fatal("restored ownership differs")
+	}
+}

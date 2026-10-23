@@ -1,0 +1,35 @@
+cq claude account remove
+Remove CQ-managed local Claude credentials.
+
+Usage
+  cq claude account remove ACCOUNT [options]
+
+Shows the resolved account and native credential impact before confirmation.
+Removes local managed credentials only; external sources and upstream accounts remain.
+Externally managed credentials cannot be removed by CQ.
+
+Arguments
+  ACCOUNT  Unique known email, case-insensitive after trimming.
+           Empty, ambiguous and unstable references are rejected; no keys or aliases.
+
+Options
+  --yes               Confirm this removal without a prompt. Default: false.
+                      Required with --json or non-terminal stdin; applies only once.
+  --timeout DURATION  Work deadline, excluding confirmation. Default: 30s.
+                      Go duration from 1s to 10m; bare numbers are invalid.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq claude account list
+  cq claude account login
+
+Examples
+  Review and confirm removal
+    cq claude account remove alex@example.test
+  Explicitly confirm non-interactive removal
+    cq claude account remove alex@example.test --yes --json

@@ -1,0 +1,25 @@
+cq codex proxy lease
+Manage reusable Codex routing affinities.
+
+Usage
+  cq codex proxy lease <COMMAND> [OPTIONS]
+
+A lease is a reusable task-to-account routing affinity.
+
+Commands
+  invalidate     Invalidate reusable Codex task-account affinity.
+  redistribute   Schedule fresh account selection at the next safe boundary.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex proxy   Codex proxy controls.
+
+Examples
+  Inspect invalidation scope before making a change
+  cq codex proxy lease invalidate --help

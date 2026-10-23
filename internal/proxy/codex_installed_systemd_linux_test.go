@@ -69,3 +69,20 @@ func TestRenderCodexInstalledLinuxProxyUnitRejectsInvalidPath(t *testing.T) {
 		}
 	}
 }
+
+func TestLinuxAttestationUserDirsMatchesConfigResolution(t *testing.T) {
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "unused-invalid")
+	for _, value := range []string{"relative", " ", "~/config"} {
+		t.Setenv("XDG_CONFIG_HOME", value)
+		if _, err := codexInstalledLinuxSystemdUnitPath(); err != errCodexInstalledProcessAttestation {
+			t.Fatalf("invalid XDG error %v", err)
+		}
+	}
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir+"/nested/..")
+	got, err := codexInstalledLinuxSystemdUnitPath()
+	if err != nil || got != filepath.Join(dir, "systemd", "user", codexInstalledLinuxProxyUnit) {
+		t.Fatalf("unit path %q error %v", got, err)
+	}
+}

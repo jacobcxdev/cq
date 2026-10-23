@@ -1,8 +1,11 @@
 package fsutil
 
 import (
+	"context"
 	"io"
 	"os"
+
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // FileSystem abstracts OS file operations for testability.
@@ -172,6 +175,14 @@ type IdentityBoundRemover interface {
 	RemoveChecked(name string, expected SecureFileIdentity) error
 }
 
+// FinalFileRemover deletes one authenticated checkpoint at a final commit boundary.
+// Before commit, ordinary errors leave it under name or the deterministic quarantine.
+// ErrCommitIndeterminate reports an unresolved native deletion-handle close.
+// A true result means namespace deletion committed; callers must not infer rollback.
+type FinalFileRemover interface {
+	RemoveFinalFile(context.Context, string, string, SecureFileIdentity) (bool, error)
+}
+
 // NoFollowFileOpener opens a final path component without following links.
 type NoFollowFileOpener interface {
 	OpenNoFollow(name string) (SecureReadFile, error)
@@ -255,7 +266,7 @@ func (OSFileSystem) WriteFile(n string, d []byte, p os.FileMode) error { return 
 func (OSFileSystem) Rename(o, n string) error                          { return os.Rename(o, n) }
 func (OSFileSystem) Remove(name string) error                          { return os.Remove(name) }
 func (OSFileSystem) MkdirAll(p string, perm os.FileMode) error         { return os.MkdirAll(p, perm) }
-func (OSFileSystem) UserHomeDir() (string, error)                      { return os.UserHomeDir() }
+func (OSFileSystem) UserHomeDir() (string, error)                      { return userdirs.UserHomeDir() }
 func (OSFileSystem) ReadDir(name string) ([]os.DirEntry, error)        { return os.ReadDir(name) }
 func (OSFileSystem) Chmod(name string, mode os.FileMode) error         { return os.Chmod(name, mode) }
 func (OSFileSystem) SyncFile(name string) error {

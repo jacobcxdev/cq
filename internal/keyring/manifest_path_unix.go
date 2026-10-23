@@ -3,13 +3,12 @@
 package keyring
 
 import (
-	"os"
 	"path/filepath"
 
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
-var resolveCQManifestHome = os.UserHomeDir
+var resolveCQManifestHome = userdirs.UserHomeDir
 
 func cqManifestHome() (string, error) {
 	return resolveCQManifestHome()

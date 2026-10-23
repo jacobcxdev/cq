@@ -477,3 +477,105 @@ func TestCodexResetExecuteNoOpRemovesAttemptWithoutRefetch(t *testing.T) {
 		t.Fatalf("result=%+v err=%v remove=%d fetches=%d/%d", result, err, attempts.removeCalls, usage.calls, beforeFetches)
 	}
 }
+
+type deadlineResetBackend struct {
+	recordingResetBackend
+	release   chan struct{}
+	completed chan struct{}
+}
+
+func (b *deadlineResetBackend) ListCredits(ctx context.Context, a codexprov.ResetAccount) (codexprov.ResetCreditInventory, error) {
+	if a.AccountKey == "account-b" {
+		<-b.release
+	}
+	if a.AccountKey == "account-a" {
+		close(b.completed)
+	}
+	return codexprov.ResetCreditInventory{Credits: []codexprov.ResetCredit{{ID: string(a.AccountKey)}}}, nil
+}
+func TestResetListTotalDeadlineRetainsCompletedRows(t *testing.T) {
+	b := &deadlineResetBackend{recordingResetBackend: recordingResetBackend{snapshot: resetAppSnapshot()}, release: make(chan struct{}), completed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan CodexResetListResult, 1)
+	go func() { r, _ := (&CodexResetApp{Backend: b}).List(ctx, ""); done <- r }()
+	<-b.completed
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case result := <-done:
+		if len(result.Accounts) != 3 || len(result.Accounts[0].Credits) != 1 || result.Accounts[1].Error == nil {
+			t.Fatalf("lost completed result or missing blocked row: %+v", result)
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(b.release)
+		<-done
+		t.Fatal("List waited for uncooperative dependency beyond total deadline")
+	}
+	close(b.release)
+}
+
+func TestCodexResetUseRejectsInvalidSharedWindows(t *testing.T) {
+	for _, mode := range []string{"missing", "nan", "range", "timestamp", "timestamp-overflow"} {
+		t.Run(mode, func(t *testing.T) {
+			a, backend, usage, attempts := completeResetApp(time.Now())
+			windows := usage.results[0].Windows
+			window := windows[quota.Window5Hour]
+			switch mode {
+			case "missing":
+				delete(windows, quota.Window5Hour)
+			case "nan":
+				value := math.NaN()
+				window.RemainingPctExact = &value
+				windows[quota.Window5Hour] = window
+			case "range":
+				window.RemainingPct = 101
+				windows[quota.Window5Hour] = window
+			case "timestamp-overflow":
+				window.ResetAtUnix = math.MaxInt64
+				windows[quota.Window5Hour] = window
+			case "timestamp":
+				window.ResetAtUnix = 0
+				windows[quota.Window5Hour] = window
+			}
+			_, err := a.PrepareUse(context.Background(), "a@example.com", "")
+			if err == nil || backend.consumeCalls != 0 || attempts.ensureCalls != 0 {
+				t.Fatalf("invalid preview accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestCodexResetRoutingDeadlineKeepsConsumedOutcome(t *testing.T) {
+	app, backend, _, _ := completeResetApp(time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC))
+	plan, err := app.PrepareUse(context.Background(), "a@example.com", "credit-account-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend.consume = codexprov.ConsumeResetResult{Outcome: codexprov.ConsumeReset}
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	app.AfterReset = func(context.Context, codexprov.AccountKey, string) error { close(entered); <-release; return nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type execution struct {
+		result CodexResetUseResult
+		err    error
+	}
+	done := make(chan execution, 1)
+	go func() { result, err := app.ExecuteUse(ctx, plan); done <- execution{result, err} }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("reset routing not reached")
+	}
+	cancel()
+	select {
+	case got := <-done:
+		if got.err != nil || got.result.Outcome != codexprov.ConsumeReset || len(got.result.Warnings) != 1 || got.result.Warnings[0].Code != "redistribution_failed" {
+			t.Fatalf("lost consumed result: %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reset routing ignored cancellation")
+	}
+}

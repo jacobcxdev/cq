@@ -200,6 +200,25 @@ func checkRuntimeExecutable(ctx context.Context, path string) (RuntimeCheckV1, e
 	return check, nil
 }
 
+// Inspect verifies an existing retained artifact without staging files or taking
+// the staging lock. A concurrent prune may make inspection fail, never create
+// state or turn an unverified path into a retained artifact.
+func (store RuntimeArtifactStore) Inspect(ctx context.Context, path string) (RuntimeArtifact, error) {
+	artifact := RuntimeArtifact{Path: path, Version: "inspecting", SHA256: filepath.Base(filepath.Dir(path)), ProtocolVersion: RuntimeUpgradeProtocolVersion}
+	if err := store.verifyStored(ctx, artifact); err != nil {
+		return RuntimeArtifact{}, err
+	}
+	check, err := checkRuntimeExecutable(ctx, path)
+	if err != nil {
+		return RuntimeArtifact{}, err
+	}
+	artifact.Version = check.Version
+	if err := store.verifyStored(ctx, artifact); err != nil {
+		return RuntimeArtifact{}, err
+	}
+	return artifact, nil
+}
+
 func (store RuntimeArtifactStore) Verify(ctx context.Context, artifact RuntimeArtifact) error {
 	if err := store.verifyStored(ctx, artifact); err != nil {
 		return err

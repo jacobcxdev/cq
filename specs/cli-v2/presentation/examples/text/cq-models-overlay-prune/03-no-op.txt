@@ -1,0 +1,18 @@
+Model overlays · Pruned 0
+  No redundant overlays.
+
+Publication · Complete · via proxy
+  Models: 2 active
+
+Sources
+  Provider  Result     Native models  Malformed rows
+  Claude    Refreshed              0               0
+  Codex     Refreshed              2               0
+
+Client caches
+  Codex cache · Written · Published
+    /Users/alex/.codex/models_cache.json
+  Claude capabilities · Skipped · Optional client absent
+    /Users/alex/.claude/cache/model-capabilities.json
+  Claude picker · Skipped · Optional client absent
+    /Users/alex/.claude/cache/model-picker.json

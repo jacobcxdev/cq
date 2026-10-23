@@ -1,6 +1,9 @@
 package codex
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // AccountReferenceErrorCode classifies a reference that cannot be resolved to
 // one stable logical account.
@@ -175,4 +178,24 @@ func resolveMatchedAccount(accounts []LogicalAccount, matches []bool) (AccountKe
 		return "", &AccountReferenceError{Code: AccountReferenceUnstable}
 	}
 	return accounts[match].Key, nil
+}
+
+// Aliases returns distinct non-secret aliases for an exact inventory key.
+func (index AccountAliasIndex) Aliases(key AccountKey) []string {
+	aliases := []string{}
+	seen := map[string]bool{}
+	for _, row := range index.rows {
+		if row.AccountKey == key && !seen[row.Alias] {
+			aliases = append(aliases, row.Alias)
+			seen[row.Alias] = true
+		}
+	}
+	sort.Slice(aliases, func(i, j int) bool {
+		a, b := strings.ToLower(aliases[i]), strings.ToLower(aliases[j])
+		if a != b {
+			return a < b
+		}
+		return aliases[i] < aliases[j]
+	})
+	return aliases
 }

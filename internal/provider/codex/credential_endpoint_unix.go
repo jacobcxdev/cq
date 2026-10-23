@@ -66,9 +66,6 @@ type credentialEndpointSidecar struct {
 var (
 	ErrCredentialEndpointOccupied               = errors.New("credential coordinator endpoint already exists")
 	ErrCredentialEndpointPublicationUnsupported = errors.New("credential coordinator endpoint publication unsupported")
-	ErrCredentialEndpointIncompatible           = errors.New("credential coordinator endpoint protocol incompatible")
-	ErrCredentialEndpointIdentityChanged        = errors.New("credential coordinator endpoint identity changed")
-	ErrCredentialEndpointLockHeld               = errors.New("credential coordinator endpoint owner lock is held")
 	ErrCredentialEndpointDurability             = errors.New("credential coordinator endpoint durability failure")
 )
 

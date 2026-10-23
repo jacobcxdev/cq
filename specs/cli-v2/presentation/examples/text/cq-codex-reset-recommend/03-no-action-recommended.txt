@@ -1,0 +1,18 @@
+Codex reset plan · Advisory
+  Inputs      Complete
+  Search      Exact
+  Confidence  High
+  Generated   23 Sep 2026, 16:30:00 BST (UTC+01:00)
+  Horizon     in 7d · 30 Sep 2026, 16:30 BST (UTC+01:00)
+
+No reset use recommended.
+
+Objective
+  Unmet demand                   0 %-seconds
+  Gap duration                   0s
+  Useful credits expired unused  0
+  Weighted discarded quota       0%
+  Restored quota                 0%
+
+Blockers
+  None

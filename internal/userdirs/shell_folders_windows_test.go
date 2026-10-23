@@ -765,6 +765,7 @@ type fakeWindowsUserShellFolders struct {
 	subjectErr    error
 	values        map[string]fakeRegistryValue
 	getValueCalls int
+	getValueNames []string
 	subjectCalls  int
 }
 
@@ -773,6 +774,7 @@ func (shellFolders *fakeWindowsUserShellFolders) GetValue(
 	buffer []byte,
 ) (int, uint32, error) {
 	shellFolders.getValueCalls++
+	shellFolders.getValueNames = append(shellFolders.getValueNames, name)
 	value, ok := shellFolders.values[name]
 	if !ok {
 		return 0, 0, registry.ErrNotExist

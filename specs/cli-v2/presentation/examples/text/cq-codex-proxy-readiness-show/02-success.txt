@@ -1,0 +1,30 @@
+Codex HTTP readiness · current
+  Codex build  0.146.0
+  Validated    5m ago · 23 Sep 2026, 16:25:00 BST (UTC+01:00)
+  Evidence     Retained validation; no live health check
+
+Validation identity
+  Marker version  3
+  CQ build  1.0.0
+  Transport  http
+  Parser schema  1
+  Lease schema  3
+  Semantics revision  http-conservative-routing-v3
+  Client build  0.146.0
+  Retry budget  1
+  Fixture hash  618be7afa604a4cdf1b34caf599a2d6e1b29db7da4ec71dd6527eb60d7e92dc1
+  CQ executable SHA-256  2222222222222222222222222222222222222222222222222222222222222222
+  Client executable SHA-256  3333333333333333333333333333333333333333333333333333333333333333
+  Service kind  launchd
+  Service identity SHA-256  4444444444444444444444444444444444444444444444444444444444444444
+  Installed result  passed
+  Completed gates
+    admitted-no-migration
+    deterministic-fallback
+    exact-pre-admission-hard429-replay
+    frozen-single-transform-envelope
+    installed-listener
+    terminal-default-once
+    v2-journal-runtime
+    warm-affinity
+  Marker validated  23 Sep 2026, 16:25:00 BST (UTC+01:00)

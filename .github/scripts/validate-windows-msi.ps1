@@ -90,13 +90,40 @@ function Wait-File {
     throw "timed out waiting for $Path"
 }
 
+function Get-CQVersion {
+    param([string]$Executable, [switch]$PreviousRelease)
+    if ($PreviousRelease) {
+        $lines = @(& $Executable --version)
+        if ($LASTEXITCODE -ne 0 -or $lines.Count -ne 1 -or $lines[0] -notmatch '^(cq )?v?([0-9]+\.[0-9]+\.[0-9]+)$') { throw "invalid previous version" }
+        return $Matches[2]
+    }
+    $result = & $Executable version --json | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $result.schema_version -ne 2 -or $result.ok -ne $true -or $result.command -ne "version" -or $result.data.version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') { throw "invalid candidate version" }
+    return $result.data.version
+}
+
+function Convert-CQServiceStatus {
+    param($Envelope, [switch]$PreviousRelease)
+    if ($PreviousRelease) {
+        if ($Envelope.schema_version -ne 1) { throw "invalid previous release schema" }
+        return $Envelope
+    }
+    if ($Envelope.schema_version -ne 2 -or $Envelope.ok -ne $true) { throw "invalid CQ service envelope" }
+    $proxy = @($Envelope.data.components | Where-Object { $_.id -eq "proxy" })
+    $refresh = @($Envelope.data.components | Where-Object { $_.id -eq "token-refresh" })
+    if ($proxy.Count -ne 1 -or $refresh.Count -ne 1) { throw "missing CQ service components" }
+    return [pscustomobject]@{ proxy = $proxy[0]; refresh = $refresh[0] }
+}
+
 function Wait-ServiceStatus {
-    param([string]$Version)
+    param([string]$Version, [switch]$PreviousRelease)
     for ($attempt = 0; $attempt -lt 90; $attempt++) {
         try {
-            $reportedVersion = (& $installedCQ --version).TrimStart("v")
-            $status = (& $installedCQ service status --json | ConvertFrom-Json)
-            if ($reportedVersion -eq $Version -and $status.owner -eq "winget" -and $status.proxy.running -and $status.proxy.healthy -and $status.refresh.healthy) {
+            $reportedVersion = Get-CQVersion -Executable $installedCQ -PreviousRelease:$PreviousRelease
+            $status = Convert-CQServiceStatus -Envelope (& $installedCQ service status --json | ConvertFrom-Json) -PreviousRelease:$PreviousRelease
+            $healthy = $reportedVersion -eq $Version -and $status.proxy.healthy -and $status.refresh.healthy
+            if (($PreviousRelease -and $healthy -and $status.owner -eq "winget" -and $status.proxy.running) -or
+                (-not $PreviousRelease -and $healthy -and $status.proxy.owner -eq "package" -and $status.proxy.state -eq "running")) {
                 return $status
             }
         }
@@ -132,11 +159,15 @@ function Get-CQMSIRegistrationCount {
 }
 
 function Assert-Installed {
-    param([string]$Version)
-    $status = Wait-ServiceStatus -Version $Version
-    if ($status.proxy.configured_executable -ne $installedCQ -or $status.proxy.live_executable -ne $installedCQ -or $status.proxy.listener -ne "127.0.0.1:$Port") {
+    param([string]$Version, [switch]$PreviousRelease)
+    $status = Wait-ServiceStatus -Version $Version -PreviousRelease:$PreviousRelease
+    if (($PreviousRelease -and ($status.proxy.configured_executable -ne $installedCQ -or $status.proxy.live_executable -ne $installedCQ -or $status.proxy.listener -ne "127.0.0.1:$Port")) -or
+        (-not $PreviousRelease -and $status.proxy.executable -ne $installedCQ)) {
         throw "installed CQ process identity differs"
     }
+    $ownedProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$($status.proxy.pid)"
+    $listener = Get-NetTCPConnection -State Listen -LocalAddress "127.0.0.1" -LocalPort $Port -ErrorAction Stop
+    if ($ownedProcess.ExecutablePath -ne $installedCQ -or $listener.OwningProcess -ne $status.proxy.pid) { throw "installed listener identity differs" }
     foreach ($name in @("Proxy", "Refresh")) {
         $task = Get-ScheduledTask -TaskPath $taskPath -TaskName $name
         if ($task.Actions.Execute -ne $installedCQ) {
@@ -269,13 +300,16 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "direct CQ service install failed"
     }
-    $directStatus = (& $serviceProbe service status --json | ConvertFrom-Json)
-    if ($LASTEXITCODE -ne 0 -or $directStatus.owner -ne "winget" -or -not $directStatus.proxy.running -or -not $directStatus.proxy.healthy -or -not $directStatus.refresh.healthy) {
+    $directStatus = Convert-CQServiceStatus -Envelope (& $serviceProbe service status --json | ConvertFrom-Json)
+    if ($LASTEXITCODE -ne 0 -or $directStatus.proxy.owner -ne "package" -or $directStatus.proxy.state -ne "running" -or -not $directStatus.proxy.healthy -or -not $directStatus.refresh.healthy) {
         throw "direct CQ service lifecycle is unhealthy"
     }
-    if ($directStatus.proxy.configured_executable -ne $serviceProbe -or $directStatus.proxy.live_executable -ne $serviceProbe -or $directStatus.proxy.listener -ne "127.0.0.1:$Port") {
+    if ($directStatus.proxy.executable -ne $serviceProbe) {
         throw "direct CQ service process identity differs"
     }
+    $directProcess = Get-CimInstance Win32_Process -Filter "ProcessId=$($directStatus.proxy.pid)"
+    $directListener = Get-NetTCPConnection -State Listen -LocalAddress "127.0.0.1" -LocalPort $Port -ErrorAction Stop
+    if ($directProcess.ExecutablePath -ne $serviceProbe -or $directListener.OwningProcess -ne $directStatus.proxy.pid) { throw "direct listener identity differs" }
     & $probeExecutable probe --address "http://127.0.0.1:$Port" --token "cq-native-local"
     if ($LASTEXITCODE -ne 0) {
         throw "direct CQ service transport probe failed"
@@ -286,7 +320,7 @@ try {
     }
 
     Invoke-MSI -Action install -Path $PreviousMSI -Log (Join-Path $temporaryRoot "install-previous.log")
-    $null = Assert-Installed -Version $PreviousVersion
+    $null = Assert-Installed -Version $PreviousVersion -PreviousRelease
 
     Invoke-MSI -Action install -Path $CurrentMSI -Log (Join-Path $temporaryRoot "upgrade-current.log")
     $status = Assert-Installed -Version $CurrentVersion

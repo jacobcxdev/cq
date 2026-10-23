@@ -108,7 +108,7 @@ func (a *FileSystemActivator) Active(context.Context) (SystemSnapshot, error) {
 	return SystemSnapshot{Present: true, AccountKey: AccountKey(acct.RecordKey), Revision: credentialRevision(data)}, nil
 }
 
-func (a *FileSystemActivator) Activate(_ context.Context, ref CandidateRef, expected Revision) (ActivationResult, error) {
+func (a *FileSystemActivator) Activate(ctx context.Context, ref CandidateRef, expected Revision) (ActivationResult, error) {
 	if ref.AccountKey == "" || ref.CandidateID == "" || ref.path == "" || expected == "" {
 		return ActivationResult{}, errors.New("invalid activation candidate")
 	}
@@ -135,6 +135,9 @@ func (a *FileSystemActivator) Activate(_ context.Context, ref CandidateRef, expe
 	}
 	if a.Replace == nil {
 		return ActivationResult{}, errors.New("system credential writer unavailable")
+	}
+	if err := ctx.Err(); err != nil {
+		return ActivationResult{}, err
 	}
 	if err := a.Replace(systemPath, merged); err != nil {
 		return ActivationResult{}, fmt.Errorf("write system auth: %w", err)

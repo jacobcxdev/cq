@@ -1,0 +1,24 @@
+cq proxy candidate receipt
+Inspect a retained candidate attempt receipt.
+
+Usage
+  cq proxy candidate receipt <COMMAND> [OPTIONS]
+
+A receipt is a retained, machine-verifiable validation-attempt record.
+
+Commands
+  show   Show the authenticated receipt for one validation attempt.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help proxy candidate   Candidate commands.
+
+Examples
+  Inspect candidate and attempt selector requirements
+  cq proxy candidate receipt show --help

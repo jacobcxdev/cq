@@ -1,0 +1,39 @@
+cq proxy
+Run and inspect the shared proxy, state and lifecycle machinery.
+
+Usage
+  cq proxy <COMMAND> [OPTIONS]
+
+Commands
+  candidate   Manage isolated candidate state and release evidence.
+  health      Probe proxy HTTP liveness.
+  operation   Inspect retained lifecycle operation state.
+  rescue      Inspect or change rescue-serving mode.
+  serve       Run the shared API proxy in the foreground.
+  state       Initialise an explicitly selected authority directory.
+  status      Inspect shared proxy readiness evidence.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq codex proxy reserve   Codex quota reserves; formerly cq proxy reserve.
+  cq codex proxy policy    Codex routing policy; formerly cq proxy policy.
+  cq codex proxy           Pools, sessions, pins, fallback, priming, leases,
+                           traces, validation, credential endpoints and hooks.
+  cq claude proxy pin      Claude pins; formerly cq proxy pin claude.
+  cq service               Install, start, stop, restart or uninstall services.
+
+Examples
+  Inspect shared readiness evidence
+  cq proxy status
+
+  Inspect Codex quota protection
+  cq codex proxy reserve status
+
+  Inspect background services
+  cq service status

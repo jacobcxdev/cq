@@ -1,0 +1,3 @@
+Warning · Local credential removal is incomplete; recover the pending operation before retrying.
+  Code: account_removal_partial
+  Command: cq codex account remove

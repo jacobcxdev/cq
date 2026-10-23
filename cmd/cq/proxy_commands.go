@@ -160,6 +160,8 @@ type CheckCachePolicyV1 struct {
 
 var candidateReceiptIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
+// ClassifyProxyCommand describes retained legacy engine operations. Public argv
+// is parsed exclusively by internal/cli before reaching canonical adapters.
 func ClassifyProxyCommand(argv []string) (OrdinaryCommandAuthorityV1, error) {
 	if len(argv) > 0 && argv[0] == "agent" {
 		return classifyAgentAuthority(argv)

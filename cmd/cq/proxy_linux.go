@@ -41,6 +41,9 @@ func linuxProxyTerminationContext(ctx context.Context) (context.Context, context
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if external, _ := ctx.Value(proxyForegroundSignalsKey{}).(bool); external {
+		return context.WithCancel(ctx)
+	}
 	return signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 }
 

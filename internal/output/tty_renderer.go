@@ -3,9 +3,12 @@ package output
 import (
 	"context"
 	"io"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/app"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 // TTYRenderer renders a Report as styled terminal output.
@@ -113,4 +116,19 @@ func writeWindowRow(ew *errWriter, row TTYWindowRow) {
 	ew.write("  ")
 	ew.write(row.Burndown)
 	ew.write("\n")
+}
+
+// QuotaReportHumanV2 preserves the established quota dashboard. JSON ordering
+// remains canonical; the human view puts the active account first.
+func QuotaReportHumanV2(report app.Report) string {
+	report.Providers = append([]app.ProviderReport(nil), report.Providers...)
+	for i := range report.Providers {
+		rows := append([]quota.Result(nil), report.Providers[i].Results...)
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].Active && !rows[j].Active })
+		report.Providers[i].Results = rows
+	}
+	var out strings.Builder
+	// strings.Builder cannot fail. Relative times use the report observation time.
+	_ = (&TTYRenderer{W: &out, Now: report.GeneratedAt}).Render(context.Background(), report)
+	return out.String()
 }

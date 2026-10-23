@@ -38,7 +38,7 @@ retained = %w[previous current].map do |name|
 end
 package = File.join(root, "package-cq")
 File.symlink(File.join(root, "current"), package)
-status = {"owner" => "homebrew", "executable" => package,
+status = {"schema_version" => 1, "owner" => "homebrew", "executable" => package,
           "proxy" => {"registered" => true, "running" => true, "healthy" => true, "pid" => 42, "listener" => "127.0.0.1:19280", "configured_executable" => retained[0], "live_executable" => retained[1]},
           "refresh" => {"registered" => true, "healthy" => true, "configured_executable" => retained[1]}, "active_runtime_version" => "0.34.99"}
 verify = lambda do |value, mode, expected|
@@ -47,6 +47,31 @@ verify = lambda do |value, mode, expected|
 end
 copy = lambda { JSON.parse(JSON.generate(status)) }
 verify.call(status, "retained", true)
+canonical = {"schema_version" => 2, "ok" => true, "command" => "service status", "data" => {
+  "active_runtime_version" => "0.34.99", "upgrade_phase" => "committed", "components" => [
+    {"id" => "proxy", "owner" => "package", "installed" => true, "state" => "running", "healthy" => true, "pid" => 42, "listener" => "127.0.0.1:19280", "executable" => retained[0], "live_executable" => retained[1]},
+    {"id" => "token-refresh", "owner" => "package", "installed" => true, "healthy" => true, "executable" => retained[1]}
+  ]}}
+verify.call(canonical, "retained", true)
+[nil, 0, 3].each do |schema|
+  invalid = copy.call
+  schema.nil? ? invalid.delete("schema_version") : invalid["schema_version"] = schema
+  verify.call(invalid, "retained", false)
+end
+invalid_canonical = JSON.parse(JSON.generate(canonical))
+invalid_canonical["ok"] = false
+verify.call(invalid_canonical, "retained", false)
+%w[proxy token-refresh].each do |id|
+  invalid_canonical = JSON.parse(JSON.generate(canonical))
+  invalid_canonical["data"]["components"].find { |component| component["id"] == id }["healthy"] = false
+  verify.call(invalid_canonical, "retained", false)
+end
+invalid_canonical = JSON.parse(JSON.generate(canonical))
+invalid_canonical["data"]["components"][0]["live_executable"] = retained[0]
+verify.call(invalid_canonical, "retained", false)
+invalid_canonical = JSON.parse(JSON.generate(canonical))
+invalid_canonical["data"]["components"][1]["owner"] = "cq"
+verify.call(invalid_canonical, "retained", false)
 legacy = copy.call
 legacy.delete("active_runtime_version")
 legacy["proxy"]["configured_executable"] = package

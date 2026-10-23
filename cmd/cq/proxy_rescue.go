@@ -44,16 +44,8 @@ func runProxyRescueWithDependencies(ctx context.Context, args []string, output i
 	if ctx == nil || output == nil || load == nil || doer == nil || len(args) == 0 {
 		return errors.New("usage: cq proxy rescue <enter|exit|status> [--port PORT]")
 	}
-	method := http.MethodPost
-	path := ""
 	switch args[0] {
-	case "enter":
-		path = proxy.RuntimeRescueEnterPath
-	case "exit":
-		path = proxy.RuntimeRescueExitPath
-	case "status":
-		method = http.MethodGet
-		path = proxy.RuntimeRescueStatusPath
+	case "enter", "exit", "status":
 	default:
 		return fmt.Errorf("unknown proxy rescue command: %s", args[0])
 	}
@@ -68,9 +60,55 @@ func runProxyRescueWithDependencies(ctx context.Context, args []string, output i
 			return errors.New("proxy rescue: invalid port")
 		}
 	}
-	cfg, err := load()
+	var recoverListener func(context.Context) error
+	if restart != nil {
+		recoverListener = func(ctx context.Context) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			return restart()
+		}
+	}
+	body, err := requestProxyRescueWithRecovery(ctx, args[0], port, load, doer, recoverListener)
 	if err != nil {
 		return err
+	}
+	_, err = output.Write(body)
+	return err
+}
+
+// proxyRescueError retains the legacy diagnostic while giving canonical callers
+// a typed control outcome. Untrusted response bodies never become diagnostics.
+type proxyRescueError struct {
+	kind   string
+	status int
+	cause  error
+}
+
+func (e *proxyRescueError) Error() string { return e.cause.Error() }
+func (e *proxyRescueError) Unwrap() error { return e.cause }
+
+func requestProxyRescue(ctx context.Context, action string, port int, load func() (*proxy.Config, error), doer httputil.Doer) ([]byte, error) {
+	return requestProxyRescueWithRecovery(ctx, action, port, load, doer, nil)
+}
+
+func requestProxyRescueWithRecovery(ctx context.Context, action string, port int, load func() (*proxy.Config, error), doer httputil.Doer, restart func(context.Context) error) ([]byte, error) {
+	recoverListener := action == "enter" && port == 0 && restart != nil
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cfg, err := load()
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	if cfg == nil {
+		return nil, errors.New("proxy rescue configuration unavailable")
+	}
+	if cfg.LocalToken == "" {
+		return nil, proxy.ErrLocalTokenRequired
 	}
 	if port == 0 {
 		port = cfg.Port
@@ -78,48 +116,72 @@ func runProxyRescueWithDependencies(ctx context.Context, args []string, output i
 			port = proxy.DefaultPort
 		}
 	}
+	method, path := http.MethodPost, proxy.RuntimeRescueEnterPath
+	switch action {
+	case "exit":
+		path = proxy.RuntimeRescueExitPath
+	case "status":
+		method, path = http.MethodGet, proxy.RuntimeRescueStatusPath
+	}
 	request, err := http.NewRequestWithContext(ctx, method, fmt.Sprintf("http://127.0.0.1:%d%s", port, path), http.NoBody)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
 	response, err := doer.Do(request)
-	if errors.Is(err, syscall.ECONNREFUSED) && args[0] == "enter" && len(args) == 1 && restart != nil {
-		if restartErr := restart(); restartErr != nil {
-			return fmt.Errorf("restore CQ service for rescue: %w", restartErr)
+	if errors.Is(err, syscall.ECONNREFUSED) && recoverListener {
+		if response != nil && response.Body != nil {
+			response.Body.Close()
 		}
-		waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if restartErr := restart(ctx); restartErr != nil {
+			return nil, fmt.Errorf("restore CQ service for rescue: %w", restartErr)
+		}
+		waitCtx, cancel := context.WithTimeout(ctx, proxyRescueControlTimeout)
 		defer cancel()
 		for errors.Is(err, syscall.ECONNREFUSED) {
 			select {
 			case <-waitCtx.Done():
-				return fmt.Errorf("proxy rescue listener did not start after service recovery: %w", err)
+				return nil, fmt.Errorf("proxy rescue listener did not start after service recovery: %w", waitCtx.Err())
 			case <-time.After(100 * time.Millisecond):
 			}
-			response, err = doer.Do(request)
+			response, err = doer.Do(request.Clone(waitCtx))
+			if err != nil && response != nil && response.Body != nil {
+				response.Body.Close()
+				response = nil
+			}
 		}
+	}
+	if response != nil && response.Body != nil {
+		defer response.Body.Close()
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 	if err != nil {
 		if errors.Is(err, syscall.ECONNREFUSED) {
-			return fmt.Errorf("proxy rescue requires a running listener; run cq proxy restart first: %w", err)
+			return nil, fmt.Errorf("proxy rescue requires a running listener; run cq proxy restart first: %w", err)
 		}
-		return err
+		return nil, err
 	}
-	if response == nil || response.Body == nil {
-		return errors.New("proxy rescue response unavailable")
+	if response == nil {
+		return nil, errors.New("proxy rescue response unavailable")
 	}
-	defer response.Body.Close()
+	// Classify known HTTP failures before reading any unused body.
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, proxyRescueResponseMaxBytes))
-		return fmt.Errorf("proxy rescue control failed: HTTP %d", response.StatusCode)
+		return nil, &proxyRescueError{status: response.StatusCode, cause: fmt.Errorf("proxy rescue control failed: HTTP %d", response.StatusCode)}
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, proxyRescueResponseMaxBytes+1))
+	if response.Body == nil {
+		return nil, &proxyRescueError{kind: "response", cause: errors.New("proxy rescue response unavailable")}
+	}
+	body, err := httputil.ReadBodyLimit(response.Body, proxyRescueResponseMaxBytes)
+	if errors.Is(err, httputil.ErrBodyTooLarge) {
+		err = errors.New("proxy rescue response exceeds 64 KiB")
+	}
 	if err != nil {
-		return err
+		return nil, &proxyRescueError{kind: "response", cause: err}
 	}
-	if len(body) > proxyRescueResponseMaxBytes {
-		return errors.New("proxy rescue response exceeds 64 KiB")
-	}
-	_, err = output.Write(body)
-	return err
+	return body, nil
 }

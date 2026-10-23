@@ -1,0 +1,29 @@
+cq codex dots status
+Show Dots status.
+
+Usage
+  cq codex dots status [OPTIONS]
+
+Read the native catalogue, workspace, and adapter component status.
+
+Readiness describes the observed app state; it does not confirm a Dot has completed a message.
+
+Options
+  --root ABS_PATH
+      Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after
+      the leaf command. This is not a global CQ option.
+      Must be a clean absolute path when supplied.
+      Must not contain the home directory or overlap native app, credential or application-support
+      paths.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable. Long/short duplicates are rejected.
+
+Examples
+  Show Dots status.
+  cq codex dots status

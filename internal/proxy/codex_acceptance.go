@@ -53,6 +53,7 @@ type CodexHTTPAcceptanceResult struct {
 }
 
 type codexAcceptanceCommand struct {
+	cleanupContext     context.Context
 	executable         string
 	expectedExecutable codexInstalledExecutableProof
 	args               []string
@@ -354,4 +355,14 @@ func codexAcceptanceServeError(serverErrors <-chan error) error {
 	default:
 	}
 	return nil
+}
+
+// Cleanup inherits a single caller deadline, and force-closes owned HTTP
+// connections when graceful shutdown cannot complete within it.
+func shutdownCodexAcceptanceServerContext(ctx context.Context, server *http.Server) error {
+	err := server.Shutdown(ctx)
+	if err != nil {
+		err = errors.Join(err, server.Close())
+	}
+	return err
 }

@@ -1,0 +1,4 @@
+Claude local credentials · Removed
+  Reference           alex@example.test
+  Native credentials  Removed
+  External sources    none

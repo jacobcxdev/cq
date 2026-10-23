@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/rpc"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -43,28 +45,43 @@ type LegacyCredentialEndpointFinaliseRPCReply struct {
 }
 
 func FinaliseLegacyCredentialEndpointTransition(ctx context.Context, path string, ticket LegacyCredentialEndpointTransitionTicket) error {
-	if err := ctx.Err(); err != nil {
+	if err := legacyMaintenanceContextError(ctx); err != nil {
 		return err
 	}
 	if err := ticket.validate(); err != nil || ticket.Path != path {
 		return errors.Join(ErrCredentialEndpointMaintenanceTicketMismatch, err)
 	}
-	client, err := dialCredentialOwner(path, credentialEndpointDialTimeout)
+	client, closeClient, err := dialLegacyMaintenanceOwner(ctx, path)
 	if err != nil {
+		if legacyMaintenanceContextError(ctx) != nil {
+			return legacyMaintenanceContextError(ctx)
+		}
 		return finaliseLegacyCredentialEndpointTransitionOffline(ctx, path, ticket)
 	}
-	defer client.Close()
+	defer closeClient()
 	var ping CredentialEndpointPingReply
 	if err := client.Call("CredentialEndpoint.Ping", CredentialEndpointPingArgs{ProtocolVersion: credentialEndpointProtocolVersion}, &ping); err != nil {
+		if legacyMaintenanceContextError(ctx) != nil {
+			return legacyMaintenanceContextError(ctx)
+		}
 		return ErrCredentialOwnerStale
 	}
 	if ping.ProtocolVersion != credentialEndpointProtocolVersion || !validCredentialEndpointMaintenanceHex(ping.Generation, 16) {
 		return ErrCredentialEndpointIncompatible
 	}
+	if err := legacyMaintenanceContextError(ctx); err != nil {
+		return err
+	}
 	var reply LegacyCredentialEndpointFinaliseRPCReply
 	if err := client.Call("CredentialEndpoint.FinaliseMaintenance", LegacyCredentialEndpointFinaliseRPCArgs{
 		Ticket: ticket, OwnerGeneration: ping.Generation,
 	}, &reply); err != nil {
+		// Once sent, a timed-out RPC has an indeterminate result. The owner may
+		// already hold verified authority; its journal is the recovery source.
+		// Never reconcile or replay automatically after caller cancellation.
+		if legacyMaintenanceContextError(ctx) != nil {
+			return legacyMaintenanceContextError(ctx)
+		}
 		mapped := credentialEndpointMaintenanceRPCError(err)
 		if errors.Is(mapped, ErrCredentialEndpointMaintenanceTicketMismatch) ||
 			errors.Is(mapped, ErrCredentialEndpointMaintenanceVerifierRequired) ||
@@ -80,7 +97,7 @@ func FinaliseLegacyCredentialEndpointTransition(ctx context.Context, path string
 			if !errors.Is(reconcileErr, fsutil.ErrExclusiveLockHeld) || time.Now().After(deadline) {
 				return mapped
 			}
-			if err := ctx.Err(); err != nil {
+			if err := legacyMaintenanceContextError(ctx); err != nil {
 				return err
 			}
 			time.Sleep(min(2*time.Millisecond, time.Until(deadline)))
@@ -89,11 +106,117 @@ func FinaliseLegacyCredentialEndpointTransition(ctx context.Context, path string
 	if !reply.Finalised {
 		return ErrCredentialEndpointMaintenanceConflict
 	}
-	return ctx.Err()
+	return legacyMaintenanceContextError(ctx)
+}
+
+// Socket deadlines can fire before the context timer callback is scheduled.
+func legacyMaintenanceContextError(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) {
+		return context.DeadlineExceeded
+	}
+	return nil
+}
+
+func cancelLegacyMaintenanceConnection(ctx context.Context, conn net.Conn) func() {
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close(); close(closed) })
+	return func() {
+		if !stop() {
+			<-closed
+		}
+		_ = conn.Close()
+	}
+}
+
+// Keep the synchronous RPC on the caller's single operation budget. Cancellation
+// only closes transport; it cannot revoke a request already accepted by the
+// owner. No goroutine performs or retries the maintenance operation.
+func dialLegacyMaintenanceOwner(ctx context.Context, path string) (*rpc.Client, func(), error) {
+	deadline := time.Now().Add(credentialEndpointDialTimeout)
+	if caller, ok := ctx.Deadline(); ok && caller.Before(deadline) {
+		deadline = caller
+	}
+	for {
+		if err := legacyMaintenanceContextError(ctx); err != nil {
+			return nil, nil, err
+		}
+		if time.Until(deadline) <= 0 {
+			return nil, nil, ErrCredentialOwnerStale
+		}
+		dialer := net.Dialer{Deadline: deadline}
+		conn, err := dialer.DialContext(ctx, "unix", path)
+		if err == nil {
+			cleanup := cancelLegacyMaintenanceConnection(ctx, conn)
+			if err := conn.SetDeadline(deadline); err != nil {
+				cleanup()
+				return nil, nil, err
+			}
+			client := rpc.NewClient(conn)
+			var ping CredentialEndpointPingReply
+			pingErr := client.Call("CredentialEndpoint.Ping", CredentialEndpointPingArgs{ProtocolVersion: credentialEndpointProtocolVersion}, &ping)
+			if pingErr == nil && ping.ProtocolVersion == credentialEndpointProtocolVersion && ping.Generation != "" {
+				callerDeadline, _ := ctx.Deadline()
+				if err := conn.SetDeadline(callerDeadline); err != nil {
+					cleanup()
+					_ = client.Close()
+					return nil, nil, err
+				}
+				return client, func() { cleanup(); _ = client.Close() }, nil
+			}
+			cleanup()
+			_ = client.Close()
+		}
+		if err := legacyMaintenanceContextError(ctx); err != nil {
+			return nil, nil, err
+		}
+		wait := min(2*time.Millisecond, time.Until(deadline))
+		if wait <= 0 {
+			return nil, nil, ErrCredentialOwnerStale
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, nil, legacyMaintenanceContextError(ctx)
+		case <-timer.C:
+		}
+	}
+}
+
+func probeLegacyMaintenanceOwner(ctx context.Context, path string) (credentialOwnerProtocol, error) {
+	deadline := time.Now().Add(credentialEndpointDialTimeout)
+	if caller, ok := ctx.Deadline(); ok && caller.Before(deadline) {
+		deadline = caller
+	}
+	dialer := net.Dialer{Deadline: deadline}
+	conn, err := dialer.DialContext(ctx, "unix", path)
+	if err != nil {
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return credentialOwnerRefused, err
+		}
+		return credentialOwnerUnavailable, err
+	}
+	defer cancelLegacyMaintenanceConnection(ctx, conn)()
+	if err := conn.SetDeadline(deadline); err != nil {
+		return credentialOwnerUnavailable, err
+	}
+	client := rpc.NewClient(conn)
+	defer client.Close()
+	var ping CredentialEndpointPingReply
+	if err := client.Call("CredentialEndpoint.Ping", CredentialEndpointPingArgs{ProtocolVersion: credentialEndpointProtocolVersion}, &ping); err != nil {
+		return credentialOwnerUnavailable, err
+	}
+	if ping.ProtocolVersion != credentialEndpointProtocolVersion || ping.Generation == "" {
+		return credentialOwnerUnavailable, ErrCredentialEndpointIncompatible
+	}
+	return credentialOwnerVersioned, nil
 }
 
 func finaliseLegacyCredentialEndpointTransitionOffline(ctx context.Context, path string, ticket LegacyCredentialEndpointTransitionTicket) error {
-	if err := ctx.Err(); err != nil {
+	if err := legacyMaintenanceContextError(ctx); err != nil {
 		return err
 	}
 	namespace, err := openLegacyCredentialMaintenanceNamespace(path, ticket.Directory)
@@ -105,7 +228,7 @@ func finaliseLegacyCredentialEndpointTransitionOffline(ctx context.Context, path
 }
 
 func finaliseLegacyCredentialEndpointTransitionOfflineInNamespace(ctx context.Context, path string, ticket LegacyCredentialEndpointTransitionTicket, namespace *legacyCredentialMaintenanceNamespace) error {
-	if err := ctx.Err(); err != nil {
+	if err := legacyMaintenanceContextError(ctx); err != nil {
 		return err
 	}
 	if namespace == nil {
@@ -173,9 +296,11 @@ func finaliseLegacyCredentialEndpointTransitionOfflineInNamespace(ctx context.Co
 		return err
 	}
 	if finalExists {
-		client, protocol, _, probeErr := probeCredentialOwnerAttempt(path, credentialEndpointDialTimeout, net.DialTimeout)
-		if client != nil {
-			_ = client.Close()
+		protocol, probeErr := probeLegacyMaintenanceOwner(ctx, path)
+		if err := legacyMaintenanceContextError(ctx); err != nil {
+			return err
+		}
+		if protocol == credentialOwnerVersioned {
 			return ErrCredentialEndpointLockHeld
 		}
 		if protocol != credentialOwnerRefused {
@@ -196,6 +321,9 @@ func finaliseLegacyCredentialEndpointTransitionOfflineInNamespace(ctx context.Co
 		if err := candidate.validateMaintenanceReceiptProof(candidate.maintenanceGate); err != nil {
 			return err
 		}
+		if err := legacyMaintenanceContextError(ctx); err != nil {
+			return err
+		}
 		if err := unix.Unlinkat(namespace.directoryFD, ticket.QuarantineName, 0); err != nil {
 			return err
 		}
@@ -204,6 +332,9 @@ func finaliseLegacyCredentialEndpointTransitionOfflineInNamespace(ctx context.Co
 		}
 	}
 	return namespace.removeRecord(namespace.rollbackName, record, func() error {
+		if err := legacyMaintenanceContextError(ctx); err != nil {
+			return err
+		}
 		if err := namespace.requireEntryAbsent(namespace.journalName); err != nil {
 			return errors.Join(ErrCredentialEndpointMaintenanceConflict, err)
 		}

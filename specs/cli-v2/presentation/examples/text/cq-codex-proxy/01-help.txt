@@ -1,0 +1,43 @@
+cq codex proxy
+Control Codex routing, quota protection and transport evidence.
+
+Usage
+  cq codex proxy <COMMAND> [OPTIONS]
+
+Commands
+  canary                Manage a bounded routing-observation run.
+  credential-endpoint   Maintain the local credential-owner endpoint.
+  fallback              Inspect, set or clear the terminal fallback account.
+  fixture               Create sanitised fixtures from saved requests.
+  hook                  Produce native client lifecycle receipt annotations.
+  lease                 Invalidate reusable routing affinities.
+  pin                   Inspect, set or clear the proxy account override.
+  policy                Export or replace the complete routing policy.
+  pool                  Define account pools and preservation values.
+  prime                 Inspect or toggle quota-window priming.
+  readiness             Inspect transport evidence for an exact client build.
+  reserve               Protect quota on the current system account.
+  session               Inspect or change a client session's routing pool.
+  trace                 Read or follow retained request traces.
+  validate              Request HTTP or run WebSocket transport checks.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq proxy     Shared proxy runtime, health, state and diagnostics.
+  cq service   Manage background services.
+
+Examples
+  Inspect system-account reserve state
+  cq codex proxy reserve status
+
+  Inspect the full routing policy
+  cq codex proxy policy show
+
+  Find exact-build readiness arguments
+  cq codex proxy readiness show --help

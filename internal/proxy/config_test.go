@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -533,4 +535,166 @@ func TestConfigDiagnosticsLogPersisted(t *testing.T) {
 	if cfg.DiagnosticsLog != path {
 		t.Fatalf("loaded DiagnosticsLog = %q, want %q", cfg.DiagnosticsLog, path)
 	}
+}
+
+func TestProxyLeasesMissingLocalTokenHasTypedConfigError(t *testing.T) {
+	cfg := &Config{}
+	cfg.setDefaults()
+	err := cfg.validate()
+	if !errors.Is(err, ErrLocalTokenRequired) || err.Error() != "local_token is required" {
+		t.Fatalf("missing token error=%v", err)
+	}
+}
+
+func TestProxyResilienceStateConfigPublicationReceipt(t *testing.T) {
+	for _, failBootstrap := range []bool{false, true} {
+		t.Run(fmt.Sprint(failBootstrap), func(t *testing.T) {
+			root := t.TempDir()
+			paths := DefaultPaths{ConfigFile: filepath.Join(root, "proxy.json"), RescueBootstrap: filepath.Join(root, "state", "proxy-rescue.json")}
+			if failBootstrap {
+				if err := os.WriteFile(filepath.Join(root, "state"), []byte("blocked parent"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg := &Config{LocalToken: "fixture-token", ProxyResilienceStateDir: filepath.Join(root, "authority")}
+			result, err := SaveConfigAtWithResult(paths, cfg)
+			if !result.Published || (err != nil) != failBootstrap {
+				t.Fatalf("published=%v err=%v", result.Published, err)
+			}
+			saved, readErr := LoadExistingConfigAt(paths)
+			if readErr != nil || saved.ProxyResilienceStateDir != cfg.ProxyResilienceStateDir {
+				t.Fatalf("published config unreadable: %v", readErr)
+			}
+			legacyErr := SaveConfigAt(paths, cfg)
+			if (legacyErr != nil) != (err != nil) {
+				t.Fatalf("wrapper=%v result=%v", legacyErr, err)
+			}
+			if err != nil && legacyErr.Error() != err.Error() {
+				t.Fatalf("changed wrapper error: %v vs %v", legacyErr, err)
+			}
+		})
+	}
+}
+
+func TestCanonicalRescueBootstrapCapturedPaths(t *testing.T) {
+	for _, source := range []string{"bootstrap", "normal", "malformed fallback"} {
+		for _, kind := range []string{"zero", "configured", "missing token", "bad root", "bad port"} {
+			t.Run(source+"/"+kind, func(t *testing.T) {
+				root := t.TempDir()
+				paths := DefaultPaths{ConfigFile: filepath.Join(root, "proxy.json"), RescueBootstrap: filepath.Join(root, "rescue.json")}
+				bootstrap := ProxyRescueBootstrapConfig{SchemaVersion: 1, Port: 0, LocalToken: "synthetic-token", StateRoot: filepath.Join(root, "authority")}
+				if kind == "configured" {
+					bootstrap.Port = 23456
+				}
+				if kind == "missing token" {
+					bootstrap.LocalToken = ""
+				}
+				if kind == "bad root" {
+					bootstrap.LocalToken = ""
+					bootstrap.StateRoot = "relative"
+				}
+				if kind == "bad port" {
+					bootstrap.LocalToken = ""
+					bootstrap.Port = -1
+				}
+				var content []byte
+				var err error
+				target := paths.RescueBootstrap
+				if source == "bootstrap" {
+					content, err = json.Marshal(bootstrap)
+				} else {
+					target = paths.ConfigFile
+					content, err = json.Marshal(map[string]any{"port": bootstrap.Port, "local_token": bootstrap.LocalToken, "proxy_resilience_state_dir": bootstrap.StateRoot, "unrelated": "ignored normal setting"})
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, content, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if source == "malformed fallback" {
+					if err := os.WriteFile(paths.RescueBootstrap, []byte("{"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := os.Stat(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg, err := LoadCanonicalProxyRescueBootstrapConfigAt(paths)
+				switch kind {
+				case "zero", "configured":
+					want := DefaultPort
+					if kind == "configured" {
+						want = 23456
+					}
+					if err != nil || cfg.Port != want {
+						t.Fatalf("cfg=%v err=%v", cfg, err)
+					}
+				case "missing token":
+					if !errors.Is(err, ErrLocalTokenRequired) {
+						t.Fatalf("missing token error=%v", err)
+					}
+				default:
+					if err == nil || errors.Is(err, ErrLocalTokenRequired) {
+						t.Fatalf("invalid shape classified as token error=%v", err)
+					}
+				}
+				after, err := os.Stat(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err := os.ReadFile(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(content, body) || !before.ModTime().Equal(after.ModTime()) || before.Mode() != after.Mode() {
+					t.Fatal("canonical defaults persisted")
+				}
+				entries, err := os.ReadDir(root)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantCount := 1
+				if source == "malformed fallback" {
+					wantCount = 2
+				}
+				if len(entries) != wantCount {
+					t.Fatal("loader created state")
+				}
+				if source == "bootstrap" && kind == "zero" {
+					if _, err := decodeProxyRescueBootstrap(content); err == nil || err.Error() != "proxy rescue bootstrap invalid" {
+						t.Fatalf("legacy zero changed: %v", err)
+					}
+				}
+				if source == "bootstrap" && kind == "missing token" {
+					if _, err := decodeProxyRescueBootstrap(content); err == nil || err.Error() != "proxy rescue bootstrap invalid" || errors.Is(err, ErrLocalTokenRequired) {
+						t.Fatalf("legacy token error changed: %v", err)
+					}
+				}
+			})
+		}
+	}
+	t.Run("schema before token", func(t *testing.T) {
+		root := t.TempDir()
+		paths := DefaultPaths{ConfigFile: filepath.Join(root, "missing"), RescueBootstrap: filepath.Join(root, "rescue.json")}
+		data, _ := json.Marshal(ProxyRescueBootstrapConfig{SchemaVersion: 2, StateRoot: filepath.Join(root, "authority")})
+		if err := os.WriteFile(paths.RescueBootstrap, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadCanonicalProxyRescueBootstrapConfigAt(paths); err == nil || errors.Is(err, ErrLocalTokenRequired) {
+			t.Fatalf("schema before auth=%v", err)
+		}
+	})
+	t.Run("missing stays absent", func(t *testing.T) {
+		root := t.TempDir()
+		paths := DefaultPaths{ConfigFile: filepath.Join(root, "absent", "proxy.json"), RescueBootstrap: filepath.Join(root, "absent", "rescue.json")}
+		if _, err := LoadCanonicalProxyRescueBootstrapConfigAt(paths); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("absent=%v", err)
+		}
+		entries, _ := os.ReadDir(root)
+		if len(entries) != 0 {
+			t.Fatal("missing state created")
+		}
+	})
 }

@@ -1,0 +1,3 @@
+Error · Account reference is ambiguous; use a unique alias or AccountKey.
+  Code: routing_account_ambiguous
+  Command: cq codex proxy pin set

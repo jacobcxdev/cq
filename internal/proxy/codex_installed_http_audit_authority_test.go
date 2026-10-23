@@ -93,7 +93,11 @@ func TestCodexInstalledHTTPProtectedFileAcceptsStandardCodexCoreDirectory(t *tes
 func TestDefaultCodexInstalledHTTPProtectedPathsIncludeMarkerAndManagedAccounts(t *testing.T) {
 	home := t.TempDir()
 	markerDir := filepath.Join(t.TempDir(), "cq")
-	t.Setenv("HOME", home)
+	old := resolveProtectedCredentialHome
+	resolveProtectedCredentialHome = func() (string, error) { return home, nil }
+	t.Cleanup(func() { resolveProtectedCredentialHome = old })
+	t.Setenv("HOME", "untrusted-shell-home")
+	t.Setenv("USERPROFILE", "untrusted-shell-profile")
 	t.Setenv("CODEX_HOME", "")
 	paths, err := defaultCodexInstalledHTTPProtectedPaths(markerDir)
 	if err != nil {

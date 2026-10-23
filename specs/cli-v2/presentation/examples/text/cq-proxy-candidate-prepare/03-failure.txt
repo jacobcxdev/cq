@@ -1,0 +1,3 @@
+Error · Candidate state conflicts with this operation.
+  Code: candidate_conflict
+  Command: cq proxy candidate prepare

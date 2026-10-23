@@ -1,0 +1,3 @@
+Warning · Native client credentials changed, but account metadata needs recovery.
+  Code: account_activation_partial
+  Command: cq codex account activate

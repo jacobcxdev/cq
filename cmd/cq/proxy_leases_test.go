@@ -88,6 +88,10 @@ func TestProxyLeasesRedistributeRejectsInvalidResponse(t *testing.T) {
 		`{"scheduled_leases":3,"deferred_leases":1,"journal_generation":42} {}`,
 		`{"scheduled_leases":3,"unknown":1}`,
 		`not-json`,
+		`{}`,
+		`null`,
+		`{"scheduled_leases":-1,"deferred_leases":0,"journal_generation":42}`,
+		`{"scheduled_leases":1,"deferred_leases":0}`,
 	} {
 		t.Run(body, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -97,7 +101,7 @@ func TestProxyLeasesRedistributeRejectsInvalidResponse(t *testing.T) {
 			port := server.Listener.Addr().(*net.TCPAddr).Port
 			var output bytes.Buffer
 			err := runProxyLeasesWithDependencies(context.Background(), []string{"redistribute"}, &output, proxyLeaseDependencies{
-				LoadConfig: func() (*proxy.Config, error) { return &proxy.Config{Port: port}, nil },
+				LoadConfig: func() (*proxy.Config, error) { return &proxy.Config{Port: port, LocalToken: "local-token"}, nil },
 				Doer:       server.Client(),
 			})
 			if err == nil || output.Len() != 0 {

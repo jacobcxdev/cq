@@ -1,0 +1,29 @@
+cq completion
+Print a shell completion script.
+
+Usage
+  cq completion SHELL [options]
+
+Prints raw executable shell text, with no heading, colour or installation action.
+With --json, emits the documented envelope containing the shell and complete script.
+Does not read credentials or provider configuration.
+
+Arguments
+  SHELL  Required: bash, zsh or fish. Exact lowercase spelling.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq help
+
+Examples
+  Save a Bash completion script for review
+    cq completion bash > cq-completion.bash
+  Print a Zsh completion script
+    cq completion zsh
+  Print a Fish completion script
+    cq completion fish

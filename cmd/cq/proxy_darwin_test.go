@@ -97,6 +97,9 @@ func TestInstallProxyAgentWritesPlist(t *testing.T) {
 	var calls [][]string
 	runProxyLaunchctl = func(args ...string) error {
 		calls = append(calls, append([]string(nil), args...))
+		if args[0] == "print" {
+			return launchctlTestExitError(113)
+		}
 		return nil
 	}
 
@@ -106,22 +109,17 @@ func TestInstallProxyAgentWritesPlist(t *testing.T) {
 		}
 	})
 
-	if len(calls) != 4 {
-		t.Fatalf("launchctl calls = %d, want 4", len(calls))
-	}
 	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), proxyAgentLabel)
 	expectedPlistPath := filepath.Join(dir, "Library", "LaunchAgents", proxyAgentLabel+".plist")
-	if got, want := strings.Join(calls[0], "|"), strings.Join([]string{"print", target}, "|"); got != want {
-		t.Fatalf("first launchctl call = %v, want print", calls[0])
+	wantCalls := [][]string{
+		{"print", target},
+		{"bootout", target},
+		{"print", target},
+		{"bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), expectedPlistPath},
+		{"kickstart", "-k", target},
 	}
-	if got, want := strings.Join(calls[1], "|"), strings.Join([]string{"bootout", target}, "|"); got != want {
-		t.Fatalf("second launchctl call = %v, want bootout", calls[1])
-	}
-	if got, want := strings.Join(calls[2], "|"), strings.Join([]string{"bootstrap", fmt.Sprintf("gui/%d", os.Getuid()), expectedPlistPath}, "|"); got != want {
-		t.Fatalf("third launchctl call = %v, want bootstrap", calls[2])
-	}
-	if got, want := strings.Join(calls[3], "|"), strings.Join([]string{"kickstart", "-k", target}, "|"); got != want {
-		t.Fatalf("fourth launchctl call = %v, want kickstart", calls[3])
+	if !reflect.DeepEqual(calls, wantCalls) {
+		t.Fatalf("launchctl calls = %v, want %v", calls, wantCalls)
 	}
 
 	plistPath, err := proxyAgentPlistPath()
@@ -434,3 +432,73 @@ func captureStderr(t *testing.T, fn func()) string {
 	}
 	return buf.String()
 }
+
+func TestDarwinServiceSelectedProxyHealth(t *testing.T) {
+	for _, scenario := range []string{"healthy", "wrong-process", "wrong-listener", "unauthorised", "failed-health", "rescue", "redirect"} {
+		t.Run(scenario, func(t *testing.T) {
+			p, _ := newSelectedDarwinHarness(t)
+			if err := proxy.SaveConfigAt(proxy.PathsForRoots(p.roots), &proxy.Config{Port: 24567, LocalToken: "selected-test-token"}); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			calls := 0
+			run := func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "/bin/ps" {
+					if scenario == "wrong-process" {
+						return []byte("/other/cq\n"), nil
+					}
+					return []byte(p.executable + "\n"), nil
+				}
+				if scenario == "wrong-listener" {
+					return []byte("p999\n"), nil
+				}
+				return []byte("p4312\n"), nil
+			}
+			doer := testDoer(func(request *http.Request) (*http.Response, error) {
+				calls++
+				if request.URL.Host != "127.0.0.1:24567" || request.Header.Get("Authorization") != "Bearer selected-test-token" {
+					t.Fatal("health used wrong installed authority")
+				}
+				code, body := 200, `{"mode":"normal"}`
+				if request.URL.Path == "/health" {
+					body = `{"status":"ok"}`
+					if scenario == "failed-health" {
+						body = `{"status":"degraded"}`
+					}
+				}
+				if scenario == "unauthorised" {
+					code = 401
+				}
+				if scenario == "redirect" {
+					code = 302
+				}
+				if scenario == "rescue" {
+					body = `{"mode":"rescue"}`
+				}
+				var reader io.ReadCloser = io.NopCloser(strings.NewReader(body))
+				if code != 200 {
+					reader = &darwinServiceForbiddenBody{t: t}
+				}
+				return &http.Response{StatusCode: code, Body: reader}, nil
+			})
+			status := inspectDarwinSelectedProxyRuntimeWith(context.Background(), p.executable, p.roots, 4312, run, doer)
+			if status.Healthy != (scenario == "healthy") {
+				t.Fatalf("health=%+v", status)
+			}
+			if (scenario == "wrong-process" || scenario == "wrong-listener") && calls != 0 {
+				t.Fatal("credentials sent before owned listener proof")
+			}
+			if scenario == "healthy" && calls != 2 {
+				t.Fatalf("HTTP calls=%d", calls)
+			}
+		})
+	}
+}
+
+type darwinServiceForbiddenBody struct{ t *testing.T }
+
+func (b *darwinServiceForbiddenBody) Read([]byte) (int, error) {
+	b.t.Error("read unused authentication error body")
+	return 0, io.EOF
+}
+func (b *darwinServiceForbiddenBody) Close() error { return nil }

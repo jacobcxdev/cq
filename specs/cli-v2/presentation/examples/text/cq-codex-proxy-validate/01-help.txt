@@ -1,0 +1,26 @@
+cq codex proxy validate
+Request HTTP checks or run WebSocket transport validation.
+
+Usage
+  cq codex proxy validate <COMMAND> [OPTIONS]
+
+Commands
+  http        Request startup validation of an installed candidate listener.
+  websocket   Validate routing with an isolated installed Codex client.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex proxy   Codex proxy controls.
+
+Examples
+  Inspect HTTP validation prerequisites
+  cq codex proxy validate http --help
+
+  Inspect WebSocket client and evidence options
+  cq codex proxy validate websocket --help

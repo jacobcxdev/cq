@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/userdirs"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
@@ -300,7 +301,7 @@ func DefaultCodexRoutingRequirements(cqBuild, clientBuild string) (CodexTranspor
 
 // OpenCodexRoutingRuntime resolves modes once for process lifetime.
 func OpenCodexRoutingRuntime(cfg *Config, cqBuild, clientBuild string) (*CodexRoutingRuntime, error) {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.ConfigRoot, userdirs.StateRoot)
 	if err != nil {
 		return nil, err
 	}
@@ -582,7 +583,7 @@ func canonicalCodexReadinessMarkerJSON(marker CodexReadinessMarker) ([]byte, err
 
 // LoadDefaultCodexReadinessMarker reads proof from CQ's runtime state.
 func LoadDefaultCodexReadinessMarker(transport CodexRoutingTransport) (CodexReadinessMarker, error) {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.StateRoot)
 	if err != nil {
 		return CodexReadinessMarker{}, err
 	}

@@ -445,7 +445,7 @@ func (a *testCodexRefreshAuthority) List(context.Context) (codexprov.Inventory, 
 
 func (a *testCodexRefreshAuthority) Refresh(_ context.Context, ref codexprov.CandidateRef, revision codexprov.Revision) (codexprov.RefreshResult, error) {
 	a.calls = append(a.calls, testCodexRefreshCall{ref: ref, revision: revision})
-	return codexprov.RefreshResult{}, nil
+	return codexprov.RefreshResult{CredentialsChanged: true}, nil
 }
 
 func TestRefreshManagedCodexAuthorityFailsClosedWhenListUnavailable(t *testing.T) {
@@ -473,7 +473,7 @@ func TestRefreshManagedCodexAuthorityUsesSanitisedExpiryForManagedCandidateOnly(
 		Candidates: []codexprov.CredentialCandidate{
 			{
 				Ref:      codexprov.CandidateRef{AccountKey: "managed", CandidateID: "managed-candidate"},
-				Revision: "managed-revision", Source: codexprov.SourceManaged,
+				Revision: "managed-revision", Source: codexprov.SourceManaged, CQAuthored: true, RefreshEligible: true,
 				AccessExpiresAt: now.Add(-time.Minute),
 			},
 			{
@@ -488,7 +488,7 @@ func TestRefreshManagedCodexAuthorityUsesSanitisedExpiryForManagedCandidateOnly(
 			},
 			{
 				Ref:      codexprov.CandidateRef{AccountKey: "fresh", CandidateID: "fresh-candidate"},
-				Revision: "fresh-revision", Source: codexprov.SourceManaged,
+				Revision: "fresh-revision", Source: codexprov.SourceManaged, CQAuthored: true, RefreshEligible: true,
 				AccessExpiresAt: now.Add(time.Hour),
 			},
 		},
@@ -516,7 +516,7 @@ func TestRefreshManagedCodexAuthorityFailsClosedWhenConfiguredInventoryDegraded(
 	authority := &testCodexRefreshAuthority{inventory: codexprov.Inventory{
 		Accounts: []codexprov.LogicalAccount{{Candidates: []codexprov.CredentialCandidate{{
 			Ref:      codexprov.CandidateRef{AccountKey: "managed", CandidateID: "managed-candidate"},
-			Revision: "managed-revision", Source: codexprov.SourceManaged, AccessExpiresAt: now.Add(-time.Minute),
+			Revision: "managed-revision", Source: codexprov.SourceManaged, CQAuthored: true, RefreshEligible: true, AccessExpiresAt: now.Add(-time.Minute),
 		}}}},
 		ExternalSources: []codexprov.ExternalSourceStatus{{Name: "configured", ErrorCode: "unavailable"}},
 	}}
@@ -541,7 +541,7 @@ func TestRefreshManagedCodexAuthorityAllowsOptionalAbsentExternalInventory(t *te
 	now := time.Now()
 	managed := codexprov.CredentialCandidate{
 		Ref:      codexprov.CandidateRef{AccountKey: "managed", CandidateID: "managed-candidate"},
-		Revision: "managed-revision", Source: codexprov.SourceManaged, AccessExpiresAt: now.Add(-time.Minute),
+		Revision: "managed-revision", Source: codexprov.SourceManaged, CQAuthored: true, RefreshEligible: true, AccessExpiresAt: now.Add(-time.Minute),
 	}
 	authority := &testCodexRefreshAuthority{inventory: codexprov.Inventory{
 		Accounts: []codexprov.LogicalAccount{{Candidates: []codexprov.CredentialCandidate{managed}}},
@@ -765,5 +765,25 @@ func TestRefreshCodexFSStatIsHermetic(t *testing.T) {
 	_, err = fs.Stat("/fake/home/.codex/nonexistent.json")
 	if !os.IsNotExist(err) {
 		t.Fatalf("Stat absent file: got %v, want ErrNotExist", err)
+	}
+}
+
+func TestRunRefreshCommandServiceHook(t *testing.T) {
+	original := serviceRefreshRunner
+	t.Cleanup(func() { serviceRefreshRunner = original })
+	sentinel := errors.New("service wrapper result")
+	calls := 0
+	serviceRefreshRunner = func(run func() error) error {
+		calls++
+		if run == nil {
+			t.Fatal("missing refresh body")
+		}
+		return sentinel
+	}
+	if err := runRefreshCommand(nil); err != sentinel || calls != 1 {
+		t.Fatalf("err=%v calls=%d", err, calls)
+	}
+	if err := runRefreshCommand([]string{"unexpected"}); err == nil || calls != 1 {
+		t.Fatal("invalid arguments reached service hook")
 	}
 }

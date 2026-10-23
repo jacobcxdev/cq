@@ -33,6 +33,7 @@ var (
 )
 
 type proxyValidateHTTPDependencies struct {
+	ctx        context.Context
 	store      installedHTTPValidationRequestStore
 	restart    func() error
 	invalidate func() error
@@ -114,8 +115,11 @@ func runProxyValidateHTTP(args []string, deps proxyValidateHTTPDependencies, bui
 			returnErr = errors.New("request installed HTTP validation startup panicked")
 		}
 		if returnErr != nil && requestCreated {
-			_, cancelErr := cancelInstalledHTTPValidationRequest(deps.store, receipt)
+			_, cancelErr := cancelInstalledHTTPValidationRequestContext(deps.ctx, deps.store, receipt)
 			invalidateErr := invalidateInstalledHTTPValidationMarkerSafely(deps.invalidate)
+			if cancelErr != nil || invalidateErr != nil {
+				returnErr = errors.Join(returnErr, errValidationCleanupFailed)
+			}
 			returnErr = errors.Join(returnErr, cancelErr, invalidateErr)
 		}
 	}()
@@ -152,6 +156,13 @@ const (
 )
 
 func cancelInstalledHTTPValidationRequest(store installedHTTPValidationRequestStore, receipt installedHTTPValidationRequestReceipt) (installedHTTPValidationCancellationOutcome, error) {
+	return cancelInstalledHTTPValidationRequestContext(context.Background(), store, receipt)
+}
+func cancelInstalledHTTPValidationRequestContext(ctx context.Context, store installedHTTPValidationRequestStore, receipt installedHTTPValidationRequestReceipt) (installedHTTPValidationCancellationOutcome, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	if store.fs == nil || store.path == "" || !filepath.IsAbs(store.path) {
 		return installedHTTPValidationCancellationMissing, errors.New("incomplete installed HTTP validation request store")
 	}
@@ -172,7 +183,7 @@ func cancelInstalledHTTPValidationRequest(store installedHTTPValidationRequestSt
 	if err := fsutil.ValidateSecureDirectoryHandle(store.fs, directory, directoryPath); err != nil {
 		return installedHTTPValidationCancellationMissing, fmt.Errorf("fence installed HTTP validation cancellation directory: %w", err)
 	}
-	lock, err := acquireInstalledHTTPValidationCancellationLock(store, directory)
+	lock, err := acquireInstalledHTTPValidationCancellationLockContext(ctx, store, directory)
 	if err != nil {
 		return installedHTTPValidationCancellationMissing, fmt.Errorf("lock installed HTTP validation request store: %w", err)
 	}
@@ -209,12 +220,19 @@ func cancelInstalledHTTPValidationRequest(store installedHTTPValidationRequestSt
 }
 
 func acquireInstalledHTTPValidationCancellationLock(store installedHTTPValidationRequestStore, directory fsutil.SecureDirectory) (fsutil.ExclusiveLock, error) {
+	return acquireInstalledHTTPValidationCancellationLockContext(context.Background(), store, directory)
+}
+func acquireInstalledHTTPValidationCancellationLockContext(ctx context.Context, store installedHTTPValidationRequestStore, directory fsutil.SecureDirectory) (fsutil.ExclusiveLock, error) {
 	for {
 		lock, err := fsutil.AcquireExclusiveLockInDirectory(store.fs, directory, installedHTTPValidationLockName)
 		if !errors.Is(err, fsutil.ErrExclusiveLockHeld) {
 			return lock, err
 		}
-		time.Sleep(time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(time.Millisecond):
+		}
 	}
 }
 
@@ -280,4 +298,84 @@ func runProxyInstalledHTTPValidationStartup(ctx context.Context, cfg *proxy.Conf
 		)
 	}
 	return runCodexInstalledHTTPValidationFn(ctx, cfg, build, clientBuild, guard)
+}
+
+var (
+	errValidationCleanupFailed        = errors.New("validation request cleanup failed")
+	errValidationCandidateUnavailable = errors.New("installed validation candidate unavailable")
+	errValidationCandidateChanged     = errors.New("installed validation candidate changed")
+)
+
+type canonicalHTTPValidationOperations struct {
+	store      func(context.Context) (installedHTTPValidationRequestStore, error)
+	validate   func(context.Context, int) (installedHTTPValidationCandidateAuthority, error)
+	restart    func(context.Context, string) error
+	invalidate func() error
+}
+
+func runCanonicalProxyValidateHTTP(ctx context.Context, port int, build string) error {
+	return runCanonicalProxyValidateHTTPWithOperations(ctx, port, build, canonicalHTTPValidationOperations{
+		store: func(ctx context.Context) (installedHTTPValidationRequestStore, error) {
+			store, err := defaultInstalledHTTPValidationRequestStore()
+			store.resolveService = func(label string) (installedHTTPValidationServiceBinding, error) {
+				return resolveCanonicalHTTPValidationService(ctx, label)
+			}
+			return store, err
+		},
+		validate:   validateCanonicalHTTPValidationCandidate,
+		restart:    restartCanonicalHTTPValidationCandidate,
+		invalidate: invalidateInstalledHTTPValidationMarkerFn,
+	})
+}
+func runCanonicalProxyValidateHTTPWithOperations(ctx context.Context, port int, build string, ops canonicalHTTPValidationOperations) error {
+	if port < 1 || port > 65535 || port == proxy.DefaultPort {
+		return errors.New("invalid validation port")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	authority, err := ops.validate(ctx, port)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil || authority.binding.validate() != nil || authority.binding.label != candidateProxyAgentLabel || authority.binding.port != port {
+		return errors.Join(errValidationCandidateUnavailable, err)
+	}
+	store, err := ops.store(ctx)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if err != nil {
+		return err
+	}
+	resolve := store.resolveService
+	store.resolveService = func(string) (installedHTTPValidationServiceBinding, error) {
+		if err := ctx.Err(); err != nil {
+			return installedHTTPValidationServiceBinding{}, err
+		}
+		current, err := resolve(authority.binding.label)
+		if err != nil || current != authority.binding {
+			return installedHTTPValidationServiceBinding{}, errValidationCandidateChanged
+		}
+		return current, nil
+	}
+	return runProxyValidateHTTP(nil, proxyValidateHTTPDependencies{
+		ctx: ctx, store: store, invalidate: ops.invalidate,
+		restart: func() error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			current, err := ops.validate(ctx, port)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if err != nil || current != authority {
+				return errors.Join(errValidationCandidateChanged, err)
+			}
+			if err := ops.restart(ctx, authority.binding.label); err != nil {
+				return err
+			}
+			return ctx.Err()
+		},
+	}, build)
 }

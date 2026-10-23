@@ -1,0 +1,29 @@
+cq codex account list
+List locally configured Codex accounts.
+
+Usage
+  cq codex account list [options]
+
+Active means native client default, not proxy routing selection or authentication health.
+Reads local metadata only; does not fetch quota, refresh or activate credentials.
+An empty inventory succeeds. Copy returned references exactly.
+
+Options
+  --timeout DURATION  Total work deadline. Default: 30s; range: 1s to 10m.
+                      Use Go duration syntax; bare numbers are invalid.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq codex account activate
+  cq check
+
+Examples
+  Inspect local identities
+    cq codex account list
+  Read structured metadata
+    cq codex account list --json

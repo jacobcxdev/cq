@@ -143,53 +143,64 @@ func validateProxyResilienceStateOptions(ctx context.Context, options ProxyResil
 	return ctx.Err()
 }
 
+// ProxyResilienceInitialisation records completed authority creation, including
+// when a later initialisation step fails. A zero receipt on error is not proof
+// that the filesystem was unchanged.
+type ProxyResilienceInitialisation struct{ Created bool }
+
 func InitialiseProxyResilienceState(ctx context.Context, options ProxyResilienceStateOptions) error {
+	_, err := InitialiseProxyResilienceStateWithResult(ctx, options)
+	return err
+}
+
+func InitialiseProxyResilienceStateWithResult(ctx context.Context, options ProxyResilienceStateOptions) (result ProxyResilienceInitialisation, returnErr error) {
 	if err := validateProxyResilienceStateOptions(ctx, options); err != nil {
-		return err
+		return result, err
 	}
 	if err := fsutil.EnsureSecureDirectory(options.FS, options.Root); err != nil {
-		return err
+		return result, err
 	}
 	opener, ok := options.FS.(fsutil.SecureDirectoryOpener)
 	if !ok {
-		return fsutil.ErrSecureCapabilityUnavailable
+		return result, fsutil.ErrSecureCapabilityUnavailable
 	}
 	inspector, ok := options.FS.(fsutil.SecurePathInspector)
 	if !ok {
-		return fsutil.ErrSecureCapabilityUnavailable
+		return result, fsutil.ErrSecureCapabilityUnavailable
 	}
 	root, err := opener.OpenSecureDirectory(options.Root)
 	if err != nil {
-		return err
+		return result, err
 	}
 	defer root.Close()
 	key, _, err := fsutil.ReadSecureFileInDirectoryWithIdentity(inspector, root, proxyResilienceKeyName, sha256.Size+1)
 	if errors.Is(err, os.ErrNotExist) {
 		key = make([]byte, sha256.Size)
 		if _, err := io.ReadFull(options.Random, key); err != nil {
-			return err
+			return result, err
 		}
 		file, err := root.CreateExclusive(proxyResilienceKeyName, 0o600)
 		if err != nil {
 			zeroRuntimeBytes(key)
-			return err
+			return result, err
 		}
 		_, writeErr := file.Write(key)
 		syncErr := file.Sync()
 		closeErr := file.Close()
 		zeroRuntimeBytes(key)
 		if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
-			return err
+			return result, err
 		}
 		if err := root.Sync(); err != nil {
-			return err
+			return result, err
 		}
+		result.Created = true
 	} else if err != nil {
-		return err
+		return result, err
 	} else {
 		defer zeroRuntimeBytes(key)
 		if len(key) != sha256.Size {
-			return errors.New("proxy resilience authority key invalid")
+			return result, errors.New("proxy resilience authority key invalid")
 		}
 	}
 	directories := []string{proxyRoutingDirectoryName, proxyDispatchDirectoryName}
@@ -198,7 +209,7 @@ func InitialiseProxyResilienceState(ctx context.Context, options ProxyResilience
 	}
 	for _, name := range directories {
 		if err := fsutil.EnsureSecureDirectory(options.FS, filepath.Join(options.Root, name)); err != nil {
-			return err
+			return result, err
 		}
 	}
 	for _, spec := range []struct{ directory, lock string }{
@@ -207,18 +218,18 @@ func InitialiseProxyResilienceState(ctx context.Context, options ProxyResilience
 	} {
 		directory, err := opener.OpenSecureDirectory(filepath.Join(options.Root, spec.directory))
 		if err != nil {
-			return err
+			return result, err
 		}
 		lock, lockErr := AcquireSelectorCASLock(inspector, directory, spec.lock)
 		closeErr := directory.Close()
 		if lockErr != nil {
-			return errors.Join(lockErr, closeErr)
+			return result, errors.Join(lockErr, closeErr)
 		}
 		if err := errors.Join(lock.Close(), closeErr); err != nil {
-			return err
+			return result, err
 		}
 	}
-	return nil
+	return result, nil
 }
 
 func OpenProxyResilienceState(ctx context.Context, options ProxyResilienceStateOptions) (_ *ProxyResilienceState, returnErr error) {

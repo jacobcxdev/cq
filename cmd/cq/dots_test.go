@@ -150,6 +150,15 @@ func TestDotsIsolatedLaunchDoesNotRequireProxyConfig(t *testing.T) {
 	}
 }
 
+// The retained parser test covers the released entry point independently of
+// the public v2 catalogue. New public dispatch tests live in cli_v2_dots_test.go.
+type dotsLegacyTestCLI struct {
+	JSON  bool `short:"j"`
+	Codex struct {
+		Dots CodexDotsCmd `cmd:""`
+	} `cmd:""`
+}
+
 func TestDotsCommandParsing(t *testing.T) {
 	for _, test := range []struct {
 		args []string
@@ -166,7 +175,7 @@ func TestDotsCommandParsing(t *testing.T) {
 		{[]string{"codex", "dots", "board", "--clear"}, "codex dots board"},
 	} {
 		t.Run(strings.Join(test.args, " "), func(t *testing.T) {
-			var cli CLI
+			var cli dotsLegacyTestCLI
 			parser, err := kong.New(&cli, kong.Writers(io.Discard, io.Discard))
 			if err != nil {
 				t.Fatal(err)
@@ -220,7 +229,7 @@ func TestDotsInstallModeParsingAndPythonFlagRemoved(t *testing.T) {
 		{[]string{"codex", "dots", "install"}, "native"},
 		{[]string{"codex", "dots", "install", "--mode", "isolated"}, "isolated"},
 	} {
-		var cli CLI
+		var cli dotsLegacyTestCLI
 		parser, err := kong.New(&cli, kong.Writers(io.Discard, io.Discard))
 		if err != nil {
 			t.Fatal(err)
@@ -232,7 +241,7 @@ func TestDotsInstallModeParsingAndPythonFlagRemoved(t *testing.T) {
 			t.Fatalf("mode %q, want %q", got, test.want)
 		}
 	}
-	var cli CLI
+	var cli dotsLegacyTestCLI
 	parser, err := kong.New(&cli, kong.Writers(io.Discard, io.Discard))
 	if err != nil {
 		t.Fatal(err)

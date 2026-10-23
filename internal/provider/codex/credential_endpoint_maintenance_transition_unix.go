@@ -325,6 +325,30 @@ func InspectLegacyCredentialEndpointTransition(ctx context.Context, path string)
 }
 
 func ResumeLegacyCredentialEndpointTransition(ctx context.Context, path string, ticket LegacyCredentialEndpointTransitionTicket, authority DrainAuthority) (*LegacyCredentialEndpointTransition, error) {
+	return resumeLegacyCredentialEndpointTransition(ctx, path, ticket, authority, "")
+}
+
+// Reopen validates a stable transition under its existing maintenance lock. It
+// never resumes an interrupted mutation or re-detaches a rolled-back socket.
+func ReopenLegacyCredentialEndpointTransition(ctx context.Context, path string, ticket LegacyCredentialEndpointTransitionTicket, authority DrainAuthority) (LegacyCredentialEndpointTransitionStatus, error) {
+	transition, err := resumeLegacyCredentialEndpointTransition(ctx, path, ticket, authority, "resume")
+	if err != nil {
+		return LegacyCredentialEndpointTransitionStatus{}, err
+	}
+	status := LegacyCredentialEndpointTransitionStatus{State: transition.State(), Ticket: transition.Ticket()}
+	return status, errors.Join(transition.Close(), ctx.Err())
+}
+
+// ResumeLegacyCredentialEndpointTransitionForAction admits only recovery
+// phases belonging to the requested operation, while holding the exact lock.
+func ResumeLegacyCredentialEndpointTransitionForAction(ctx context.Context, path string, ticket LegacyCredentialEndpointTransitionTicket, authority DrainAuthority, action LegacyCredentialEndpointAction) (*LegacyCredentialEndpointTransition, error) {
+	if action != LegacyCredentialEndpointActivate && action != LegacyCredentialEndpointRollback {
+		return nil, ErrCredentialEndpointMaintenanceConflict
+	}
+	return resumeLegacyCredentialEndpointTransition(ctx, path, ticket, authority, string(action))
+}
+
+func resumeLegacyCredentialEndpointTransition(ctx context.Context, path string, ticket LegacyCredentialEndpointTransitionTicket, authority DrainAuthority, action string) (*LegacyCredentialEndpointTransition, error) {
 	if err := assertLegacyCredentialDrainAuthority(ctx, path, authority); err != nil {
 		return nil, err
 	}
@@ -341,7 +365,14 @@ func ResumeLegacyCredentialEndpointTransition(ctx context.Context, path string, 
 			_ = namespace.Close()
 		}
 	}()
-	pair, err := namespace.readMaintenanceRecordPair()
+	absence := ErrCredentialEndpointMaintenancePending
+	if action != "" {
+		absence = ErrCredentialEndpointMaintenanceNotFound
+	}
+	pair, err := namespace.readMaintenanceRecordPairWithAbsence(absence)
+	if err == ErrCredentialEndpointMaintenanceNotFound {
+		return nil, namespace.confirmTransitionAbsent(ctx, ticket, authority)
+	}
 	pairTicket, pairTicketErr := pair.ticket()
 	if err != nil || pairTicketErr != nil || pairTicket != ticket {
 		return nil, errors.Join(ErrCredentialEndpointMaintenanceTicketMismatch, err, pairTicketErr)
@@ -384,6 +415,31 @@ func ResumeLegacyCredentialEndpointTransition(ctx context.Context, path string, 
 		return nil, err
 	}
 	public := &LegacyCredentialEndpointTransition{implementation: transition}
+	if action != "" {
+		allowed := false
+		switch action {
+		case "resume":
+			allowed = record.State == CredentialEndpointMaintenanceQuarantined || record.State == CredentialEndpointMaintenanceActivated || record.State == CredentialEndpointMaintenanceRolledBack
+			allowed = allowed && !(pair.journalExists && pair.rollbackExists)
+		case "activate":
+			allowed = record.State == CredentialEndpointMaintenancePrepared || record.State == CredentialEndpointMaintenanceQuarantined || record.State == CredentialEndpointMaintenanceActivating || record.State == CredentialEndpointMaintenanceActivated
+		case "rollback":
+			allowed = record.State == CredentialEndpointMaintenancePrepared || record.State == CredentialEndpointMaintenanceQuarantined || record.State == CredentialEndpointMaintenanceActivated || record.State == CredentialEndpointMaintenanceRollingBack || record.State == CredentialEndpointMaintenanceRolledBack
+		}
+		if !allowed {
+			return nil, ErrCredentialEndpointMaintenanceConflict
+		}
+		if action == "resume" || (action == "rollback" && record.State == CredentialEndpointMaintenanceRolledBack && !pair.rollbackExists) {
+			if err := namespace.validateReadOnlyRecordPairShape(pair); err != nil {
+				return nil, err
+			}
+			if err := assertLegacyCredentialDrainAuthority(ctx, path, authority); err != nil {
+				return nil, err
+			}
+			closeTransition = false
+			return public, nil
+		}
+	}
 	if pair.journalExists && pair.rollbackExists &&
 		pair.journal.State == CredentialEndpointMaintenanceRolledBack &&
 		pair.rollback.State == CredentialEndpointMaintenanceRollingBack {
@@ -774,11 +830,11 @@ func (transition *legacyCredentialEndpointTransition) cleanupActivatedCandidateF
 		return ErrCredentialEndpointMaintenanceConflict
 	}
 	if finalExists {
-		client, protocol, _, probeErr := probeCredentialOwnerAttempt(
-			transition.ticket.Path, credentialEndpointDialTimeout, net.DialTimeout,
-		)
-		if client != nil {
-			_ = client.Close()
+		protocol, probeErr := probeLegacyMaintenanceOwner(ctx, transition.ticket.Path)
+		if err := legacyMaintenanceContextError(ctx); err != nil {
+			return err
+		}
+		if protocol == credentialOwnerVersioned {
 			return ErrCredentialEndpointLockHeld
 		}
 		if protocol != credentialOwnerRefused {
@@ -1308,7 +1364,40 @@ func (namespace *legacyCredentialMaintenanceNamespace) readOptionalRecord(name s
 	return record, true, nil
 }
 
+// Absence grants no ticket authority. Check the retained namespace and lock,
+// then re-read under that existing lock before classifying a canonical request.
+func (namespace *legacyCredentialMaintenanceNamespace) confirmTransitionAbsent(ctx context.Context, ticket LegacyCredentialEndpointTransitionTicket, authority DrainAuthority) (resultErr error) {
+	lockProof, err := namespace.inspectRegular(namespace.lockName)
+	if err != nil || lockProof != ticket.Lock {
+		return errors.Join(ErrCredentialEndpointMaintenanceConflict, err)
+	}
+	lock, err := namespace.openExistingLock(ticket.Lock)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := lock.Close(); closeErr != nil {
+			resultErr = fmt.Errorf("release endpoint transition lock: %w", closeErr)
+		}
+	}()
+	if err := namespace.validateHeldLock(ticket.Lock); err != nil {
+		return err
+	}
+	if err := assertLegacyCredentialDrainAuthority(ctx, ticket.Path, authority); err != nil {
+		return err
+	}
+	_, err = namespace.readMaintenanceRecordPairWithAbsence(ErrCredentialEndpointMaintenanceNotFound)
+	if err != ErrCredentialEndpointMaintenanceNotFound {
+		return errors.Join(ErrCredentialEndpointMaintenanceConflict, err)
+	}
+	return err
+}
+
 func (namespace *legacyCredentialMaintenanceNamespace) readMaintenanceRecordPair() (legacyCredentialMaintenanceRecordPair, error) {
+	return namespace.readMaintenanceRecordPairWithAbsence(ErrCredentialEndpointMaintenancePending)
+}
+
+func (namespace *legacyCredentialMaintenanceNamespace) readMaintenanceRecordPairWithAbsence(absence error) (legacyCredentialMaintenanceRecordPair, error) {
 	journal, journalExists, journalErr := namespace.readOptionalRecord(namespace.journalName)
 	rollback, rollbackExists, rollbackErr := namespace.readOptionalRecord(namespace.rollbackName)
 	if journalErr != nil || rollbackErr != nil {
@@ -1319,7 +1408,7 @@ func (namespace *legacyCredentialMaintenanceNamespace) readMaintenanceRecordPair
 		rollback: rollback, rollbackExists: rollbackExists,
 	}
 	if !journalExists && !rollbackExists {
-		return pair, ErrCredentialEndpointMaintenancePending
+		return pair, absence
 	}
 	if journalExists {
 		if journal.Owner != nil {

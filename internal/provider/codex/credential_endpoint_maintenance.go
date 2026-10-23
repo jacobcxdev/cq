@@ -14,9 +14,13 @@ const legacyCredentialEndpointSnapshotVersion = 1
 const legacyCredentialEndpointProofMaxBytes = 16 << 10
 
 var (
+	ErrCredentialEndpointIncompatible                = errors.New("credential coordinator endpoint protocol incompatible")
+	ErrCredentialEndpointIdentityChanged             = errors.New("credential coordinator endpoint identity changed")
+	ErrCredentialEndpointLockHeld                    = errors.New("credential coordinator endpoint owner lock is held")
 	ErrLegacyCredentialEndpointNotRefused            = errors.New("legacy credential endpoint is not an exact refused socket")
 	ErrLegacyCredentialEndpointArtifacts             = errors.New("legacy credential endpoint has coordination artifacts")
 	ErrCredentialEndpointMaintenancePending          = errors.New("credential endpoint maintenance is pending")
+	ErrCredentialEndpointMaintenanceNotFound         = errors.New("credential endpoint maintenance transition not found")
 	ErrCredentialEndpointMaintenanceUnsupported      = errors.New("credential endpoint maintenance unsupported")
 	ErrCredentialEndpointMaintenanceDrainRequired    = errors.New("credential endpoint stopped-and-drained authority required")
 	ErrCredentialEndpointMaintenanceSnapshotChanged  = errors.New("legacy credential endpoint snapshot changed")
@@ -132,6 +136,15 @@ type legacyCredentialEndpointTransitionImplementation interface {
 	Rollback(context.Context) error
 	Close() error
 }
+
+// LegacyCredentialEndpointAction limits recovery to the explicitly requested
+// operation. It is an in-process selector, not a journal or protocol field.
+type LegacyCredentialEndpointAction string
+
+const (
+	LegacyCredentialEndpointActivate LegacyCredentialEndpointAction = "activate"
+	LegacyCredentialEndpointRollback LegacyCredentialEndpointAction = "rollback"
+)
 
 type LegacyCredentialEndpointTransition struct {
 	implementation legacyCredentialEndpointTransitionImplementation

@@ -1,0 +1,13 @@
+Gemini account · Configured
+  alex@example.test
+
+  Reference       unknown
+  Account ID      gemini_alex_01
+  Email           alex@example.test
+  Native default  Active
+  Identity        Stable
+  Sources         external
+  Aliases         none
+  Tier            unknown
+
+Managed by Antigravity · credentials not validated by this command

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/userdirs"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -121,7 +122,7 @@ func OpenCodexPrimerStore(fsys fsutil.DurableFileSystem, path, keyPath string) (
 }
 
 func OpenDefaultCodexPrimerStore(fsys fsutil.DurableFileSystem) (*CodexPrimerStore, error) {
-	paths, err := ResolveDefaultPaths()
+	paths, err := ResolveDefaultPaths(userdirs.StateRoot)
 	if err != nil {
 		return nil, err
 	}

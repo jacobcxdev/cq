@@ -1,0 +1,31 @@
+cq service
+Manage proxy and periodic token-refresh background services.
+
+Usage
+  cq service <COMMAND> [OPTIONS]
+
+Commands
+  install     Install and start selected CQ services.
+  restart     Restart selected installed CQ services.
+  start       Start selected installed CQ services.
+  status      Inspect selected CQ service components.
+  stop        Stop and disable selected CQ services.
+  uninstall   Stop and remove selected CQ service registrations.
+  upgrade     Upgrade a Homebrew proxy runtime while retaining its listener.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq proxy   Inspect readiness or run the proxy in the foreground.
+
+Examples
+  Inspect installed service components
+  cq service status
+
+  Inspect component selection and installation options
+  cq service install --help

@@ -1,0 +1,3 @@
+Error · Pool not found: work.
+  Code: pool_not_found
+  Command: cq codex proxy session bind

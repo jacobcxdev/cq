@@ -1,0 +1,3 @@
+Error · Unknown command: widgets. Run cq help.
+  Code: unknown_command
+  Command: cq help

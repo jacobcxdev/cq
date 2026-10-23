@@ -1,0 +1,12 @@
+Authentication refresh
+  Provider  Refreshed  Unchanged  Need login  Failed
+  Codex             1          1           0       0
+
+  alex@example.test · Refreshed
+    Reference: account-alex
+    Credentials: Saved
+  sam@example.test · Unchanged · More than 30 minutes remaining
+    Reference: account-sam
+    Credentials: Unchanged
+
+Credentials saved for 1 account

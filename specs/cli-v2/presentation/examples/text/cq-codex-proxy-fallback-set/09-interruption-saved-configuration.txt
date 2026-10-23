@@ -1,0 +1,4 @@
+Warning · Operation interrupted; inspect state before retrying.
+  Code: interrupted
+  Command: cq codex proxy fallback set
+  Result: completion unknown

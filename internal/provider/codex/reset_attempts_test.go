@@ -2,6 +2,8 @@ package codex
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -34,14 +36,14 @@ func TestResetIdempotencyKeyDeterministicAndScoped(t *testing.T) {
 	}
 }
 
-func TestSelectResetCreditDefaultsToOldestPending(t *testing.T) {
+func TestResetUseRejectsAmbiguousPending(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	pending := []ResetAttempt{
 		{CreditID: "later", StartedAt: now.Add(time.Minute), IdempotencyKey: "later-key"},
 		{CreditID: "first", StartedAt: now, IdempotencyKey: "first-key"},
 	}
 	got, err := SelectResetCredit(now, resetSelectionCredits(now), pending, "")
-	if err != nil || !got.Resume || got.Credit.ID != "first" || got.Attempt == nil || got.Attempt.IdempotencyKey != "first-key" {
+	if err == nil {
 		t.Fatalf("selection = %+v, %v", got, err)
 	}
 }
@@ -199,5 +201,79 @@ func TestResetAttemptJSONContainsOnlyAttemptSchema(t *testing.T) {
 		if !want[field] {
 			t.Fatalf("unexpected field %q", field)
 		}
+	}
+}
+
+func TestResetUseExpiryTiesUseCreditID(t *testing.T) {
+	now := time.Now()
+	credits := resetSelectionCredits(now)
+	credits[0].ID = "a"
+	credits[0].ExpiresAt = credits[2].ExpiresAt
+	credits[0].GrantedAt = now
+	got, err := SelectResetCredit(now, credits, nil, "")
+	if err != nil || got.Credit.ID != "a" {
+		t.Fatalf("selection=%+v error=%v", got, err)
+	}
+}
+
+func TestResetAttemptLazyOpenDoesNotWriteBeforeEnsure(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheRoot := filepath.Join(root, "cache")
+	store, err := OpenResetAttemptStore(fsutil.OSFileSystem{}, cacheRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.Pending("account")
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("pending=%+v err=%v", pending, err)
+	}
+	if _, err := os.Stat(cacheRoot); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read created state: %v", err)
+	}
+	first, err := store.Ensure("account", "credit", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	restart, err := OpenResetAttemptStore(fsutil.OSFileSystem{}, cacheRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := restart.Ensure("account", "credit", time.Now().Add(time.Hour))
+	if err != nil || first != replay {
+		t.Fatalf("restart changed attempt: %+v %+v %v", first, replay, err)
+	}
+}
+func TestResetAttemptLazyOpenRejectsUnsafeExistingState(t *testing.T) {
+	for _, mode := range []string{"file", "unsafe-directory", "malformed"} {
+		t.Run(mode, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			store, err := OpenResetAttemptStore(fsutil.OSFileSystem{}, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch mode {
+			case "file":
+				err = os.WriteFile(store.Dir, []byte("not a directory"), 0o600)
+			case "unsafe-directory":
+				err = os.Mkdir(store.Dir, 0o755)
+			case "malformed":
+				err = os.Mkdir(store.Dir, 0o700)
+				if err == nil {
+					err = os.WriteFile(filepath.Join(store.Dir, "malformed.json"), []byte(`{}`), 0o600)
+				}
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Pending("account"); err == nil {
+				t.Fatal("unsafe existing state treated as absence")
+			}
+		})
 	}
 }

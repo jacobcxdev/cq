@@ -922,3 +922,44 @@ func canaryTestProtectedDigests() []CodexCanaryProtectedDigest {
 	}
 	return result
 }
+
+func TestCodexCanaryValidateProtectedStateIsReadOnly(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	value := []byte("private-source")
+	var sourceErr error
+	var protected []CodexCanaryProtection
+	for _, kind := range requiredCodexCanaryProtection {
+		protected = append(protected, CodexCanaryOptionalSnapshotProtection(kind, func() ([]byte, error) { return value, sourceErr }))
+	}
+	recorder, err := StartCodexCanary(fsys, "/state/canary.json", protected, canaryTestTuple(), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := fsys.ReadFile("/state/canary.json")
+	stateBefore, _ := json.Marshal(recorder.State())
+	generation := recorder.generation
+	if err = recorder.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name                 string
+		value                []byte
+		sourceErr, errorWant error
+	}{
+		{"matching", value, nil, nil},
+		{"drift", []byte("changed"), nil, ErrCodexCanaryProtectedStateChanged},
+		{"unavailable", value, errors.New("private source failure"), ErrCodexCanaryProtectedStateUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value, sourceErr = test.value, test.sourceErr
+			if got := recorder.ValidateProtectedState(); !errors.Is(got, test.errorWant) {
+				t.Fatalf("error=%v want=%v", got, test.errorWant)
+			}
+			after, _ := fsys.ReadFile("/state/canary.json")
+			stateAfter, _ := json.Marshal(recorder.State())
+			if string(before) != string(after) || string(stateBefore) != string(stateAfter) || recorder.generation != generation {
+				t.Fatal("read-only validation mutated retained state")
+			}
+		})
+	}
+}

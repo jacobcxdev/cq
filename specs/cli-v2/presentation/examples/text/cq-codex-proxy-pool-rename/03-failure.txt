@@ -1,0 +1,3 @@
+Error · Pool name already exists: primary.
+  Code: pool_name_conflict
+  Command: cq codex proxy pool rename

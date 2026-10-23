@@ -197,3 +197,27 @@ func TestMerge_AllNatives(t *testing.T) {
 		t.Errorf("len(Prunable) = %d, want 0", len(result.Prunable))
 	}
 }
+
+func TestModelMergeFilledMetadataStillSelectsMissingTokens(t *testing.T) {
+	native := Entry{Provider: ProviderCodex, ID: "family-2", Source: SourceNative, DisplayName: "Native", Description: "Native description", ContextWindow: 100, MaxContextWindow: 200, MaxOutputTokens: 40, Priority: 3, Visibility: "list"}
+	overlay := Entry{Provider: ProviderCodex, ID: "family-3", Source: SourceOverlay, DisplayName: "User", Description: "User description", ContextWindow: 50, Visibility: "custom"}
+	got := Merge([]Entry{native}, []Entry{overlay}).Active[1]
+	if got.MaxContextWindow != 200 || got.MaxOutputTokens != 40 || got.Priority != 3 || got.InferredFrom != "family-2" || got.DisplayName != "User" || got.ContextWindow != 50 || got.Visibility != "custom" {
+		t.Fatalf("missing fields not filled or set fields replaced: %+v", got)
+	}
+}
+
+func TestModelMergePriorityPresence(t *testing.T) {
+	native := Entry{Provider: ProviderCodex, ID: "family-1", Source: SourceNative, Priority: 0, PriorityKnown: true}
+	overlay := Entry{Provider: ProviderCodex, ID: "family-2", Source: SourceOverlay}
+	got := InferOverlayMetadata(overlay, []Entry{native})
+	if !got.PriorityKnown || got.Priority != 0 {
+		t.Fatal("unknown rank did not inherit known zero")
+	}
+	overlay.PriorityKnown = true
+	native.Priority = 4
+	got = InferOverlayMetadata(overlay, []Entry{native})
+	if !got.PriorityKnown || got.Priority != 0 {
+		t.Fatal("known zero was overwritten")
+	}
+}

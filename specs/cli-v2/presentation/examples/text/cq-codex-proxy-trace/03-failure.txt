@@ -1,0 +1,3 @@
+Error · Selected trace log is not configured.
+  Code: trace_not_configured
+  Command: cq codex proxy trace

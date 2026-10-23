@@ -1,0 +1,6 @@
+Finalise credential endpoint replacement
+  Path    /Users/alex/Library/Application Support/cq/codex/credential.sock
+  Ticket  0123456789abcdef0123456789abcdef
+  Effect  Permanently retire the rollback path after live-owner verification.
+
+Type candidate-healthy to confirm the exact live candidate passed health verification: 

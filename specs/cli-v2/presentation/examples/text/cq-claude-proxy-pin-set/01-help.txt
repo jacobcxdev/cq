@@ -1,0 +1,32 @@
+cq claude proxy pin set
+Pin Claude proxy routing to one known account.
+
+Usage
+  cq claude proxy pin set ACCOUNT [options]
+
+Saves configuration; a running proxy applies it asynchronously without a restart.
+Does not change the native client default or rewrite existing session bindings.
+
+Arguments
+  ACCOUNT  Unique known Claude email from cq claude account list.
+           Must be non-empty and match exactly one account. UUIDs are not accepted.
+
+Options
+  --timeout DURATION  Total work deadline, including preparation and requests.
+                      Default: 10s. Positive Go duration; bare numbers invalid.
+                      A timed-out write may have committed: inspect state before retrying.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq claude account list
+  cq claude proxy pin
+  cq proxy
+
+Examples
+  Pin Claude proxy routing to one known account.
+    cq claude proxy pin set alex@example.test

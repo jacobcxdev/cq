@@ -1,0 +1,29 @@
+cq codex proxy session
+Inspect or change the routing pool bound to a client session.
+
+Usage
+  cq codex proxy session <COMMAND> [OPTIONS]
+
+Commands
+  bind     Bind one exact session to a Codex pool.
+  digest   Return the keyed digest for a session selector.
+  list     List all session-to-pool bindings.
+  show     Show one session-to-pool binding.
+  unbind   Remove one exact session-to-pool binding.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex proxy   Codex proxy controls.
+
+Examples
+  Inspect retained bindings
+  cq codex proxy session list
+
+  Inspect exact-session selector syntax
+  cq codex proxy session show --help

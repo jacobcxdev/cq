@@ -1,0 +1,3 @@
+Error · Codex reset authentication failed.
+  Code: codex_reset_auth_failed
+  Command: cq codex reset list

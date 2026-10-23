@@ -1,0 +1,29 @@
+cq codex proxy canary start
+Start a protected observation run of Codex routing.
+
+Usage
+  cq codex proxy canary start [OPTIONS]
+
+Observe real routing; no synthetic traffic or routing-policy changes.
+Last observed day is a UTC calendar-day bucket, not the last heartbeat or exact event time.
+No arguments or command-specific options.
+Requires HTTP routing enforcement, payload diagnostics disabled and current HTTP readiness.
+Creates an observation record; it does not prove service attachment or observed traffic.
+An active run conflicts. A valid completed run may be replaced.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq codex proxy canary status
+  cq service restart
+
+Examples
+  Create a run before separately attaching the service:
+  cq codex proxy canary start

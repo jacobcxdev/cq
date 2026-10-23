@@ -1,8 +1,11 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -15,17 +18,32 @@ import (
 var validBrowserName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 func openBrowser(rawURL string) error {
+	return openBrowserContext(context.Background(), rawURL, os.Stdout, true)
+}
+
+// OpenBrowserContext launches the existing private-browser flow without printing
+// an OAuth URL or writing to command stdout.
+func OpenBrowserContextTo(ctx context.Context, rawURL string, out io.Writer) error {
+	return openBrowserContext(ctx, rawURL, out, false)
+}
+func OpenBrowserContext(ctx context.Context, rawURL string) error {
+	return OpenBrowserContextTo(ctx, rawURL, io.Discard)
+}
+func openBrowserContext(ctx context.Context, rawURL string, out io.Writer, legacyURLFallback bool) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return fmt.Errorf("invalid URL scheme for browser open: %q", rawURL)
 	}
 	switch runtime.GOOS {
 	case "darwin":
-		return openBrowserDarwin(rawURL)
+		return openBrowserDarwinContext(ctx, rawURL, out, legacyURLFallback)
 	case "linux":
-		return openBrowserLinux(rawURL)
+		return openBrowserLinuxContext(ctx, rawURL, out)
 	case "windows":
-		return openBrowserWindows(rawURL)
+		return openBrowserWindowsContext(ctx, rawURL, out)
 	default:
 		return fmt.Errorf("unsupported OS: %s", runtime.GOOS)
 	}
@@ -35,9 +53,12 @@ func openBrowser(rawURL string) error {
 // --args only works on fresh launch; when the browser is already running, macOS
 // ignores extra args and just sends the URL via Apple Events.
 func openBrowserDarwin(rawURL string) error {
-	bundleID := defaultBrowserBundleID()
+	return openBrowserDarwinContext(context.Background(), rawURL, os.Stdout, true)
+}
+func openBrowserDarwinContext(ctx context.Context, rawURL string, output io.Writer, legacyURLFallback bool) error {
+	bundleID := defaultBrowserBundleIDContext(ctx)
 	if bundleID == "" || bundleID == "com.apple.safari" || !validBrowserName.MatchString(bundleID) {
-		return startAndReap(exec.Command("open", rawURL))
+		return startAndReap(exec.CommandContext(ctx, "open", rawURL))
 	}
 
 	flag := "--incognito"
@@ -47,35 +68,43 @@ func openBrowserDarwin(rawURL string) error {
 
 	// Check if browser is already running — --args is only effective on fresh launch.
 	// SECURITY: bundleID is validated by validBrowserName regex above — safe for AppleScript interpolation.
-	out, _ := exec.Command("osascript", "-e",
+	out, _ := exec.CommandContext(ctx, "osascript", "-e",
 		fmt.Sprintf(`application id "%s" is running`, bundleID)).Output()
 	running := strings.TrimSpace(string(out)) == "true"
 
 	if !running {
-		if startAndReap(exec.Command("open", "-b", bundleID, "--args", flag, rawURL)) == nil {
+		if startAndReap(exec.CommandContext(ctx, "open", "-b", bundleID, "--args", flag, rawURL)) == nil {
 			return nil
 		}
 	}
 
 	// Browser already running: copy URL to clipboard for manual paste into private window
-	cmd := exec.Command("pbcopy")
+	cmd := exec.CommandContext(ctx, "pbcopy")
 	cmd.Stdin = strings.NewReader(rawURL)
 	if err := cmd.Run(); err != nil {
-		fmt.Printf("Browser already running \u2014 open this URL in a private window:\n  %s\n", rawURL)
+		if !legacyURLFallback {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return errors.New("browser authentication clipboard failed")
+		}
+		fmt.Fprintf(output, "Browser already running \u2014 open this URL in a private window:\n  %s\n", rawURL)
 	} else {
-		fmt.Println("Browser already running \u2014 URL copied to clipboard. Paste in a private window.")
+		_, err := fmt.Fprintln(output, "Browser already running \u2014 URL copied to clipboard. Paste in a private window.")
+		return err
 	}
 	return nil
 }
 
-func defaultBrowserBundleID() string {
+func defaultBrowserBundleID() string { return defaultBrowserBundleIDContext(context.Background()) }
+func defaultBrowserBundleIDContext(ctx context.Context) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
 	plistPath := filepath.Join(home, "Library", "Preferences",
 		"com.apple.LaunchServices", "com.apple.launchservices.secure.plist")
-	out, err := exec.Command("plutil", "-convert", "json", "-o", "-", plistPath).Output()
+	out, err := exec.CommandContext(ctx, "plutil", "-convert", "json", "-o", "-", plistPath).Output()
 	if err != nil {
 		return ""
 	}
@@ -98,28 +127,34 @@ func defaultBrowserBundleID() string {
 
 // Linux: detect default browser via xdg-settings, open in private mode.
 func openBrowserLinux(rawURL string) error {
-	out, _ := exec.Command("xdg-settings", "get", "default-web-browser").Output()
+	return openBrowserLinuxContext(context.Background(), rawURL, os.Stdout)
+}
+func openBrowserLinuxContext(ctx context.Context, rawURL string, output io.Writer) error {
+	out, _ := exec.CommandContext(ctx, "xdg-settings", "get", "default-web-browser").Output()
 	name := strings.TrimSuffix(strings.TrimSpace(string(out)), ".desktop")
 	if name != "" && !validBrowserName.MatchString(name) {
 		name = "" // reject suspicious names
 	}
 	switch {
 	case strings.Contains(name, "firefox"):
-		if startAndReap(exec.Command(name, "--private-window", rawURL)) == nil {
+		if startAndReap(exec.CommandContext(ctx, name, "--private-window", rawURL)) == nil {
 			return nil
 		}
 	case name != "":
 		// Chromium-based: binary name typically matches .desktop file stem
-		if startAndReap(exec.Command(name, "--incognito", rawURL)) == nil {
+		if startAndReap(exec.CommandContext(ctx, name, "--incognito", rawURL)) == nil {
 			return nil
 		}
 	}
-	return startAndReap(exec.Command("xdg-open", rawURL))
+	return startAndReap(exec.CommandContext(ctx, "xdg-open", rawURL))
 }
 
 // Windows: detect default browser via registry, open in private mode.
 func openBrowserWindows(rawURL string) error {
-	out, _ := exec.Command("reg", "query",
+	return openBrowserWindowsContext(context.Background(), rawURL, os.Stdout)
+}
+func openBrowserWindowsContext(ctx context.Context, rawURL string, output io.Writer) error {
+	out, _ := exec.CommandContext(ctx, "reg", "query",
 		`HKEY_CURRENT_USER\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice`,
 		"/v", "ProgId").Output()
 	progID := parseRegValue(string(out))
@@ -127,7 +162,7 @@ func openBrowserWindows(rawURL string) error {
 		progID = ""
 	}
 	if progID != "" {
-		cmdOut, _ := exec.Command("reg", "query",
+		cmdOut, _ := exec.CommandContext(ctx, "reg", "query",
 			fmt.Sprintf(`HKEY_CLASSES_ROOT\%s\shell\open\command`, progID),
 			"/ve").Output()
 		if browserPath := parseBrowserPath(string(cmdOut)); browserPath != "" {
@@ -135,12 +170,12 @@ func openBrowserWindows(rawURL string) error {
 			if strings.Contains(strings.ToLower(progID), "firefox") {
 				flag = "--private-window"
 			}
-			if startAndReap(exec.Command(browserPath, flag, rawURL)) == nil {
+			if startAndReap(exec.CommandContext(ctx, browserPath, flag, rawURL)) == nil {
 				return nil
 			}
 		}
 	}
-	return startAndReap(exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL))
+	return startAndReap(exec.CommandContext(ctx, "rundll32", "url.dll,FileProtocolHandler", rawURL))
 }
 
 // startAndReap starts a command and spawns a goroutine to reap the child process,

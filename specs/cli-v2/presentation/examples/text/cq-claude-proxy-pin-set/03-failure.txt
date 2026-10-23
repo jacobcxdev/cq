@@ -1,0 +1,3 @@
+Error · Account not found: sam@example.test.
+  Code: routing_account_not_found
+  Command: cq claude proxy pin set

@@ -35,11 +35,11 @@ func (store darwinServiceRuntimeArtifacts) Stage(ctx context.Context, path strin
 	return store.RuntimeArtifactStore.Stage(ctx, source)
 }
 
-func configureDarwinServiceUpgrades(lifecycle *serviceLifecycle, platform *darwinServicePlatform) {
+func configureDarwinServiceUpgrades(ctx context.Context, lifecycle *serviceLifecycle, platform *darwinServicePlatform) {
 	artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: platform.roots}
 	receipts := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: platform.roots}
 	if record, err := lifecycle.Store.Load(); err == nil && record.Owner == installstate.OwnerHomebrew {
-		if selected, err := darwinSelectedRuntimeArtifact(context.Background(), artifacts, receipts, record); err == nil {
+		if selected, err := darwinSelectedRuntimeArtifact(ctx, artifacts, receipts, record); err == nil {
 			lifecycle.RuntimeExecutable = selected.Path
 		}
 	}
@@ -185,7 +185,7 @@ func darwinExistingRuntimeArtifact(ctx context.Context, artifacts installer.Runt
 	if err != nil || len(decoded) != 32 {
 		return installer.RuntimeArtifact{}, ErrServiceUpgradeMaintenance
 	}
-	return artifacts.Stage(ctx, clean)
+	return artifacts.Inspect(ctx, clean)
 }
 
 func resolveDarwinRetainedServiceRuntime(ctx context.Context, roots userdirs.Roots, current, configured string) (installer.RuntimeArtifact, error) {

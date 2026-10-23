@@ -145,3 +145,69 @@ func TestCandidateLifecycleRejectsUnsafeInputBeforeCreation(t *testing.T) {
 		})
 	}
 }
+
+func TestCandidateLifecycleCancelledStagesPreservePendingState(t *testing.T) {
+	for _, point := range []string{"intent_durable", "effect_started", "effect_returned", "effect"} {
+		t.Run(point, func(t *testing.T) {
+			root := filepath.Join(t.TempDir(), "candidate")
+			registry, digest := candidateRegistryForTest()
+			store, _, err := PrepareCandidateLifecycle(context.Background(), fsutil.OSFileSystem{}, CandidatePrepareInputV1{Root: root, Port: 29280, SourceConfigDigest: strings.Repeat("1", 64), TargetReleaseBundleDigest: strings.Repeat("2", 64), TargetReleaseSetDigest: strings.Repeat("3", 64), ClientBuild: "synthetic", ClientExecutableDigest: strings.Repeat("4", 64), LocalTokenClientRegistryDigest: digest, LocalTokenClientRegistry: registry, CredentialMode: "none"}, rand.Reader, time.Now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var snapshot []byte
+			cancelAndSnapshot := func() {
+				cancel()
+				var err error
+				snapshot, err = os.ReadFile(filepath.Join(root, candidateLifecycleStateName))
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			store.hook = func(at string) error {
+				if at == point {
+					cancelAndSnapshot()
+				}
+				return nil
+			}
+			calls := 0
+			_, err = store.Apply(ctx, CandidateActionStart, func(CandidateLifecycleStateV1) (string, error) {
+				calls++
+				if point == "effect" {
+					cancelAndSnapshot()
+				}
+				return strings.Repeat("a", 64), nil
+			})
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Apply error=%v", err)
+			}
+			expectedCalls := 0
+			if point == "effect" || point == "effect_returned" {
+				expectedCalls = 1
+			}
+			if calls != expectedCalls {
+				t.Fatalf("effects=%d want=%d", calls, expectedCalls)
+			}
+			after, err := os.ReadFile(filepath.Join(root, candidateLifecycleStateName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(after) != string(snapshot) {
+				t.Fatal("state changed after cancellation")
+			}
+			state, err := InspectCandidateLifecycle(context.Background(), fsutil.OSFileSystem{}, root)
+			if err != nil || state.Phase != CandidatePhasePrepared || state.PendingAction != CandidateActionStart || state.EffectReceiptDigest != "" || state.EffectStarted != (point != "intent_durable") {
+				t.Fatalf("pending state=%+v err=%v", state, err)
+			}
+			if state.EffectStarted {
+				_, err = store.Apply(context.Background(), CandidateActionStart, func(CandidateLifecycleStateV1) (string, error) { t.Fatal("effect replayed"); return "", nil })
+				if !errors.Is(err, ErrCandidateEffectIndeterminate) {
+					t.Fatalf("replay=%v", err)
+				}
+			}
+		})
+	}
+}

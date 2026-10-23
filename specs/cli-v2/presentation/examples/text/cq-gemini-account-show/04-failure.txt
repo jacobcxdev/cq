@@ -1,0 +1,3 @@
+Error · Antigravity account configuration could not be read.
+  Code: gemini_account_unavailable
+  Command: cq gemini account show

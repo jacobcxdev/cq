@@ -1,0 +1,27 @@
+cq codex proxy prime
+Inspect or toggle automatic Codex quota-window priming.
+
+Usage
+  cq codex proxy prime <COMMAND> [OPTIONS]
+
+Commands
+  disable   Disable automatic Codex quota-window priming.
+  enable    Enable automatic Codex quota-window priming.
+  status    Show configured Codex quota-window priming.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex proxy   Codex proxy controls.
+
+Examples
+  Inspect current priming configuration
+  cq codex proxy prime status
+
+  Inspect the effects of enabling priming
+  cq codex proxy prime enable --help

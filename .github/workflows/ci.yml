@@ -2,16 +2,42 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      candidate_only:
+        description: Build six candidate binaries with release provider configuration; no release or installation
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
+
+# Planned feature candidate only; publication remains a separate release action.
+env:
+  CQ_CANDIDATE_VERSION: 0.39.0
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  cli-contract:
+    if: ${{ !inputs.candidate_only }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get update && sudo apt-get install -y zsh fish jq
+      - run: python3 specs/cli-v2/generate.py --check --go-output internal/cli/catalogue_gen.go
+      - run: python3 specs/cli-v2/plan/check.py
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+
   packages:
+    if: ${{ !inputs.candidate_only }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     outputs:
@@ -33,13 +59,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          latest_tag=
-          while IFS= read -r candidate; do
-            if [[ "$candidate" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              latest_tag="$candidate"
-              break
-            fi
-          done < <(git tag --sort=-v:refname)
           previous_tag="$(gh release list \
             --repo "$GITHUB_REPOSITORY" \
             --exclude-drafts \
@@ -47,12 +66,10 @@ jobs:
             --limit 1 \
             --json tagName \
             --jq '.[0].tagName')"
-          test -n "$latest_tag"
           test -n "$previous_tag"
           previous_version="${previous_tag#v}"
-          latest_version="${latest_tag#v}"
-          IFS=. read -r major minor patch <<<"$latest_version"
-          current_version="${major}.${minor}.$((patch + 1))-ci"
+          # Retain the 0.x release line and isolated CI prerelease suffix.
+          current_version="${CQ_CANDIDATE_VERSION}-ci"
           git tag "v$current_version"
           {
             echo "PREVIOUS_TAG=$previous_tag"
@@ -84,6 +101,7 @@ jobs:
           compression-level: 0
 
   validate-codex:
+    if: ${{ !inputs.candidate_only }}
     needs: packages
     runs-on: macos-15
     timeout-minutes: 15
@@ -134,6 +152,7 @@ jobs:
           .github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"
 
   homebrew-lifecycle:
+    if: ${{ !inputs.candidate_only }}
     needs: packages
     runs-on: macos-15
     timeout-minutes: 15
@@ -185,6 +204,7 @@ jobs:
             "$CURRENT_VERSION"
 
   linux:
+    if: ${{ !inputs.candidate_only }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -201,6 +221,8 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+
+      - run: sudo apt-get update && sudo apt-get install -y zsh fish jq
 
       - name: Require stock Ubuntu AppArmor policy
         shell: bash
@@ -229,6 +251,7 @@ jobs:
           done
 
   windows:
+    if: ${{ !inputs.candidate_only }}
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -248,10 +271,10 @@ jobs:
       - run: .\cq.exe --version
       - run: .\cq-install.exe --help
       - run: go vet ./...
-      - run: go test -race -count=1 ./internal/fsutil
+      - run: go test -race -count=1 ./internal/userdirs ./internal/fsutil
       - run: go test -race -count=1 ./internal/installer -run '^(TestWindows|TestInstallLock|TestInstaller)'
       - run: go test -race -count=1 ./cmd/cq-install
-      - run: go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot)'
+      - run: go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot|TestCLIV2ResetProduction|TestCLIV2AccountMutationRealCodexRemovalFence|TestCLIV2CompleteRegistry|TestCLIV2EveryGroupIsPure)'
         env:
           CQ_NATIVE_WINDOWS_SCHEDULER_TEST: "1"
       - run: go test -race -count=1 ./internal/provider/codex -run '^TestWindowsCredential'
@@ -272,3 +295,104 @@ jobs:
           .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $previousRoot "cq.exe") -Version 0.0.1 -Architecture amd64 -Output $previousMSI -Wix $wix
           .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $currentRoot "cq.exe") -Version 0.0.2 -Architecture amd64 -Output $currentMSI -Wix $wix
           .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion 0.0.2
+
+  # Build transport only; this job does not qualify or publish a release.
+  candidate-build:
+    if: ${{ inputs.candidate_only }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          install-only: true
+
+      - name: Prepare planned-version candidate configuration
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          cp .goreleaser.yml "$RUNNER_TEMP/candidate.yml"
+          cat >> "$RUNNER_TEMP/candidate.yml" <<'CONFIG'
+          snapshot:
+            version_template: '{{ .Env.CQ_CANDIDATE_VERSION }}'
+          CONFIG
+          printf 'dist: "%s/candidate-build"\n' "$RUNNER_TEMP" >> "$RUNNER_TEMP/candidate.yml"
+          echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go "$CQ_CANDIDATE_VERSION" ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)" >> "$GITHUB_ENV"
+
+      - name: Build all six targets with release provider configuration
+        env:
+          GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          test -n "$GEMINI_ANTIGRAVITY_CLIENT_SECRET"
+          # Never enable verbose output: linker flags contain the client secret.
+          goreleaser build --snapshot --clean --skip=before,pre-hooks,post-hooks --config "$RUNNER_TEMP/candidate.yml"
+
+      - name: Collect binaries and safe provenance
+        run: |
+          set -euo pipefail
+          python3 - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "candidate-artifact"
+          output.mkdir()
+          binaries = []
+          for target_os in ("darwin", "linux", "windows"):
+              for arch in ("amd64", "arm64"):
+                  executable = "cq.exe" if target_os == "windows" else "cq"
+                  matches = list((Path(os.environ["RUNNER_TEMP"]) / "candidate-build").glob(f"cq_{target_os}_{arch}*/{executable}"))
+                  if len(matches) != 1:
+                      raise SystemExit(f"expected one executable for {target_os}/{arch}")
+                  destination = output / f"{target_os}_{arch}" / executable
+                  destination.parent.mkdir()
+                  shutil.copy2(matches[0], destination)
+                  # Capture privately; never print linker flags or other build settings.
+                  info = subprocess.check_output(["go", "version", "-m", str(destination)], text=True)
+                  settings = {}
+                  for line in info.splitlines():
+                      for key in ("vcs.revision", "vcs.modified", "GOOS", "GOARCH"):
+                          prefix = "\tbuild\t" + key + "="
+                          if line.startswith(prefix):
+                              settings[key] = line[len(prefix):]
+                  assert settings == {"vcs.revision": os.environ["GITHUB_SHA"], "vcs.modified": "false", "GOOS": target_os, "GOARCH": arch}
+                  binaries.append({"path": str(destination.relative_to(output)), "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(), "build": settings})
+          version = json.loads(subprocess.check_output([str(output / "linux_arm64/cq"), "version", "--json"], text=True))
+          assert version["schema_version"] == 2 and version["ok"] is True
+          assert version["data"]["version"] == os.environ["CQ_CANDIDATE_VERSION"]
+          assert version["data"]["cli_schema_version"] == 2
+          metadata = {
+              "kind": "candidate-build-only",
+              "version": os.environ["CQ_CANDIDATE_VERSION"],
+              "cli_schema_version": 2,
+              "source_commit": os.environ["GITHUB_SHA"],
+              "source_tree": subprocess.check_output(["git", "rev-parse", "HEAD^{tree}"], text=True).strip(),
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "codex_stage11_provenance_sha256": os.environ["CODEX_STAGE11_PROVENANCE_SHA256"],
+              "binaries": binaries,
+          }
+          (output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+          PYTHON
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cq-candidate-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/candidate-artifact/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

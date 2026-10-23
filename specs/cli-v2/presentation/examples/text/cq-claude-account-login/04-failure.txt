@@ -1,0 +1,3 @@
+Error · Browser authentication failed.
+  Code: account_auth_failed
+  Command: cq claude account login

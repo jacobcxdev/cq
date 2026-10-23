@@ -1,0 +1,31 @@
+cq auth refresh
+Refresh eligible stored Claude and Codex OAuth credentials.
+
+Usage
+  cq auth refresh [PROVIDER…] [options]
+
+Refresh credentials with 30 minutes or less remaining, including expired tokens.
+Unknown expiry is skipped. Codex system and external credentials stay read-only.
+Claude may offer browser login in a terminal; JSON and redirected input do not.
+Gemini refreshes during quota checks. No overall deadline applies: HTTP requests
+allow 10s and a started Claude browser callback allows 5m; prompts have no deadline.
+
+Arguments
+  PROVIDER  claude or codex; omit for both, in that order. No duplicates.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq claude account login
+  cq codex account login
+  cq check
+
+Examples
+  Refresh both providers
+    cq auth refresh
+  Refresh CQ-managed Codex credentials without prompts
+    cq auth refresh codex --json

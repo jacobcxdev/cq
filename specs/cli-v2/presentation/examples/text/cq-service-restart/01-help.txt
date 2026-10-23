@@ -1,0 +1,38 @@
+cq service restart
+Restart selected installed CQ services.
+
+Usage
+  cq service restart [OPTIONS]
+
+CQ services: shared API proxy and token-refresh job. The job runs auth refresh at load and
+then every 30 minutes; it does not fetch quota reports. Managers: launchd on macOS,
+per-user systemd on Linux, current-user Task Scheduler on Windows. No automatic elevation.
+Writes verify ownership. Package-owned services permit start/stop/restart; manual install/uninstall
+cannot replace package or foreign ownership. Selected components never widen after validation.
+Requires existing registrations. May interrupt active Claude/Codex traffic when proxy selected.
+Preserves automatic-start policy. A disabled refresh job can complete one requested run without
+becoming enabled or scheduled-healthy. Verification must identify the newly completed run.
+
+Options
+  --component COMPONENT
+      all, proxy or token-refresh. Default: all; exact enum.
+  --timeout DURATION
+      Maximum elapsed time including locks, requests and local verification. Default: 60s.
+      Positive Go duration, at most 10m; no bare number. Expiry does not imply rollback.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq service status
+  cq service start
+
+Examples
+  Run the installed token-refresh job again without changing its enablement:
+  cq service restart --component token-refresh

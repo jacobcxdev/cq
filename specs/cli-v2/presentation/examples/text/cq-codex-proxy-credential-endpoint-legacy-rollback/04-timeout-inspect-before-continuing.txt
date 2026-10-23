@@ -1,0 +1,3 @@
+Error · Credential endpoint operation timed out; inspect migration state before continuing.
+  Code: endpoint_timeout
+  Command: cq codex proxy credential-endpoint legacy rollback

@@ -1,0 +1,43 @@
+cq codex proxy pool value
+Set a Codex pool preservation value.
+
+Usage
+  cq codex proxy pool value NAME VALUE [options]
+
+Validate all input, then publish one atomic live policy update. No restart.
+Equivalent repeated membership/value updates retain equivalent policy. Rename preserves identity
+and bindings. Existing account continuity still takes precedence.
+
+Arguments
+  NAME
+      Required. Existing pool name.
+      Pool names are case-insensitive; display casing is preserved.
+      Valid UTF-8, at least one non-whitespace character, no control characters.
+  VALUE
+      Required. Integer 0–4294967295; relative preservation value, not quota percentage.
+      Higher values preserve capacity by preferring lower-value viable accounts for unbound work.
+
+Options
+  --port PORT
+      Authenticated loopback proxy port, integer 1–65535.
+      Omit to use the configured port, or 19280 when unset. Does not create configuration.
+  --timeout TIMEOUT
+      Maximum total elapsed time, including preparation and control requests. Default: 10s.
+      Positive Go duration, for example 500ms or 30s. Expiry exits 7.
+      A timed-out write may have committed; inspect current state before retrying.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default false; accept a bare flag, =true or =false.
+  Options occur once unless marked repeatable; duplicate long/short spellings count together.
+
+Related commands
+  cq codex account list
+  cq codex proxy policy show
+  cq codex proxy session bind --help
+
+Examples
+  Preserve work capacity relative to lower-value pools.
+  cq codex proxy pool value work 20

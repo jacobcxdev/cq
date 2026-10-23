@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime/debug"
 	"strings"
 	"testing"
@@ -185,7 +187,7 @@ func TestCommandLifecycleUsesExactServiceCommands(t *testing.T) {
 			}
 			calls = append(calls, append([]string{executable}, args...))
 			if len(args) == 3 && args[0] == "service" && args[1] == "status" {
-				return []byte(`{"schema_version":1,"owner":"go","proxy":{"registered":true,"running":true,"configured_executable":"/go/bin/cq","live_executable":"/go/bin/cq","healthy":true},"refresh":{"registered":true,"configured_executable":"/go/bin/cq","healthy":true}}`), nil
+				return []byte(`{"schema_version":2,"command":"service status","ok":true,"data":{"components":[{"id":"proxy","installed":true,"owner":"cq","state":"running","healthy":true,"executable":"/go/bin/cq"},{"id":"token-refresh","installed":true,"owner":"cq","state":"idle","healthy":true,"executable":"/go/bin/cq"}]},"errors":[],"warnings":[]}`), nil
 			}
 			return nil, nil
 		},
@@ -306,4 +308,127 @@ func (action *fakeInstallerAction) Install(context.Context) error {
 func (action *fakeInstallerAction) Uninstall(context.Context) error {
 	action.uninstalls++
 	return action.err
+}
+
+// This shared corpus catches accidental adoption of public globals, reordered
+// action restrictions, output envelopes, or a broader package-owner policy.
+func TestCLIV2InternalInstallerCorpus(t *testing.T) {
+	data, err := os.ReadFile("../cq/testdata/cli-v2/internal-abi.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cases []struct {
+		Name        string   `json:"name"`
+		Executable  string   `json:"executable"`
+		Argv        []string `json:"argv"`
+		AllowWinGet bool     `json:"allow_winget"`
+		Stdout      string   `json:"stdout"`
+		Stderr      string   `json:"stderr"`
+		Exit        int      `json:"exit"`
+		Effects     []string `json:"effects"`
+	}
+	if err := json.Unmarshal(data, &cases); err != nil {
+		t.Fatal(err)
+	}
+	matched := 0
+	for _, c := range cases {
+		if c.Executable != "cq-install" {
+			continue
+		}
+		matched++
+		t.Run(c.Name, func(t *testing.T) {
+			action := &fakeInstallerAction{}
+			var output bytes.Buffer
+			deps := commandDependencies{
+				ResolveVersion: func() (string, error) {
+					if len(c.Effects) == 0 {
+						t.Fatal("rejection/help accessed release version")
+					}
+					return "0.32.5", nil
+				},
+				Build: func(_ context.Context, owner installstate.Owner, version string) (installerAction, error) {
+					if len(c.Effects) == 0 {
+						t.Fatal("rejection/help accessed installer")
+					}
+					wantOwner := installstate.OwnerGo
+					if c.AllowWinGet {
+						wantOwner = installstate.OwnerWinGet
+					}
+					if owner != wantOwner || version != "0.32.5" {
+						t.Fatalf("build owner=%s version=%s", owner, version)
+					}
+					return action, nil
+				},
+				Output: &output, AllowWinGet: c.AllowWinGet,
+			}
+			err := runInstaller(context.Background(), c.Argv, deps)
+			code, stderr := 0, ""
+			if err != nil {
+				code, stderr = 1, "cq-install: "+err.Error()+"\n"
+			}
+			if code != c.Exit || output.String() != c.Stdout || stderr != c.Stderr {
+				t.Fatalf("exit=%d stdout=%q stderr=%q; want %d %q %q", code, output.String(), stderr, c.Exit, c.Stdout, c.Stderr)
+			}
+			effects := []string{}
+			for i := 0; i < action.installs; i++ {
+				effects = append(effects, "install")
+			}
+			for i := 0; i < action.uninstalls; i++ {
+				effects = append(effects, "uninstall")
+			}
+			if !reflect.DeepEqual(effects, c.Effects) {
+				t.Fatalf("effects=%v, want %v", effects, c.Effects)
+			}
+		})
+	}
+	if matched == 0 {
+		t.Fatal("empty installer corpus")
+	}
+}
+
+func TestCommandVersionRunnerStrictEnvelopes(t *testing.T) {
+	for _, tc := range []struct {
+		name, output string
+		valid        bool
+	}{
+		{"released", "v0.27.0\n", true},
+		{"candidate", `{"schema_version":2,"ok":true,"command":"version","data":{"version":"1.0.0"}}`, true},
+		{"extra-line", "v0.27.0\n1.0.0\n", false},
+		{"malformed", `{"schema_version":2`, false},
+		{"failed", `{"schema_version":2,"ok":false,"command":"version","data":{"version":"1.0.0"}}`, false},
+		{"wrong-schema", `{"schema_version":1,"ok":true,"command":"version","data":{"version":"1.0.0"}}`, false},
+		{"wrong-command", `{"schema_version":2,"ok":true,"command":"check","data":{"version":"1.0.0"}}`, false},
+		{"missing-data", `{"schema_version":2,"ok":true,"command":"version"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := commandVersionRunner{Run: func(context.Context, string) (string, error) { return tc.output, nil }}
+			_, err := runner.Version(context.Background(), "synthetic")
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v err=%v", tc.valid, err)
+			}
+		})
+	}
+}
+
+func TestCommandLifecycleStatusStrictCandidate(t *testing.T) {
+	valid := `{"schema_version":2,"command":"service status","ok":true,"data":{"components":[{"id":"proxy","installed":true,"owner":"cq","state":"running","healthy":true,"executable":"synthetic"},{"id":"token-refresh","installed":true,"owner":"cq","state":"idle","healthy":true,"executable":"synthetic"}]}}`
+	for _, tc := range []struct {
+		name, value string
+		valid       bool
+	}{
+		{"candidate", valid, true},
+		{"legacy", `{"owner":"go","proxy":{"healthy":true},"refresh":{"healthy":true}}`, false},
+		{"duplicate", strings.Replace(valid, `"id":"token-refresh"`, `"id":"proxy"`, 1), false},
+		{"wrong-owner", strings.ReplaceAll(valid, `"cq"`, `"package"`), false},
+		{"failed", strings.Replace(valid, `"ok":true`, `"ok":false`, 1), false},
+		{"stopped", strings.Replace(valid, `"running"`, `"stopped"`, 1), false},
+		{"wrong-executable", strings.ReplaceAll(valid, `"executable":"synthetic"`, `"executable":"other"`), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle := commandLifecycle{Executable: "synthetic", Owner: installstate.OwnerGo, Run: func(context.Context, string, *os.File, ...string) ([]byte, error) { return []byte(tc.value), nil }}
+			if err := lifecycle.Status(context.Background()); (err == nil) != tc.valid {
+				t.Fatalf("valid=%v err=%v", tc.valid, err)
+			}
+		})
+	}
 }

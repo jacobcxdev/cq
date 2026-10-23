@@ -257,10 +257,7 @@ func runProxy(args []string) error {
 		}
 		if authority.Terminating {
 			if authority.Row == "ordinary_help" {
-				path, ok := proxyHelpInspectionPath(args)
-				if ok {
-					return writeManualHelp(os.Stdout, path)
-				}
+				return writeManualHelp(os.Stdout, []string{"proxy", "candidate"})
 			}
 			return errors.New("proxy candidate usage")
 		}
@@ -350,6 +347,23 @@ func runProxyPin(args []string) error {
 	})
 }
 
+// proxySelectionIntent separates routing configuration from account activation.
+type proxySelectionIntent struct {
+	provider, kind, action, reference string
+	legacyUUID                        bool
+}
+
+func applyProxySelection(cfg *proxy.Config, intent proxySelectionIntent, account string) {
+	switch {
+	case intent.provider == "claude":
+		cfg.PinnedClaudeAccount = account
+	case intent.kind == "fallback":
+		cfg.CodexRoutingDefaultAccountKey = codexprov.AccountKey(account)
+	default:
+		cfg.CodexRoutingPinnedAccountKey = codexprov.AccountKey(account)
+	}
+}
+
 func runProxyPinWithDependencies(ctx context.Context, args []string, deps proxyCodexDefaultDependencies) error {
 	if helpRequested(args) {
 		return writeManualHelp(os.Stdout, []string{"proxy", "pin"})
@@ -400,7 +414,7 @@ func runProxyClaudePin(args []string, deps proxyCodexDefaultDependencies) error 
 
 	// cq proxy pin claude --clear
 	if len(args) == 1 && args[0] == "--clear" {
-		cfg.PinnedClaudeAccount = ""
+		applyProxySelection(cfg, proxySelectionIntent{provider: "claude", kind: "pin", action: "clear"}, "")
 		if err := deps.SaveConfig(cfg); err != nil {
 			return fmt.Errorf("save config: %w", err)
 		}
@@ -426,7 +440,7 @@ func runProxyClaudePin(args []string, deps proxyCodexDefaultDependencies) error 
 			return fmt.Errorf("unknown flag %q", arg)
 		}
 
-		cfg.PinnedClaudeAccount = arg
+		applyProxySelection(cfg, proxySelectionIntent{provider: "claude", kind: "pin", action: "set", reference: arg}, arg)
 		if err := deps.SaveConfig(cfg); err != nil {
 			return fmt.Errorf("save config: %w", err)
 		}
@@ -456,7 +470,7 @@ func runProxyCodexPin(ctx context.Context, args []string, deps proxyCodexDefault
 			}
 			return nil
 		}
-		cfg.CodexRoutingPinnedAccountKey = ""
+		applyProxySelection(cfg, proxySelectionIntent{provider: "codex", kind: "pin", action: "clear"}, "")
 		if err := deps.SaveConfig(cfg); err != nil {
 			return fmt.Errorf("save config: %w", err)
 		}
@@ -481,7 +495,7 @@ func runProxyCodexPin(ctx context.Context, args []string, deps proxyCodexDefault
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	cfg.CodexRoutingPinnedAccountKey = accountKey
+	applyProxySelection(cfg, proxySelectionIntent{provider: "codex", kind: "pin", action: "set", reference: args[0]}, string(accountKey))
 	if err := deps.SaveConfig(cfg); err != nil {
 		return fmt.Errorf("save config: %w", err)
 	}
@@ -647,9 +661,46 @@ func listProxyCodexStartupInventory(ctx context.Context, inventory codexprov.Cre
 	return inventory.List(ctx)
 }
 
-func runProxyStart(opts proxyCommandOptions) (returnErr error) {
+func runProxyStart(opts proxyCommandOptions) error {
+	return runProxyStartWithContext(context.Background(), opts, nil)
+}
+
+type proxyStartConfigurationError struct{ err error }
+
+func (e *proxyStartConfigurationError) Error() string {
+	return "proxy startup configuration unavailable"
+}
+func (e *proxyStartConfigurationError) Unwrap() error { return e.err }
+
+type proxyForegroundMigrationKey struct{}
+type proxyForegroundSignalsKey struct{}
+
+func runProxyStartWithContext(ctx context.Context, opts proxyCommandOptions, ready func(string, []string) error) (returnErr error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	serve := serveRuntimeSupervisor
+	if ready != nil {
+		serve = func(ctx context.Context, listener net.Listener, handler http.Handler) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if runtime, ok := handler.(*proxy.RuntimeSupervisor); ok && !runtime.AdmissionReady() && runtime.TrafficMode() != proxy.TrafficModeRescue {
+				return proxy.ErrRuntimeSupervisorUnavailable
+			}
+			providers := []string{"claude", "codex"}
+			if runtime, ok := handler.(*proxy.RuntimeSupervisor); ok && runtime.TrafficMode() == proxy.TrafficModeRescue {
+				providers = []string{"codex"}
+			}
+			if err := ready(listener.Addr().String(), providers); err != nil {
+				return err
+			}
+			return serveRuntimeSupervisor(ctx, listener, handler)
+		}
+	}
+
 	if opts.LinuxValidationCandidateFD != 0 {
-		handled, err := runProxyValidationCandidateFn(context.Background(), opts, version)
+		handled, err := runProxyValidationCandidateFn(ctx, opts, version)
 		if handled {
 			return err
 		}
@@ -717,7 +768,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		}
 	}
 	if workerRole != nil {
-		handled, err := runProxyValidationCandidateWorkerFn(context.Background(), *workerRole, workerFiles)
+		handled, err := runProxyValidationCandidateWorkerFn(ctx, *workerRole, workerFiles)
 		if handled {
 			workerFiles = proxy.RuntimeRoleFiles{}
 			return err
@@ -727,8 +778,20 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("resolve CQ directories: %w", err)
 	}
+	if ready != nil {
+		paths, pathErr := proxy.ResolveDefaultPaths(userdirs.ConfigRoot)
+		if pathErr != nil {
+			return &proxyStartConfigurationError{pathErr}
+		}
+		if pathErr = validateProxyStatePath(filepath.Dir(paths.ConfigFile), false); pathErr != nil {
+			return &proxyStartConfigurationError{pathErr}
+		}
+		if pathErr = fsutil.ValidateSecureRegularFile(fsutil.OSFileSystem{}, paths.ConfigFile); pathErr != nil && !errors.Is(pathErr, os.ErrNotExist) {
+			return &proxyStartConfigurationError{pathErr}
+		}
+	}
 	var adoptedListener net.Listener
-	if supervisorRole == nil && workerRole == nil {
+	if supervisorRole == nil && workerRole == nil && ready == nil {
 		adoptedListener, err = adoptProxyListenerFn()
 	}
 	if err != nil {
@@ -740,7 +803,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 				returnErr = errors.Join(returnErr, adoptedListener.Close())
 			}
 		}()
-		err = runProxyAdoptedRuntimeFn(context.Background(), adoptedListener, serveRuntimeSupervisor)
+		err = runProxyAdoptedRuntimeFn(ctx, adoptedListener, serve)
 		adoptedListener = nil
 		return err
 	}
@@ -750,35 +813,49 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			return err
 		}
 		defer store.Close()
-		err = proxy.RunValidatedRuntimeSupervisorRole(context.Background(), *supervisorRole, proxy.RuntimeSupervisorRoleDependencies{
+		err = proxy.RunValidatedRuntimeSupervisorRole(ctx, *supervisorRole, proxy.RuntimeSupervisorRoleDependencies{
 			Files: supervisorFiles, SupervisorHolder: supervisorHolder, Launcher: supervisorLauncher,
 			Checkpoints: &proxy.RuntimeHashCheckpointStore{}, CallerAdmissions: store,
 			WorkerManifest: proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(supervisorRole.ManifestDigest[:])},
-			Serve:          serveRuntimeSupervisor,
+			Serve:          serve,
 		})
 		supervisorFiles = proxy.RuntimeRoleFiles{}
 		return err
 	}
-	intent, err := claimInstalledHTTPValidationStartupRequest(
-		version,
-		consumeInstalledHTTPValidationStartupRequestFn,
-		invalidateInstalledHTTPValidationMarkerFn,
-	)
-	if err != nil {
-		return err
+	var intent *installedHTTPValidationConsumedRequest
+	if ready == nil {
+		intent, err = claimInstalledHTTPValidationStartupRequest(version, consumeInstalledHTTPValidationStartupRequestFn, invalidateInstalledHTTPValidationMarkerFn)
+		if err != nil {
+			return err
+		}
 	}
 	cfg, err := loadProxyStartConfigFn()
 	if err != nil {
+		if ready != nil {
+			return &proxyStartConfigurationError{err}
+		}
 		return err
 	}
+	if ready != nil && opts.MigrateLegacyManaged {
+		ctx = context.WithValue(ctx, proxyForegroundMigrationKey{}, func(ctx context.Context) error {
+			control, err := codexprov.OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifierAndRecoveryRecorder(ctx, fsutil.OSFileSystem{}, newHTTPClientFn(30*time.Second, version), newProxyLegacyMaintenanceFinaliseVerifier(version, defaultCodexRoutingClientBuild(), cfg.Port, proxy.NewServingAttestor()), nil)
+			if err != nil {
+				return err
+			}
+			_, migrationErr := control.MigrateLegacyManaged(ctx)
+			return errors.Join(migrationErr, control.Close())
+		})
+	}
 	if opts.Port != 0 {
-		cfg.Port = opts.Port
+		ephemeral := *cfg
+		ephemeral.Port = opts.Port
+		cfg = &ephemeral
 	}
 	if intent != nil {
-		return runInstalledHTTPValidationStartupFn(context.Background(), cfg, version, intent)
+		return runInstalledHTTPValidationStartupFn(ctx, cfg, version, intent)
 	}
 	if workerRole == nil && opts.LinuxValidationCandidateFD == 0 {
-		handled, err := runProxyOwnedRuntimeFn(context.Background(), cfg.Port, serveRuntimeSupervisor)
+		handled, err := runProxyOwnedRuntimeFn(ctx, cfg.Port, serve)
 		if handled {
 			return err
 		}
@@ -787,7 +864,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	fsys := fsutil.OSFileSystem{}
 	var resilienceState *proxy.ProxyResilienceState
 	if stateDir := cfg.ResolvedProxyResilienceStateDir(); stateDir != "" {
-		resilienceState, err = proxy.OpenProxyResilienceState(context.Background(), proxy.ProxyResilienceStateOptions{
+		resilienceState, err = proxy.OpenProxyResilienceState(ctx, proxy.ProxyResilienceStateOptions{
 			FS: fsys, Root: stateDir, Random: rand.Reader, Now: time.Now, SkipRuntimeMode: workerRole != nil,
 		})
 		if err != nil {
@@ -826,9 +903,9 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	var credentialControl *codexprov.CredentialControl
 	if workerRole == nil {
-		credentialControl, err = openCredentialControl(context.Background())
+		credentialControl, err = openCredentialControl(ctx)
 	} else {
-		credentialAuthorityCtx, cancelCredentialAuthority := context.WithTimeout(context.Background(), 10*time.Second)
+		credentialAuthorityCtx, cancelCredentialAuthority := context.WithTimeout(ctx, 10*time.Second)
 		credentialControl, err = acquireProxyWorkerCredentialAuthority(credentialAuthorityCtx, proxyCredentialAuthorityOperations{
 			open: openCredentialControl,
 			owner: func(control *codexprov.CredentialControl) bool {
@@ -850,7 +927,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		}
 	}()
 	if opts.MigrateLegacyManaged {
-		migration, migrateErr := credentialControl.MigrateLegacyManaged(context.Background())
+		migration, migrateErr := credentialControl.MigrateLegacyManaged(ctx)
 		if migrateErr != nil {
 			return fmt.Errorf("migrate legacy Codex managed records: %w", migrateErr)
 		}
@@ -904,7 +981,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if cfg.PinnedClaudeAccount != "" {
 		fmt.Fprintf(os.Stderr, "cq: pinned claude account: %s\n", cfg.PinnedClaudeAccount)
 	}
-	proxyCtx, proxyCancel := context.WithCancel(context.Background())
+	proxyCtx, proxyCancel := context.WithCancel(ctx)
 	defer proxyCancel()
 	startProxyConfigReload(proxyCtx, selector, codexRouting)
 
@@ -925,7 +1002,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 
 	// Codex account discovery is owned by the credential coordinator.
-	codexInventory, err := listProxyCodexStartupInventory(context.Background(), credentialControl)
+	codexInventory, err := listProxyCodexStartupInventory(ctx, credentialControl)
 	if err != nil {
 		return fmt.Errorf("Codex credential inventory: %w", err)
 	}
@@ -934,18 +1011,18 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		cfg.CodexRoutingAccountKeys,
 		cfg.CodexRoutingPinnedAccountKey,
 	)
-	codexInventory, err = codexRoutingInventory.List(context.Background())
+	codexInventory, err = codexRoutingInventory.List(ctx)
 	if err != nil {
 		return fmt.Errorf("Codex routing inventory: %w", err)
 	}
 	if codexRouting.HTTP.Effective == proxy.CodexRoutingEnforce && codexDispatchableAccountCount(codexInventory) == 0 {
 		return errors.New("Codex HTTP enforcement has no allowed dispatchable account")
 	}
-	codexCallerInventory, err := codexContinuityInventory.List(context.Background())
+	codexCallerInventory, err := codexContinuityInventory.List(ctx)
 	if err != nil {
 		return fmt.Errorf("Codex caller inventory: %w", err)
 	}
-	runtimeCallerCredentials, err := normalCallerCredentialsFromInventory(context.Background(), cfg, accounts, codexCallerInventory, codexContinuityInventory, credentialControl)
+	runtimeCallerCredentials, err := normalCallerCredentialsFromInventory(ctx, cfg, accounts, codexCallerInventory, codexContinuityInventory, credentialControl)
 	if err != nil {
 		return fmt.Errorf("normal caller index: %w", err)
 	}
@@ -1065,14 +1142,19 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	var proxyRefresher proxy.RegistryRefresher
 	if registryRefresher != nil {
 		proxyRefresher = proxy.RegistryRefresherFunc(func(ctx context.Context) (modelregistry.RefreshDiagnostics, error) {
-			diag, err := registryRefresher.Refresh(ctx)
+			phase, cancel := context.WithTimeout(ctx, 30*time.Second)
+			diag, err := registryRefresher.Refresh(phase)
+			cancel()
 			writeRegistrySourceDiagnostics(os.Stderr, diag)
-			if err == nil {
-				publishRegistry()
+			var targets []modelregistry.PublicationTarget
+			if err == nil && ctx.Err() == nil {
+				targets = pipeline.PublishReport(diag.Snapshot)
 			}
+			publication := modelregistry.NewPublication(diag, len(diag.Snapshot.Entries), targets, "proxy")
+			diag.Publication = &publication
 			return diag, err
 		})
-		initialRefreshCtx, initialRefreshCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		initialRefreshCtx, initialRefreshCancel := context.WithTimeout(ctx, 30*time.Second)
 		if initDiag, err := registryRefresher.Refresh(initialRefreshCtx); err != nil {
 			fmt.Fprintf(os.Stderr, "cq: registry: initial refresh failed: %v (continuing with empty registry)\n", err)
 		} else {
@@ -1247,7 +1329,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Discover:  discover,
 		Transport: transport,
 		CodexHealth: func() proxy.CodexHealth {
-			return codexHealthTracker.Health(context.Background())
+			return codexHealthTracker.Health(ctx)
 		},
 		CodexRequests:                    codexRequestRouter,
 		CodexWebSocketExecutor:           codexWebSocketExecutor,
@@ -1301,6 +1383,10 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		})
 		err = proxy.RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(proxyCtx, *workerRole, workerFiles, handler, credentialSource)
 		workerFiles = proxy.RuntimeRoleFiles{}
+	} else if ready != nil {
+		srv.Ready = func(address string) error { return ready(address, []string{"claude", "codex"}) }
+		srv.ExternallyManagedSignals, _ = ctx.Value(proxyForegroundSignalsKey{}).(bool)
+		err = srv.ListenAndServe(proxyCtx)
 	} else {
 		err = srv.ListenAndServe(proxyCtx)
 	}
@@ -1334,6 +1420,11 @@ func serveRuntimeSupervisor(ctx context.Context, listener net.Listener, handler 
 
 	serveResult := make(chan error, 1)
 	go func() {
+		defer func() {
+			if recover() != nil {
+				serveResult <- proxy.ErrRuntimeSupervisorUnavailable
+			}
+		}()
 		serveResult <- server.Serve(listener)
 	}()
 	select {
@@ -1493,7 +1584,7 @@ func loadProxyStatusPort(opts proxyCommandOptions) (int, error) {
 	if opts.Port != 0 {
 		return opts.Port, nil
 	}
-	paths, err := proxy.ResolveDefaultPaths()
+	paths, err := proxy.ResolveDefaultPaths(userdirs.ConfigRoot)
 	if err != nil {
 		return 0, err
 	}

@@ -1,0 +1,32 @@
+cq proxy candidate stop
+Stop an isolated candidate after its client has stopped.
+
+Usage
+  cq proxy candidate stop --state-dir STATE_DIR --confirm-client-stopped [OPTIONS]
+
+Requires running or validated phase and proof of process/listener absence before success.
+Already stopped is a phase conflict; pending effects are never automatically replayed.
+
+Options
+  --state-dir STATE_DIR
+      Required existing candidate directory from prepare. Absolute, clean, non-root,
+      current-user-owned; no symlink; parent owner-controlled. Never defaults to shared state.
+  --confirm-client-stopped
+      Required; must be true. Assert every client using this candidate has stopped
+      and no request remains active.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq proxy candidate status
+
+Examples
+  Use exact retained candidate identity after the stated preconditions:
+  cq proxy candidate stop --state-dir /Users/alex/cq-candidate-29280 --confirm-client-stopped

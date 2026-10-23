@@ -1,0 +1,3 @@
+Error · Local credential removal requires --yes in non-interactive mode.
+  Code: account_confirmation_required
+  Command: cq claude account remove

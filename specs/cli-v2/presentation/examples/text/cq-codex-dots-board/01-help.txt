@@ -1,0 +1,44 @@
+cq codex dots board
+Show or assign one local chat as the shared Dot message board.
+
+Usage
+  cq codex dots board [THREAD] [OPTIONS]
+
+With no argument, show the shared board binding. Supply THREAD to bind an existing local chat.
+
+Binding a chat announces the board to discovered Dots and reports notice delivery outcomes.
+
+Use --clear to remove the binding.
+
+Arguments
+  THREAD
+      Existing local thread ID or codex://threads/ID link. Omit to show the binding.
+      Exact lower-case UUID or codex://threads/UUID link.
+      Cannot combine with --clear=true; --clear=false permits THREAD.
+
+Options
+  --root ABS_PATH
+      Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after
+      the leaf command. This is not a global CQ option.
+      Must be a clean absolute path when supplied.
+      Must not contain the home directory or overlap native app, credential or application-support
+      paths.
+  --clear
+      Remove the shared message board binding.
+      Cannot combine --clear=true with THREAD; --clear=false permits THREAD.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable. Long/short duplicates are rejected.
+
+Examples
+  Show the shared board binding.
+  cq codex dots board
+  Bind one existing local chat as the shared board.
+  cq codex dots board codex://threads/01234567-89ab-cdef-0123-456789abcdef
+  Remove the shared board binding.
+  cq codex dots board --clear

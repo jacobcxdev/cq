@@ -1,7 +1,10 @@
 package modelregistry
 
 import (
+	"bytes"
+	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
@@ -110,5 +113,177 @@ func TestLoadClaudeEntriesFromCapabilities_ParsesCache(t *testing.T) {
 	}
 	if entries[0].ContextWindow != 200000 || entries[0].MaxOutputTokens != 32000 {
 		t.Errorf("entries[0] tokens = %d/%d", entries[0].ContextWindow, entries[0].MaxOutputTokens)
+	}
+}
+
+func TestModelCacheProvenanceRoundTripAndVendorRewrite(t *testing.T) {
+	for _, provider := range []Provider{ProviderCodex, ProviderAnthropic} {
+		t.Run(string(provider), func(t *testing.T) {
+			fs := fsutil.NewMemFS()
+			path := "/cache.json"
+			native := Entry{Provider: provider, ID: "native", Source: SourceNative, Description: "rich metadata", MaxOutputTokens: 40, Aliases: []string{"alias"}}
+			snap := Snapshot{Entries: []Entry{native, {Provider: provider, ID: "overlay", Source: SourceOverlay}}, CodexRawByID: map[string]json.RawMessage{"native": json.RawMessage(`{"slug":"native","vendor_opaque":{"preserved":true}}`)}}
+			load := func() ([]Entry, error) {
+				if provider == ProviderCodex {
+					return LoadCodexEntriesFromCache(fs, path)
+				}
+				return LoadClaudeEntriesFromCapabilities(fs, path)
+			}
+			if provider == ProviderCodex {
+				if err := PublishCodexCache(fs, path, snap, time.Now(), "test"); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := PublishClaudeCapabilities(fs, path, snap, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			entries, err := load()
+			if err != nil || len(entries) != 1 || entries[0].ID != "native" || entries[0].Description != "rich metadata" || entries[0].MaxOutputTokens != 40 {
+				t.Fatalf("provenance lost entries=%+v err=%v", entries, err)
+			}
+			if provider == ProviderCodex && !bytes.Contains(entries[0].Raw, []byte(`"vendor_opaque"`)) {
+				t.Fatal("native vendor metadata lost")
+			}
+			data, _ := fs.ReadFile(path)
+			var envelope map[string]json.RawMessage
+			json.Unmarshal(data, &envelope)
+			if provider == ProviderCodex {
+				envelope["models"] = json.RawMessage(`[{"slug":"vendor-new"}]`)
+			} else {
+				envelope["models"] = json.RawMessage(`[{"id":"vendor-new"}]`)
+			}
+			changed, _ := json.Marshal(envelope)
+			fs.WriteFile(path, changed, 0600)
+			entries, err = load()
+			if err != nil || len(entries) != 1 || entries[0].ID != "vendor-new" {
+				t.Fatalf("stale provenance overrode vendor update: %+v %v", entries, err)
+			}
+			envelope["cq_native"] = json.RawMessage(`{"digest":"broken","entries":[]}`)
+			changed, _ = json.Marshal(envelope)
+			fs.WriteFile(path, changed, 0600)
+			if _, err := load(); err == nil {
+				t.Fatal("malformed provenance accepted")
+			}
+		})
+	}
+}
+func TestModelCacheMalformedEnvelopeAndEntries(t *testing.T) {
+	for _, body := range []string{`null`, `{}`, `{"models":null}`, `{"models":[{}]}`, `{"models":[{"slug":" x","id":" x"}]}`} {
+		fs := fsutil.NewMemFS()
+		fs.WriteFile("/cache.json", []byte(body), 0600)
+		if _, err := LoadCodexEntriesFromCache(fs, "/cache.json"); err == nil {
+			t.Errorf("Codex accepted %s", body)
+		}
+		if _, err := LoadClaudeEntriesFromCapabilities(fs, "/cache.json"); err == nil {
+			t.Errorf("Claude accepted %s", body)
+		}
+	}
+}
+
+// A vendor rewrite of any model field must invalidate the old native subset.
+func TestModelCacheClaudeProvenanceBindsUnknownFields(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		models string
+		want   int
+	}{
+		{"formatting-only", `[
+    {"max_tokens":0,"max_input_tokens":0,"id":"overlay"},
+    {"max_tokens":0,"id":"native","max_input_tokens":0}
+  ]`, 1},
+		{"vendor-display-name", `[{"id":"overlay","max_input_tokens":0,"max_tokens":0,"display_name":"Fresh vendor label"},{"id":"native","max_input_tokens":0,"max_tokens":0}]`, 2},
+		{"vendor-nested-metadata", `[{"id":"overlay","max_input_tokens":0,"max_tokens":0,"vendor":{"revision":9007199254740993}},{"id":"native","max_input_tokens":0,"max_tokens":0}]`, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := fsutil.NewMemFS()
+			snap := Snapshot{Entries: []Entry{
+				{Provider: ProviderAnthropic, ID: "native", Source: SourceNative, Description: "native metadata"},
+				{Provider: ProviderAnthropic, ID: "overlay", Source: SourceOverlay},
+			}}
+			if err := PublishClaudeCapabilities(fs, "/cache.json", snap, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			got, err := LoadClaudeEntriesFromCapabilities(fs, "/cache.json")
+			if err != nil || len(got) != 1 || got[0].ID != "native" {
+				t.Fatalf("initial provenance: %+v, %v", got, err)
+			}
+			data, err := fs.ReadFile("/cache.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope map[string]json.RawMessage
+			if err := json.Unmarshal(data, &envelope); err != nil {
+				t.Fatal(err)
+			}
+			envelope["models"] = json.RawMessage(tc.models)
+			data, err = json.Marshal(envelope)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := fs.WriteFile("/cache.json", data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			got, err = LoadClaudeEntriesFromCapabilities(fs, "/cache.json")
+			if err != nil || len(got) != tc.want {
+				t.Fatalf("rewritten native rows: %+v, %v; want %d", got, err, tc.want)
+			}
+			if tc.want == 1 && (got[0].ID != "native" || got[0].Description != "native metadata") {
+				t.Fatalf("formatting discarded provenance: %+v", got)
+			}
+			for _, entry := range got {
+				if entry.Source != SourceNative {
+					t.Fatalf("vendor row is not native: %+v", entry)
+				}
+			}
+		})
+	}
+}
+
+func TestModelCacheCodexProvenancePreservesLargeNumbers(t *testing.T) {
+	fs := fsutil.NewMemFS()
+	snap := Snapshot{
+		Entries:      []Entry{{Provider: ProviderCodex, ID: "native", Source: SourceNative}, {Provider: ProviderCodex, ID: "overlay", Source: SourceOverlay}},
+		CodexRawByID: map[string]json.RawMessage{"native": json.RawMessage(`{"slug":"native","vendor":{"revision":9007199254740993}}`)},
+	}
+	if err := PublishCodexCache(fs, "/cache.json", snap, time.Now(), "test"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := fs.ReadFile("/cache.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	var rows []map[string]json.RawMessage
+	if err := json.Unmarshal(envelope["models"], &rows); err != nil {
+		t.Fatal(err)
+	}
+	// Reserialising reorders the native row's keys but must retain provenance.
+	envelope["models"], err = json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err = json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile("/cache.json", data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadCodexEntriesFromCache(fs, "/cache.json")
+	if err != nil || len(got) != 1 || got[0].ID != "native" {
+		t.Fatalf("key order discarded provenance: %+v, %v", got, err)
+	}
+	// These adjacent integers round to the same float64; their payloads differ.
+	data = bytes.Replace(data, []byte("9007199254740993"), []byte("9007199254740992"), 1)
+	if err := fs.WriteFile("/cache.json", data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err = LoadCodexEntriesFromCache(fs, "/cache.json")
+	if err != nil || len(got) != 2 {
+		t.Fatalf("changed vendor number retained stale provenance: %+v, %v", got, err)
 	}
 }

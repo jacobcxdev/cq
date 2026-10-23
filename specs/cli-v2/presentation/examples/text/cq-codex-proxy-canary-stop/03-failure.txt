@@ -1,0 +1,3 @@
+Error · The Codex canary state is unavailable.
+  Code: canary_state_unavailable
+  Command: cq codex proxy canary stop

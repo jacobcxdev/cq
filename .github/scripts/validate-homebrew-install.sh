@@ -163,16 +163,29 @@ require "open3"
 
 status_json, package, runtime_root, expected_version, mode, architecture, go_executable = ARGV
 status = JSON.parse(status_json)
-proxy, refresh = status.fetch("proxy"), status.fetch("refresh")
+if status["schema_version"] == 2
+  abort "canonical status failed" unless status["ok"] == true && status["command"] == "service status"
+  data = status.fetch("data")
+  components = data.fetch("components").to_h { |component| [component.fetch("id"), component] }
+  proxy, refresh = components.fetch("proxy"), components.fetch("token-refresh")
+  abort "canonical ownership differs" unless proxy["owner"] == "package" && refresh["owner"] == "package"
+  proxy = proxy.merge("registered" => proxy["installed"], "running" => proxy["state"] == "running", "configured_executable" => proxy["executable"])
+  refresh = refresh.merge("registered" => refresh["installed"], "configured_executable" => refresh["executable"])
+  status = data.merge("owner" => "homebrew", "executable" => package)
+elsif status["schema_version"] == 1
+  proxy, refresh = status.fetch("proxy"), status.fetch("refresh")
+else
+  abort "unsupported service status schema"
+end
 abort "service ownership executable differs" unless status["owner"] == "homebrew" && status["executable"] == package
-abort "service health differs" unless proxy["registered"] && proxy["running"] && proxy["healthy"] && refresh["registered"] && refresh["healthy"] && proxy["listener"] == "127.0.0.1:19280" && proxy.fetch("pid", 0) > 1
+abort "service health differs" unless proxy["registered"] == true && proxy["running"] == true && proxy["healthy"] == true && refresh["registered"] == true && refresh["healthy"] == true && proxy["listener"] == "127.0.0.1:19280" && proxy.fetch("pid", 0) > 1
 live = proxy.fetch("live_executable")
 configured = proxy.fetch("configured_executable")
 refresh_executable = refresh.fetch("configured_executable")
 package_digest = Digest::SHA256.file(package).hexdigest
 abort "selected runtime differs from package bytes" unless File.file?(live) && Digest::SHA256.file(live).hexdigest == package_digest
 version, result = Open3.capture2(live, "--version")
-abort "selected runtime version differs" unless result.success? && version.strip == expected_version
+abort "selected runtime version differs" unless result.success? && version.lines.first.to_s.strip.sub(/\Acq /, "").sub(/\Av/, "") == expected_version
 
 verify_build = lambda do |path|
   build, result = Open3.capture2(go_executable, "version", "-m", path)
@@ -208,7 +221,11 @@ RUBY
 assert_installed() {
   local expected_version=$1
   local runtime_mode=${2:-legacy-or-retained}
-  [[ "$($installed_cq --version)" == "$expected_version" ]]
+  local actual_version
+  actual_version=$("$installed_cq" --version)
+  actual_version=${actual_version%%$'\n'*}
+  actual_version=${actual_version#cq }
+  [[ "${actual_version#v}" == "$expected_version" ]]
   if xattr -p com.apple.quarantine "$installed_cq" >/dev/null 2>&1; then
     echo "Homebrew Cask left cq quarantined" >&2
     return 1
@@ -254,10 +271,10 @@ HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask "$validation_tap/cq"
 assert_installed "$current_version" retained
 "$probe_executable" probe --address http://127.0.0.1:19280 --token cq-native-local
 
-proxy_pid=$($installed_cq service status --json | jq -er '.proxy.pid')
+proxy_pid=$($installed_cq service status --json | jq -er 'if .schema_version == 2 then .data.components[] | select(.id == "proxy") | .pid else .proxy.pid end')
 HOMEBREW_NO_AUTO_UPDATE=1 brew reinstall --cask "$validation_tap/cq"
 assert_installed "$current_version" retained
-[[ "$($installed_cq service status --json | jq -er '.proxy.pid')" == "$proxy_pid" ]]
+[[ "$($installed_cq service status --json | jq -er 'if .schema_version == 2 then .data.components[] | select(.id == "proxy") | .pid else .proxy.pid end')" == "$proxy_pid" ]]
 "$probe_executable" probe --address http://127.0.0.1:19280 --token cq-native-local
 
 preserved_config=$(shasum -a 256 "$config_root/proxy.json")

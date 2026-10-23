@@ -1,0 +1,3 @@
+Error · The Dots operation failed; inspect cq codex dots status before retrying.
+  Code: dots_operation_failed
+  Command: cq codex dots board

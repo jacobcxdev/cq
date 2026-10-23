@@ -1,0 +1,3 @@
+Error · Proxy HTTP health check failed.
+  Code: proxy_health_failed
+  Command: cq proxy health

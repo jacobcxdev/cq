@@ -1,0 +1,4435 @@
+{
+  "status": "implementation-plan coverage; not evidence of implemented tests",
+  "catalogue": "../../../specs/cli-v2/commands.json",
+  "fixture_index": "../../../specs/cli-v2/presentation/examples/index.json",
+  "commands": [
+    {
+      "command": "cq auth refresh",
+      "task": "T04"
+    },
+    {
+      "command": "cq check",
+      "task": "T12"
+    },
+    {
+      "command": "cq claude account activate",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account list",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account login",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account remove",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude proxy pin clear",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin set",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin show",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex account activate",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account list",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account login",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account remove",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots board",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots broadcast",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots install",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots list",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots prime",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots start",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots status",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots stop",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots sync",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex proxy canary start",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy canary status",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy canary stop",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy activate",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy finalise",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy inspect",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy prepare",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy resume",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy rollback",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback show",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fixture create",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy hook stop",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy lease invalidate",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy lease redistribute",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin show",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy policy apply",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy policy show",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool rename",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool set",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool value",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime status",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy readiness show",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy reserve clear",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve disable",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve enable",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve set",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve status",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve windows",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session bind",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session digest",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session list",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session show",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session unbind",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy trace",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy validate http",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy validate websocket",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex reset list",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset recommend",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "task": "T05"
+    },
+    {
+      "command": "cq completion",
+      "task": "T03"
+    },
+    {
+      "command": "cq gemini account show",
+      "task": "T04"
+    },
+    {
+      "command": "cq help",
+      "task": "T03"
+    },
+    {
+      "command": "cq models list",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay add",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay prune",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay remove",
+      "task": "T06"
+    },
+    {
+      "command": "cq models refresh",
+      "task": "T06"
+    },
+    {
+      "command": "cq proxy candidate client-safety refresh",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate prepare",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate receipt show",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate release activate",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate release validate",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate remove",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate start",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate status",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate stop",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy health",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy operation status",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy rescue enter",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy rescue exit",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy rescue status",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy serve",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy state initialise",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy status",
+      "task": "T10"
+    },
+    {
+      "command": "cq service install",
+      "task": "T11"
+    },
+    {
+      "command": "cq service restart",
+      "task": "T11"
+    },
+    {
+      "command": "cq service start",
+      "task": "T11"
+    },
+    {
+      "command": "cq service status",
+      "task": "T11"
+    },
+    {
+      "command": "cq service stop",
+      "task": "T11"
+    },
+    {
+      "command": "cq service uninstall",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "task": "T11"
+    },
+    {
+      "command": "cq version",
+      "task": "T03"
+    }
+  ],
+  "groups": {
+    "task": "T03",
+    "paths": [
+      "cq",
+      "cq auth",
+      "cq claude",
+      "cq claude account",
+      "cq claude proxy",
+      "cq claude proxy pin",
+      "cq codex",
+      "cq codex account",
+      "cq codex dots",
+      "cq codex proxy",
+      "cq codex proxy canary",
+      "cq codex proxy credential-endpoint",
+      "cq codex proxy credential-endpoint legacy",
+      "cq codex proxy fallback",
+      "cq codex proxy fixture",
+      "cq codex proxy hook",
+      "cq codex proxy lease",
+      "cq codex proxy pin",
+      "cq codex proxy policy",
+      "cq codex proxy pool",
+      "cq codex proxy prime",
+      "cq codex proxy readiness",
+      "cq codex proxy reserve",
+      "cq codex proxy session",
+      "cq codex proxy validate",
+      "cq codex reset",
+      "cq gemini",
+      "cq gemini account",
+      "cq models",
+      "cq models overlay",
+      "cq proxy",
+      "cq proxy candidate",
+      "cq proxy candidate client-safety",
+      "cq proxy candidate receipt",
+      "cq proxy candidate release",
+      "cq proxy operation",
+      "cq proxy rescue",
+      "cq proxy state",
+      "cq service"
+    ]
+  },
+  "fixtures": [
+    {
+      "command": "cq --help",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-root-help/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq --help",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-root-help/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq auth",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-auth/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq auth",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-auth/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-claude/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-claude/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude account",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-claude-account/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude account",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-claude-account/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude proxy",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude proxy",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-claude-proxy/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude proxy pin",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude proxy pin",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-claude-proxy-pin/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex account",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-account/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex account",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-account/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy canary",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-canary/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy canary",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-canary/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-credential-endpoint/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy fallback",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy fallback",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy fixture",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fixture/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy fixture",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fixture/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy hook",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-hook/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy hook",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-hook/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy lease",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-lease/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy lease",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-lease/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy pin",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy pin",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy policy",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-policy/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy policy",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-policy/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy pool",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pool/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy pool",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pool/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy prime",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy prime",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy readiness",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-readiness/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy readiness",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-readiness/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy reserve",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy reserve",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy session",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy session",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-session/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy validate",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-validate/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy validate",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-validate/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex reset",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex reset",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq gemini",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-gemini/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq gemini",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-gemini/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq gemini account",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-gemini-account/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq gemini account",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-gemini-account/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq models",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-models/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq models",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-models/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq models overlay",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-models-overlay/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq models overlay",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-models-overlay/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate client-safety",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-client-safety/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate client-safety",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-client-safety/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate receipt",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-receipt/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate receipt",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-receipt/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate release",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-release/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate release",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-release/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy operation",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-operation/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy operation",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-operation/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy rescue",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-rescue/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy rescue",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-rescue/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy state",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-state/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy state",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-state/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq service",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-service/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq service",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-service/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq auth refresh",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-auth-refresh/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq auth refresh",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-auth-refresh/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq auth refresh",
+      "scenario": "No-op",
+      "stream": "stdout",
+      "file": "text/cq-auth-refresh/03-no-op.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq auth refresh",
+      "scenario": "Partial",
+      "stream": "stdout",
+      "file": "text/cq-auth-refresh/04-partial.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq auth refresh",
+      "scenario": "Partial",
+      "stream": "stderr",
+      "file": "text/cq-auth-refresh/05-partial.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq auth refresh",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-auth-refresh/06-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq auth refresh",
+      "scenario": "Interrupted after a confirmed write",
+      "stream": "stdout",
+      "file": "text/cq-auth-refresh/07-interrupted-after-a-confirmed-write.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq auth refresh",
+      "scenario": "Interrupted after a confirmed write",
+      "stream": "stderr",
+      "file": "text/cq-auth-refresh/08-interrupted-after-a-confirmed-write.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq check",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-check/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq check",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-check/02-success.txt",
+      "task": "T12"
+    },
+    {
+      "command": "cq check",
+      "scenario": "Partial with stale data",
+      "stream": "stdout",
+      "file": "text/cq-check/03-partial-with-stale-data.txt",
+      "task": "T12"
+    },
+    {
+      "command": "cq check",
+      "scenario": "Partial with stale data",
+      "stream": "stderr",
+      "file": "text/cq-check/04-partial-with-stale-data.txt",
+      "task": "T12"
+    },
+    {
+      "command": "cq check",
+      "scenario": "Failure",
+      "stream": "stdout",
+      "file": "text/cq-check/05-failure.txt",
+      "task": "T12"
+    },
+    {
+      "command": "cq check",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-check/06-failure.txt",
+      "task": "T12"
+    },
+    {
+      "command": "cq check",
+      "scenario": "Timeout with no completed rows",
+      "stream": "stderr",
+      "file": "text/cq-check/07-timeout-with-no-completed-rows.txt",
+      "task": "T12"
+    },
+    {
+      "command": "cq claude account activate",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-activate/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude account activate",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-activate/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account activate",
+      "scenario": "No-op",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-activate/03-no-op.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account activate",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-claude-account-activate/04-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account activate",
+      "scenario": "Partial",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-activate/05-partial.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account activate",
+      "scenario": "Partial",
+      "stream": "stderr",
+      "file": "text/cq-claude-account-activate/06-partial.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account list",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-list/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude account list",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-list/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account list",
+      "scenario": "Empty",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-list/03-empty.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account list",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-claude-account-list/04-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account login",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-login/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude account login",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-login/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account login",
+      "scenario": "Success with activation",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-login/03-success-with-activation.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account login",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-claude-account-login/04-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account login",
+      "scenario": "Partial activation",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-login/05-partial-activation.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account login",
+      "scenario": "Partial activation",
+      "stream": "stderr",
+      "file": "text/cq-claude-account-login/06-partial-activation.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account login",
+      "scenario": "Timeout before credentials saved",
+      "stream": "stderr",
+      "file": "text/cq-claude-account-login/07-timeout-before-credentials-saved.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account remove",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-remove/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude account remove",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-remove/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account remove",
+      "scenario": "Confirmation declined",
+      "stream": "stdout",
+      "file": "text/cq-claude-account-remove/03-confirmation-declined.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account remove",
+      "scenario": "Confirmation declined",
+      "stream": "stderr",
+      "file": "text/cq-claude-account-remove/04-confirmation-declined.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account remove",
+      "scenario": "Failure with redirected input",
+      "stream": "stderr",
+      "file": "text/cq-claude-account-remove/05-failure-with-redirected-input.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq claude account remove",
+      "scenario": "Partial removal",
+      "stream": "stderr",
+      "file": "text/cq-claude-account-remove/06-partial-removal.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account activate",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-activate/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex account activate",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-activate/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account activate",
+      "scenario": "No-op",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-activate/03-no-op.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account activate",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-account-activate/04-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account activate",
+      "scenario": "Partial",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-activate/05-partial.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account activate",
+      "scenario": "Partial",
+      "stream": "stderr",
+      "file": "text/cq-codex-account-activate/06-partial.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account list",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-list/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex account list",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-list/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account list",
+      "scenario": "Empty",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-list/03-empty.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account list",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-account-list/04-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account login",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-login/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex account login",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-login/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account login",
+      "scenario": "Success with activation",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-login/03-success-with-activation.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account login",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-account-login/04-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account login",
+      "scenario": "Partial activation",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-login/05-partial-activation.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account login",
+      "scenario": "Partial activation",
+      "stream": "stderr",
+      "file": "text/cq-codex-account-login/06-partial-activation.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account login",
+      "scenario": "Timeout before credentials saved",
+      "stream": "stderr",
+      "file": "text/cq-codex-account-login/07-timeout-before-credentials-saved.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account remove",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-remove/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex account remove",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-remove/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account remove",
+      "scenario": "Confirmation declined",
+      "stream": "stdout",
+      "file": "text/cq-codex-account-remove/03-confirmation-declined.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account remove",
+      "scenario": "Confirmation declined",
+      "stream": "stderr",
+      "file": "text/cq-codex-account-remove/04-confirmation-declined.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account remove",
+      "scenario": "Failure with redirected input",
+      "stream": "stderr",
+      "file": "text/cq-codex-account-remove/05-failure-with-redirected-input.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex account remove",
+      "scenario": "Partial removal",
+      "stream": "stderr",
+      "file": "text/cq-codex-account-remove/06-partial-removal.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex reset list",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-list/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex reset list",
+      "scenario": "Success · all accounts",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-list/02-success-all-accounts.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset list",
+      "scenario": "Success · one account",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-list/03-success-one-account.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset list",
+      "scenario": "Empty",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-list/04-empty.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset list",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-list/05-failure.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset list",
+      "scenario": "Partial inventory",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-list/06-partial-inventory.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset list",
+      "scenario": "Partial inventory",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-list/07-partial-inventory.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset recommend",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-recommend/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex reset recommend",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-recommend/02-success.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset recommend",
+      "scenario": "No action recommended",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-recommend/03-no-action-recommended.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset recommend",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-recommend/04-failure.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset recommend",
+      "scenario": "Incomplete recommendation",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-recommend/05-incomplete-recommendation.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset recommend",
+      "scenario": "Incomplete recommendation",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-recommend/06-incomplete-recommendation.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-use/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-use/02-success.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Success",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-use/03-success.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Confirmation declined",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-use/04-confirmation-declined.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Confirmation declined",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-use/05-confirmation-declined.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-use/06-failure.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Indeterminate consumption",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-use/07-indeterminate-consumption.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Indeterminate consumption",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-use/08-indeterminate-consumption.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Known reset, incomplete postcheck",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-use/09-known-reset-incomplete-postcheck.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Known reset, incomplete postcheck",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-use/10-known-reset-incomplete-postcheck.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Already redeemed replay",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-use/11-already-redeemed-replay.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Already redeemed replay",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-use/12-already-redeemed-replay.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Nothing to reset",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-use/13-nothing-to-reset.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "Nothing to reset",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-use/14-nothing-to-reset.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "No credit returned by consumption",
+      "stream": "stdout",
+      "file": "text/cq-codex-reset-use/15-no-credit-returned-by-consumption.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq codex reset use",
+      "scenario": "No credit returned by consumption",
+      "stream": "stderr",
+      "file": "text/cq-codex-reset-use/16-no-credit-returned-by-consumption.txt",
+      "task": "T05"
+    },
+    {
+      "command": "cq claude proxy pin clear",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-clear/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude proxy pin clear",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-clear/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin clear",
+      "scenario": "No pin configured",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-clear/03-no-pin-configured.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin clear",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-claude-proxy-pin-clear/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin clear",
+      "scenario": "Timeout",
+      "stream": "stderr",
+      "file": "text/cq-claude-proxy-pin-clear/05-timeout.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin clear",
+      "scenario": "Timeout",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-clear/06-timeout.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin set",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-set/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude proxy pin set",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-set/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin set",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-claude-proxy-pin-set/03-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin set",
+      "scenario": "Timeout",
+      "stream": "stderr",
+      "file": "text/cq-claude-proxy-pin-set/04-timeout.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin set",
+      "scenario": "Timeout",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-set/05-timeout.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin show",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-show/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq claude proxy pin show",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-show/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin show",
+      "scenario": "No pin configured",
+      "stream": "stdout",
+      "file": "text/cq-claude-proxy-pin-show/03-no-pin-configured.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq claude proxy pin show",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-claude-proxy-pin-show/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq models list",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-models-list/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq models list",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-models-list/02-success.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models list",
+      "scenario": "Empty",
+      "stream": "stdout",
+      "file": "text/cq-models-list/03-empty.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models list",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-models-list/04-failure.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay add",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-models-overlay-add/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq models overlay add",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-models-overlay-add/02-success.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay add",
+      "scenario": "Failure before saving",
+      "stream": "stderr",
+      "file": "text/cq-models-overlay-add/03-failure-before-saving.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay add",
+      "scenario": "Saved overlay, partial publication",
+      "stream": "stdout",
+      "file": "text/cq-models-overlay-add/04-saved-overlay-partial-publication.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay add",
+      "scenario": "Saved overlay, partial publication",
+      "stream": "stderr",
+      "file": "text/cq-models-overlay-add/05-saved-overlay-partial-publication.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay prune",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-models-overlay-prune/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq models overlay prune",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-models-overlay-prune/02-success.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay prune",
+      "scenario": "No-op",
+      "stream": "stdout",
+      "file": "text/cq-models-overlay-prune/03-no-op.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay prune",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-models-overlay-prune/04-failure.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay remove",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-models-overlay-remove/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq models overlay remove",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-models-overlay-remove/02-success.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay remove",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-models-overlay-remove/03-failure.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay remove",
+      "scenario": "Removed overlay, partial publication",
+      "stream": "stdout",
+      "file": "text/cq-models-overlay-remove/04-removed-overlay-partial-publication.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models overlay remove",
+      "scenario": "Removed overlay, partial publication",
+      "stream": "stderr",
+      "file": "text/cq-models-overlay-remove/05-removed-overlay-partial-publication.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models refresh",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-models-refresh/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq models refresh",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-models-refresh/02-success.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models refresh",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-models-refresh/03-failure.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models refresh",
+      "scenario": "Partial publication",
+      "stream": "stdout",
+      "file": "text/cq-models-refresh/04-partial-publication.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq models refresh",
+      "scenario": "Partial publication",
+      "stream": "stderr",
+      "file": "text/cq-models-refresh/05-partial-publication.txt",
+      "task": "T06"
+    },
+    {
+      "command": "cq completion",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-completion/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq completion",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-completion/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq gemini account show",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-gemini-account-show/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq gemini account show",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-gemini-account-show/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq gemini account show",
+      "scenario": "Not configured",
+      "stream": "stdout",
+      "file": "text/cq-gemini-account-show/03-not-configured.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq gemini account show",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-gemini-account-show/04-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq help",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-help/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq help",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-help/02-success.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq help",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-help/03-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq version",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-version/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq version",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-version/02-success.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq version",
+      "scenario": "Unknown provenance",
+      "stream": "stdout",
+      "file": "text/cq-version/03-unknown-provenance.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq version",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-version/04-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-clear/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-clear/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "No-op · already absent",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-clear/03-no-op-already-absent.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-clear/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-clear/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-clear/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-clear/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-clear/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback clear",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-clear/09-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-set/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-set/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "No-op · same resolved account",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-set/03-no-op-same-resolved-account.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-set/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-set/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-set/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-set/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-set/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback set",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-set/09-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback show",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-show/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy fallback show",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-show/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback show",
+      "scenario": "Empty · no configured fallback",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fallback-show/03-empty-no-configured-fallback.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback show",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-show/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy fallback show",
+      "scenario": "Timeout · observation unavailable",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fallback-show/05-timeout-observation-unavailable.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-clear/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-clear/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "No-op · already absent",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-clear/03-no-op-already-absent.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-clear/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-clear/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-clear/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-clear/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-clear/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin clear",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-clear/09-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-set/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-set/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "No-op · same resolved account",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-set/03-no-op-same-resolved-account.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-set/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-set/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-set/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-set/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-set/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin set",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-set/09-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin show",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-show/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy pin show",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-show/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin show",
+      "scenario": "Empty · no configured pin",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pin-show/03-empty-no-configured-pin.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin show",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-show/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pin show",
+      "scenario": "Timeout · observation unavailable",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pin-show/05-timeout-observation-unavailable.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy lease invalidate",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-lease-invalidate/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy lease invalidate",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-lease-invalidate/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy lease invalidate",
+      "scenario": "No-op · no reusable affinity",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-lease-invalidate/03-no-op-no-reusable-affinity.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy lease invalidate",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-lease-invalidate/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy lease invalidate",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-lease-invalidate/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy lease redistribute",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-lease-redistribute/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy lease redistribute",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-lease-redistribute/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy lease redistribute",
+      "scenario": "Empty · no reusable affinity",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-lease-redistribute/03-empty-no-reusable-affinity.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy lease redistribute",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-lease-redistribute/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy lease redistribute",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-lease-redistribute/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy policy apply",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-policy-apply/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy policy apply",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-policy-apply/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy policy apply",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-policy-apply/03-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy policy apply",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-policy-apply/04-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy policy show",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-policy-show/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy policy show",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-policy-show/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy policy show",
+      "scenario": "Empty · published policy without collections",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-policy-show/03-empty-published-policy-without-collections.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy policy show",
+      "scenario": "Offline · application not checked",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-policy-show/04-offline-application-not-checked.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy policy show",
+      "scenario": "Success · retained capability and delegation evidence",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-policy-show/05-success-retained-capability-and-delegation-evidence.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy policy show",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-policy-show/06-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy policy show",
+      "scenario": "Timeout · observation unavailable",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-policy-show/07-timeout-observation-unavailable.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool rename",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pool-rename/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy pool rename",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pool-rename/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool rename",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pool-rename/03-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool rename",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pool-rename/04-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool set",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pool-set/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy pool set",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pool-set/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool set",
+      "scenario": "No-op · equivalent policy",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pool-set/03-no-op-equivalent-policy.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool set",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pool-set/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool set",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pool-set/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool value",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pool-value/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy pool value",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pool-value/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool value",
+      "scenario": "No-op · equivalent policy",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-pool-value/03-no-op-equivalent-policy.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool value",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pool-value/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy pool value",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-pool-value/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-disable/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-disable/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "No-op · same configured state",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-disable/03-no-op-same-configured-state.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-disable/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-disable/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-disable/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-disable/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-disable/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime disable",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-disable/09-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-enable/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-enable/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "No-op · same configured state",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-enable/03-no-op-same-configured-state.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-enable/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-enable/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-enable/06-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Timeout · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-enable/07-timeout-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-enable/08-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime enable",
+      "scenario": "Interruption · saved configuration",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-enable/09-interruption-saved-configuration.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime status",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-status/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy prime status",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-status/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime status",
+      "scenario": "Empty · no model overrides",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-prime-status/03-empty-no-model-overrides.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime status",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-status/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy prime status",
+      "scenario": "Timeout · observation unavailable",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-prime-status/05-timeout-observation-unavailable.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy readiness show",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-readiness-show/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy readiness show",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-readiness-show/02-success.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy readiness show",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-readiness-show/03-failure.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy readiness show",
+      "scenario": "Empty · no marker",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-readiness-show/04-empty-no-marker.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy reserve clear",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-clear/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy reserve clear",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-clear/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve clear",
+      "scenario": "No-op · already unconfigured",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-clear/03-no-op-already-unconfigured.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve clear",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-clear/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve clear",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-clear/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve disable",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-disable/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy reserve disable",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-disable/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve disable",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-disable/03-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve disable",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-disable/04-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve enable",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-enable/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy reserve enable",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-enable/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve enable",
+      "scenario": "No-op · already enabled",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-enable/03-no-op-already-enabled.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve enable",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-enable/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve enable",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-enable/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve set",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-set/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy reserve set",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-set/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve set",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-set/03-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve set",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-set/04-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve status",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-status/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy reserve status",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-status/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve status",
+      "scenario": "Threshold reached · valid observation",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-status/03-threshold-reached-valid-observation.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve status",
+      "scenario": "Unavailable observation · fail-closed reserve",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-status/04-unavailable-observation-fail-closed-reserve.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve status",
+      "scenario": "Empty · unconfigured reserve",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-status/05-empty-unconfigured-reserve.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve status",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-status/06-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve status",
+      "scenario": "Timeout · observation unavailable",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-status/07-timeout-observation-unavailable.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve windows",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-windows/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy reserve windows",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-windows/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve windows",
+      "scenario": "Empty · no observed windows",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-reserve-windows/03-empty-no-observed-windows.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve windows",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-windows/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy reserve windows",
+      "scenario": "Timeout · observation unavailable",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-reserve-windows/05-timeout-observation-unavailable.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session bind",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-bind/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy session bind",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-bind/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session bind",
+      "scenario": "No-op · same pool binding",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-bind/03-no-op-same-pool-binding.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session bind",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-session-bind/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session bind",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-session-bind/05-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session digest",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-digest/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy session digest",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-digest/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session digest",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-session-digest/03-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session digest",
+      "scenario": "Timeout · observation unavailable",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-session-digest/04-timeout-observation-unavailable.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session list",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-list/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy session list",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-list/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session list",
+      "scenario": "Empty · no bindings",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-list/03-empty-no-bindings.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session list",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-session-list/04-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session list",
+      "scenario": "Timeout · observation unavailable",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-session-list/05-timeout-observation-unavailable.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session show",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-show/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy session show",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-show/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session show",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-session-show/03-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session show",
+      "scenario": "Timeout · observation unavailable",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-session-show/04-timeout-observation-unavailable.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session unbind",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-unbind/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy session unbind",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-session-unbind/02-success.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session unbind",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-session-unbind/03-failure.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy session unbind",
+      "scenario": "Timeout · no receipt",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-session-unbind/04-timeout-no-receipt.txt",
+      "task": "T07"
+    },
+    {
+      "command": "cq codex proxy trace",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-trace/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy trace",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-trace/02-success.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy trace",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-trace/03-failure.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy trace",
+      "scenario": "Partial history · retained rotation gap",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-trace/04-partial-history-retained-rotation-gap.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy trace",
+      "scenario": "Partial history · retained rotation gap",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-trace/05-partial-history-retained-rotation-gap.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy trace",
+      "scenario": "Timeout · records already emitted",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-trace/06-timeout-records-already-emitted.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy trace",
+      "scenario": "Timeout · records already emitted",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-trace/07-timeout-records-already-emitted.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy trace",
+      "scenario": "Interrupted · records already emitted",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-trace/08-interrupted-records-already-emitted.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy trace",
+      "scenario": "Interrupted · records already emitted",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-trace/09-interrupted-records-already-emitted.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy canary start",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-canary-start/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy canary start",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-canary-start/02-success.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy canary start",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-canary-start/03-failure.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy canary start",
+      "scenario": "Failure after publication",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-canary-start/04-failure-after-publication.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy canary status",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-canary-status/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy canary status",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-canary-status/02-success.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy canary status",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-canary-status/03-failure.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy canary stop",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-canary-stop/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy canary stop",
+      "scenario": "Success · stop requested, still active",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-canary-stop/02-success-stop-requested-still-active.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy canary stop",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-canary-stop/03-failure.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy activate",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-activate/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy activate",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-activate/02-success.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy activate",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-activate/03-failure.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy activate",
+      "scenario": "Timeout · inspect before continuing",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-activate/04-timeout-inspect-before-continuing.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy finalise",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-finalise/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy finalise",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-finalise/02-success.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy finalise",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-finalise/03-failure.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy finalise",
+      "scenario": "Confirmation · pending",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-finalise/04-confirmation-pending.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy inspect",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-inspect/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy inspect",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-inspect/02-success.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy inspect",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-inspect/03-failure.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy prepare",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-prepare/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy prepare",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-prepare/02-success.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy prepare",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-prepare/03-failure.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy resume",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-resume/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy resume",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-resume/02-success.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy resume",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-resume/03-failure.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy rollback",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-rollback/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy rollback",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-rollback/02-success.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy rollback",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-rollback/03-failure.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy credential-endpoint legacy rollback",
+      "scenario": "Timeout · inspect before continuing",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-credential-endpoint-legacy-rollback/04-timeout-inspect-before-continuing.txt",
+      "task": "T09"
+    },
+    {
+      "command": "cq codex proxy fixture create",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fixture-create/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy fixture create",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-fixture-create/02-success.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy fixture create",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-fixture-create/03-failure.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy hook stop",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-hook-stop/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy hook stop",
+      "scenario": "Success · no receipt",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-hook-stop/02-success-no-receipt.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy hook stop",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-hook-stop/03-failure.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy hook stop",
+      "scenario": "Failure · lookup deadline",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-hook-stop/04-failure-lookup-deadline.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy hook stop",
+      "scenario": "Success · retained receipt protocol",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-hook-stop/05-success-retained-receipt-protocol.txt",
+      "task": "T14"
+    },
+    {
+      "command": "cq codex proxy validate http",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-validate-http/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy validate http",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-validate-http/02-success.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy validate http",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-validate-http/03-failure.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy validate http",
+      "scenario": "Timeout · completion unknown",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-validate-http/04-timeout-completion-unknown.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy validate websocket",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-validate-websocket/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex proxy validate websocket",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-proxy-validate-websocket/02-success.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy validate websocket",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-validate-websocket/03-failure.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq codex proxy validate websocket",
+      "scenario": "Timeout · no readiness recorded",
+      "stream": "stderr",
+      "file": "text/cq-codex-proxy-validate-websocket/04-timeout-no-readiness-recorded.txt",
+      "task": "T08"
+    },
+    {
+      "command": "cq proxy candidate prepare",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-prepare/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate prepare",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-prepare/02-success.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate prepare",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-prepare/03-failure.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate prepare",
+      "scenario": "Timeout · inspect retained candidate",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-prepare/04-timeout-inspect-retained-candidate.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate receipt show",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-receipt-show/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate receipt show",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-receipt-show/02-success.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate receipt show",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-receipt-show/03-failure.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate receipt show",
+      "scenario": "Failure · retained conflicted receipt",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-receipt-show/04-failure-retained-conflicted-receipt.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate receipt show",
+      "scenario": "Failure · retained conflicted receipt",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-receipt-show/05-failure-retained-conflicted-receipt.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate client-safety refresh",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-client-safety-refresh/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate client-safety refresh",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-client-safety-refresh/02-failure.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate start",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-start/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate start",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-start/02-failure.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate release activate",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-release-activate/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate release activate",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-release-activate/02-failure.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate release validate",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-release-validate/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate release validate",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-release-validate/02-failure.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate status",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-status/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate status",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-status/02-success.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate status",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-status/03-failure.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate status",
+      "scenario": "Success · pending external effect",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-status/04-success-pending-external-effect.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate stop",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-stop/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate stop",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-stop/02-success.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate stop",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-stop/03-failure.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate remove",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-remove/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy candidate remove",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-proxy-candidate-remove/02-success.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy candidate remove",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-candidate-remove/03-failure.txt",
+      "task": "T13"
+    },
+    {
+      "command": "cq proxy health",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-health/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy health",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-proxy-health/02-success.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy health",
+      "scenario": "Failure",
+      "stream": "stdout",
+      "file": "text/cq-proxy-health/03-failure.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy health",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-health/04-failure.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy health",
+      "scenario": "Failure · reachable but unhealthy",
+      "stream": "stdout",
+      "file": "text/cq-proxy-health/05-failure-reachable-but-unhealthy.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy health",
+      "scenario": "Failure · reachable but unhealthy",
+      "stream": "stderr",
+      "file": "text/cq-proxy-health/06-failure-reachable-but-unhealthy.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy operation status",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-operation-status/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy operation status",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-proxy-operation-status/02-success.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy operation status",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-operation-status/03-failure.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy operation status",
+      "scenario": "Success · idle coordinator",
+      "stream": "stdout",
+      "file": "text/cq-proxy-operation-status/04-success-idle-coordinator.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy rescue enter",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-rescue-enter/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy rescue enter",
+      "scenario": "Success · transition acknowledged, drain pending",
+      "stream": "stdout",
+      "file": "text/cq-proxy-rescue-enter/02-success-transition-acknowledged-drain-pending.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy rescue enter",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-rescue-enter/03-failure.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy rescue enter",
+      "scenario": "Timeout · inspect state before retrying",
+      "stream": "stderr",
+      "file": "text/cq-proxy-rescue-enter/04-timeout-inspect-state-before-retrying.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy rescue exit",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-rescue-exit/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy rescue exit",
+      "scenario": "Success · transition acknowledged, drain pending",
+      "stream": "stdout",
+      "file": "text/cq-proxy-rescue-exit/02-success-transition-acknowledged-drain-pending.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy rescue exit",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-rescue-exit/03-failure.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy rescue exit",
+      "scenario": "Timeout · inspect state before retrying",
+      "stream": "stderr",
+      "file": "text/cq-proxy-rescue-exit/04-timeout-inspect-state-before-retrying.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy rescue status",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-rescue-status/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy rescue status",
+      "scenario": "Success · normal",
+      "stream": "stdout",
+      "file": "text/cq-proxy-rescue-status/02-success-normal.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy rescue status",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-rescue-status/03-failure.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy serve",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-serve/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy serve",
+      "scenario": "Success · foreground run ended by SIGTERM",
+      "stream": "stdout",
+      "file": "text/cq-proxy-serve/02-success-foreground-run-ended-by-sigterm.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy serve",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-serve/03-failure.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy serve",
+      "scenario": "Interruption · completed shutdown after Ctrl-C",
+      "stream": "stdout",
+      "file": "text/cq-proxy-serve/04-interruption-completed-shutdown-after-ctrl-c.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy serve",
+      "scenario": "Interruption · completed shutdown after Ctrl-C",
+      "stream": "stderr",
+      "file": "text/cq-proxy-serve/05-interruption-completed-shutdown-after-ctrl-c.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy state initialise",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-state-initialise/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy state initialise",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-proxy-state-initialise/02-success.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy state initialise",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-state-initialise/03-failure.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy state initialise",
+      "scenario": "Success · safely reused state",
+      "stream": "stdout",
+      "file": "text/cq-proxy-state-initialise/04-success-safely-reused-state.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy state initialise",
+      "scenario": "Partial · creation committed, later binding failed",
+      "stream": "stdout",
+      "file": "text/cq-proxy-state-initialise/05-partial-creation-committed-later-binding-failed.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy state initialise",
+      "scenario": "Partial · creation committed, later binding failed",
+      "stream": "stderr",
+      "file": "text/cq-proxy-state-initialise/06-partial-creation-committed-later-binding-failed.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy state initialise",
+      "scenario": "Interruption · preserve known creation",
+      "stream": "stdout",
+      "file": "text/cq-proxy-state-initialise/07-interruption-preserve-known-creation.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy state initialise",
+      "scenario": "Interruption · preserve known creation",
+      "stream": "stderr",
+      "file": "text/cq-proxy-state-initialise/08-interruption-preserve-known-creation.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy status",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-proxy-status/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq proxy status",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-proxy-status/02-success.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy status",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-proxy-status/03-failure.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq proxy status",
+      "scenario": "Timeout · no complete snapshot",
+      "stream": "stderr",
+      "file": "text/cq-proxy-status/04-timeout-no-complete-snapshot.txt",
+      "task": "T10"
+    },
+    {
+      "command": "cq service install",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-service-install/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq service install",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-service-install/02-success.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service install",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-service-install/03-failure.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service install",
+      "scenario": "Partial · proxy started, refresh failed",
+      "stream": "stdout",
+      "file": "text/cq-service-install/04-partial-proxy-started-refresh-failed.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service install",
+      "scenario": "Partial · proxy started, refresh failed",
+      "stream": "stderr",
+      "file": "text/cq-service-install/05-partial-proxy-started-refresh-failed.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service start",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-service-start/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq service start",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-service-start/02-success.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service start",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-service-start/03-failure.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service start",
+      "scenario": "Timeout · selected verification incomplete",
+      "stream": "stderr",
+      "file": "text/cq-service-start/04-timeout-selected-verification-incomplete.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service restart",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-service-restart/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq service restart",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-service-restart/02-success.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service restart",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-service-restart/03-failure.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service restart",
+      "scenario": "Timeout · restart completion unknown",
+      "stream": "stderr",
+      "file": "text/cq-service-restart/04-timeout-restart-completion-unknown.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service status",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-service-status/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq service status",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-service-status/02-success.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service status",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-service-status/03-failure.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service status",
+      "scenario": "Success · component absent",
+      "stream": "stdout",
+      "file": "text/cq-service-status/04-success-component-absent.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service status",
+      "scenario": "Failure · strict absence",
+      "stream": "stdout",
+      "file": "text/cq-service-status/05-failure-strict-absence.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service status",
+      "scenario": "Failure · strict absence",
+      "stream": "stderr",
+      "file": "text/cq-service-status/06-failure-strict-absence.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service stop",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-service-stop/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq service stop",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-service-stop/02-success.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service stop",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-service-stop/03-failure.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service stop",
+      "scenario": "Timeout · stop completion unknown",
+      "stream": "stderr",
+      "file": "text/cq-service-stop/04-timeout-stop-completion-unknown.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service uninstall",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-service-uninstall/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq service uninstall",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-service-uninstall/02-success.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service uninstall",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-service-uninstall/03-failure.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq codex dots",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex dots",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots/02-failure.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex dots install",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-install/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex dots install",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-install/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots install",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots-install/03-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots start",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-start/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex dots start",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-start/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots start",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots-start/03-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots start",
+      "scenario": "Pending · restart required",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-start/04-pending-restart-required.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots start",
+      "scenario": "Pending · restart required",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots-start/05-pending-restart-required.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots stop",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-stop/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex dots stop",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-stop/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots stop",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots-stop/03-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots status",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-status/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex dots status",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-status/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots status",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots-status/03-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots sync",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-sync/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex dots sync",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-sync/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots sync",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots-sync/03-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots list",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-list/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex dots list",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-list/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots list",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots-list/03-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots prime",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-prime/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex dots prime",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-prime/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots prime",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots-prime/03-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots broadcast",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-broadcast/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex dots broadcast",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-broadcast/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots broadcast",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots-broadcast/03-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots broadcast",
+      "scenario": "Partial · delivery unknown",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-broadcast/04-partial-delivery-unknown.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots broadcast",
+      "scenario": "Partial · delivery unknown",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots-broadcast/05-partial-delivery-unknown.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots board",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-board/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq codex dots board",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-codex-dots-board/02-success.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq codex dots board",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-codex-dots-board/03-failure.txt",
+      "task": "T04"
+    },
+    {
+      "command": "cq completion",
+      "scenario": "Success — bash raw protocol",
+      "stream": "stdout",
+      "file": "raw/completion.bash",
+      "task": "T03"
+    },
+    {
+      "command": "cq completion",
+      "scenario": "Success — zsh raw protocol",
+      "stream": "stdout",
+      "file": "raw/completion.zsh",
+      "task": "T03"
+    },
+    {
+      "command": "cq completion",
+      "scenario": "Success — fish raw protocol",
+      "stream": "stdout",
+      "file": "raw/completion.fish",
+      "task": "T03"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Help",
+      "stream": "stdout",
+      "file": "text/cq-service-upgrade/01-help.txt",
+      "task": "T03"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Success",
+      "stream": "stdout",
+      "file": "text/cq-service-upgrade/02-success.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Success · native JSON receipt",
+      "stream": "stdout",
+      "file": "text/cq-service-upgrade/03-success-native-json-receipt.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Failure",
+      "stream": "stderr",
+      "file": "text/cq-service-upgrade/04-failure.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · active turns",
+      "stream": "stdout",
+      "file": "text/cq-service-upgrade/05-deferred-active-turns.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · active turns",
+      "stream": "stderr",
+      "file": "text/cq-service-upgrade/06-deferred-active-turns.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · native JSON receipt",
+      "stream": "stdout",
+      "file": "text/cq-service-upgrade/07-deferred-native-json-receipt.txt",
+      "task": "T11"
+    },
+    {
+      "command": "cq service upgrade",
+      "scenario": "Deferred · native JSON receipt",
+      "stream": "stderr",
+      "file": "text/cq-service-upgrade/08-deferred-native-json-receipt.txt",
+      "task": "T11"
+    }
+  ],
+  "raw_protocol_commands": [
+    "cq completion",
+    "cq codex proxy trace",
+    "cq codex proxy hook stop",
+    "cq service upgrade"
+  ]
+}

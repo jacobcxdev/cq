@@ -1,0 +1,46 @@
+cq codex dots install
+Install multi-account Dots for the normal native app.
+
+Usage
+  cq codex dots install [OPTIONS]
+
+Create the private installation, discover account profiles, and start the Dots adapter.
+
+The result reports whether setup is ready or needs onboarding or a normal app restart.
+
+Options
+  --root ABS_PATH
+      Private Dots installation directory (default ~/.local/share/cq/dots). Accept before or after
+      the leaf command. This is not a global CQ option.
+      Must be a clean absolute path when supplied.
+      Must not contain the home directory or overlap native app, credential or application-support
+      paths.
+  --mode MODE
+      Use the normal native profile or an isolated research profile. Default: native.
+      Exact enum native or isolated.
+  --app ABS_PATH
+      Native app bundle. Default: /Applications/ChatGPT.app.
+      Clean absolute path.
+  --system-auth ABS_PATH
+      Read-only native Codex authentication path. Default: ~/.codex/auth.json.
+      Clean absolute path when supplied.
+  --cq-accounts ABS_PATH
+      Read-only CQ Codex accounts directory. Default: ~/.codex/accounts.
+      Clean absolute path when supplied.
+  --account-source ABS_PATH
+      Optional read-only CodexBar account directory. Omission adds no source.
+      Clean absolute path when supplied.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable. Long/short duplicates are rejected.
+
+Examples
+  Install Dots using native mode and default paths.
+  cq codex dots install
+  Install an isolated research profile in a separate root.
+  cq codex dots install --root /tmp/cq-dots --mode isolated

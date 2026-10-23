@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/jacobcxdev/cq/internal/app"
+	"github.com/jacobcxdev/cq/internal/cli"
 	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
@@ -112,7 +113,7 @@ func ttyLabelWidth(report app.Report) int {
 			width = max(width, lipgloss.Width("Proxy"))
 		}
 		for _, pool := range providerReport.ProxyPools {
-			width = max(width, lipgloss.Width(pool.Name))
+			width = max(width, lipgloss.Width(cli.HumanValue(pool.Name)))
 		}
 	}
 	return width
@@ -141,9 +142,13 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 			}
 		}
 
+		if r.Error != nil && r.Error.Code == "not_configured" {
+			errMsg = "not configured"
+		}
+
 		header := fmt.Sprintf("  %s  %s",
 			boldRedStyle.Render(icon),
-			boldStyle.Render(padTTYLabel(displayName, labelWidth)),
+			boldStyle.Render(padTTYLabel(cli.HumanValue(displayName), labelWidth)),
 		)
 		label := r.Plan
 		if label == "" {
@@ -155,12 +160,12 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 					label += fmt.Sprintf(" %dx", m)
 				}
 			}
-			header += " " + boldDimItalicStyle.Render(label)
+			header += " " + boldDimItalicStyle.Render(cli.HumanValue(label))
 		}
 		if r.Email != "" {
-			header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
+			header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", cli.HumanValue(r.Email)))
 		}
-		header += " " + brightBlackStyle.Render("\u00b7") + " " + boldRedStyle.Render(errMsg)
+		header += " " + brightBlackStyle.Render("\u00b7") + " " + boldRedStyle.Render(cli.HumanValue(errMsg))
 		return header, nil
 	}
 
@@ -172,7 +177,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 
 	header := fmt.Sprintf("  %s  %s",
 		iconStyle.Render(icon),
-		boldStyle.Render(padTTYLabel(displayName, labelWidth)),
+		boldStyle.Render(padTTYLabel(cli.HumanValue(displayName), labelWidth)),
 	)
 
 	label := r.Plan
@@ -185,11 +190,11 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 				label += fmt.Sprintf(" %dx", m)
 			}
 		}
-		header += " " + boldDimItalicStyle.Render(label)
+		header += " " + boldDimItalicStyle.Render(cli.HumanValue(label))
 	}
 
 	if r.Email != "" {
-		header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
+		header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", cli.HumanValue(r.Email)))
 	}
 
 	if r.CacheAge > 0 && r.Error != nil {
@@ -206,7 +211,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 			}
 		}
 		header += " " + brightBlackStyle.Render("\u00b7") + " " +
-			boldRedStyle.Render(errMsg) + " " +
+			boldRedStyle.Render(cli.HumanValue(errMsg)) + " " +
 			dimStyle.Render(fmt.Sprintf("\u2014 using cache from %s ago", fmtDuration(r.CacheAge)))
 	}
 
@@ -224,7 +229,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 		if bucket == "" {
 			currentBucket = ""
 		} else if bucket != currentBucket {
-			rows = append(rows, TTYWindowRow{Label: "       " + boldDimStyle.Render(bucket)})
+			rows = append(rows, TTYWindowRow{Label: "       " + boldDimStyle.Render(cli.HumanValue(bucket))})
 			currentBucket = bucket
 		}
 
@@ -234,7 +239,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 			w.ResetAtUnix = quota.DefaultResetEpoch(periodS, nowEpoch)
 		}
 
-		row := TTYWindowRow{Label: fmt.Sprintf("       %5s  ", quota.BaseWindow(winName))}
+		row := TTYWindowRow{Label: fmt.Sprintf("       %5s  ", cli.HumanValue(string(quota.BaseWindow(winName))))}
 
 		var pace int
 		hasPace := false
@@ -311,7 +316,7 @@ func buildAggHeader(agg *app.AggregateReport, labelWidth int) string {
 	header := fmt.Sprintf("  %s  %s %s",
 		iconStyle.Render(providerIcon(agg.ProviderID)),
 		boldStyle.Render(padTTYLabel(providerDisplayName(agg.ProviderID), labelWidth)),
-		boldDimItalicStyle.Render(label),
+		boldDimItalicStyle.Render(cli.HumanValue(label)),
 	)
 	return header
 }
@@ -337,10 +342,10 @@ func buildProxyHeader(id provider.ID, label string, eligibility *app.ProxyEligib
 	}
 	header := fmt.Sprintf("  %s  %s",
 		iconStyle.Render(providerIcon(id)),
-		boldStyle.Render(padTTYLabel(label, labelWidth)),
+		boldStyle.Render(padTTYLabel(cli.HumanValue(label), labelWidth)),
 	)
 	if eligibility.Aggregate != nil && eligibility.Aggregate.Summary.Label != "" {
-		header += " " + boldDimItalicStyle.Render(eligibility.Aggregate.Summary.Label)
+		header += " " + boldDimItalicStyle.Render(cli.HumanValue(eligibility.Aggregate.Summary.Label))
 	}
 	return header
 }
@@ -355,12 +360,12 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 		if bucket == "" {
 			currentBucket = ""
 		} else if bucket != currentBucket {
-			rows = append(rows, TTYWindowRow{Label: "       " + boldDimStyle.Render(bucket)})
+			rows = append(rows, TTYWindowRow{Label: "       " + boldDimStyle.Render(cli.HumanValue(bucket))})
 			currentBucket = bucket
 		}
 
 		a := windows[winName]
-		row := TTYWindowRow{Label: fmt.Sprintf("       %5s  ", quota.BaseWindow(winName))}
+		row := TTYWindowRow{Label: fmt.Sprintf("       %5s  ", cli.HumanValue(string(quota.BaseWindow(winName))))}
 
 		var barForce lipgloss.Style
 		if a.RemainingPct <= 0 {

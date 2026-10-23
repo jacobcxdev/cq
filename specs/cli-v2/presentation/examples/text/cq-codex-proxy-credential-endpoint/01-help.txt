@@ -1,0 +1,24 @@
+cq codex proxy credential-endpoint
+Maintain the Codex local credential-owner endpoint.
+
+Usage
+  cq codex proxy credential-endpoint <COMMAND> [OPTIONS]
+
+This endpoint is the credential-owner socket, not the HTTP proxy listener.
+
+Commands
+  legacy   Inspect and migrate the legacy endpoint protocol.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  Boolean flags default to false. Use a bare flag or =true / =false.
+  Specify each flag once; long and short spellings are the same flag.
+
+Related commands
+  cq help codex proxy   Codex proxy controls.
+
+Examples
+  Inspect legacy endpoint maintenance commands
+  cq codex proxy credential-endpoint legacy --help

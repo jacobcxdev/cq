@@ -1,0 +1,7 @@
+Authentication refresh · Interrupted
+  alex@example.test · Refreshed
+    Reference: account-alex
+    Credentials: Saved
+
+Credentials saved for 1 account
+Remaining refresh outcomes: unknown

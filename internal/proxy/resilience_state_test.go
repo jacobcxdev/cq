@@ -130,3 +130,55 @@ func TestProxyWorkerStateCoexistsWithRescueAuthority(t *testing.T) {
 		t.Fatal("worker acquired supervisor-owned runtime mode authority")
 	}
 }
+
+func TestProxyResilienceStateInitialisationReceipt(t *testing.T) {
+	options := ProxyResilienceStateOptions{FS: fsutil.OSFileSystem{}, Root: filepath.Join(t.TempDir(), "state"), Random: bytes.NewReader(bytes.Repeat([]byte{0x41}, 4096)), Now: time.Now}
+	first, err := InitialiseProxyResilienceStateWithResult(context.Background(), options)
+	if err != nil || !first.Created {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+	key, err := os.ReadFile(filepath.Join(options.Root, proxyResilienceKeyName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := InitialiseProxyResilienceStateWithResult(context.Background(), options)
+	if err != nil || second.Created {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+	if err := InitialiseProxyResilienceState(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(filepath.Join(options.Root, proxyResilienceKeyName))
+	if err != nil || !bytes.Equal(key, after) {
+		t.Fatal("authority rotated")
+	}
+}
+func TestProxyResilienceStateInitialisationLaterFailureReceipt(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "state")
+	injected := errors.New("injected post-key failure")
+	fsys := &resilienceReceiptFaultFS{root: root, err: injected}
+	options := ProxyResilienceStateOptions{FS: fsys, Root: root, Random: bytes.NewReader(bytes.Repeat([]byte{0x41}, 4096)), Now: time.Now}
+	result, err := InitialiseProxyResilienceStateWithResult(context.Background(), options)
+	if !result.Created || !errors.Is(err, injected) {
+		t.Fatalf("receipt=%+v err=%v", result, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, proxyResilienceKeyName)); err != nil || len(data) != 32 {
+		t.Fatalf("key was not durable: length=%d err=%v", len(data), err)
+	}
+	if err := InitialiseProxyResilienceState(context.Background(), options); !errors.Is(err, injected) {
+		t.Fatalf("wrapper error=%v", err)
+	}
+}
+
+type resilienceReceiptFaultFS struct {
+	fsutil.OSFileSystem
+	root string
+	err  error
+}
+
+func (f *resilienceReceiptFaultFS) OpenSecureDirectory(path string) (fsutil.SecureDirectory, error) {
+	if filepath.Base(path) == proxyRoutingDirectoryName {
+		return nil, f.err
+	}
+	return f.OSFileSystem.OpenSecureDirectory(path)
+}

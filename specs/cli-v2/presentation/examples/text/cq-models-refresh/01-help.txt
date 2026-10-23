@@ -1,0 +1,28 @@
+cq models refresh
+Refresh model sources and publish client model caches.
+
+Usage
+  cq models refresh [options]
+
+Merges native models with overlays and validates routing ownership before publication.
+Uses the healthy proxy registry, otherwise local refresh. A reachable proxy error is
+reported rather than retried through another owner. Missing optional client files are
+reported as skipped. No service is installed or restarted.
+No overall deadline: proxy refresh 5s; local source refresh 30s; HTTP requests 30s;
+legacy health probe 2s. File publication has no separate deadline.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq models list
+  cq models overlay
+
+Examples
+  Refresh and publish model caches
+    cq models refresh
+  Inspect source and publication results
+    cq models refresh --json

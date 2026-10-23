@@ -60,7 +60,10 @@ func (fsys codexInstalledHTTPValidationFileSystem) UserHomeDir() (string, error)
 	return fsys.home, nil
 }
 
-func newCodexInstalledHTTPValidationRuntimeCore(ctx context.Context) (core *codexInstalledHTTPValidationRuntimeCore, returnErr error) {
+func newCodexInstalledHTTPValidationRuntimeCore(ctx context.Context) (*codexInstalledHTTPValidationRuntimeCore, error) {
+	return newCodexInstalledHTTPValidationRuntimeCoreWithCleanup(ctx, nil)
+}
+func newCodexInstalledHTTPValidationRuntimeCoreWithCleanup(ctx, cleanup context.Context) (core *codexInstalledHTTPValidationRuntimeCore, returnErr error) {
 	if ctx == nil {
 		return nil, errors.New("Codex installed HTTP validation context unavailable")
 	}
@@ -68,15 +71,21 @@ func newCodexInstalledHTTPValidationRuntimeCore(ctx context.Context) (core *code
 		return nil, err
 	}
 	core = &codexInstalledHTTPValidationRuntimeCore{}
+	ownedCore := core
+	closeCore := func() error {
+		if cleanup != nil {
+			return ownedCore.closeWithContext(cleanup)
+		}
+		return ownedCore.close()
+	}
 	defer func() {
 		if recover() != nil {
-			_ = core.close()
+			returnErr = errors.Join(errors.New("Codex installed HTTP validation runtime panicked"), closeCore())
 			core = nil
-			returnErr = errors.New("Codex installed HTTP validation runtime panicked")
 			return
 		}
 		if returnErr != nil {
-			_ = core.close()
+			returnErr = errors.Join(returnErr, closeCore())
 			core = nil
 		}
 	}()
@@ -263,11 +272,16 @@ func (core *codexInstalledHTTPValidationRuntimeCore) close() error {
 }
 
 func (core *codexInstalledHTTPValidationRuntimeCore) closeWithTimeout(timeout time.Duration) error {
-	if core == nil {
-		return nil
-	}
 	if timeout <= 0 {
 		return errors.New("Codex installed HTTP validation close timeout unavailable")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return core.closeWithContext(ctx)
+}
+func (core *codexInstalledHTTPValidationRuntimeCore) closeWithContext(ctx context.Context) error {
+	if core == nil {
+		return nil
 	}
 	core.closeMu.Lock()
 	defer core.closeMu.Unlock()
@@ -275,16 +289,20 @@ func (core *codexInstalledHTTPValidationRuntimeCore) closeWithTimeout(timeout ti
 		return core.closeErr
 	}
 	if core.handler != nil {
-		drainCtx, cancelDrain := context.WithTimeout(context.Background(), timeout)
-		drainErr := core.handler.CloseAndDrain(drainCtx)
-		cancelDrain()
+		drainErr := core.handler.CloseAndDrain(ctx)
 		if drainErr != nil {
-			return drainErr
+			// An expired context must not retain an already drained owned runtime.
+			// Active requests still retain authority until a later successful drain.
+			select {
+			case <-core.handler.requests.closeAdmission():
+			default:
+				return drainErr
+			}
 		}
 	}
 	var closeErr error
 	if core.upstream != nil {
-		closeErr = errors.Join(closeErr, core.upstream.close())
+		closeErr = errors.Join(closeErr, core.upstream.closeWithContext(ctx))
 	}
 	if core.continuity != nil {
 		closeErr = errors.Join(closeErr, core.continuity.Close())
@@ -300,7 +318,7 @@ func (core *codexInstalledHTTPValidationRuntimeCore) closeWithTimeout(timeout ti
 	core.inventory = nil
 	core.closed = true
 	core.closeErr = closeErr
-	return core.closeErr
+	return errors.Join(core.closeErr, ctx.Err())
 }
 
 func removeCodexInstalledHTTPValidationTempRoot(root string) error {
@@ -692,6 +710,9 @@ func (upstream *codexInstalledHTTPValidationUpstream) recordServeError(err error
 }
 
 func (upstream *codexInstalledHTTPValidationUpstream) close() error {
+	return upstream.closeWithContext(nil)
+}
+func (upstream *codexInstalledHTTPValidationUpstream) closeWithContext(caller context.Context) error {
 	if upstream == nil {
 		return nil
 	}
@@ -699,18 +720,28 @@ func (upstream *codexInstalledHTTPValidationUpstream) close() error {
 		upstream.mu.Lock()
 		upstream.closing = true
 		upstream.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		shutdownErr := upstream.server.Shutdown(ctx)
+		ctx := caller
+		cancel := func() {}
+		if ctx == nil {
+			ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+		}
+		shutdownErr := shutdownCodexAcceptanceServerContext(ctx, upstream.server)
 		cancel()
 		listenerErr := upstream.listener.Close()
 		if errors.Is(listenerErr, net.ErrClosed) {
 			listenerErr = nil
 		}
+		joinCtx := caller
+		cancelJoin := func() {}
+		if joinCtx == nil {
+			joinCtx, cancelJoin = context.WithTimeout(context.Background(), 2*time.Second)
+		}
 		select {
 		case <-upstream.done:
-		case <-time.After(2 * time.Second):
-			shutdownErr = errors.Join(shutdownErr, errors.New("Codex validation synthetic upstream did not stop"))
+		case <-joinCtx.Done():
+			shutdownErr = errors.Join(shutdownErr, joinCtx.Err())
 		}
+		cancelJoin()
 		upstream.mu.Lock()
 		serveErr := upstream.serveErr
 		upstream.mu.Unlock()

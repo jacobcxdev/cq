@@ -1,0 +1,28 @@
+cq codex proxy hook stop
+Return a private-data-safe routing receipt for a Codex Stop hook.
+
+Usage
+  cq codex proxy hook stop [OPTIONS]
+
+Reads one UTF-8 JSON object from stdin, at most 16,777,216 bytes; only whitespace may follow.
+Requires hook_event_name "Stop", nonempty session_id and turn_id; IDs at most 4,096 bytes,
+without C0/DEL controls. Duplicate required keys fail. Extra event fields are ignored.
+No positional arguments or command-specific options. Total lookup deadline: 5s.
+Default stdout is one raw JSON object plus newline: systemMessage receipt, or {} if absent.
+No colour, banners or wrapping. --json is a manual diagnostic envelope, not hook integration.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+
+  Boolean flags accept a bare flag, =true or =false; default false.
+  Options are not repeatable unless marked. Long/short duplicates are rejected.
+  --version --json emits the version envelope; raw stream exceptions are described above.
+
+Related commands
+  cq codex proxy trace
+
+Examples
+  Read a saved synthetic Stop event:
+  cq codex proxy hook stop < /Users/alex/cq-inputs/stop-event.json

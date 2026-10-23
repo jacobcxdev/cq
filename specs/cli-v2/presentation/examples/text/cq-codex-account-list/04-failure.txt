@@ -1,0 +1,3 @@
+Error · Account inventory is unavailable.
+  Code: account_inventory_unavailable
+  Command: cq codex account list

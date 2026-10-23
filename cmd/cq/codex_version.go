@@ -2,21 +2,25 @@ package main
 
 import (
 	"context"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // fallbackCodexClientVersion is the pinned value used when no other source
 // yields a usable Codex client_version. Update when the Codex API starts
 // rejecting it; verified to be accepted by /models.
 const fallbackCodexClientVersion = "0.124.0"
+
+var (
+	probeCodexBinaryVersionFn  = probeCodexBinaryVersion
+	probeCodexDesktopVersionFn = probeCodexDesktopVersion
+)
 
 // codexVersionResolver resolves the Codex client_version string used when
 // querying the upstream /models endpoint. Dependencies are injected so the
@@ -75,17 +79,14 @@ func (r codexVersionResolver) Resolve() string {
 func defaultCodexClientVersion() string {
 	fsys := fsutil.OSFileSystem{}
 	cachePath := ""
-	if home, err := fsys.UserHomeDir(); err == nil {
-		codexHome := os.Getenv("CODEX_HOME")
-		if codexHome == "" {
-			codexHome = filepath.Join(home, ".codex")
-		}
-		cachePath = filepath.Join(codexHome, "models_cache.json")
+	if paths, err := userdirs.DefaultClientPaths("codex"); err == nil {
+		cachePath = paths.CodexVersion
 	}
+
 	return codexVersionResolver{
 		FS:                fsys,
 		CachePath:         cachePath,
-		SubprocessVersion: probeCodexBinaryVersion,
+		SubprocessVersion: probeCodexBinaryVersionFn,
 		Fallback:          fallbackCodexClientVersion,
 	}.Resolve()
 }
@@ -95,24 +96,20 @@ func defaultCodexClientVersion() string {
 // its client_version may omit a Desktop prerelease suffix.
 func defaultCodexRoutingClientBuild() string {
 	return codexRoutingBuildResolver{
-		DesktopVersion:    probeCodexDesktopVersion,
+		DesktopVersion:    probeCodexDesktopVersionFn,
 		CachedVersion:     cachedCodexClientVersion,
-		SubprocessVersion: probeCodexBinaryVersion,
+		SubprocessVersion: probeCodexBinaryVersionFn,
 		Fallback:          fallbackCodexClientVersion,
 	}.Resolve()
 }
 
 func cachedCodexClientVersion() string {
 	fsys := fsutil.OSFileSystem{}
-	home, err := fsys.UserHomeDir()
+	paths, err := userdirs.DefaultClientPaths("codex")
 	if err != nil {
 		return ""
 	}
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		codexHome = filepath.Join(home, ".codex")
-	}
-	return modelregistry.DiscoverCodexClientVersion(fsys, filepath.Join(codexHome, "models_cache.json"))
+	return modelregistry.DiscoverCodexClientVersion(fsys, paths.CodexVersion)
 }
 
 // probeCodexBinaryVersion runs `codex --version` with a short timeout and

@@ -1,0 +1,28 @@
+cq gemini account show
+Show the externally managed Gemini account.
+
+Usage
+  cq gemini account show [options]
+
+Inspects the single Antigravity-managed identity locally. Configured does not mean
+credentials are valid. No login, activation, removal or quota request occurs.
+An absent account is a successful inspection; configure authentication in Antigravity.
+
+Options
+  --timeout DURATION  Total inspection deadline. Default: 30s; range: 1s to 10m.
+                      Go duration syntax; bare numbers are invalid.
+
+Global options
+  -h, --help     Show this help without reading state.
+  -j, --json     Emit JSON; disable terminal prompts. Help remains human text.
+  -v, --version  Show CQ version without reading state.
+  All options are single-use. Boolean flags default false; accept bare or =true/=false.
+
+Related commands
+  cq check
+
+Examples
+  Inspect the external identity
+    cq gemini account show
+  Inspect local configuration as JSON
+    cq gemini account show --json

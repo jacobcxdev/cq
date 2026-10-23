@@ -3,6 +3,7 @@
 package fsutil
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -1695,5 +1696,122 @@ func assertWindowsTestDACLProtection(t *testing.T, path string, wantProtected bo
 	}
 	if got := control&windows.SE_DACL_PROTECTED != 0; got != wantProtected {
 		t.Fatalf("DACL protected = %v, want %v", got, wantProtected)
+	}
+}
+
+func TestWindowsCheckedDirectoryRenameRemove(t *testing.T) {
+	root := t.TempDir()
+	fsys := newWindowsTestFileSystem(t, root)
+	directory, err := OpenOwnerControlledDirectory(fsys, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	for _, name := range []string{"empty", "nonempty", "replacement"} {
+		if err = fsys.MkdirAll(filepath.Join(root, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	identity := func(name string) SecureFileIdentity {
+		t.Helper()
+		info, err := fsys.Lstat(filepath.Join(root, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, ok := fsys.FileIdentity(info)
+		if !ok {
+			t.Fatal("identity unavailable")
+		}
+		return id
+	}
+	rename := directory.(IdentityBoundRenamer)
+	remove := directory.(IdentityBoundRemover)
+	id := identity("empty")
+	if err = rename.RenameNoReplaceChecked("empty", "renamed", id); err != nil {
+		t.Fatal(err)
+	}
+	if err = remove.RemoveChecked("renamed", id); err != nil {
+		t.Fatal(err)
+	}
+	if err = fsys.WriteFile(filepath.Join(root, "nonempty", "owned"), []byte("kept"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err = remove.RemoveChecked("nonempty", identity("nonempty")); err == nil {
+		t.Fatal("removed nonempty directory")
+	}
+	if body, err := fsys.ReadFile(filepath.Join(root, "nonempty", "owned")); err != nil || string(body) != "kept" {
+		t.Fatalf("nonempty contents %q %v", body, err)
+	}
+	wrong := identity("replacement")
+	wrong.Inode++
+	if err = remove.RemoveChecked("replacement", wrong); !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("wrong identity=%v", err)
+	}
+	if err = rename.RenameNoReplaceChecked("replacement", "nonempty", identity("replacement")); err == nil {
+		t.Fatal("overwrote existing directory")
+	}
+	if _, err = fsys.Lstat(filepath.Join(root, "replacement")); err != nil {
+		t.Fatalf("failed rename lost source: %v", err)
+	}
+}
+
+func TestWindowsFinalCheckpointRemoval(t *testing.T) {
+	for _, which := range []string{"success", "shared_handle", "unsupported", "cancel", "close_error_committed", "collision"} {
+		t.Run(which, func(t *testing.T) {
+			root := t.TempDir()
+			fsys := newWindowsTestFileSystem(t, root)
+			d, err := OpenOwnerControlledDirectory(fsys, root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			if err = SecureAtomicCreateInOwnerControlledDirectory(fsys, d, root, "checkpoint", []byte("checkpoint"), nil); err != nil {
+				t.Fatal(err)
+			}
+			info, err := fsys.Lstat(filepath.Join(root, "checkpoint"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, _ := fsys.FileIdentity(info)
+			oldDisposition, oldClose := finalWindowsDisposition, finalWindowsClose
+			defer func() { finalWindowsDisposition, finalWindowsClose = oldDisposition, oldClose }()
+			if which == "unsupported" {
+				finalWindowsDisposition = func(windows.Handle, uint32) error { return windows.ERROR_NOT_SUPPORTED }
+			}
+			if which == "close_error_committed" {
+				finalWindowsClose = func(f *os.File) error {
+					if err := f.Close(); err != nil {
+						return err
+					}
+					return windows.ERROR_INVALID_HANDLE
+				}
+			}
+			if which == "shared_handle" {
+				f, e := d.OpenNoFollow("checkpoint")
+				if e != nil {
+					t.Fatal(e)
+				}
+				defer f.Close()
+			}
+			if which == "collision" {
+				if err = SecureAtomicCreateInOwnerControlledDirectory(fsys, d, root, "final", []byte("other"), nil); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if which == "cancel" {
+				cancel()
+			}
+			committed, err := d.(FinalFileRemover).RemoveFinalFile(ctx, "checkpoint", "final", id)
+			want := which == "success" || which == "close_error_committed"
+			if committed != want || (err == nil) != want {
+				t.Fatalf("commit=%t err=%v", committed, err)
+			}
+			_, statErr := fsys.Lstat(filepath.Join(root, "checkpoint"))
+			if want && !errors.Is(statErr, os.ErrNotExist) || !want && statErr != nil {
+				t.Fatalf("checkpoint observation=%v", statErr)
+			}
+		})
 	}
 }

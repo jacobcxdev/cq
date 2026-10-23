@@ -1,0 +1,7 @@
+Proxy health · failed
+  Address    127.0.0.1:19280
+  HTTP       503
+  Reachable  yes
+  Elapsed    14ms
+
+Health endpoint only; model traffic not verified.

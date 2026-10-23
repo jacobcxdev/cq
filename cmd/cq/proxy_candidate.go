@@ -261,6 +261,17 @@ func runProxyCandidateCommand(ctx context.Context, output io.Writer, authority O
 }
 
 func prepareCandidateInput(fsys fsutil.FileSystem, arguments CandidatePrepareArgumentsV1) (proxy.CandidatePrepareInputV1, error) {
+	return prepareCandidateInputContext(context.Background(), fsys, arguments)
+}
+
+func prepareCandidateInputContext(ctx context.Context, fsys fsutil.FileSystem, arguments CandidatePrepareArgumentsV1) (proxy.CandidatePrepareInputV1, error) {
+	if err := ctx.Err(); err != nil {
+		return proxy.CandidatePrepareInputV1{}, err
+	}
+	if (arguments.CredentialMode == "read-only" && (arguments.CredentialManifest == "" || !arguments.ConfirmReadOnlyCredentials)) || (arguments.CredentialMode == "none" && (arguments.CredentialManifest != "" || arguments.ConfirmReadOnlyCredentials)) {
+		return proxy.CandidatePrepareInputV1{}, proxy.ErrCandidateLifecycleInvalid
+	}
+
 	digest := func(path string, maxBytes int64) (string, error) {
 		body, err := readCandidateInputFile(fsys, path, maxBytes)
 		if err != nil {
@@ -273,17 +284,29 @@ func prepareCandidateInput(fsys fsutil.FileSystem, arguments CandidatePrepareArg
 	if err != nil {
 		return proxy.CandidatePrepareInputV1{}, fmt.Errorf("read source config: %w", err)
 	}
-	releaseDigest, err := digest(arguments.TargetReleaseBundle, candidateReleaseMaxBytes)
+	releaseBody, err := readCandidateInputFile(fsys, arguments.TargetReleaseBundle, candidateReleaseMaxBytes)
 	if err != nil {
-		return proxy.CandidatePrepareInputV1{}, fmt.Errorf("read target release bundle: %w", err)
+		return proxy.CandidatePrepareInputV1{}, err
 	}
-	executableDigest, err := digestCandidateExecutable(arguments.ClientExecutable, candidateExecutableMaxBytes)
+	bundle, err := decodeOperationalCandidateRelease(releaseBody, "target")
+	if err != nil || bundle.Digest != arguments.TargetReleaseSet {
+		return proxy.CandidatePrepareInputV1{}, proxy.ErrCandidateLifecycleInvalid
+	}
+	releaseDigest := candidateSHA256(releaseBody)
+	executableDigest, err := digestCandidateExecutableContext(ctx, fsys, arguments.ClientExecutable, candidateExecutableMaxBytes)
 	if err != nil {
 		return proxy.CandidatePrepareInputV1{}, fmt.Errorf("read client executable: %w", err)
 	}
 	registryBody, err := readCandidateInputFile(fsys, arguments.LocalTokenClientRegistry, candidateRegistryMaxBytes)
 	if err != nil {
 		return proxy.CandidatePrepareInputV1{}, fmt.Errorf("read local-token client registry: %w", err)
+	}
+	var registry proxy.ClientSenderRegistryV1
+	if err := decodeCandidateCanonicalJSON(registryBody, &registry); err != nil {
+		return proxy.CandidatePrepareInputV1{}, proxy.ErrCandidateLifecycleInvalid
+	}
+	if err := proxy.ValidateClientSenderRegistry(registry); err != nil {
+		return proxy.CandidatePrepareInputV1{}, proxy.ErrCandidateLifecycleInvalid
 	}
 	registrySum := sha256.Sum256(registryBody)
 	registryDigest := hex.EncodeToString(registrySum[:])
@@ -307,7 +330,7 @@ func prepareCandidateInput(fsys fsutil.FileSystem, arguments CandidatePrepareArg
 			return proxy.CandidatePrepareInputV1{}, fmt.Errorf("read policy snapshot: %w", err)
 		}
 	}
-	return input, nil
+	return input, ctx.Err()
 }
 
 func readCandidateInputFile(fsys fsutil.FileSystem, path string, maxBytes int64) ([]byte, error) {
@@ -325,38 +348,97 @@ func readCandidateInputFile(fsys fsutil.FileSystem, path string, maxBytes int64)
 	}
 	defer directory.Close()
 	body, _, err := fsutil.ReadOwnerControlledFileInDirectoryWithIdentity(inspector, directory, directoryPath, filepath.Base(path), maxBytes)
+	if err == nil && len(body) == 0 {
+		return nil, proxy.ErrCandidateLifecycleInvalid
+	}
 	return body, err
 }
 
 func digestCandidateExecutable(path string, maxBytes int64) (string, error) {
+	return digestCandidateExecutableContext(context.Background(), fsutil.OSFileSystem{}, path, maxBytes)
+}
+
+// Executables alone may have a trusted root owner; state and attestations may not.
+func digestCandidateExecutableContext(ctx context.Context, fsys fsutil.FileSystem, path string, maxBytes int64) (string, error) {
 	if !cleanAbsolutePath(path) || maxBytes <= 0 {
 		return "", proxy.ErrCandidateLifecycleInvalid
 	}
-	pathInfo, err := os.Lstat(path)
+	inspector, ok := fsys.(fsutil.SecurePathInspector)
+	if !ok {
+		return "", fsutil.ErrSecureCapabilityUnavailable
+	}
+	parent, err := inspector.Lstat(filepath.Dir(path))
 	if err != nil {
 		return "", err
 	}
-	if !pathInfo.Mode().IsRegular() || pathInfo.Mode()&os.ModeSymlink != 0 || pathInfo.Mode().Perm()&0o022 != 0 {
+	trusted := func(info os.FileInfo) bool {
+		if fsutil.ValidateSecureOwner(inspector, info) == nil {
+			return true
+		}
+		uid, ok := inspector.FileOwnerUID(info)
+		return ok && uid == 0
+	}
+	if !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 || parent.Mode().Perm()&0o022 != 0 || !trusted(parent) {
 		return "", fsutil.ErrUnsafeSecurePath
 	}
-	file, err := os.Open(path)
+	before, err := inspector.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if !before.Mode().IsRegular() || before.Mode().Perm()&0o022 != 0 || candidateMissingExecutableMode(fsys, before) || !trusted(before) || before.Size() < 1 || before.Size() > maxBytes {
+		return "", fsutil.ErrUnsafeSecurePath
+	}
+	var file fsutil.RetainedRegularFile
+	if opener, ok := fsys.(fsutil.RetainedRegularFileOpener); ok {
+		file, err = opener.OpenRetainedRegularFileNoFollow(path, fsutil.RetainedRegularFileExecutableDenyReplacement)
+	} else if opener, ok := fsys.(fsutil.NoFollowFileOpener); ok {
+		file, err = opener.OpenNoFollow(path)
+	} else {
+		return "", fsutil.ErrSecureCapabilityUnavailable
+	}
 	if err != nil {
 		return "", err
 	}
 	defer file.Close()
-	openedInfo, err := file.Stat()
-	if err != nil || !os.SameFile(pathInfo, openedInfo) {
+	same := func(a, b os.FileInfo) bool {
+		ai, aok := inspector.FileIdentity(a)
+		bi, bok := inspector.FileIdentity(b)
+		return aok && bok && ai == bi && a.Size() == b.Size() && a.Mode() == b.Mode() && a.ModTime() == b.ModTime()
+	}
+	opened, err := file.Stat()
+	if err != nil || !same(before, opened) || !trusted(opened) {
 		return "", fsutil.ErrUnsafeSecurePath
 	}
 	hash := sha256.New()
-	written, err := io.Copy(hash, io.LimitReader(file, maxBytes+1))
+	written, err := io.Copy(hash, io.LimitReader(candidateContextReader{ctx, file}, maxBytes+1))
 	if err != nil {
 		return "", err
 	}
-	if written > maxBytes {
-		return "", fsutil.ErrSecureFileTooLarge
+	after, err := file.Stat()
+	if err != nil || !same(before, after) || written != before.Size() {
+		return "", fsutil.ErrUnsafeSecurePath
 	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
+	current, err := inspector.Lstat(path)
+	if err != nil || !same(before, current) {
+		return "", fsutil.ErrUnsafeSecurePath
+	}
+	currentParent, err := inspector.Lstat(filepath.Dir(path))
+	if err != nil || !same(parent, currentParent) {
+		return "", fsutil.ErrUnsafeSecurePath
+	}
+	return hex.EncodeToString(hash.Sum(nil)), ctx.Err()
+}
+
+type candidateContextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r candidateContextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
 }
 
 func renderCandidateLifecycle(output io.Writer, state proxy.CandidateLifecycleStateV1, jsonOutput bool) (int, error) {
@@ -387,4 +469,13 @@ func zeroCandidateBytes(value []byte) {
 	for index := range value {
 		value[index] = 0
 	}
+}
+
+func candidateMissingExecutableMode(fsys fsutil.FileSystem, info os.FileInfo) bool {
+	// Windows retained-executable policy checks native executable access and
+	// replacement protection; POSIX execute bits have no meaning there.
+	if _, native := fsys.(fsutil.RetainedRegularFileOpener); native {
+		return false
+	}
+	return info.Mode().Perm()&0o111 == 0
 }
