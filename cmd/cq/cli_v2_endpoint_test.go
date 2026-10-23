@@ -582,24 +582,28 @@ func TestCLIV2EndpointProductionBudgetAndCleanup(t *testing.T) {
 	}
 	path, file, _ := endpointV2State(t, "snapshot")
 	deps := v2EndpointDependenciesForPath(path)
+	parent, expire := context.WithCancel(context.Background())
+	defer expire()
+	ctx := diagnosticsDeadlineContext{parent}
 	transition := deps.Transition
 	deps.Transition = func(ctx context.Context, path string, opts legacyEndpointTransitionOptions) (codexprov.LegacyCredentialEndpointTransitionStatus, error) {
 		status, err := transition(ctx, path, opts)
-		if err != nil {
-			return status, err
+		if err != nil || status.State != "quarantined" {
+			t.Fatalf("prepare before expiry: state=%q err=%v", status.State, err)
 		}
+		// Expire only after real journal preparation, then await propagation.
+		// The first phase separately proves the production wall-clock budget.
+		expire()
 		<-ctx.Done()
 		return status, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	defer cancel()
 	exit, _, out, _ := runEndpointV2(t, ctx, endpointV2Args("prepare", file, false), func(context.Context) (v2EndpointDependencies, error) { return deps, nil }, noAccessV2Input{}, false)
 	if exit != 7 || out.Errors[0].Code != "endpoint_timeout" {
 		t.Fatalf("cleanup budget exit=%d", exit)
 	}
 	status, err := codexprov.InspectLegacyCredentialEndpointTransition(context.Background(), path)
 	if err != nil || status.State != "quarantined" {
-		t.Fatal("timeout lost inspectable prepared journal")
+		t.Fatalf("timeout lost inspectable prepared journal: state=%q err=%v", status.State, err)
 	}
 }
 
