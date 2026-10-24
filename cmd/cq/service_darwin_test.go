@@ -48,6 +48,21 @@ func TestDarwinServiceInstallsExactProxyAndRefreshLaunchAgents(t *testing.T) {
 	if refreshDefinition.StandardErrorPath != filepath.Join(platform.roots.Logs, "refresh.log") {
 		t.Fatalf("refresh log = %q", refreshDefinition.StandardErrorPath)
 	}
+	for _, check := range []struct {
+		label       string
+		processType string
+	}{
+		{proxyAgentLabel, "Interactive"},
+		{agentLabel, "Background"},
+	} {
+		data, err := os.ReadFile(platform.plistPath(check.label))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), "<key>ProcessType</key>\n\t<string>"+check.processType+"</string>") {
+			t.Errorf("%s must use %s process policy", check.label, check.processType)
+		}
+	}
 
 	wantCalls := [][]string{
 		{"print", "gui/501/" + homebrewProxyAgentLabel},
@@ -96,6 +111,59 @@ func TestDarwinServiceWaitsForOldProxyBeforeBootstrap(t *testing.T) {
 	}
 }
 
+func TestDarwinServiceRestartReloadsLegacyProxyPolicy(t *testing.T) {
+	for _, processType := range []string{"Background", "Standard", "", "Interactive"} {
+		t.Run(processType, func(t *testing.T) {
+			platform, runner := newDarwinServiceHarness(t)
+			pinned := filepath.Join(filepath.Dir(platform.executable), "retained-cq")
+			if err := os.WriteFile(pinned, []byte("cq"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := platform.InstallProxy(context.Background(), pinned); err != nil {
+				t.Fatal(err)
+			}
+			path := platform.plistPath(proxyAgentLabel)
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			policy := "\t<key>ProcessType</key>\n\t<string>Interactive</string>\n"
+			replacement := strings.Replace(policy, "Interactive", processType, 1)
+			if processType == "" {
+				replacement = ""
+			}
+			data = []byte(strings.Replace(string(data), policy, replacement, 1))
+			if err := atomicWriteDarwinLaunchAgent(path, data); err != nil {
+				t.Fatal(err)
+			}
+			runner.calls = nil
+			if err := platform.RestartProxy(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(got), policy) {
+				t.Fatal("legacy proxy policy was not migrated")
+			}
+			definition := readDarwinDefinition(t, path)
+			if !reflect.DeepEqual(definition.ProgramArguments, []string{pinned, "proxy", "start"}) {
+				t.Fatalf("retained executable changed: %v", definition.ProgramArguments)
+			}
+			want := [][]string{
+				{"print", "gui/501/" + proxyAgentLabel},
+				{"bootout", "gui/501/" + proxyAgentLabel},
+				{"bootstrap", "gui/501", path},
+				{"kickstart", "-k", "gui/501/" + proxyAgentLabel},
+			}
+			if !reflect.DeepEqual(runner.calls, want) {
+				t.Fatalf("policy migration did not reload launchd: %v", runner.calls)
+			}
+		})
+	}
+}
+
 func TestDarwinServiceDoesNotBootstrapBeforeOldProxyExits(t *testing.T) {
 	platform, runner := newDarwinServiceHarness(t)
 	runner.loaded[proxyAgentLabel] = true
@@ -110,6 +178,57 @@ func TestDarwinServiceDoesNotBootstrapBeforeOldProxyExits(t *testing.T) {
 		if call[0] == "bootstrap" {
 			t.Fatalf("bootstrapped before old proxy exited: %v", runner.calls)
 		}
+	}
+}
+
+func TestDarwinServiceRestartRejectsUnrelatedDefinition(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	path := platform.plistPath(proxyAgentLabel)
+	definition := readDarwinDefinition(t, path)
+	definition.ProgramArguments[2] = "other"
+	data, err := renderDarwinLaunchAgent(definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteDarwinLaunchAgent(path, data); err != nil {
+		t.Fatal(err)
+	}
+	runner.calls = nil
+	if err := platform.RestartProxy(context.Background()); !errors.Is(err, installstate.ErrOwnershipConflict) {
+		t.Fatalf("RestartProxy() error = %v, want ownership conflict", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("unrelated job was changed: %v", runner.calls)
+	}
+}
+
+func TestDarwinServiceRestartRestoresPolicyWhenBootstrapFails(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	path := platform.plistPath(proxyAgentLabel)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = []byte(strings.Replace(string(data), "<string>Interactive</string>", "<string>Background</string>", 1))
+	if err := atomicWriteDarwinLaunchAgent(path, data); err != nil {
+		t.Fatal(err)
+	}
+	runner.failOnce["bootstrap\x00gui/501\x00"+path] = errors.New("bootstrap failed")
+	if err := platform.RestartProxy(context.Background()); err == nil || !strings.Contains(err.Error(), "bootstrap failed") {
+		t.Fatalf("RestartProxy() error = %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(data) || !runner.loaded[proxyAgentLabel] {
+		t.Fatal("previous policy and job were not restored")
 	}
 }
 
@@ -230,6 +349,9 @@ func TestDarwinServiceRestartsAndRemovesBothJobs(t *testing.T) {
 	}
 	want := [][]string{
 		{"kickstart", "-k", "gui/501/" + agentLabel},
+		{"print", "gui/501/" + proxyAgentLabel},
+		{"bootout", "gui/501/" + proxyAgentLabel},
+		{"bootstrap", "gui/501", platform.plistPath(proxyAgentLabel)},
 		{"kickstart", "-k", "gui/501/" + proxyAgentLabel},
 		{"bootout", "gui/501/" + agentLabel},
 	}
