@@ -243,7 +243,19 @@ func (platform *darwinServicePlatform) installRefresh(ctx context.Context, execu
 }
 
 func (platform *darwinServicePlatform) RestartProxy(ctx context.Context) error {
-	return platform.kickstart(ctx, proxyAgentLabel)
+	definition, exists, err := platform.readDefinition(proxyAgentLabel)
+	if err != nil {
+		return fmt.Errorf("inspect proxy definition: %w", err)
+	}
+	if !exists {
+		return platform.kickstart(ctx, proxyAgentLabel)
+	}
+	if definition.Label != proxyAgentLabel || len(definition.ProgramArguments) != 3 || !equalStrings(definition.ProgramArguments[1:], []string{"proxy", "start"}) {
+		return fmt.Errorf("%w: proxy definition differs", installstate.ErrOwnershipConflict)
+	}
+	// launchd caches ProcessType across kickstart and exec upgrades. Reload the
+	// managed job to apply its current policy while retaining its executable.
+	return platform.reconcile(ctx, definition)
 }
 
 func (platform *darwinServicePlatform) RestartRefresh(ctx context.Context) error {
@@ -552,7 +564,13 @@ func renderDarwinLaunchAgent(definition darwinLaunchAgentDefinition) ([]byte, er
 		output.WriteString("</integer>\n")
 	}
 	writeDarwinBool(&output, "RunAtLoad", definition.RunAtLoad)
-	writeDarwinString(&output, "ProcessType", "Background")
+	processType := "Background"
+	if definition.Label == proxyAgentLabel {
+		// Proxy work directly serves user requests; background CPU and I/O
+		// throttling otherwise delays every child worker and credential query.
+		processType = "Interactive"
+	}
+	writeDarwinString(&output, "ProcessType", processType)
 	writeDarwinString(&output, "StandardErrorPath", definition.StandardErrorPath)
 	output.WriteString("</dict>\n</plist>\n")
 	return output.Bytes(), nil

@@ -94,6 +94,13 @@ manual post-install service command.
 - Inspect or restart both components: `cq service status --json` or
   `cq service restart`
 
+On macOS, the proxy uses launchd's `Interactive` process policy because it serves
+user requests. Scheduled refresh remains `Background`. Installations created
+before this fix need one `cq service restart` after upgrading to reload the proxy
+job's policy. A normal executable upgrade preserves launchd's cached policy.
+The explicit service restart drains and reloads the proxy, retaining its pinned
+executable; it can wait for active connections to finish.
+
 Direct `cq proxy install|restart|uninstall` LaunchAgent commands remain
 available for focused development and repair work, but they are not a complete
 Homebrew installation path.
