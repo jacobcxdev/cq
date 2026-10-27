@@ -13,10 +13,11 @@ import (
 )
 
 const (
-	oauthTokenURL        = "https://oauth2.googleapis.com/token"
-	loadCodeAssistURL    = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-	retrieveQuotaURL     = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-	antigravityUserAgent = "antigravity/cli/cq"
+	oauthTokenURL     = "https://oauth2.googleapis.com/token"
+	loadCodeAssistURL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+	retrieveQuotaURL  = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+	// Antigravity requires a versioned CLI identity to include Gemini quota buckets.
+	antigravityUserAgent = "antigravity/cli/1.4.2 (cq)"
 )
 
 var (

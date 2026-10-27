@@ -21,7 +21,7 @@ Single-account Gemini provider backed by direct Antigravity HTTP calls. Provider
 - Read Keychain service `gemini`, account `antigravity`, and Antigravity project cache without writing either
 - Keep public OAuth client ID in source; inject client secret only at release link time
 - Retain refreshed access and refresh tokens only in process memory
-- Send exact `User-Agent: antigravity/cli/cq` on private Antigravity endpoints
+- Send exact `User-Agent: antigravity/cli/1.4.2 (cq)` on private Antigravity endpoints; unversioned CLI identities omit Gemini quota buckets
 - Read all HTTP responses through `httputil.ReadBody`
 - Keep panic recovery around concurrent credential and project reads
 - Ignore `3p-*` buckets; map `gemini-5h` to `5h` and `gemini-weekly` to `7d`

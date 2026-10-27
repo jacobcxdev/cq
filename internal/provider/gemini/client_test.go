@@ -151,8 +151,9 @@ func assertAntigravityRequest(t *testing.T, req *http.Request, wantURL, wantToke
 	if got := req.Header.Get("Content-Type"); got != "application/json" {
 		t.Fatalf("Content-Type = %q, want application/json", got)
 	}
-	if got := req.Header.Get("User-Agent"); got != antigravityUserAgent {
-		t.Fatalf("User-Agent = %q, want %q", got, antigravityUserAgent)
+	const wantUserAgent = "antigravity/cli/1.4.2 (cq)"
+	if got := req.Header.Get("User-Agent"); got != wantUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, wantUserAgent)
 	}
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
