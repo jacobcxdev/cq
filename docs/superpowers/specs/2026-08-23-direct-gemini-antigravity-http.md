@@ -141,7 +141,11 @@ Both Antigravity requests set:
 
 - `Authorization: Bearer <access-token>`;
 - `Content-Type: application/json`;
-- `User-Agent: antigravity/cli/cq`.
+- `User-Agent: antigravity/cli/1.4.2 (cq)`.
+
+The backend omits Gemini quota buckets for the unversioned `antigravity/cli/cq`
+identity, even with valid credentials. Keep the tested CLI compatibility version
+in the identifier and identify CQ separately with `(cq)`.
 
 Live probes established that generic CQ user agents receive
 `SUBSCRIPTION_REQUIRED`; the Antigravity namespace is part of request
