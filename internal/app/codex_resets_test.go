@@ -255,6 +255,64 @@ func TestCodexResetRecommendIncompleteClearsActionableTiming(t *testing.T) {
 	}
 }
 
+func TestCodexResetRecommendSingleSharedWindow(t *testing.T) {
+	for _, name := range []quota.WindowName{quota.Window5Hour, quota.Window7Day} {
+		t.Run(string(name), func(t *testing.T) {
+			now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+			app, backend, usage, _ := completeResetApp(now)
+			for index := range usage.results {
+				window := usage.results[index].Windows[name]
+				window.RemainingPct = 0
+				usage.results[index].Windows = map[quota.WindowName]quota.Window{name: window}
+			}
+			got, err := app.Recommend(context.Background())
+			if err != nil || !got.Complete || len(got.Blockers) != 0 || len(got.Items) != 3 {
+				t.Fatalf("Recommend() = %+v, %v", got, err)
+			}
+			if got.Items[0].Status != "due_now" || len(got.Items[0].RestoredPct) != 1 || got.Items[0].RestoredPct[name] != 100 {
+				t.Fatalf("first recommendation = %+v", got.Items[0])
+			}
+			if backend.consumeCalls != 0 {
+				t.Fatal("recommendation consumed a reset credit")
+			}
+		})
+	}
+}
+
+func TestCodexResetRecommendRejectsInvalidSharedWindows(t *testing.T) {
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name    string
+		windows map[quota.WindowName]quota.Window
+	}{
+		{name: "empty"},
+		{name: "scoped only", windows: map[quota.WindowName]quota.Window{
+			"7d:model": {RemainingPct: 40, ResetAtUnix: now.Add(time.Hour).Unix()},
+		}},
+		{name: "missing reset", windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day: {RemainingPct: 40},
+		}},
+		{name: "malformed alongside valid", windows: map[quota.WindowName]quota.Window{
+			quota.Window5Hour: {RemainingPct: 20},
+			quota.Window7Day:  {RemainingPct: 40, ResetAtUnix: now.Add(time.Hour).Unix()},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			app, _, usage, _ := completeResetApp(now)
+			usage.results[0].Windows = test.windows
+			got, err := app.Recommend(context.Background())
+			if err == nil || got.Complete || len(got.Blockers) != 1 || got.Blockers[0].Code != "usage_windows_invalid" {
+				t.Fatalf("Recommend() = %+v, %v", got, err)
+			}
+			for _, item := range got.Items {
+				if !item.UseAt.IsZero() || !item.UseBy.IsZero() {
+					t.Fatalf("invalid input left actionable timing: %+v", item)
+				}
+			}
+		})
+	}
+}
+
 func TestCodexResetRecommendFallsBackWithoutHistory(t *testing.T) {
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	app, _, _, _ := completeResetApp(now)

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -19,14 +20,17 @@ import (
 	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/quota"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 type codexResetsDependencies struct {
-	App    *app.CodexResetApp
-	In     io.Reader
-	Out    io.Writer
-	ErrOut io.Writer
+	ExecutorStatus func(context.Context) proxy.CodexResetSchedulerStatus
+	App            *app.CodexResetApp
+	In             io.Reader
+	Out            io.Writer
+	ErrOut         io.Writer
 }
 
 type codexResetScheduleJSON struct {
@@ -81,10 +85,6 @@ func withCodexResetsDependencies(ctx context.Context, run func(codexResetsDepend
 func newCodexResetsDependencies(ctx context.Context) (codexResetsDependencies, func(), error) {
 	fs := fsutil.OSFileSystem{}
 	httpClient := httputil.NewClient(10*time.Second, version)
-	store, err := codexprov.NewManagedStore(fs)
-	if err != nil {
-		return codexResetsDependencies{}, func() {}, err
-	}
 	control, err := codexprov.OpenDefaultCredentialRefreshControl(ctx, fs, httpClient)
 	if err != nil {
 		return codexResetsDependencies{}, func() {}, err
@@ -99,45 +99,50 @@ func newCodexResetsDependencies(ctx context.Context) (codexResetsDependencies, f
 		return codexResetsDependencies{}, func() {}, err
 	}
 
-	cacheRoot, err := cache.DefaultDir()
+	roots, err := userdirs.Default()
 	if err != nil {
 		return fail(err)
 	}
-	attempts, err := codexprov.NewResetAttemptStore(fs, cacheRoot)
-	if err != nil {
-		return fail(err)
-	}
-	historyStore, err := history.New(fs, cacheRoot)
-	if err != nil {
-		return fail(err)
-	}
-	quotaCache, err := cache.New(cache.OSFileSystem{}, cacheRoot, cacheTTL())
+	service, err := newCodexResetService(fs, control, httpClient, roots)
 	if err != nil {
 		return fail(err)
 	}
 
+	return codexResetsDependencies{
+		App: service, In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr, ExecutorStatus: codexResetExecutorStatus,
+	}, closeDependencies, nil
+}
+
+// Reuse the runtime's credential authority; constructing a reset service never
+// opens a second coordinator owner or starts background work.
+func newCodexResetService(fs fsutil.DurableFileSystem, control *codexprov.CredentialControl, httpClient httputil.Doer, roots userdirs.Roots) (*app.CodexResetApp, error) {
+	store, err := codexprov.NewManagedStore(fs)
+	if err != nil {
+		return nil, err
+	}
+	attempts, err := codexprov.NewResetAttemptStore(fs, roots.Cache)
+	if err != nil {
+		return nil, err
+	}
+	historyStore, err := history.New(fs, roots.Cache)
+	if err != nil {
+		return nil, err
+	}
+	quotaCache, err := cache.New(cache.OSFileSystem{}, roots.Cache, cacheTTL())
+	if err != nil {
+		return nil, err
+	}
 	backend := &codexprov.ResetBackend{
-		Inventory: control,
-		Resolver:  control,
-		Refresh:   control,
+		Inventory: control, Resolver: control, Refresh: control,
 		Aliases: func() (codexprov.AccountAliasIndex, error) {
 			return (codexprov.Registry{FS: fs, Home: store.Home}).AccountAliasIndex()
 		},
-		Credits: codexprov.ResetCreditClient{HTTP: httpClient},
-		Now:     time.Now,
+		Credits: codexprov.ResetCreditClient{HTTP: httpClient}, Now: time.Now,
 	}
-	service := &app.CodexResetApp{
-		AfterReset: notifyProxyCodexReset,
-		Backend:    backend,
-		Usage:      codexprov.New(httpClient),
-		History:    historyStore,
-		Attempts:   attempts,
-		Cache:      quotaCache,
-		Clock:      systemClock{},
-	}
-	return codexResetsDependencies{
-		App: service, In: os.Stdin, Out: os.Stdout, ErrOut: os.Stderr,
-	}, closeDependencies, nil
+	return &app.CodexResetApp{
+		Schedule:   codexprov.NewResetAutomationStore(fs, filepath.Join(roots.State, "codex-reset-schedule.json")),
+		AfterReset: notifyProxyCodexReset, Backend: backend, Usage: codexprov.New(httpClient), History: historyStore, Attempts: attempts, Cache: quotaCache, Clock: systemClock{},
+	}, nil
 }
 
 func runCodexResetsList(ctx context.Context, cmd CodexResetsListCmd, jsonOutput bool, deps codexResetsDependencies) error {

@@ -314,13 +314,18 @@ func freshPositiveSharedQuota(snap QuotaSnapshot, now time.Time, maxAge time.Dur
 	if snap.FetchedAt.IsZero() || snap.FetchedAt.After(now) || now.Sub(snap.FetchedAt) >= maxAge {
 		return false
 	}
+	found := false
 	for _, name := range []quota.WindowName{quota.Window5Hour, quota.Window7Day} {
 		window, ok := snap.Result.Windows[name]
-		if !ok || window.RemainingPctExact == nil || !(windowRemaining(window) > 0 && windowRemaining(window) <= 100) || window.ResetAtUnix <= now.Unix() {
+		if !ok {
+			continue
+		}
+		found = true
+		if window.RemainingPctExact == nil || !(windowRemaining(window) > 0 && windowRemaining(window) <= 100) || window.ResetAtUnix <= now.Unix() {
 			return false
 		}
 	}
-	return true
+	return found
 }
 
 func capacitySnapshotAggregates(snap QuotaSnapshot) map[CapacityBucket]capacitySnapshotAggregate {

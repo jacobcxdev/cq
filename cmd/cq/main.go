@@ -66,6 +66,7 @@ type CodexCmd struct {
 type CodexResetsCmd struct {
 	List      CodexResetsListCmd      `cmd:"" help:"List reset credits"`
 	Recommend CodexResetsRecommendCmd `cmd:"" help:"Recommend a portfolio schedule"`
+	Schedule  CodexResetScheduleCmd   `cmd:"" help:"Manage automated reset schedule"`
 	Use       CodexResetsUseCmd       `cmd:"" help:"Use one reset credit"`
 }
 
@@ -73,7 +74,40 @@ type CodexResetsListCmd struct {
 	Reference string `arg:"" optional:"" name:"account-reference" help:"Unique Codex email, CQ alias, or opaque AccountKey"`
 }
 
-type CodexResetsRecommendCmd struct{}
+type CodexResetsRecommendCmd struct {
+	Schedule bool    `help:"Accept recommendation as an automated schedule after confirmation"`
+	Mode     *string `enum:"fixed,adaptive" help:"Schedule timing mode (new schedules default to fixed)"`
+	Replace  bool    `help:"Replace existing pending schedule entries"`
+	Yes      bool    `help:"Save schedule without interactive confirmation"`
+}
+
+type CodexResetScheduleCmd struct {
+	Status struct{} `cmd:"" default:"1" help:"Show schedule and executor status"`
+	Add    struct {
+		Reference string  `arg:"" name:"account-reference"`
+		At        string  `required:"" help:"Reset timestamp in RFC3339 format"`
+		Credit    *string `help:"Exact credit ID; defaults to next unscheduled expiry"`
+		Yes       bool    `help:"Confirm changes to enabled schedule"`
+	} `cmd:"" help:"Add a manually timed reset"`
+	Set struct {
+		Entry      string `arg:""`
+		At         string `help:"Pin reset timestamp in RFC3339 format"`
+		FollowMode bool   `help:"Remove manual time pin"`
+		Yes        bool   `help:"Confirm changes to enabled schedule"`
+	} `cmd:"" help:"Edit a scheduled reset"`
+	Mode struct {
+		Value string `arg:"" enum:"fixed,adaptive"`
+		Yes   bool   `help:"Confirm changes to enabled schedule"`
+	} `cmd:"" help:"Choose fixed or adaptive timing"`
+	Remove struct {
+		Entry string `arg:""`
+	} `cmd:"" help:"Cancel one pending reset"`
+	Enable struct {
+		Yes bool `help:"Enable without interactive confirmation"`
+	} `cmd:"" help:"Enable scheduled execution"`
+	Disable struct{} `cmd:"" help:"Pause all scheduled execution"`
+	Cancel  struct{} `cmd:"" help:"Cancel all pending resets and disable schedule"`
+}
 
 type CodexResetsUseCmd struct {
 	Reference string  `arg:"" name:"account-reference" help:"Unique Codex email, CQ alias, or opaque AccountKey"`
@@ -440,12 +474,23 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 		})
 	case "codex resets recommend":
 		return withCodexResetsDependencies(context.Background(), func(deps codexResetsDependencies) error {
-			return runCodexResetsRecommend(context.Background(), cli.JSON, deps)
+			return runCodexResetsRecommendOptions(context.Background(), cli.Codex.Resets.Recommend, cli.JSON, deps)
 		})
 	case "codex resets use <account-reference>":
 		return withCodexResetsDependencies(context.Background(), func(deps codexResetsDependencies) error {
 			return runCodexResetsUse(context.Background(), cli.Codex.Resets.Use, cli.JSON, deps)
 		})
+	case "codex resets schedule status", "codex resets schedule remove <entry>", "codex resets schedule disable", "codex resets schedule cancel":
+		deps, err := localCodexResetScheduleDependencies()
+		if err != nil {
+			return err
+		}
+		return runCodexResetScheduleCommand(context.Background(), ctx.Command(), cli.Codex.Resets.Schedule, cli.JSON, deps)
+	case "codex resets schedule add <account-reference>", "codex resets schedule set <entry>", "codex resets schedule mode <value>", "codex resets schedule enable":
+		return withCodexResetsDependencies(context.Background(), func(deps codexResetsDependencies) error {
+			return runCodexResetScheduleCommand(context.Background(), ctx.Command(), cli.Codex.Resets.Schedule, cli.JSON, deps)
+		})
+
 	case "gemini accounts":
 		return app.RunAccounts(provider.Gemini, cli.JSON)
 	default:

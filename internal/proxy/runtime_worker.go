@@ -177,6 +177,13 @@ func RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(ctx context.Contex
 		return ErrRuntimeRoleManifest
 	}
 	drainer, _ := handler.(interface{ BeginDrain() })
+	background, _ := handler.(interface {
+		ActivateBackground(context.Context) error
+		StopBackground()
+	})
+	if background != nil {
+		defer background.StopBackground()
+	}
 	upgrade, _ := handler.(RuntimeUpgradeWorker)
 	admission := NewRuntimeUpgradeAdmission()
 	if source, ok := handler.(interface {
@@ -263,9 +270,18 @@ func RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(ctx context.Contex
 			if err != nil {
 				return err
 			}
-			payload, err = json.Marshal(callerIndex)
+			payload, err = json.Marshal(struct {
+				NormalCallerIndexV1
+				BackgroundWork bool `json:"background_work,omitempty"`
+			}{callerIndex, background != nil})
 			if err != nil {
 				return err
+			}
+		case "activate_background":
+			if background == nil || background.ActivateBackground(ctx) != nil {
+				kind = "background_unavailable"
+			} else {
+				kind = "background_active"
 			}
 		case "begin_drain":
 			if drainer != nil {
@@ -656,16 +672,27 @@ func (worker *runtimeProcessWorker) Boot(ctx context.Context, _ WorkerManifestV1
 	if err != nil || frame.Kind != "ready" {
 		return RuntimeBootAckV1{}, errors.Join(ErrRuntimeWorkerUnavailable, err)
 	}
-	var index NormalCallerIndexV1
-	if json.Unmarshal(frame.Payload, &index) != nil {
+	var ready struct {
+		NormalCallerIndexV1
+		BackgroundWork bool `json:"background_work,omitempty"`
+	}
+	if json.Unmarshal(frame.Payload, &ready) != nil {
 		return RuntimeBootAckV1{}, ErrRuntimeControlFrame
 	}
+	index := ready.NormalCallerIndexV1
 	key, err := normalCallerKeyFromRuntimeSecret(worker.secret)
 	if err != nil || !VerifyNormalCallerIndexV1(key, index) {
 		zeroRuntimeBytes(key)
 		return RuntimeBootAckV1{}, errors.Join(ErrRuntimeControlFrame, err)
 	}
-	return RuntimeBootAckV1{SchemaVersion: 1, Kind: "runtime_boot_ack_v1", Holder: worker.holder, CallerIndex: index, CallerAuthorityKey: key}, nil
+	return RuntimeBootAckV1{SchemaVersion: 1, Kind: "runtime_boot_ack_v1", Holder: worker.holder, CallerIndex: index, CallerAuthorityKey: key, BackgroundWork: ready.BackgroundWork}, nil
+}
+func (worker *runtimeProcessWorker) ActivateBackground(ctx context.Context) error {
+	frame, err := worker.exchange(ctx, "activate_background", nil)
+	if err == nil && frame.Kind != "background_active" {
+		return ErrRuntimeWorkerUnavailable
+	}
+	return err
 }
 func (worker *runtimeProcessWorker) BeginDrain(ctx context.Context, _ TrafficMode, _ uint64) error {
 	frame, err := worker.exchange(ctx, "begin_drain", nil)

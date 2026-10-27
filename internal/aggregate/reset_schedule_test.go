@@ -208,6 +208,7 @@ func TestSimulationInvalidAccountDoesNotContributeDemand(t *testing.T) {
 		Key: "invalid", Multiplier: 10,
 		Windows: map[quota.WindowName]ResetScheduleWindowInput{
 			quota.Window5Hour: resetTestWindow(90, now.Add(5*time.Hour), 5*time.Hour, 1),
+			quota.Window7Day:  resetTestWindow(90, time.Time{}, 7*24*time.Hour, 1),
 		},
 	}}}
 	state, blockers := normaliseResetScheduleInput(input)
@@ -216,6 +217,79 @@ func TestSimulationInvalidAccountDoesNotContributeDemand(t *testing.T) {
 	}
 	if len(state.accounts) != 0 || state.totalDemand[quota.Window5Hour] != 0 {
 		t.Fatalf("invalid account leaked into state: accounts=%+v demand=%+v", state.accounts, state.totalDemand)
+	}
+}
+
+func TestRecommendResetScheduleSingleSharedWindow(t *testing.T) {
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(time.Hour)
+	for _, name := range []quota.WindowName{quota.Window5Hour, quota.Window7Day} {
+		for _, remaining := range []float64{0, 100} {
+			t.Run(fmt.Sprintf("%s/%g", name, remaining), func(t *testing.T) {
+				rate := 0.0
+				if remaining == 0 {
+					rate = 0.01
+				}
+				input := ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{{
+					Key: "account-a", Multiplier: 1,
+					Windows: map[quota.WindowName]ResetScheduleWindowInput{
+						name: resetTestWindow(remaining, now.Add(quota.PeriodFor(name)), quota.PeriodFor(name), rate),
+					},
+					Credits: []ResetScheduleCreditInput{{ID: "credit-a", ExpiresAt: &expiresAt, Supported: true}},
+				}}}
+				got := RecommendResetSchedule(input)
+				if !got.Complete || !got.Exact || len(got.Blockers) != 0 || len(got.Items) != 1 {
+					t.Fatalf("schedule = %+v", got)
+				}
+				item := got.Items[0]
+				if remaining == 0 {
+					if item.Status != ResetDueNow || item.UseAt != now || item.UseBy != now || len(item.RestoredPct) != 1 || item.RestoredPct[name] != 100 || item.AvoidedGapSec <= 0 {
+						t.Fatalf("exhausted window recommendation = %+v", item)
+					}
+				} else if item.Status != ResetNotUseful || !item.UseAt.IsZero() || len(item.RestoredPct) != 0 {
+					t.Fatalf("full window recommendation = %+v", item)
+				}
+			})
+		}
+	}
+}
+
+func TestSimulationMixedSharedWindowsDoesNotInventMissingWindow(t *testing.T) {
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	weekly := scheduleTestAccount(now, "weekly", 1, 80, 0.01, ResetScheduleCreditInput{})
+	delete(weekly.Windows, quota.Window5Hour)
+	weekly.Credits = nil
+	both := scheduleTestAccount(now, "both", 1, 50, 0.01, ResetScheduleCreditInput{})
+	both.Credits = nil
+	state, blockers := normaliseResetScheduleInput(ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{weekly, both}})
+	if len(blockers) != 0 || simulationActiveMultiplier(state) != 2 {
+		t.Fatalf("blockers=%+v active=%v", blockers, simulationActiveMultiplier(state))
+	}
+	event, ok := nextSimulationEvent(state)
+	if !ok || event.kind != simulationEventExhaustion || event.accountKey != "both" || event.window != quota.Window7Day || event.at != now.Add(5_000*time.Second) {
+		t.Fatalf("next event = %+v, %v", event, ok)
+	}
+	state = advanceSimulationTo(state, now.Add(100*time.Second))
+	if windows := state.accounts["weekly"].windows; len(windows) != 1 || windows[quota.Window7Day].remaining != 79 {
+		t.Fatalf("weekly windows = %+v", windows)
+	}
+	if got := state.accounts["both"].windows[quota.Window5Hour].remaining; got != 49.5 {
+		t.Fatalf("5h remaining = %v, want 49.5", got)
+	}
+}
+
+func TestResetScheduleRejectsMissingSharedWindows(t *testing.T) {
+	now := time.Date(2026, 10, 27, 12, 0, 0, 0, time.UTC)
+	for _, windows := range []map[quota.WindowName]ResetScheduleWindowInput{
+		nil,
+		{"7d:model": resetTestWindow(40, now.Add(time.Hour), 7*24*time.Hour, 0.01)},
+	} {
+		got := RecommendResetSchedule(ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{{
+			Key: "account-a", Multiplier: 1, Windows: windows,
+		}}})
+		if got.Complete || got.Exact || len(got.Blockers) == 0 || got.Blockers[0].Code != "missing_shared_window" {
+			t.Fatalf("schedule = %+v", got)
+		}
 	}
 }
 

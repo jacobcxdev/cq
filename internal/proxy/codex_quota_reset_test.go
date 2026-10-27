@@ -377,7 +377,7 @@ func TestCodexCapacityForceRefreshBypassesCooldown(t *testing.T) {
 }
 
 func TestCodexCapacityForceRefreshRequiresFreshPositiveSharedWindows(t *testing.T) {
-	for _, scenario := range []string{"zero", "partial", "stale", "cached", "reordered"} {
+	for _, scenario := range []string{"zero", "inexact", "empty", "scoped", "stale", "cached", "reordered"} {
 		t.Run(scenario, func(t *testing.T) {
 			now := time.Unix(1_800_000_000, 0)
 			ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Minute)
@@ -390,8 +390,15 @@ func TestCodexCapacityForceRefreshRequiresFreshPositiveSharedWindows(t *testing.
 			switch scenario {
 			case "zero":
 				reader.results["account"] = codex.UsageObservation{Result: resetTestSnapshot(now, quota.Window7Day, 0).Result}
-			case "partial":
-				delete(reader.results["account"].Result.Windows, quota.Window5Hour)
+			case "inexact":
+				w := reader.results["account"].Result.Windows[quota.Window5Hour]
+				w.RemainingPctExact = nil
+				reader.results["account"].Result.Windows[quota.Window5Hour] = w
+			case "empty":
+				reader.results["account"] = codex.UsageObservation{Result: quota.Result{Status: quota.StatusOK}}
+			case "scoped":
+				result := resetTestSnapshot(now, "7d:model", 100).Result
+				reader.results["account"] = codex.UsageObservation{Result: result}
 			case "stale":
 				w := reader.results["account"].Result.Windows[quota.Window7Day]
 				w.ResetAtUnix = now.Unix()
@@ -410,6 +417,32 @@ func TestCodexCapacityForceRefreshRequiresFreshPositiveSharedWindows(t *testing.
 			}
 			if refresher.ForceRefresh(context.Background(), []codex.AccountKey{"account"}) {
 				t.Fatalf("%s reset refresh accepted old or unusable included quota", scenario)
+			}
+		})
+	}
+}
+
+func TestCodexCapacityForceRefreshAcceptsSingleSharedWindow(t *testing.T) {
+	for _, name := range []quota.WindowName{quota.Window5Hour, quota.Window7Day} {
+		t.Run(string(name), func(t *testing.T) {
+			now := time.Unix(1_800_000_000, 0)
+			ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Minute)
+			ledger.Observe(ledger.NewObservationStream().Stamp(CapacityFact{
+				AccountKey: "account", Bucket: CapacityBucketBase, RemainingPct: 0,
+				Source: CapacitySourceHardLimit, ResetAt: now.Add(time.Hour), Confidence: CapacityConfidenceAuthoritative,
+			}))
+			now = now.Add(time.Second)
+			refresher := &CodexRoutingCapacityRefresher{
+				Usage: codexResetUsageReadFunc(func(context.Context, codex.AccountKey) (codex.UsageObservation, error) {
+					return codex.UsageObservation{Result: resetTestSnapshot(now, name, 100).Result}, nil
+				}),
+				Capacity: ledger, Now: func() time.Time { return now },
+			}
+			if !refresher.ForceRefresh(context.Background(), []codex.AccountKey{"account"}) {
+				t.Fatal("fresh positive shared window rejected after reset")
+			}
+			if view := ledger.Capacity("account", CapacityBucketBase); view.State != CapacityPositive || view.RemainingPct != 100 {
+				t.Fatalf("capacity = %+v, want positive 100%%", view)
 			}
 		})
 	}

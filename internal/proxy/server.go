@@ -171,6 +171,7 @@ type Server struct {
 	CodexLeaseInvalidator     CodexLeaseInvalidator
 	CodexLeaseRedistributor   CodexLeaseRedistributor
 	CodexResetCapacityRefresh func(context.Context, codex.AccountKey) error
+	CodexResetScheduler       *CodexResetScheduler
 }
 
 type codexWebSocketRoutingProvider interface {
@@ -311,6 +312,13 @@ func (s *Server) serve(ctx context.Context, listener net.Listener) error {
 		shutdownResult <- nil
 	}()
 
+	if s.CodexResetScheduler != nil && s.CodexHTTPStartupValidation == nil && s.CodexCanaryStop == nil {
+		if err := s.CodexResetScheduler.Activate(ctx, NewRuntimeUpgradeAdmission()); err != nil {
+			stop()
+			return err
+		}
+		defer s.CodexResetScheduler.Stop()
+	}
 	fmt.Fprintf(os.Stderr, "cq: proxy listening on %s\n", listener.Addr().String())
 
 	serveErr := srv.Serve(serveListener)
@@ -386,6 +394,7 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("POST "+RuntimePolicySessionDigestPath, s.handlePolicySessionDigest)
 	mux.HandleFunc("POST "+RuntimeCodexLeaseInvalidationPath, s.handleCodexLeaseInvalidation)
 	mux.HandleFunc("POST "+RuntimeCodexLeaseRedistributionPath, s.handleCodexLeaseRedistribution)
+	mux.HandleFunc("POST "+RuntimeCodexResetScheduleStatusPath, s.handleCodexResetScheduleStatus)
 	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptPath, s.handleCodexTurnReceipt)
 	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptV2Path, s.handleCodexTurnReceipt)
 	mux.HandleFunc(codexResponsesPath, s.handleCodexResponsesRoute)
@@ -445,7 +454,15 @@ type runtimeDrainHandler struct {
 	upgradeCompatible bool
 }
 
+func (handler runtimeDrainHandler) ActivateBackground(ctx context.Context) error {
+	if handler.server.CodexResetScheduler == nil || handler.server.CodexHTTPStartupValidation != nil || handler.server.CodexCanaryStop != nil {
+		return nil
+	}
+	return handler.server.CodexResetScheduler.Activate(ctx, handler.upgrade)
+}
+func (handler runtimeDrainHandler) StopBackground() { handler.server.CodexResetScheduler.Stop() }
 func (handler runtimeDrainHandler) BeginDrain() {
+	handler.StopBackground()
 	if drainer, ok := handler.server.CodexWebSocketBroker.(interface{ BeginDrain() }); ok {
 		drainer.BeginDrain()
 	}
