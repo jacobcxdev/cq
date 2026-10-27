@@ -54,22 +54,86 @@ Commands:
 Inspect and use Codex banked reset credits.
 
 Recommendations are portfolio-wide across every account visible through
-cq codex accounts. They are advisory-only and never consume a credit.
+cq codex accounts. They remain advisory-only unless --schedule is accepted.
 
 Commands:
   codex resets list        List reset credits
   codex resets recommend   Recommend a portfolio schedule
   codex resets use         Use one reset credit after confirmation
+  codex resets schedule    Manage automated reset schedule
 `,
 	"codex resets list": `Usage: cq codex resets list [account-reference]
 
 List banked reset credits for every account visible through cq codex accounts.
 Supply a unique email, CQ alias, or opaque AccountKey to inspect one account.
 `,
-	"codex resets recommend": `Usage: cq codex resets recommend
+	"codex resets recommend": `Usage: cq codex resets recommend [--schedule] [--mode fixed|adaptive] [--replace] [--yes]
 
-Recommend timing across the whole visible portfolio. This command fetches
-fresh usage and reset-credit data, is advisory-only, and never consumes a credit.
+Recommend timing across the whole visible portfolio. Without --schedule this
+command stays advisory-only and never consumes a credit.
+Accept --schedule to save automated execution after default-No confirmation.
+New schedules use fixed dates; --mode adaptive replans accepted credits as usage
+changes. --replace replaces pending entries and preserves running outcomes.
+Execution requires the CQ proxy runtime. Due entries may execute immediately.
+`,
+	"codex resets schedule": `Usage: cq codex resets schedule [command]
+
+Show schedule and fresh executor status, or manage automated resets.
+
+Commands:
+  schedule status            Show entries and executor availability
+  schedule add ACCOUNT --at RFC3339 [--credit ID] [--yes]
+  schedule set ENTRY (--at RFC3339 | --follow-mode) [--yes]
+  schedule mode fixed|adaptive [--yes]
+  schedule remove ENTRY      Cancel one pending reset
+  schedule enable [--yes]    Enable automatic execution after confirmation
+  schedule disable           Pause execution and adaptive replanning
+  schedule cancel            Cancel all pending entries and disable execution
+
+Manual additions create a disabled fixed schedule. --at pins a date even in
+adaptive mode. --follow-mode removes that pin. Active edits require default-No
+confirmation. Fixed dates survive usage changes; adaptive dates can move earlier
+or later. Only accepted account/credit pairs can execute. CQ proxy must run;
+status reports a fresh authenticated executor heartbeat. Running or unresolved
+requests remain visible after cancellation; an upstream request cannot be undone.
+`,
+	"codex resets schedule status": `Usage: cq codex resets schedule [status]
+
+Show saved entries, mode, enabled state and fresh executor availability.
+`,
+	"codex resets schedule add": `Usage: cq codex resets schedule add ACCOUNT --at RFC3339 [--credit ID] [--yes]
+
+Add an exact credit with a manual time pin. Omit --credit for the next eligible
+unscheduled credit. A new manual schedule starts disabled with fixed timing.
+`,
+	"codex resets schedule set": `Usage: cq codex resets schedule set ENTRY (--at RFC3339 | --follow-mode) [--yes]
+
+Pin a timestamp or let the entry follow schedule mode. Active edits require
+confirmation; changing an already running or unresolved entry is refused.
+`,
+	"codex resets schedule mode": `Usage: cq codex resets schedule mode fixed|adaptive [--yes]
+
+Fixed keeps accepted dates. Adaptive replans only accepted pending credits and
+respects manual pins. Switching to fixed freezes current actionable dates;
+entries without one need --at. Active mode changes require confirmation.
+`,
+	"codex resets schedule remove": `Usage: cq codex resets schedule remove ENTRY
+
+Cancel one pending reset. An already running or unresolved request stays visible.
+`,
+	"codex resets schedule enable": `Usage: cq codex resets schedule enable [--yes]
+
+Enable automatic execution after default-No confirmation. Overdue fixed dates
+may execute immediately if their exact credit remains eligible.
+`,
+	"codex resets schedule disable": `Usage: cq codex resets schedule disable
+
+Pause future execution and adaptive replanning. Running requests may finish.
+`,
+	"codex resets schedule cancel": `Usage: cq codex resets schedule cancel
+
+Cancel pending entries and disable execution. Keep completed history and
+unresolved outcomes; cancellation cannot undo an upstream request.
 `,
 	"codex resets use": `Usage: cq codex resets use <account-reference> [--credit CREDIT_ID] [--yes]
 
@@ -77,7 +141,7 @@ Use one banked reset for one account. When --credit is omitted, CQ resumes an
 unresolved attempt or selects the eligible credit with the next expiry.
 
 Confirmation default is No. Use --yes to consume without an interactive prompt.
-Banked resets restore usage percentages only; natural reset dates do not change.
+After consumption, fresh upstream usage supplies the current reset dates.
 `,
 	"codex validate": "Usage: cq codex validate capture ... | http --client-build BUILD [--state-dir DIR] | websocket --client-build BUILD [--client-executable PATH] [--state-dir DIR]\n",
 	"codex canary":   "Usage: cq codex canary start|status|stop\n",
@@ -257,7 +321,7 @@ is preferred over unknown or exhausted accounts within current routing policy.
 WebSocket account-owned deltas use the existing reconnect/resync path before moving.
 HTTP previous_response_id continuations wait for a portable full-history request.
 Successful banked resets and fresh detected quota resets schedule this automatically.
-CQ never consumes a banked reset automatically. Pending work survives worker restart.
+CQ never consumes a banked reset automatically for lease redistribution. Pending work survives worker restart.
 `,
 	"proxy leases invalidate": `Usage: cq proxy leases invalidate [--port PORT]
 
@@ -1108,6 +1172,15 @@ func manualHelpInspectionPath(args []string) ([]string, bool) {
 			}
 			if args[2] == "list" || args[2] == "recommend" || args[2] == "use" {
 				return []string{"codex", "resets", args[2]}, true
+			}
+			if args[2] == "schedule" {
+				if len(args) > 3 && args[3] == "help" {
+					path := append([]string{"codex", "resets", "schedule"}, args[4:]...)
+					_, ok := manualHelp(path)
+					return path, ok
+				}
+				path, ok := interceptedGroupHelpPath("schedule", args[3:], map[string]bool{"status": true, "add": true, "set": true, "mode": true, "remove": true, "enable": true, "disable": true, "cancel": true})
+				return append([]string{"codex", "resets"}, path...), ok
 			}
 		}
 		if len(args) >= 2 && (args[1] == "validate" || args[1] == "canary") && (len(args) == 2 || helpRequested(args[2:])) {

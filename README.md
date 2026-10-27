@@ -211,9 +211,40 @@ CQ-owned Codex accounts live under `~/.codex/accounts/` with registry metadata. 
 
 The credential coordinator also renews explicitly declared CodexBar managed accounts within 60 seconds of access expiry. It shares CodexBar's account lock and writes renewed tokens and their fingerprint back to the declared owner home; later CodexBar login takes priority. Renewal runs in the background, preserving healthy-account routing. If every credential is unavailable, reads wait up to one second for fast repair. Other external accounts and system auth remain read-only. An ambiguous refresh outcome is retained without replay and can require owner reauthentication.
 
-`cq codex resets recommend` plans across every account shown by `cq codex accounts`. It fetches fresh usage and banked-reset inventories, reports a non-actionable incomplete schedule when any portfolio input is missing, and never consumes a credit. Banked resets restore shared-window percentages without changing natural 5-hour or 7-day reset dates.
+`cq codex resets recommend` plans across every account shown by `cq codex accounts`. It fetches fresh usage and banked-reset inventories, reports a non-actionable incomplete schedule when any portfolio input is missing, and never consumes a credit. Fresh upstream usage supplies reset dates after consumption; an account may expose one or both shared windows.
 
 `cq codex resets use EMAIL` previews selected credit, current shared usage, and current recommendation, then asks for confirmation with default No. Omit `--credit` to resume a pending attempt or select eligible credit with next expiry. Supply `--yes` only when explicit non-interactive consumption is intended.
+
+An automated reset schedule is optional. Preview with `cq codex resets recommend`,
+then accept with `cq codex resets recommend --schedule`. Confirmation defaults to
+No. New schedules use **fixed** dates; `--mode adaptive` allows fresh portfolio
+forecasts to move dates for the exact accepted credits. It never enrols newly
+found credits. Use `--replace` to replace existing pending entries.
+
+```sh
+cq codex resets schedule                       # Entries and fresh executor status
+cq codex resets schedule mode adaptive         # Confirm a mode change
+cq codex resets schedule add EMAIL --at 2026-10-28T18:00:00Z
+cq codex resets schedule set ENTRY --at 2026-10-28T20:00:00Z
+cq codex resets schedule set ENTRY --follow-mode
+cq codex resets schedule remove ENTRY
+cq codex resets schedule enable
+cq codex resets schedule disable
+cq codex resets schedule cancel
+```
+
+Manual additions create a disabled fixed schedule. Manual dates must not be in
+the past and pin entries in adaptive mode. Active edits and enabling require
+confirmation; non-interactive acceptance requires `--yes`. Disable pauses
+execution and replanning; cancel also cancels pending entries. A request already
+sent upstream may finish, and unknown
+outcomes remain visible with the same durable retry identity.
+
+Execution requires the CQ proxy runtime. Saved schedules survive restarts; fixed
+overdues catch up before expiry, while adaptive work first obtains a complete
+fresh plan. Unavailable forecast inputs block adaptive entries; explicit pins
+retain their fixed authority after fresh target validation. Status uses an
+authenticated live heartbeat rather than assuming an installed service is running.
 
 ### Gemini
 
@@ -390,7 +421,7 @@ with `previous_response_id` stay on their account until the client sends a
 portable full-history request. Pending redistribution survives a worker restart.
 
 Successful `cq codex resets use` and fresh detected quota resets schedule this
-automatically. CQ never consumes a banked reset automatically. A failed reset
+automatically. Redistribution itself never consumes a banked reset. Only an explicitly enabled reset schedule authorises automatic consumption. A failed reset
 notification emits a warning without undoing or repeating reset consumption.
 
 Lease invalidation clears reusable Codex account affinity across all sessions.
@@ -626,6 +657,15 @@ cq codex remove
 cq codex resets
 cq codex resets list
 cq codex resets recommend
+cq codex resets schedule
+cq codex resets schedule add
+cq codex resets schedule cancel
+cq codex resets schedule disable
+cq codex resets schedule enable
+cq codex resets schedule mode
+cq codex resets schedule remove
+cq codex resets schedule set
+cq codex resets schedule status
 cq codex resets use
 cq codex switch
 cq codex validate

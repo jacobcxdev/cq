@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -351,6 +352,26 @@ func TestRuntimeWorkerProcessUsesPrivateTransportWithoutPublicListenerFD(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !boot.BackgroundWork {
+		t.Fatal("worker did not advertise background activation")
+	}
+	background, ok := process.(interface{ ActivateBackground(context.Context) error })
+	if !ok {
+		t.Fatal("worker activation control missing")
+	}
+	// The private transport is already serving, but background work stays inert
+	// until selection explicitly activates it.
+	before, err := process.ExecuteHTTP(context.Background(), RuntimeHTTPRequestV1{Method: http.MethodGet, RequestURI: "/health?mode=background"})
+	if err != nil || string(before.Body) != "false" {
+		t.Fatalf("warming worker active: %q %v", before.Body, err)
+	}
+	if err := background.ActivateBackground(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := process.ExecuteHTTP(context.Background(), RuntimeHTTPRequestV1{Method: http.MethodGet, RequestURI: "/health?mode=background"})
+	if err != nil || string(after.Body) != "true" {
+		t.Fatalf("selected worker inactive: %q %v", after.Body, err)
+	}
 	if len(boot.CallerAuthorityKey) != 32 || len(boot.CallerIndex.Entries) != 1 || boot.CallerIndex.Entries[0].Domain != NormalCallerCodex {
 		t.Fatalf("worker caller index = %#v", boot.CallerIndex)
 	}
@@ -475,6 +496,7 @@ func TestRuntimeWorkerRoleHelperProcess(t *testing.T) {
 		os.Exit(93)
 	}
 	_ = unix.Close(RuntimeListenerFD)
+	var backgroundActive atomic.Bool
 	err = RunRuntimeWorkerRoleWithHandlerAndCallerCredentials(context.Background(), manifest, RuntimeRoleFiles{
 		Lifecycle: os.NewFile(RuntimeLifecycleFD, "lifecycle"),
 		Control:   os.NewFile(RuntimeControlFD, "control"),
@@ -482,6 +504,9 @@ func TestRuntimeWorkerRoleHelperProcess(t *testing.T) {
 		Work:      os.NewFile(RuntimeWorkFD, "work"),
 	}, runtimeUpgradeFixtureHandler{Handler: http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Query().Get("mode") {
+		case "background":
+			_, _ = io.WriteString(writer, strconv.FormatBool(backgroundActive.Load()))
+			return
 		case "large":
 			body, readErr := io.ReadAll(request.Body)
 			if readErr != nil {
@@ -513,7 +538,7 @@ func TestRuntimeWorkerRoleHelperProcess(t *testing.T) {
 		writer.Header().Set("X-Worker", "child")
 		writer.WriteHeader(http.StatusCreated)
 		_, _ = writer.Write([]byte(request.Header.Get("Authorization")))
-	}), gate: NewRuntimeUpgradeAdmission()}, []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "worker-only-bearer", SubjectID: "codex-worker"}})
+	}), gate: NewRuntimeUpgradeAdmission(), backgroundActive: &backgroundActive}, []NormalCallerCredentialV1{{Domain: NormalCallerCodex, Bearer: "worker-only-bearer", SubjectID: "codex-worker"}})
 	if err != nil {
 		os.Exit(94)
 	}
@@ -667,9 +692,21 @@ func TestRuntimeUpgradeWorkerWaitsForActiveIngress(t *testing.T) {
 
 type runtimeUpgradeFixtureHandler struct {
 	http.Handler
-	gate *RuntimeUpgradeAdmission
+	gate             *RuntimeUpgradeAdmission
+	backgroundActive *atomic.Bool
 }
 
+func (handler runtimeUpgradeFixtureHandler) ActivateBackground(context.Context) error {
+	if handler.backgroundActive != nil {
+		handler.backgroundActive.Store(true)
+	}
+	return nil
+}
+func (handler runtimeUpgradeFixtureHandler) StopBackground() {
+	if handler.backgroundActive != nil {
+		handler.backgroundActive.Store(false)
+	}
+}
 func (handler runtimeUpgradeFixtureHandler) RuntimeUpgradeAdmission() *RuntimeUpgradeAdmission {
 	return handler.gate
 }

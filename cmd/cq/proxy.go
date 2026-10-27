@@ -1280,6 +1280,24 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			return nil
 		},
 	}
+	resetService, resetServiceErr := newCodexResetService(fsys, credentialControl, refreshClient, roots)
+	if resetServiceErr != nil {
+		return fmt.Errorf("Codex reset scheduler: %w", resetServiceErr)
+	}
+	resetService.AfterReset = func(ctx context.Context, account codexprov.AccountKey, eventID string) error {
+		if err := srv.CodexResetCapacityRefresh(ctx, account); err != nil {
+			return err
+		}
+		if srv.CodexLeaseRedistributor == nil {
+			return errors.New("Codex reset redistribution unavailable")
+		}
+		_, err := srv.CodexLeaseRedistributor.RedistributeTaskAffinitiesForReset(ctx, account, eventID)
+		return err
+	}
+	srv.CodexResetScheduler = proxy.NewCodexResetScheduler(resetService.StepSchedule, time.Now)
+	resetService.ScheduleClaim = srv.CodexResetScheduler.Claim
+	defer srv.CodexResetScheduler.Stop()
+
 	if resilienceState != nil {
 		srv.RoutingPolicy = resilienceState.Routing
 	}

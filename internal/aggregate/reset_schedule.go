@@ -35,8 +35,19 @@ const (
 )
 
 type ResetScheduleInput struct {
-	Now      time.Time
-	Accounts []ResetScheduleAccountInput
+	Now         time.Time
+	Accounts    []ResetScheduleAccountInput
+	Constraints *ResetScheduleConstraints
+}
+
+type ResetScheduleCreditRef struct{ AccountKey, CreditID string }
+type ResetScheduleFixedUse struct {
+	AccountKey, CreditID string
+	At                   time.Time
+}
+type ResetScheduleConstraints struct {
+	AllowedCredits []ResetScheduleCreditRef
+	FixedUses      []ResetScheduleFixedUse
 }
 
 type ResetScheduleAccountInput struct {
@@ -122,6 +133,7 @@ type simulationCredit struct {
 	grantedAt  time.Time
 	expiresAt  *time.Time
 	supported  bool
+	fixedAt    *time.Time
 }
 
 type simulationState struct {
@@ -186,8 +198,6 @@ func normaliseResetScheduleInput(input ResetScheduleInput) (simulationState, []R
 		for _, name := range sharedResetWindows() {
 			inputWindow, ok := inputAccount.Windows[name]
 			if !ok {
-				blocker("missing_shared_window")
-				valid = false
 				continue
 			}
 			if !finiteInRange(inputWindow.RemainingPct, 0, 100) || inputWindow.Period <= 0 || inputWindow.ResetAt.IsZero() {
@@ -215,6 +225,10 @@ func normaliseResetScheduleInput(input ResetScheduleInput) (simulationState, []R
 				resetAt:   inputWindow.ResetAt.UTC(),
 				period:    inputWindow.Period,
 			}
+		}
+		if len(account.windows) == 0 && valid {
+			blocker("missing_shared_window")
+			valid = false
 		}
 		if !valid {
 			continue
@@ -248,6 +262,42 @@ func normaliseResetScheduleInput(input ResetScheduleInput) (simulationState, []R
 		}
 	}
 	state.horizon = resetPlanningHorizon(state.now, allCredits)
+	if input.Constraints != nil {
+		allowed := make(map[string]bool)
+		for _, ref := range input.Constraints.AllowedCredits {
+			credit, ok := state.credits[ref.CreditID]
+			if !ok || credit.accountKey != ref.AccountKey || allowed[ref.CreditID] {
+				blockers = append(blockers, ResetScheduleBlocker{Code: "invalid_allowed_credit"})
+			}
+			allowed[ref.CreditID] = true
+		}
+		for id := range state.credits {
+			if !allowed[id] {
+				delete(state.credits, id)
+			}
+		}
+		acceptedCredits := make([]ResetScheduleCreditInput, 0, len(state.credits))
+		for _, credit := range state.credits {
+			acceptedCredits = append(acceptedCredits, ResetScheduleCreditInput{ExpiresAt: credit.expiresAt})
+		}
+		state.horizon = resetPlanningHorizon(state.now, acceptedCredits)
+		for _, pin := range input.Constraints.FixedUses {
+			credit, ok := state.credits[pin.CreditID]
+			at := pin.At.UTC()
+			if at.Before(state.now) {
+				at = state.now
+			}
+			if !ok || credit.accountKey != pin.AccountKey || credit.fixedAt != nil || pin.At.IsZero() || credit.grantedAt.After(at) || !credit.supported || (credit.expiresAt != nil && !at.Before(*credit.expiresAt)) {
+				blockers = append(blockers, ResetScheduleBlocker{Code: "invalid_fixed_use"})
+				continue
+			}
+			credit.fixedAt = &at
+			state.credits[pin.CreditID] = credit
+			if at.After(state.horizon) {
+				state.horizon = at.Add(7 * 24 * time.Hour)
+			}
+		}
+	}
 	sort.Slice(blockers, func(i, j int) bool {
 		if blockers[i].AccountEmail != blockers[j].AccountEmail {
 			return blockers[i].AccountEmail < blockers[j].AccountEmail
@@ -365,11 +415,11 @@ func cloneSimulationState(state simulationState) simulationState {
 func simulationAccountAvailable(account simulationAccount) bool {
 	for _, name := range sharedResetWindows() {
 		window, ok := account.windows[name]
-		if !ok || window.remaining <= 0 {
+		if ok && window.remaining <= 0 {
 			return false
 		}
 	}
-	return true
+	return len(account.windows) > 0
 }
 
 func simulationActiveMultiplier(state simulationState) float64 {
@@ -399,13 +449,19 @@ func nextSimulationEvent(state simulationState) (simulationEvent, bool) {
 	for _, key := range accountKeys {
 		account := state.accounts[key]
 		for _, name := range sharedResetWindows() {
-			window := account.windows[name]
+			window, ok := account.windows[name]
+			if !ok {
+				continue
+			}
 			consider(simulationEvent{at: window.resetAt, kind: simulationEventNaturalReset, accountKey: key, window: name})
 		}
 	}
 	creditIDs := sortedSimulationCreditIDs(state)
 	for _, id := range creditIDs {
 		credit := state.credits[id]
+		if credit.fixedAt != nil {
+			consider(simulationEvent{at: *credit.fixedAt, kind: simulationEventConsumption, accountKey: credit.accountKey, creditID: id})
+		}
 		if credit.expiresAt != nil {
 			consider(simulationEvent{at: *credit.expiresAt, kind: simulationEventExpiry, accountKey: credit.accountKey, creditID: id})
 		}
@@ -419,11 +475,15 @@ func nextSimulationEvent(state simulationState) (simulationEvent, bool) {
 				continue
 			}
 			for _, name := range sharedResetWindows() {
+				window, ok := account.windows[name]
+				if !ok {
+					continue
+				}
 				rate := state.totalDemand[name] / activeMultiplier
 				if rate <= 0 {
 					continue
 				}
-				seconds := account.windows[name].remaining / rate
+				seconds := window.remaining / rate
 				if !finiteInRange(seconds, 0, state.horizon.Sub(state.now).Seconds()) {
 					continue
 				}
@@ -475,7 +535,10 @@ func advanceSimulationTo(state simulationState, target time.Time) simulationStat
 			continue
 		}
 		for _, name := range sharedResetWindows() {
-			window := account.windows[name]
+			window, ok := account.windows[name]
+			if !ok {
+				continue
+			}
 			window.remaining = clampPercentage(window.remaining - state.totalDemand[name]/activeMultiplier*seconds)
 			account.windows[name] = window
 		}
@@ -595,6 +658,17 @@ func RecommendResetSchedule(input ResetScheduleInput) ResetSchedule {
 		Blockers:    blockers,
 	}
 	records := resetCreditRecords(input)
+	if input.Constraints != nil {
+		allowed := make(map[string]bool)
+		for _, ref := range input.Constraints.AllowedCredits {
+			allowed[ref.CreditID] = true
+		}
+		for id := range records {
+			if !allowed[id] {
+				delete(records, id)
+			}
+		}
+	}
 	if len(blockers) != 0 {
 		result.Exact = false
 		result.Items = unfinishedResetScheduleItems(records, nil, nil, input.Now.UTC(), state.confidence)
@@ -609,6 +683,23 @@ func RecommendResetSchedule(input ResetScheduleInput) ResetSchedule {
 		consumed[consumption.creditID] = consumption
 	}
 	result.Items = projectResetScheduleItems(records, consumed, node.useful, input.Now.UTC(), state.confidence)
+	if input.Constraints != nil {
+		for _, pin := range input.Constraints.FixedUses {
+			for i := range result.Items {
+				item := &result.Items[i]
+				if item.CreditID == pin.CreditID && !item.UseAt.IsZero() {
+					item.UseAt = pin.At.UTC()
+					if item.UseAt.Before(input.Now) {
+						item.UseAt = input.Now.UTC()
+					}
+					item.Status = ResetScheduled
+					if !item.UseAt.After(input.Now) {
+						item.Status = ResetDueNow
+					}
+				}
+			}
+		}
+	}
 	return result
 }
 
@@ -687,6 +778,14 @@ func branchImmediateResetConsumptions(node resetSearchNode) []resetSearchNode {
 func expandResetSearchEvent(node resetSearchNode, event simulationEvent) []resetSearchNode {
 	advanced := cloneResetSearchNode(node)
 	advanced.state = advanceSimulationTo(advanced.state, event.at)
+	if event.kind == simulationEventConsumption {
+		state, restored, applied := applySimulationCredit(advanced.state, event.accountKey, event.creditID)
+		if applied {
+			advanced.state = state
+			advanced.consumptions = append(advanced.consumptions, resetSearchConsumption{accountKey: event.accountKey, creditID: event.creditID, useBy: event.at, eventKind: event.kind, restored: restored})
+		}
+		return []resetSearchNode{advanced}
+	}
 	useful := usefulResetCredits(advanced.state)
 	for _, credit := range useful {
 		advanced.useful[credit.id] = true
@@ -743,7 +842,7 @@ func usefulResetCredits(state simulationState) []simulationCredit {
 	credits := make([]simulationCredit, 0)
 	for _, id := range sortedSimulationCreditIDs(state) {
 		credit := state.credits[id]
-		if resetCreditUseful(state, credit) {
+		if credit.fixedAt == nil && resetCreditUseful(state, credit) {
 			credits = append(credits, credit)
 		}
 	}
@@ -762,7 +861,7 @@ func resetCreditUseful(state simulationState, credit simulationCredit) bool {
 		return false
 	}
 	for _, name := range sharedResetWindows() {
-		if 100-account.windows[name].remaining >= 1 {
+		if window, ok := account.windows[name]; ok && 100-window.remaining >= 1 {
 			return true
 		}
 	}

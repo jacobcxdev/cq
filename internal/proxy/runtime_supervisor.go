@@ -1063,6 +1063,17 @@ func (supervisor *RuntimeSupervisor) bootLocked(ctx context.Context, manifest Wo
 	if err != nil || digest == "" {
 		return RuntimeBootAckV1{}, supervisor.releaseFailedBoot(worker, errors.Join(ErrRuntimeCheckpointUnavailable, err))
 	}
+	// Warming and validation workers never receive activation. Older workers
+	// omit this capability and retain their existing lifecycle behaviour.
+	if ack.BackgroundWork {
+		background, ok := worker.(interface{ ActivateBackground(context.Context) error })
+		if !ok {
+			return RuntimeBootAckV1{}, supervisor.releaseFailedBoot(worker, ErrRuntimeWorkerUnavailable)
+		}
+		if err := background.ActivateBackground(ctx); err != nil {
+			return RuntimeBootAckV1{}, supervisor.releaseFailedBoot(worker, err)
+		}
+	}
 	supervisor.worker = worker
 	supervisor.workerManifest = manifest
 	supervisor.checkpointDigest = digest
