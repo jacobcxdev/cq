@@ -469,6 +469,7 @@ jobs:
       - name: Audit published Homebrew Cask
         run: |
           brew tap jacobcxdev/tap
+          brew trust --cask jacobcxdev/tap/cq
           brew audit --cask --strict jacobcxdev/tap/cq
 
       - name: Verify published release
