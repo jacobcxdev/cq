@@ -544,6 +544,29 @@ func (a *CodexResetApp) cleanupScheduleAttempts(state codex.ResetAutomationState
 }
 
 func (a *CodexResetApp) executeAutomationEntry(ctx context.Context, state codex.ResetAutomationState, entry codex.ResetAutomationEntry) error {
+	// A crash between the schedule claim and attempt creation, or an older
+	// manual client, can leave a durable claim without its replay record.
+	// Rebuild only that claimed credit's deterministic request; never select a replacement.
+	if entry.State == codex.ResetAutomationRunning || entry.State == codex.ResetAutomationRetrying {
+		pending, err := a.Attempts.Pending(entry.AccountKey)
+		if err != nil {
+			return a.blockAutomationEntry(ctx, state.Revision, entry, err)
+		}
+		found := false
+		for _, attempt := range pending {
+			if attempt.CreditID == entry.CreditID {
+				found = true
+			}
+		}
+		if !found {
+			if len(pending) != 0 {
+				return a.blockAutomationEntry(ctx, state.Revision, entry, resetAppError("consume_indeterminate", errors.New("account has an unresolved reset attempt")))
+			}
+			if _, err := a.Attempts.Ensure(entry.AccountKey, entry.CreditID, entry.UpdatedAt); err != nil {
+				return a.blockAutomationEntry(ctx, state.Revision, entry, err)
+			}
+		}
+	}
 	// Target-only preflight keeps explicit fixed authority independent of forecast failures.
 	plan, err := a.prepareUse(ctx, string(entry.AccountKey), entry.CreditID, false)
 	if err != nil {
@@ -634,23 +657,7 @@ func (a *CodexResetApp) executeAutomationEntry(ctx context.Context, state codex.
 			e.NextAttemptAt = resetTimePointer(a.now().Add(time.Minute))
 			return nil
 		}
-		e.Outcome = result.Outcome
-		e.LastError = ""
-		e.Warnings = nil
-		for _, warning := range result.Warnings {
-			e.Warnings = append(e.Warnings, warning.Code)
-		}
-		switch result.Outcome {
-		case codex.ConsumeReset, codex.ConsumeAlreadyRedeemed:
-			e.State = codex.ResetAutomationCompleted
-		case codex.ConsumeNothingToReset:
-			e.State = codex.ResetAutomationSkipped
-		default:
-			e.State = codex.ResetAutomationMissed
-			e.LastError = "no_credit"
-		}
-		current.PlanValid = false
-		current.NextReplanAt = nil
+		applyAutomationUseResult(current, e, result, a.now())
 		return nil
 	})
 	if consumeErr == nil && saveErr == nil {
@@ -665,6 +672,45 @@ func (a *CodexResetApp) executeAutomationEntry(ctx context.Context, state codex.
 		}
 	}
 	return errors.Join(consumeErr, saveErr)
+}
+
+func (a *CodexResetApp) reconcileManualAutomationUse(ctx context.Context, plan CodexResetUsePlan, result CodexResetUseResult) error {
+	_, err := a.Schedule.Update(ctx, func(state *codex.ResetAutomationState) error {
+		for i := range state.Entries {
+			entry := &state.Entries[i]
+			if entry.AccountKey == plan.account.AccountKey && entry.CreditID == plan.Credit.ID && !entry.Terminal() {
+				applyAutomationUseResult(state, entry, result, a.now())
+				return nil
+			}
+		}
+		return errResetScheduleNoWork
+	})
+	if errors.Is(err, errResetScheduleNoWork) {
+		return nil
+	}
+	return err
+}
+
+func applyAutomationUseResult(state *codex.ResetAutomationState, entry *codex.ResetAutomationEntry, result CodexResetUseResult, now time.Time) {
+	entry.UpdatedAt = now
+	entry.NextAttemptAt = nil
+	entry.Outcome = result.Outcome
+	entry.LastError = ""
+	entry.Warnings = nil
+	for _, warning := range result.Warnings {
+		entry.Warnings = append(entry.Warnings, warning.Code)
+	}
+	switch result.Outcome {
+	case codex.ConsumeReset, codex.ConsumeAlreadyRedeemed:
+		entry.State = codex.ResetAutomationCompleted
+	case codex.ConsumeNothingToReset:
+		entry.State = codex.ResetAutomationSkipped
+	default:
+		entry.State = codex.ResetAutomationMissed
+		entry.LastError = "no_credit"
+	}
+	state.PlanValid = false
+	state.NextReplanAt = nil
 }
 
 func finiteResetRemaining(value float64) bool { return value >= 0 && value <= 100 }
