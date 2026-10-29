@@ -239,6 +239,158 @@ func TestResetAutomationCancellationDuringPreflightWins(t *testing.T) {
 	}
 }
 
+func TestResetAutomationManualRetryCompletesScheduledEntry(t *testing.T) {
+	a, b, _, attempts := automationFixture(t)
+	at := a.now()
+	automationChange(t, a, CodexResetScheduleChange{Action: "add", Reference: "a@example.com", At: &at})
+	automationChange(t, a, CodexResetScheduleChange{Action: "enable"})
+	b.consumeErr = errors.New("lost response")
+	if err := a.StepSchedule(context.Background()); err == nil {
+		t.Fatal("lost response hidden")
+	}
+	b.consumeErr = nil
+	b.consume.Outcome = codex.ConsumeAlreadyRedeemed
+	b.credits["account-a"] = codex.ResetCreditInventory{}
+	plan, err := a.PrepareUse(context.Background(), "a@example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts.removeCalls = 0
+	b.consumeHook = func() { automationChange(t, a, CodexResetScheduleChange{Action: "disable"}) }
+	result, err := a.ExecuteUse(context.Background(), plan)
+	if err != nil || result.Outcome != codex.ConsumeAlreadyRedeemed {
+		t.Fatalf("manual retry = %+v, %v", result, err)
+	}
+	state, err := a.Schedule.Load()
+	if err != nil || state.Entries[0].State != codex.ResetAutomationCompleted || state.Entries[0].Outcome != codex.ConsumeAlreadyRedeemed || state.Entries[0].NextAttemptAt != nil || state.PlanValid || state.Enabled {
+		t.Fatalf("manual outcome not merged: %+v, %v", state, err)
+	}
+	if len(attempts.pending["account-a"]) != 0 || attempts.removeCalls != 1 || b.consumeCalls != 2 {
+		t.Fatal("manual completion did not clean exactly its resolved attempt")
+	}
+	if err := a.StepSchedule(context.Background()); err != nil || b.consumeCalls != 2 {
+		t.Fatal("resolved manual retry consumed again")
+	}
+}
+
+func TestResetAutomationClaimWithoutAttemptReplaysMissingCredit(t *testing.T) {
+	for _, outcome := range []codex.ConsumeResetOutcome{codex.ConsumeAlreadyRedeemed, codex.ConsumeNoCredit} {
+		t.Run(string(outcome), func(t *testing.T) {
+			a, b, _, attempts := automationFixture(t)
+			requests := &automationRequestBackend{recordingResetBackend: b}
+			a.Backend = requests
+			at := a.now()
+			automationChange(t, a, CodexResetScheduleChange{Action: "add", Reference: "a@example.com", At: &at})
+			automationChange(t, a, CodexResetScheduleChange{Action: "enable"})
+			_, err := a.Schedule.Update(context.Background(), func(s *codex.ResetAutomationState) error {
+				s.Entries[0].State = codex.ResetAutomationRetrying
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.credits["account-a"] = codex.ResetCreditInventory{}
+			b.consume.Outcome = outcome
+			if err := a.StepSchedule(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			state, _ := a.Schedule.Load()
+			want := codex.ResetAutomationCompleted
+			if outcome == codex.ConsumeNoCredit {
+				want = codex.ResetAutomationMissed
+			}
+			if state.Entries[0].State != want || state.Entries[0].Outcome != outcome || b.consumeCalls != 1 || len(attempts.pending["account-a"]) != 0 {
+				t.Fatalf("claim not reconciled: %+v calls=%d", state, b.consumeCalls)
+			}
+			if requests.creditIDs[0] != "credit-account-a" || requests.keys[0] != codex.ResetIdempotencyKey("account-a", "credit-account-a") {
+				t.Fatal("claim recovery changed credit or request key")
+			}
+		})
+	}
+}
+
+func TestResetAutomationManualOutcomeSurvivesScheduleSaveFailure(t *testing.T) {
+	a, b, _, attempts := automationFixture(t)
+	at := a.now()
+	automationChange(t, a, CodexResetScheduleChange{Action: "add", Reference: "a@example.com", At: &at})
+	automationChange(t, a, CodexResetScheduleChange{Action: "enable"})
+	plan, err := a.PrepareUse(context.Background(), "a@example.com", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalPath := a.Schedule.Path
+	b.consumeHook = func() { a.Schedule.Path = "invalid-relative-path" }
+	result, err := a.ExecuteUse(context.Background(), plan)
+	if err != nil || result.Outcome != codex.ConsumeReset || len(result.Warnings) != 1 || result.Warnings[0].Code != "schedule_update_failed" {
+		t.Fatalf("manual success lost: %+v, %v", result, err)
+	}
+	if len(attempts.pending["account-a"]) != 1 || attempts.removeCalls != 0 {
+		t.Fatal("retry record removed before schedule outcome saved")
+	}
+	a.Schedule.Path = originalPath
+	b.consumeHook = nil
+	b.credits["account-a"] = codex.ResetCreditInventory{}
+	b.consume.Outcome = codex.ConsumeAlreadyRedeemed
+	if err := a.StepSchedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, _ := a.Schedule.Load()
+	if state.Entries[0].State != codex.ResetAutomationCompleted || len(attempts.pending["account-a"]) != 0 {
+		t.Fatalf("manual success not recovered: %+v", state)
+	}
+}
+
+func TestResetAutomationClaimRecoveryDoesNotReplaceUnrelatedAttempt(t *testing.T) {
+	a, b, _, attempts := automationFixture(t)
+	at := a.now()
+	automationChange(t, a, CodexResetScheduleChange{Action: "add", Reference: "a@example.com", At: &at})
+	automationChange(t, a, CodexResetScheduleChange{Action: "enable"})
+	_, err := a.Schedule.Update(context.Background(), func(s *codex.ResetAutomationState) error {
+		s.Entries[0].State = codex.ResetAutomationRunning
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = attempts.Ensure("account-a", "unrelated-credit", a.now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StepSchedule(context.Background()); err == nil {
+		t.Fatal("unrelated unresolved attempt ignored")
+	}
+	if b.consumeCalls != 0 || len(attempts.pending["account-a"]) != 1 || attempts.pending["account-a"][0].CreditID != "unrelated-credit" {
+		t.Fatal("recovery replaced unrelated pending attempt")
+	}
+}
+
+func TestResetAutomationAcceptDrainedWeeklyPortfolioRunsInitialReset(t *testing.T) {
+	a, b, u, _ := automationFixture(t)
+	for _, result := range u.results {
+		delete(result.Windows, quota.Window5Hour)
+		w := result.Windows[quota.Window7Day]
+		w.RemainingPct = 0
+		result.Windows[quota.Window7Day] = w
+	}
+	state := automationChange(t, a, CodexResetScheduleChange{Action: "accept", Mode: codex.ResetAutomationAdaptive})
+	if !state.Enabled || b.consumeCalls != 0 {
+		t.Fatal("acceptance did not leave execution to executor")
+	}
+	if err := a.StepSchedule(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	state, _ = a.Schedule.Load()
+	completed := 0
+	for _, e := range state.Entries {
+		if e.State == codex.ResetAutomationCompleted {
+			completed++
+		}
+	}
+	if b.consumeCalls != 1 || completed != 1 {
+		t.Fatalf("initial due reset did not execute: %+v calls=%d", state, b.consumeCalls)
+	}
+}
+
 type resetAutomationUsageHook struct {
 	results []quota.Result
 	hook    func()

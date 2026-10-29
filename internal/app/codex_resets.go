@@ -256,14 +256,26 @@ func (a *CodexResetApp) prepareUse(ctx context.Context, reference, explicitCredi
 }
 
 func (a *CodexResetApp) ExecuteUse(ctx context.Context, plan CodexResetUsePlan) (CodexResetUseResult, error) {
-	if a.Schedule != nil {
-		lock, err := a.Schedule.AcquireExecutor()
-		if err != nil {
-			return CodexResetUseResult{}, resetAppError("consume_failed", err)
-		}
-		defer lock.Close()
+	if a.Schedule == nil {
+		return a.executeUse(ctx, plan, false)
 	}
-	return a.executeUse(ctx, plan, false)
+	lock, err := a.Schedule.AcquireExecutor()
+	if err != nil {
+		return CodexResetUseResult{}, resetAppError("consume_failed", err)
+	}
+	defer lock.Close()
+	result, err := a.executeUse(ctx, plan, true)
+	if err != nil {
+		return result, err
+	}
+	// Save the definitive manual outcome before removing its replay record.
+	// Otherwise a claimed schedule entry can lose its only recovery evidence.
+	if err := a.reconcileManualAutomationUse(context.WithoutCancel(ctx), plan, result); err != nil {
+		result.Warnings = append(result.Warnings, CodexResetWarning{Code: "schedule_update_failed"})
+		return result, nil
+	}
+	a.finishResetAttempt(&result, plan.account, plan.Credit.ID)
+	return result, nil
 }
 
 func (a *CodexResetApp) executeUse(ctx context.Context, plan CodexResetUsePlan, retainAttempt bool) (CodexResetUseResult, error) {
