@@ -64,6 +64,7 @@ func ProjectCodexRoutePolicyCandidates(
 				RequiredBuckets: append([]CapacityBucket(nil), buckets...),
 			},
 			RequiredCapacity:  views,
+			SystemAccount:     account.Active,
 			Compatible:        compatible,
 			Routable:          codexRouteProjectionAccountRoutable(account, now),
 			ProvisionalLeases: provisional[account.Key],

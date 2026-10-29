@@ -588,7 +588,7 @@ accountsLoop:
 				var reserveLimit *codexReserveLimitError
 				if errors.As(err, &reserveLimit) {
 					nextAccountIndex, hasReplacement := codexHTTPRequestNextUnavailableAccount(accountIndex, ordinaryAccountCount, len(accounts), result.Lifecycle.EverAdmitted())
-					if hasReplacement || codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle) {
+					if hasReplacement || codexHTTPRequestCanRecordAccountUnavailable(plan, result.Lifecycle) || plan.quotaRecoveryRetry {
 						replacementSlot := uint32(0)
 						if hasReplacement {
 							replacementSlot = codexHTTPRequestFirstAccountSlot(accountSlots[nextAccountIndex])

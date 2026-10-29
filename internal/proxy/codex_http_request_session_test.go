@@ -2002,6 +2002,7 @@ func TestCodexHTTPRequestSessionReserveTerminalLifecycle(t *testing.T) {
 		name       string
 		admitted   bool
 		portable   bool
+		recovery   bool
 		reserve    bool
 		wantEvents string
 		wantReplan bool
@@ -2009,11 +2010,13 @@ func TestCodexHTTPRequestSessionReserveTerminalLifecycle(t *testing.T) {
 		{name: "new request", reserve: true, wantEvents: "exhaust:0", wantReplan: true},
 		{name: "portable continuation", admitted: true, portable: true, reserve: true, wantEvents: "exhaust:0", wantReplan: true},
 		{name: "nonportable continuation", admitted: true, reserve: true, wantEvents: "abandon"},
+		{name: "quota recovery continuation", admitted: true, recovery: true, reserve: true, wantEvents: "exhaust:0", wantReplan: true},
 		{name: "unrelated cached limit", portable: true, wantEvents: "abandon"},
+		{name: "quota recovery cached limit", admitted: true, recovery: true, wantEvents: "abandon"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			choice := codexHTTPSessionChoice("account-a")
-			plan := CodexFrozenDispatchPlan{status: CodexRoutePlanReady, accountUnavailablePortable: test.portable, accounts: []CodexFrozenDispatchAccount{
+			plan := CodexFrozenDispatchPlan{status: CodexRoutePlanReady, accountUnavailablePortable: test.portable, quotaRecoveryRetry: test.recovery, accounts: []CodexFrozenDispatchAccount{
 				{choice: choice, attempts: []CandidateAttempt{codexHTTPSessionAttempt("account-a", "candidate-a", "revision-a", 1)}},
 			}}
 			frozen, encoded := newCodexHTTPSessionFrozenRequest(t, choice)

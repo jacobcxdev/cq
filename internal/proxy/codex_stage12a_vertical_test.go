@@ -34,7 +34,7 @@ func TestCodexStage12AProductionVertical(t *testing.T) {
 		frozenDispatchTestLogicalAccount(accountB, frozenDispatchCandidate(accountB, "candidate-b", "revision-b", codex.SourceExternal, false, expires)),
 		frozenDispatchTestLogicalAccount(accountA, frozenDispatchCandidate(accountA, "candidate-a", "revision-a", codex.SourceExternal, false, expires)),
 	}
-	accounts[2].Active = true
+	accounts[1].Active = true
 	inventory := &stage12AInventory{inventory: codex.Inventory{Accounts: accounts}}
 
 	ledger := NewCodexCapacityLedger(func() time.Time { return *now }, time.Hour)
@@ -209,17 +209,17 @@ func TestCodexStage12AProductionVertical(t *testing.T) {
 		t.Fatalf("first response = %d/%q", firstResponse.Code, firstResponse.Body.String())
 	}
 
-	inventory.setActive(accountB, defaultAccount)
+	inventory.setActive(accountA, defaultAccount)
 	secondResponse := stage12AServe(t, server, requestBodies[1], "stage12a-private-session-header-two")
 	if secondResponse.Code != http.StatusOK || !strings.Contains(secondResponse.Body.String(), "stage12a-private-response-default") {
 		t.Fatalf("second response = %d/%q", secondResponse.Code, secondResponse.Body.String())
 	}
 
-	if got, want := inventory.activeSnapshots(), [][]codex.AccountKey{{accountA}, {defaultAccount, accountB}}; !reflect.DeepEqual(got, want) {
+	if got, want := inventory.activeSnapshots(), [][]codex.AccountKey{{accountB}, {defaultAccount, accountA}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("inventory Active snapshots = %v, want %v", got, want)
 	}
 	attempts, responseBodies := transport.snapshot()
-	if got, want := stage12AAttemptAccounts(attempts), []codex.AccountKey{accountA, accountA, accountB, defaultAccount}; !reflect.DeepEqual(got, want) {
+	if got, want := stage12AAttemptAccounts(attempts), []codex.AccountKey{accountA, accountB, accountA, defaultAccount}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("attempt accounts = %v, want %v", got, want)
 	}
 	if got := ledger.Capacity(accountA, CapacityBucketBase); got.State != CapacityZero || got.Source != CapacitySourceHardLimit {
@@ -396,7 +396,7 @@ func TestCodexStage12AMonotonicResponseIDContinuation(t *testing.T) {
 		frozenDispatchTestLogicalAccount(accountB, frozenDispatchCandidate(accountB, "candidate-b", "revision-b", codex.SourceExternal, false, expires)),
 		frozenDispatchTestLogicalAccount(accountA, frozenDispatchCandidate(accountA, "candidate-a", "revision-a", codex.SourceExternal, false, expires)),
 	}
-	accounts[2].Active = true
+	accounts[1].Active = true
 	inventory := &stage12AInventory{inventory: codex.Inventory{Accounts: accounts}}
 
 	ledger := NewCodexCapacityLedger(func() time.Time { return *now }, time.Hour)
@@ -539,7 +539,7 @@ func TestCodexStage12AMonotonicResponseIDContinuation(t *testing.T) {
 		t.Fatalf("first response = %d/%q", firstResponse.Code, firstResponse.Body.String())
 	}
 
-	inventory.setActive(accountB, defaultAccount)
+	inventory.setActive(accountA, defaultAccount)
 	secondResponse := httptest.NewRecorder()
 	stage12AServeWithWriter(t, server, secondInput, "stage12a-private-session-header", "stage12a-private-turn-state-a", secondResponse)
 	if secondResponse.Code != http.StatusTooManyRequests {
@@ -562,7 +562,7 @@ func TestCodexStage12AMonotonicResponseIDContinuation(t *testing.T) {
 	if got, want := stage12AAttemptAccounts(attempts), []codex.AccountKey{accountA, accountA}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("attempt accounts = %v, want %v", got, want)
 	}
-	if got, want := inventory.activeSnapshots(), [][]codex.AccountKey{{accountA}, {defaultAccount, accountB}}; !reflect.DeepEqual(got, want) {
+	if got, want := inventory.activeSnapshots(), [][]codex.AccountKey{{accountB}, {defaultAccount, accountA}}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("inventory Active snapshots = %v, want %v", got, want)
 	}
 	if got := ledger.Capacity(accountA, CapacityBucketBase); got.State != CapacityZero || got.Source != CapacitySourceHardLimit {

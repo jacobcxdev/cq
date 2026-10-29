@@ -3581,3 +3581,72 @@ func TestNormalProxyTransportHTTPReserveRebindsFullRequest(t *testing.T) {
 	}
 	harness.backend.assertNoFailure(t)
 }
+
+func TestNormalProxyTransportHTTPReserveRecoversPreviouslyExhaustedAccount(t *testing.T) {
+	harness := newNormalTransportGateCodexCallerHarness(t, normalTransportGateHTTPAllHardLimit)
+	harness.httpPlanner.DefaultAccountKey = codexInstalledHTTPValidationAccountA
+	metadata := CodexTurnMetadata{SessionID: "reserve-recovery-session", ThreadID: "reserve-recovery-thread", TurnID: "exhausted-turn", RequestKind: CodexRequestTurn}
+	status, body := normalTransportGateHTTPCall(t, harness, normalTransportGateHTTPBody(t, metadata))
+	if status != http.StatusTooManyRequests {
+		t.Fatalf("historical exhaustion = %d %q, want429", status, body)
+	}
+	receipts := normalTransportGateReceipts(harness.backend.snapshot(), "http")
+	if len(receipts) != 2 {
+		t.Fatalf("historical attempts = %#v, want both accounts", receipts)
+	}
+
+	harness.backend.scenario = normalTransportGateHTTPSuccess
+	harness.backend.httpTurnState = true
+	for _, account := range []codex.AccountKey{codexInstalledHTTPValidationAccountA, codexInstalledHTTPValidationAccountB} {
+		now := time.Now()
+		positive := resetTestSnapshot(now, quota.Window7Day, 100)
+		exact := 100.0
+		positive.Result.Windows[quota.Window5Hour] = quota.Window{RemainingPct: 100, RemainingPctExact: &exact, ResetAtUnix: now.Add(4 * time.Hour).Unix()}
+		harness.httpPlanner.Capacity.ObserveLivePositiveQuotaSnapshot(harness.httpPlanner.Capacity.NewObservationStream(), account, positive)
+		if view := harness.httpPlanner.Capacity.Capacity(account, CapacityBucketBase); view.State != CapacityPositive {
+			t.Fatalf("restored capacity %s = %+v", account, view)
+		}
+	}
+	metadata.TurnID = "recovered-turn"
+	encoded := normalTransportGateHTTPBody(t, metadata)
+	status, body = normalTransportGateHTTPCall(t, harness, encoded)
+	if status != http.StatusOK {
+		t.Fatalf("recovered A seed = %d %q, want200", status, body)
+	}
+	receipts = normalTransportGateReceipts(harness.backend.snapshot(), "http")
+	if len(receipts) != 3 || receipts[2].accountID != "validation-upstream-a" {
+		t.Fatalf("recovered A receipts = %#v", receipts)
+	}
+
+	// The response can drain before its terminal journal mutation completes.
+	var snapshot CodexLeaseRouteSnapshot
+	for deadline := time.Now().Add(time.Second); ; {
+		var err error
+		snapshot, err = harness.continuity.LoadRouteSnapshot(context.Background(), NewCodexLeaseKey(metadata), []codex.AccountKey{codexInstalledHTTPValidationAccountA, codexInstalledHTTPValidationAccountB}, CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.QuotaExhaustedAccountKeys) == 1 || !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(snapshot.QuotaExhaustedAccountKeys) != 1 || snapshot.QuotaExhaustedAccountKeys[0] != codexInstalledHTTPValidationAccountB {
+		t.Fatalf("historical quota exclusions = %#v, want B", snapshot.QuotaExhaustedAccountKeys)
+	}
+
+	now := time.Now()
+	harness.httpPlanner.Capacity.ObserveQuotaSnapshot(codexInstalledHTTPValidationAccountA, QuotaSnapshot{FetchedAt: now, Result: quota.Result{Windows: map[quota.WindowName]quota.Window{"7d": {RemainingPct: 2, ResetAtUnix: now.Add(time.Hour).Unix()}}}})
+	if _, err := harness.reserve.Control("set", "7d", 2); err != nil {
+		t.Fatal(err)
+	}
+	status, body = normalTransportGateHTTPCall(t, harness, encoded, http.Header{"X-Codex-Turn-State": {"state-validation-upstream-a"}})
+	if status != http.StatusOK {
+		t.Fatalf("reserve recovery = %d %q, want B/200; receipts=%#v", status, body, normalTransportGateReceipts(harness.backend.snapshot(), "http"))
+	}
+	receipts = normalTransportGateReceipts(harness.backend.snapshot(), "http")
+	if len(receipts) != 4 || receipts[3].accountID != "validation-upstream-b" || receipts[3].turnState != "" || receipts[3].payload != string(encoded) {
+		t.Fatalf("reserve recovery receipts = %#v, want full request on B without A turn state", receipts)
+	}
+	harness.backend.assertNoFailure(t)
+}

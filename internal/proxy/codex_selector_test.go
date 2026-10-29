@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -26,6 +27,64 @@ func TestCodexSelector_DoesNotPreferSystemActive(t *testing.T) {
 	}
 	if acct.AccessToken != "tok-1" {
 		t.Errorf("token = %q, want tok-1", acct.AccessToken)
+	}
+}
+
+func TestCodexSelectorPreservesSystemAccount(t *testing.T) {
+	for _, inventoryBacked := range []bool{false, true} {
+		for _, test := range []struct {
+			name       string
+			remaining  int
+			unroutable bool
+			excluded   bool
+			want       codex.AccountKey
+		}{
+			{name: "positive ordinary", remaining: 1, want: "ordinary"},
+			{name: "unknown ordinary", remaining: -1, want: "ordinary"},
+			{name: "exhausted ordinary", want: "system"},
+			{name: "unroutable ordinary", remaining: 1, unroutable: true, want: "system"},
+			{name: "excluded ordinary", remaining: 1, excluded: true, want: "system"},
+		} {
+			t.Run(fmt.Sprintf("inventory=%t/%s", inventoryBacked, test.name), func(t *testing.T) {
+				now := time.Unix(1_700_000_000, 0)
+				capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+				frozenDispatchObserveCapacity(t, capacity, "system", CapacityBucketBase, 99, now)
+				if test.remaining >= 0 {
+					frozenDispatchObserveCapacity(t, capacity, "ordinary", CapacityBucketBase, test.remaining, now)
+				}
+				accounts := []codex.CodexAccount{
+					{AccountKey: "system", AccessToken: "system-token", IsActive: true},
+					{AccountKey: "ordinary", AccessToken: "ordinary-token"},
+				}
+				if test.unroutable {
+					accounts[1].AccessToken = ""
+				}
+				selector := NewCodexSelector(func() []codex.CodexAccount { return accounts }, nil).(*codexSelector)
+				if inventoryBacked {
+					var inventory codex.Inventory
+					for _, account := range accounts {
+						logical := frozenDispatchTestLogicalAccount(account.AccountKey,
+							frozenDispatchCandidate(account.AccountKey, "candidate", "revision", codex.SourceExternal, false, now.Add(time.Hour)))
+						logical.Active = account.IsActive
+						logical.Routable = account.AccessToken != ""
+						inventory.Accounts = append(inventory.Accounts, logical)
+					}
+					selector = NewCodexInventorySelector(staticCredentialInventory{inventory: inventory}, nil).(*codexSelector)
+				}
+				selector.capacity = capacity
+				var excluded []codex.SelectionExclusion
+				if test.excluded {
+					excluded = append(excluded, codex.SelectionExclusion{AccountKey: "ordinary"})
+				}
+				choice, err := selector.Choose(context.Background(), CodexRouteRequirements{RequestedModel: "gpt-5"}, excluded...)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if choice.AccountKey != test.want {
+					t.Fatalf("selected account = %q, want %q", choice.AccountKey, test.want)
+				}
+			})
+		}
 	}
 }
 
@@ -281,7 +340,7 @@ func TestCodexSelector_KeepsAdvisoryZeroAccountsEligible(t *testing.T) {
 	}
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
-			{AccountID: "dead-a", Email: "a@test.com", AccessToken: "t1", IsActive: true},
+			{AccountID: "dead-a", Email: "a@test.com", AccessToken: "t1"},
 			{AccountID: "dead-b", Email: "b@test.com", AccessToken: "t2"},
 		}
 	}, quotaReader)
@@ -408,7 +467,7 @@ func TestCodexSelector_PrefersProAccountForSparkWithOneMSuffix(t *testing.T) {
 func TestCodexSelector_UsesNonProAccountForNonSparkModel(t *testing.T) {
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
-			{Email: "plus@test.com", AccessToken: "tok-plus", PlanType: "plus", IsActive: true},
+			{Email: "plus@test.com", AccessToken: "tok-plus", PlanType: "plus", IsActive: false},
 			{Email: "pro@test.com", AccessToken: "tok-pro", PlanType: "pro", IsActive: false},
 		}
 	}, nil)
@@ -422,10 +481,10 @@ func TestCodexSelector_UsesNonProAccountForNonSparkModel(t *testing.T) {
 	}
 }
 
-func TestCodexSelector_KeepsActiveProForSparkModel(t *testing.T) {
+func TestCodexSelector_PrefersNativeProForSparkModel(t *testing.T) {
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
-			{Email: "pro@test.com", AccessToken: "tok-pro", PlanType: "pro", IsActive: true},
+			{Email: "pro@test.com", AccessToken: "tok-pro", PlanType: "pro", IsActive: false},
 			{Email: "plus@test.com", AccessToken: "tok-plus", PlanType: "plus", IsActive: false},
 		}
 	}, nil)
@@ -463,7 +522,7 @@ func TestCodexSelector_PrefersPositiveNonProOverAdvisoryZeroPro(t *testing.T) {
 	}
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{
-			{AccountID: "plus", Email: "plus@test.com", AccessToken: "tok-plus", PlanType: "plus", IsActive: true},
+			{AccountID: "plus", Email: "plus@test.com", AccessToken: "tok-plus", PlanType: "plus", IsActive: false},
 			{AccountID: "pro", Email: "pro@test.com", AccessToken: "tok-pro", PlanType: "pro", IsActive: false},
 		}
 	}, quotaReader)

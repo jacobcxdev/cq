@@ -97,6 +97,111 @@ func TestBuildCodexFrozenDispatchPlanUsesProvisionalCounts(t *testing.T) {
 	}
 }
 
+func TestBuildCodexFrozenDispatchPlanPreservesSystemAccount(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name               string
+		ordinaryValue      PoolValue
+		systemValue        PoolValue
+		ordinaryRemaining  int
+		ordinaryUnroutable bool
+		systemAffinity     bool
+		boundSystem        bool
+		recoveryProbe      bool
+		want               []codex.AccountKey
+	}{
+		{name: "unpooled", ordinaryRemaining: 1, want: []codex.AccountKey{"ordinary", "system"}},
+		{name: "same pool", ordinaryValue: 10, systemValue: 10, ordinaryRemaining: 1, want: []codex.AccountKey{"ordinary", "system"}},
+		{name: "maximum pool value", ordinaryValue: ^PoolValue(0), ordinaryRemaining: 1, want: []codex.AccountKey{"ordinary", "system"}},
+		{name: "system affinity", ordinaryRemaining: 1, systemAffinity: true, want: []codex.AccountKey{"ordinary", "system"}},
+		{name: "unknown ordinary capacity", ordinaryRemaining: -1, want: []codex.AccountKey{"ordinary", "system"}},
+		{name: "ordinary exhausted", ordinaryRemaining: 0, want: []codex.AccountKey{"system"}},
+		{name: "ordinary unroutable", ordinaryRemaining: 1, ordinaryUnroutable: true, want: []codex.AccountKey{"system"}},
+		{name: "hard continuation", ordinaryRemaining: 1, boundSystem: true, want: []codex.AccountKey{"system"}},
+		{name: "recovery probe", ordinaryRemaining: 1, recoveryProbe: true, want: []codex.AccountKey{"ordinary"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(1_700_000_000, 0)
+			capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+			frozenDispatchObserveCapacity(t, capacity, "system", CapacityBucketBase, 99, now)
+			if test.ordinaryRemaining >= 0 {
+				frozenDispatchObserveCapacity(t, capacity, "ordinary", CapacityBucketBase, test.ordinaryRemaining, now)
+			}
+			ordinary := frozenDispatchTestLogicalAccount("ordinary",
+				frozenDispatchCandidate("ordinary", "candidate-ordinary", "revision-ordinary", codex.SourceManaged, true, now.Add(time.Hour)))
+			ordinary.Routable = !test.ordinaryUnroutable
+			// An external credential for the same logical system account must
+			// retain system-account preservation too.
+			system := frozenDispatchTestLogicalAccount("system",
+				frozenDispatchCandidate("system", "candidate-system", "revision-system", codex.SourceExternal, false, now.Add(time.Hour)))
+			system.Active = true
+			input := CodexFrozenDispatchInput{
+				Inventory: codex.Inventory{Accounts: []codex.LogicalAccount{system, ordinary}},
+				Capacity:  capacity,
+				Requirements: CodexRouteRequirements{
+					RequestedModel: "gpt-5",
+				},
+				AccountValues: map[codex.AccountKey]PoolValue{
+					"ordinary": test.ordinaryValue, "system": test.systemValue,
+				},
+				DefaultAccountKey: "system",
+				Now:               now,
+			}
+			if test.systemAffinity {
+				input.AffinityAccountKey = "system"
+			}
+			if test.boundSystem {
+				input.BoundAccountKey = "system"
+			}
+			if test.recoveryProbe {
+				input.UnavailableAccountKeys = []codex.AccountKey{"system", "ordinary"}
+				input.ProbeUnavailableAccountKeys = input.UnavailableAccountKeys
+				input.ProbeUnavailableWhenAll = true
+			}
+			plan, err := BuildCodexFrozenDispatchPlan(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []codex.AccountKey
+			for _, account := range plan.Accounts() {
+				got = append(got, account.Choice().AccountKey)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("account order = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildCodexFrozenDispatchPlanPreservationFollowsSystemAccount(t *testing.T) {
+	t.Parallel()
+
+	for _, systemKey := range []codex.AccountKey{"account-a", "account-b"} {
+		t.Run(string(systemKey), func(t *testing.T) {
+			now := time.Unix(1_700_000_000, 0)
+			input := CodexFrozenDispatchInput{
+				Requirements: CodexRouteRequirements{RequestedModel: "gpt-5"},
+				Now:          now,
+			}
+			for _, key := range []codex.AccountKey{"account-a", "account-b"} {
+				account := frozenDispatchTestLogicalAccount(key,
+					frozenDispatchCandidate(key, "candidate", "revision", codex.SourceManaged, true, now.Add(time.Hour)))
+				account.Active = key == systemKey
+				input.Inventory.Accounts = append(input.Inventory.Accounts, account)
+			}
+			plan, err := BuildCodexFrozenDispatchPlan(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			accounts := plan.Accounts()
+			if len(accounts) != 2 || accounts[0].Choice().AccountKey == systemKey || accounts[1].Choice().AccountKey != systemKey {
+				t.Fatalf("account plans = %+v, want system account %q last", accounts, systemKey)
+			}
+		})
+	}
+}
+
 func TestBuildCodexFrozenDispatchPlanClassifiesExhaustedCapacity(t *testing.T) {
 	t.Parallel()
 

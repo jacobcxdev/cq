@@ -561,6 +561,55 @@ func TestCodexHTTPRequestPlanFactoryAppliesPoolValueToWebSocketPrewarm(t *testin
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryPreservesSystemAccount(t *testing.T) {
+	t.Parallel()
+
+	for _, prewarm := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prewarm=%t", prewarm), func(t *testing.T) {
+			runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "ordinary"}}
+			factory := codexHTTPRequestPlanTestFactory(runtime)
+			now := factory.Now()
+			system := frozenDispatchTestLogicalAccount("system",
+				frozenDispatchCandidate("system", "system-candidate", "system-revision", codex.SourceSystem, false, now.Add(time.Hour)))
+			system.Active = true
+			ordinary := frozenDispatchTestLogicalAccount("ordinary",
+				frozenDispatchCandidate("ordinary", "ordinary-candidate", "ordinary-revision", codex.SourceManaged, true, now.Add(time.Hour)))
+			factory.Inventory = &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{system, ordinary}}}
+			factory.DefaultAccountKey = "system"
+			factory.Routes.(*codexHTTPRequestPlanTestSnapshotter).snapshot.AffinityAccountKey = "system"
+			factory.SessionPolicy = NewSessionPolicyResolver(make([]byte, 32), RoutingPolicyV2{
+				SchemaVersion: 2, RoutingGeneration: 7,
+				Pools: []AccountPoolV2{{ID: testPoolIDA, Name: "Cyber", Value: ^PoolValue(0), Members: []codex.AccountKey{"ordinary"}}},
+			})
+			input := CodexHTTPRequestPlanInput{Encoded: frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "private-body")}
+			var dispatch CodexFrozenDispatchPlan
+			if prewarm {
+				input.Encoded = []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"","request_kind":"prewarm"}},"input":[]}`)
+				var err error
+				dispatch, err = factory.planWebSocketPrewarm(context.Background(), input)
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				result, err := factory.Build(context.Background(), input)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer result.Frozen.Release()
+				dispatch = result.Dispatch
+			}
+			accounts := dispatch.Accounts()
+			if len(accounts) != 2 || accounts[0].Choice().AccountKey != "ordinary" || accounts[1].Choice().AccountKey != "system" {
+				t.Fatalf("dispatch = %+v, want ordinary account before system account", accounts)
+			}
+			candidates := codexTraceDispatchCandidates(dispatch)
+			if len(candidates) != 2 || !candidates[0].SystemAccount || candidates[1].SystemAccount {
+				t.Fatalf("system-account trace classification = %+v", candidates)
+			}
+		})
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryAdoptsReadyWebSocketPrewarm(t *testing.T) {
 	t.Parallel()
 	coordinator, _, now := openCodexLeaseRuntimeTestCoordinator(t)
@@ -2956,6 +3005,47 @@ func TestCodexHTTPRequestPlanFactoryResetsCyberOffDeltaOnlyForCheaperAvailableAc
 	frozenDispatchObserveCapacity(t, factory.Capacity, "ordinary", CapacityBucketBase, 0, now)
 	if factory.ShouldResetCyberOff(ctx, protocol, "cyber") {
 		t.Fatal("exhausted ordinary account triggered Cyber-off retry")
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryCyberOffResetPreservesSystemAccount(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		systemAccount codex.AccountKey
+		ordinaryValue PoolValue
+		wantReset     bool
+	}{
+		{name: "ordinary Cyber stays ahead of system", systemAccount: "ordinary"},
+		{name: "system Cyber yields to maximum pool value", systemAccount: "cyber", ordinaryValue: ^PoolValue(0), wantReset: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(1_700_000_000, 0).UTC()
+			policy := RoutingPolicyV2{
+				SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+				Pools: []AccountPoolV2{
+					{ID: testPoolIDA, Name: "Cyber", Value: 10, Members: []codex.AccountKey{"cyber"}},
+					{ID: testPoolIDB, Name: "Ordinary", Value: test.ordinaryValue, Members: []codex.AccountKey{"ordinary"}},
+				},
+			}
+			var inventory codex.Inventory
+			for _, key := range []codex.AccountKey{"ordinary", "cyber"} {
+				account := frozenDispatchTestLogicalAccount(key,
+					frozenDispatchCandidate(key, "candidate", "revision", codex.SourceExternal, false, now.Add(time.Hour)))
+				account.Active = key == test.systemAccount
+				inventory.Accounts = append(inventory.Accounts, account)
+			}
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory:        &codexHTTPRequestPlanTestInventory{inventory: inventory},
+				SessionPolicy:    NewSessionPolicyResolver([]byte("01234567890123456789012345678901"), policy),
+				CyberEligibility: NewCyberEligibilityStore(&RoutingPolicyStore{current: &policy}),
+				Now:              func() time.Time { return now },
+			}
+			ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"})
+			protocol := CodexProtocolRequest{Model: "gpt-5", Metadata: CodexTurnMetadataResult{Metadata: CodexTurnMetadata{SessionID: "session"}}}
+			if got := factory.ShouldResetCyberOff(ctx, protocol, "cyber"); got != test.wantReset {
+				t.Fatalf("Cyber-off reset = %t, want %t", got, test.wantReset)
+			}
+		})
 	}
 }
 

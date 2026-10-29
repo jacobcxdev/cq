@@ -403,7 +403,9 @@ cq proxy policy session digest --session-id ID
 
 Session selectors accept `--session-id`, `--session-id-stdin`, or a full keyed `--digest`. Live policy operations use authenticated loopback control; explicit `--state-root` supports offline state.
 
-Pool names are case-insensitive selectors and retain their configured display casing. Higher values preserve a pool's account capacity by routing ordinary unbound work through lower-value viable accounts first. Session bindings and task affinity remain hard constraints.
+Pool names are case-insensitive selectors and retain their configured display casing. Higher values preserve a pool's account capacity by routing ordinary unbound work through lower-value viable accounts first.
+
+The current Codex system account has an inherent preservation tier above every pool value because it may also serve clients on other hosts. Ordinary routing tries other eligible accounts first, even when soft affinity points to the system account. Within each tier, pool values retain their ordering. Hard continuation bindings and session-pool restrictions remain enforced, and the configured quota reserve still blocks protected system-account usage.
 
 ### Lease redistribution and invalidation
 

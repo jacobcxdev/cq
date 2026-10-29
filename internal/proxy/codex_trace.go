@@ -37,6 +37,7 @@ type CodexTraceCandidate struct {
 	Ordinal           int    `json:"ordinal"`
 	AccountHint       string `json:"account_hint,omitempty"`
 	Value             int    `json:"value,omitempty"`
+	SystemAccount     bool   `json:"system_account,omitempty"`
 	Compatible        bool   `json:"compatible"`
 	Routable          bool   `json:"routable"`
 	CapacityState     string `json:"capacity_state,omitempty"`
@@ -332,6 +333,7 @@ func codexTraceDispatchCandidates(plan CodexFrozenDispatchPlan) []CodexTraceCand
 		candidates = append(candidates, CodexTraceCandidate{
 			Ordinal: index + 1, AccountHint: codexTraceAccountHint(candidate.Choice.AccountKey),
 			Value: int(candidate.Value), Compatible: candidate.Compatible, Routable: candidate.Routable,
+			SystemAccount: candidate.SystemAccount,
 			CapacityState: capacityState, ProvisionalLeases: candidate.ProvisionalLeases,
 			Selected: selected[candidate.Choice.AccountKey], ExclusionReason: exclusion,
 		})
