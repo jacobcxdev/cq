@@ -635,7 +635,7 @@ func TestCodexRouteChoiceUsesActiveLeaseCountOnlyAsTieBreak(t *testing.T) {
 	}
 	ledger.SetActiveLeases("busy", 2)
 	selector := newCodexSelectorWithCapacity(func() []codex.CodexAccount {
-		return []codex.CodexAccount{{AccountKey: "busy", AccessToken: "a"}, {AccountKey: "idle", AccessToken: "b", IsActive: true}}
+		return []codex.CodexAccount{{AccountKey: "busy", AccessToken: "a"}, {AccountKey: "idle", AccessToken: "b"}}
 	}, nil, ledger)
 	choice, err := selector.Choose(context.Background(), CodexRouteRequirements{RequestedModel: "gpt-5.4"})
 	if err != nil {

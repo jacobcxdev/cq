@@ -438,11 +438,19 @@ func (factory *CodexHTTPRequestPlanFactory) ShouldResetCyberOff(ctx context.Cont
 	if err != nil {
 		return false
 	}
+	activeCandidate := CodexRoutePolicyCandidate{Value: decision.AccountValues[active]}
+	for _, candidate := range candidates {
+		if candidate.Choice.AccountKey == active {
+			activeCandidate.SystemAccount = candidate.SystemAccount
+			break
+		}
+	}
 	for _, candidate := range candidates {
 		account := candidate.Choice.AccountKey
+		candidate.Value = decision.AccountValues[account]
 		if account != active && candidate.Routable && candidate.Compatible && codexRoutePolicyCapacity(candidate).State != CapacityZero &&
 			containsCodexHTTPRequestAccountKey(decision.Allowed, account) &&
-			decision.AccountValues[account] < decision.AccountValues[active] {
+			codexRoutePolicyAccountValueLess(candidate, activeCandidate) {
 			return true
 		}
 	}

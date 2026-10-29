@@ -57,6 +57,7 @@ type codexRouteAccount struct {
 	email       string
 	planType    string
 	routable    bool
+	system      bool
 }
 
 type codexSelector struct {
@@ -102,6 +103,7 @@ func NewCodexInventorySelector(inventory codex.CredentialInventory, quota codexQ
 				email:       logical.Identity.Email,
 				planType:    logical.Identity.PlanType,
 				routable:    true,
+				system:      logical.Active,
 			})
 		}
 		return accounts, nil
@@ -173,6 +175,7 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 
 	type candidate struct {
 		choice    RouteChoice
+		system    bool
 		state     CapacityState
 		remaining int
 		resetAt   time.Time
@@ -228,6 +231,7 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 					RequiredBuckets: buckets,
 				},
 				state:     state,
+				system:    account.system,
 				remaining: remaining,
 				resetAt:   resetAt,
 				native:    native,
@@ -277,6 +281,7 @@ func (s *codexSelector) routeAccounts(ctx context.Context) ([]codexRouteAccount,
 			email:       account.Email,
 			planType:    account.PlanType,
 			routable:    account.AccessToken != "",
+			system:      account.IsActive,
 		})
 	}
 	return accounts, nil
@@ -284,6 +289,7 @@ func (s *codexSelector) routeAccounts(ctx context.Context) ([]codexRouteAccount,
 
 func betterRoute(candidate, current struct {
 	choice    RouteChoice
+	system    bool
 	state     CapacityState
 	remaining int
 	resetAt   time.Time
@@ -291,6 +297,9 @@ func betterRoute(candidate, current struct {
 	leases    int
 	index     int
 }) bool {
+	if candidate.system != current.system {
+		return !candidate.system
+	}
 	if candidate.state != current.state {
 		return candidate.state > current.state
 	}

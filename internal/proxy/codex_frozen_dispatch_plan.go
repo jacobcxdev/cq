@@ -536,6 +536,9 @@ func filterCodexFrozenDispatchUnavailableCandidates(candidates []CodexRoutePolic
 		if leftEligible != rightEligible {
 			return leftEligible
 		}
+		if probeCandidates[i].SystemAccount != probeCandidates[j].SystemAccount {
+			return !probeCandidates[i].SystemAccount
+		}
 		leftDefault := defaultAccountKey != "" && probeCandidates[i].Choice.AccountKey == defaultAccountKey
 		rightDefault := defaultAccountKey != "" && probeCandidates[j].Choice.AccountKey == defaultAccountKey
 		if leftDefault != rightDefault {

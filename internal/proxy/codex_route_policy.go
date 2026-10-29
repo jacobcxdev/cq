@@ -10,8 +10,9 @@ import (
 
 // CodexRoutePolicyCandidate is a secret-free account/model route considered by policy.
 type CodexRoutePolicyCandidate struct {
-	Choice RouteChoice
-	Value  PoolValue
+	Choice        RouteChoice
+	Value         PoolValue
+	SystemAccount bool
 	// RequiredCapacity aligns one-to-one with Choice.RequiredBuckets.
 	RequiredCapacity  []CapacityView
 	Compatible        bool
@@ -364,8 +365,10 @@ func codexRoutePolicyChoiceForAccount(frozen RouteChoice, accountKey codex.Accou
 }
 
 func codexRoutePolicyCandidateLess(left, right CodexRoutePolicyCandidate, affinity codex.AccountKey, affinityModel string) bool {
-	if left.Value != right.Value {
-		return left.Value < right.Value
+	// Preserve the system account for clients and hosts outside CQ, regardless
+	// of pool value or soft affinity. Hard continuation binding is handled first.
+	if left.SystemAccount != right.SystemAccount || left.Value != right.Value {
+		return codexRoutePolicyAccountValueLess(left, right)
 	}
 	leftAffinity := affinity != "" && left.Choice.AccountKey == affinity && (affinityModel == "" || codexRoutePolicySameModel(left.Choice.EffectiveModel, affinityModel))
 	rightAffinity := affinity != "" && right.Choice.AccountKey == affinity && (affinityModel == "" || codexRoutePolicySameModel(right.Choice.EffectiveModel, affinityModel))
@@ -394,6 +397,13 @@ func codexRoutePolicyCandidateLess(left, right CodexRoutePolicyCandidate, affini
 		return left.Choice.AccountKey < right.Choice.AccountKey
 	}
 	return codexRoutePolicyChoiceLess(left.Choice, right.Choice)
+}
+
+func codexRoutePolicyAccountValueLess(left, right CodexRoutePolicyCandidate) bool {
+	if left.SystemAccount != right.SystemAccount {
+		return !left.SystemAccount
+	}
+	return left.Value < right.Value
 }
 
 func codexRoutePolicyCapacityRank(state CapacityState) int {
