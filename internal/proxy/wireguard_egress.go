@@ -114,7 +114,7 @@ func (r *wireGuardRuntime) start(ctx context.Context) (*netstack.Net, error) {
 		err = dev.Up()
 	}
 	if err != nil {
-		dev.Close()
+		closeWireGuardDevice(dev)
 		return nil, errors.New("initialise WireGuard peer failed")
 	}
 	r.device, r.network = dev, network
@@ -275,9 +275,21 @@ func (r *wireGuardRuntime) Close() error {
 	r.device = nil
 	r.mu.Unlock()
 	if dev != nil {
-		dev.Close()
+		closeWireGuardDevice(dev)
 	}
 	return nil
+}
+
+// Device.Close closes its TUN before stopping the peers. With a userspace TUN,
+// an in-flight receive can synchronously emit a reply into that TUN's outgoing
+// packet channel. Down closes the bind and joins the peer workers first, while
+// the TUN reader is still available to drain those replies. Removing all peers
+// also fences a delayed initial TUN EventUp from restarting them between Down
+// and Close, which acquire the device state lock separately.
+func closeWireGuardDevice(dev *device.Device) {
+	_ = dev.Down()
+	dev.RemoveAllPeers()
+	dev.Close()
 }
 
 var _ io.Closer = (*wireGuardRuntime)(nil)

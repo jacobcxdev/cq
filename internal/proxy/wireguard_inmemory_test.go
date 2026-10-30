@@ -56,7 +56,7 @@ func TestWireGuardInMemoryEgressStreamsAndDNSFailover(t *testing.T) {
 		t.Fatal(err)
 	}
 	peer := device.NewDevice(tun, binds[1], device.NewLogger(device.LogLevelSilent, ""))
-	defer peer.Close()
+	defer closeWireGuardDevice(peer)
 	serverProfile := &wireGuardProfile{privateKey: serverPrivate, peers: []wireGuardPeer{{publicKey: clientPublic, allowedIPs: []netip.Prefix{netip.PrefixFrom(clientIP, 32)}}}}
 	if err := peer.IpcSet(serverProfile.ipcConfig([]netip.AddrPort{netip.MustParseAddrPort("127.0.0.1:2")})); err != nil {
 		t.Fatal(err)
@@ -357,7 +357,7 @@ func TestWireGuardInMemoryMultiplePeersLongestPrefixAndNoFallback(t *testing.T) 
 			t.Fatal(e)
 		}
 		dev := device.NewDevice(tun, bus[id], device.NewLogger(device.LogLevelSilent, ""))
-		t.Cleanup(dev.Close)
+		t.Cleanup(func() { closeWireGuardDevice(dev) })
 		p := &wireGuardProfile{privateKey: private, peers: []wireGuardPeer{{publicKey: clientPublic, allowedIPs: []netip.Prefix{netip.PrefixFrom(clientIP, 32)}}}}
 		if e := dev.IpcSet(p.ipcConfig([]netip.AddrPort{netip.MustParseAddrPort("127.0.0.1:1")})); e != nil {
 			t.Fatal(e)
@@ -431,7 +431,7 @@ func TestWireGuardInMemoryMultiplePeersLongestPrefixAndNoFallback(t *testing.T) 
 	if resolutions.Load() != 2 {
 		t.Fatal("peer endpoints were not resolved exactly once")
 	}
-	narrow.Close()
+	closeWireGuardDevice(narrow)
 	for _, ip := range []netip.Addr{narrowIP, isolatedIP} {
 		ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 		c, e := runtime.DialContext(ctx, "tcp", netip.AddrPortFrom(ip, 443).String())
