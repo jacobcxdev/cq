@@ -38,7 +38,7 @@ func (c Controller) settings() (*Settings, error) {
 	return s, nil
 }
 
-// refreshAppPin preserves account and runtime state when a reviewed app update
+// refreshAppPin preserves account and runtime state when a compatible app update
 // replaces the installed bundle. Callers hold the installation operation lock.
 func (c Controller) refreshAppPin(s *Settings, pins []Settings) error {
 	if AppCheck(s) == nil {
@@ -51,6 +51,7 @@ func (c Controller) refreshAppPin(s *Settings, pins []Settings) error {
 	next := *s
 	next.AppVersion, next.AppBuild = pin.AppVersion, pin.AppBuild
 	next.ASARSHA256, next.ModuleAsset = pin.ASARSHA256, pin.ModuleAsset
+	next.NativeBindings = pin.NativeBindings
 	if err := SaveJSON(filepath.Join(c.Root, "settings.json"), &next); err != nil {
 		return err
 	}

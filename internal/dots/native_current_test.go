@@ -41,7 +41,11 @@ func TestCurrentNativeContract(t *testing.T) {
 	if pin == nil || pin.AppVersion != fixture.Version || pin.ASARSHA256 != fixture.Archive || pin.ModuleAsset != fixture.Initial {
 		t.Fatal("current pin does not match reviewed renderer contract")
 	}
-	s := &Settings{IntegrationMode: "native", ModuleAsset: fixture.Initial, SystemAlias: "primary", Dots: map[string]Dot{"one": {OwnerAlias: "primary", ProfileID: "profile-one"}}}
+	asset, bindings, err := resolveNativeBindings(nativeDiscoveryFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Settings{IntegrationMode: "native", ModuleAsset: asset, NativeBindings: bindings, SystemAlias: "primary", Dots: map[string]Dot{"one": {OwnerAlias: "primary", ProfileID: "profile-one"}}}
 	sources := map[string]string{}
 	e := nativeEvaluationFunc(func(_ context.Context, expression string) ([]any, error) {
 		switch {

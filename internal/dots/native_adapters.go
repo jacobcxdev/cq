@@ -33,11 +33,15 @@ func nativeJSON(v any) string { data, _ := json.Marshal(v); return string(data) 
 func nativeAsset(source string, s *Settings) string {
 	source = strings.ReplaceAll(source, "MODULE_ASSET_PLACEHOLDER", s.ModuleAsset)
 	var bindings string
-	switch s.ModuleAsset {
-	case "app-initial-f3e281fb9a71.js":
-		bindings = "Ymr:m.iRr,GMr:m.zRr,XMr:m.BRr,JMr:m.yLr,Lpr:m.B_r,VAn:m.lPn"
-	case nativeOwnedModuleAsset:
-		bindings = "Ymr:m._lr,GMr:m.Hlr,XMr:m.Ulr,JMr:m.mcr,Lpr:m.g2n,VAn:m.Nen,CQNativeOwnedReads:true"
+	if b := s.NativeBindings; b != nil {
+		bindings = "Ymr:m." + b.API + ",GMr:m." + b.Account + ",XMr:m." + b.User + ",JMr:m." + b.Ready + ",Lpr:m." + b.Cache + ",VAn:m." + b.Executor + ",CQNativeOwnedReads:true"
+	} else {
+		switch s.ModuleAsset {
+		case "app-initial-f3e281fb9a71.js":
+			bindings = "Ymr:m.iRr,GMr:m.zRr,XMr:m.BRr,JMr:m.yLr,Lpr:m.B_r,VAn:m.lPn"
+		case nativeOwnedModuleAsset:
+			bindings = "Ymr:m._lr,GMr:m.Hlr,XMr:m.Ulr,JMr:m.mcr,Lpr:m.g2n,VAn:m.Nen,CQNativeOwnedReads:true"
+		}
 	}
 	if bindings != "" {
 		module := "import('app://-/assets/" + s.ModuleAsset + "')"

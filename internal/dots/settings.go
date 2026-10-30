@@ -29,22 +29,23 @@ type Dot struct {
 
 // Settings retains the existing installation's JSON schema.
 type Settings struct {
-	RuntimeRoot       string         `json:"runtime_root"`
-	AppPath           string         `json:"app_path"`
-	AppVersion        string         `json:"app_version"`
-	AppBuild          string         `json:"app_build"`
-	ASARSHA256        string         `json:"asar_sha256"`
-	ModuleAsset       string         `json:"module_asset"`
-	AccountSource     string         `json:"account_source,omitempty"`
-	SystemAuth        string         `json:"system_auth"`
-	CQAccounts        string         `json:"cq_accounts,omitempty"`
-	SystemAlias       string         `json:"system_alias"`
-	SystemAccountID   string         `json:"system_account_id,omitempty"`
-	SecondaryAlias    string         `json:"secondary_alias,omitempty"`
-	SecondarySelector string         `json:"secondary_selector,omitempty"`
-	Dots              map[string]Dot `json:"dots"`
-	DebugPort         int            `json:"debug_port"`
-	IntegrationMode   string         `json:"integration_mode"`
+	RuntimeRoot       string          `json:"runtime_root"`
+	AppPath           string          `json:"app_path"`
+	AppVersion        string          `json:"app_version"`
+	AppBuild          string          `json:"app_build"`
+	ASARSHA256        string          `json:"asar_sha256"`
+	ModuleAsset       string          `json:"module_asset"`
+	NativeBindings    *NativeBindings `json:"native_bindings,omitempty"`
+	AccountSource     string          `json:"account_source,omitempty"`
+	SystemAuth        string          `json:"system_auth"`
+	CQAccounts        string          `json:"cq_accounts,omitempty"`
+	SystemAlias       string          `json:"system_alias"`
+	SystemAccountID   string          `json:"system_account_id,omitempty"`
+	SecondaryAlias    string          `json:"secondary_alias,omitempty"`
+	SecondarySelector string          `json:"secondary_selector,omitempty"`
+	Dots              map[string]Dot  `json:"dots"`
+	DebugPort         int             `json:"debug_port"`
+	IntegrationMode   string          `json:"integration_mode"`
 }
 
 // MarshalJSON retains legacy bindings until their full owner identity is known.
@@ -304,6 +305,11 @@ func (s *Settings) Validate() error {
 	}
 	if !digestPattern.MatchString(s.ASARSHA256) || !modulePattern.MatchString(s.ModuleAsset) || !validText(s.AppVersion, 256) || !validText(s.AppBuild, 256) {
 		return fmt.Errorf("invalid Dots application pin")
+	}
+	if s.NativeBindings != nil {
+		if err := s.NativeBindings.validate(); err != nil {
+			return err
+		}
 	}
 	if s.DebugPort < 0 || s.DebugPort > 65535 {
 		return fmt.Errorf("invalid Dots setting: debug_port")
