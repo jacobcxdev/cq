@@ -661,6 +661,9 @@ func TestCredentialRPCCancellationCanArriveBeforeRequestBegins(t *testing.T) {
 func TestCredentialControlSimultaneousStartupHasOneOwner(t *testing.T) {
 	coordinator, _ := testCoordinator(t)
 	path := shortControlPath(t)
+	// This checks ownership, not startup latency under race-enabled CI load.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	controls := make(chan *CredentialControl, 2)
 	errs := make(chan error, 2)
 	var wg sync.WaitGroup
@@ -668,7 +671,7 @@ func TestCredentialControlSimultaneousStartupHasOneOwner(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			control, err := OpenCredentialControl(path, coordinator)
+			control, err := OpenCredentialControlPrepared(ctx, path, coordinator, nil)
 			controls <- control
 			errs <- err
 		}()

@@ -397,7 +397,10 @@ func TestActivatedMaintenanceReceiptBindsCandidateBeforeAcceptAndSurvivesClose(t
 		t.Fatal("bound receipt has empty owner generation")
 	}
 
-	delegate, err := OpenCredentialControl(path, coordinator)
+	// This checks receipt binding, not RPC startup latency under CI load.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	delegate, err := OpenCredentialControlPrepared(ctx, path, coordinator, nil)
 	if err != nil {
 		_ = owner.Close()
 		t.Fatalf("delegate open error = %v", err)
