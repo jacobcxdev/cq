@@ -860,6 +860,11 @@ alongside installation state and loopback certificates. It does not patch or
 re-sign the installed app bundle. Native app qualification is version-pinned;
 unsupported app updates fail before launch.
 
+CQ automatically rechecks cached access denials for active, configured Dots
+through their owner's native profile query. A successful check restores the
+sidebar entry without restarting ChatGPT. Genuine denials retry at most once
+per minute; deleted profiles remain untouched.
+
 Native installation also creates `~/Applications/ChatGPT via CQ.app`, bundled
 with CQ. Launch it through Raycast, Spotlight or Finder to open ChatGPT with Dots.
 The launcher preserves the original app signature and opens the existing profile.

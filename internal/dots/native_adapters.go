@@ -35,12 +35,15 @@ func nativeAsset(source string, s *Settings) string {
 	var bindings string
 	if b := s.NativeBindings; b != nil {
 		bindings = "Ymr:m." + b.API + ",GMr:m." + b.Account + ",XMr:m." + b.User + ",JMr:m." + b.Ready + ",Lpr:m." + b.Cache + ",VAn:m." + b.Executor + ",CQNativeOwnedReads:true"
+		if b.ProfileQuery != "" && b.ProfileRecovery != "" {
+			bindings += ",CQProfileQuery:m." + b.ProfileQuery + ",CQProfileRecovery:m." + b.ProfileRecovery
+		}
 	} else {
 		switch s.ModuleAsset {
 		case "app-initial-f3e281fb9a71.js":
 			bindings = "Ymr:m.iRr,GMr:m.zRr,XMr:m.BRr,JMr:m.yLr,Lpr:m.B_r,VAn:m.lPn"
 		case nativeOwnedModuleAsset:
-			bindings = "Ymr:m._lr,GMr:m.Hlr,XMr:m.Ulr,JMr:m.mcr,Lpr:m.g2n,VAn:m.Nen,CQNativeOwnedReads:true"
+			bindings = "Ymr:m._lr,GMr:m.Hlr,XMr:m.Ulr,JMr:m.mcr,Lpr:m.g2n,VAn:m.Nen,CQNativeOwnedReads:true,CQProfileQuery:m.K0n,CQProfileRecovery:m.Rcr"
 		}
 	}
 	if bindings != "" {

@@ -18,6 +18,32 @@ var nativeRoomCacheRegressionJS string
 //go:embed native_profile_test.js
 var nativeProfileRegressionJS string
 
+//go:embed native_profile_recovery_test.js
+var nativeProfileRecoveryRegressionJS string
+
+func TestNativeProfileAccessRecovery(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("Node required for native JavaScript regression")
+	}
+	s := &Settings{IntegrationMode: "native", ModuleAsset: nativeOwnedModuleAsset, Dots: map[string]Dot{
+		"one": {ProfileID: "profile-one"}, "two": {ProfileID: "profile-two"},
+	}}
+	var source string
+	e := nativeEvaluationFunc(func(_ context.Context, expression string) ([]any, error) {
+		source = expression
+		return []any{map[string]any{"installed": true}}, nil
+	})
+	if _, err := InstallNativeRoomCache(context.Background(), s, e); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(node, "-e", nativeProfileRecoveryRegressionJS)
+	command.Stdin = strings.NewReader(source)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("native profile recovery: %v\n%s", err, output)
+	}
+}
+
 type nativeEvaluationFunc func(context.Context, string) ([]any, error)
 
 func (f nativeEvaluationFunc) Evaluate(ctx context.Context, s string) (any, error) {

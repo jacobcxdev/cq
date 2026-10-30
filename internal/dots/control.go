@@ -39,9 +39,11 @@ func (c Controller) settings() (*Settings, error) {
 }
 
 // refreshAppPin preserves account and runtime state when a compatible app update
-// replaces the installed bundle. Callers hold the installation operation lock.
+// replaces the installed bundle or CQ discovers additional semantic bindings.
+// Callers hold the installation operation lock.
 func (c Controller) refreshAppPin(s *Settings, pins []Settings) error {
-	if AppCheck(s) == nil {
+	missingRecovery := s.NativeBindings != nil && (s.NativeBindings.ProfileQuery == "" || s.NativeBindings.ProfileRecovery == "")
+	if AppCheck(s) == nil && !missingRecovery {
 		return nil
 	}
 	pin, err := qualifiedAppPin(s.AppPath, pins)

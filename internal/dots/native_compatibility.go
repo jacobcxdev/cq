@@ -15,14 +15,16 @@ import (
 // NativeBindings records semantic exports discovered from an application
 // snapshot. Names are identifiers, never JavaScript supplied by configuration.
 type NativeBindings struct {
-	API      string `json:"api"`
-	Account  string `json:"account"`
-	User     string `json:"user"`
-	Ready    string `json:"ready"`
-	Cache    string `json:"cache"`
-	Executor string `json:"executor"`
-	BusAsset string `json:"bus_asset"`
-	Bus      string `json:"bus"`
+	API             string `json:"api"`
+	Account         string `json:"account"`
+	User            string `json:"user"`
+	Ready           string `json:"ready"`
+	Cache           string `json:"cache"`
+	Executor        string `json:"executor"`
+	BusAsset        string `json:"bus_asset"`
+	Bus             string `json:"bus"`
+	ProfileQuery    string `json:"profile_query,omitempty"`
+	ProfileRecovery string `json:"profile_recovery,omitempty"`
 }
 
 const jsIdentifier = `[A-Za-z_$][A-Za-z0-9_$]*`
@@ -33,6 +35,11 @@ func (b NativeBindings) validate() error {
 	for _, name := range []string{b.API, b.Account, b.User, b.Ready, b.Cache, b.Executor, b.Bus} {
 		if !jsIdentifierPattern.MatchString(name) {
 			return errors.New("invalid native renderer binding")
+		}
+	}
+	if b.ProfileQuery != "" || b.ProfileRecovery != "" {
+		if !jsIdentifierPattern.MatchString(b.ProfileQuery) || !jsIdentifierPattern.MatchString(b.ProfileRecovery) {
+			return errors.New("invalid native profile recovery binding")
 		}
 	}
 	if !modulePattern.MatchString(b.BusAsset) || !strings.HasPrefix(b.BusAsset, "app-shared-") {
@@ -289,6 +296,35 @@ func resolveNativeInitial(source string) (*NativeBindings, error) {
 	}
 	bindings := &NativeBindings{}
 	for local, target := range map[string]*string{api[1]: &bindings.API, account[1]: &bindings.Account, user[1]: &bindings.User, ready[1]: &bindings.Ready, factory[1]: &bindings.Cache, executor[1]: &bindings.Executor} {
+		export, err := nativeExport(source, local)
+		if err != nil {
+			return nil, err
+		}
+		*target = export
+	}
+	key, err := nativeSemanticMatch(source, `function (`+id+`)\((`+id+`)\)\{let (`+id+`)=(`+id+`)\(`+regexp.QuoteMeta(account[1])+`\),(`+id+`)=(`+id+`)\(`+regexp.QuoteMeta(user[1])+`\);return[^;]{0,100}cloud-aeon-profiles-v1:`, "cloud-aeon-profiles-v1:", "profile recovery key")
+	if err != nil || key[2] != key[4] || key[2] != key[6] {
+		return nil, errors.New("native profile recovery identity changed")
+	}
+	keyStart := strings.Index(source, key[0])
+	keyBody, ok := nativeJSBody(source, keyStart+strings.IndexByte(key[0], '{'))
+	if !ok || !strings.Contains(keyBody, "JSON.stringify(["+key[3]+","+key[5]+"])") {
+		return nil, errors.New("native profile recovery key changed")
+	}
+	snapshot, err := uniqueNativeMatch(source, `function `+id+`\((`+id+`)\)\{let (`+id+`)=`+regexp.QuoteMeta(key[1])+`\((`+id+`)\.get\);return (`+id+`)==null\?null:\{key:(`+id+`),entries:(`+id+`)\((`+id+`),\{\}\)\}\}`, "profile recovery snapshot")
+	if err != nil || snapshot[1] != snapshot[3] || snapshot[2] != snapshot[4] || snapshot[2] != snapshot[5] || snapshot[2] != snapshot[7] {
+		return nil, errors.New("native profile recovery snapshot changed")
+	}
+	profile, err := nativeSemanticMatch(source, `(`+id+`)=`+id+`\(`+id+`,\(`+id+`,\{get:`+id+`,scope:`+id+`\}\)=>\{[^{}]{0,256}return\{enabled:[^{}]{0,256}queryKey:\[[\x60'"]cloud-aeon[\x60'"],`, "cloud-aeon", "profile query")
+	if err != nil {
+		return nil, err
+	}
+	profileStart := strings.Index(source, profile[0])
+	profileBody, ok := nativeJSBody(source, profileStart+strings.Index(profile[0], "=>{")+2)
+	if !ok || !strings.Contains(profileBody, ".safeGet(`/tbo/{tbo_id}`") || !strings.Contains(profileBody, "tbo_id:") || !strings.Contains(profileBody, ".throwIfAborted()") {
+		return nil, errors.New("native profile query ownership changed")
+	}
+	for local, target := range map[string]*string{profile[1]: &bindings.ProfileQuery, snapshot[6]: &bindings.ProfileRecovery} {
 		export, err := nativeExport(source, local)
 		if err != nil {
 			return nil, err
