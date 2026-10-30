@@ -73,6 +73,30 @@ func TestEgressManagerReloadClosesOldGenerationAndBlocksBadReload(t *testing.T) 
 	}
 }
 
+func TestEgressManagerAllowsDotControlPlaneOnly(t *testing.T) {
+	manager, err := newEgressManager(&Config{}, func(*Config) (*CodexEgress, [32]byte, error) {
+		return &CodexEgress{}, [32]byte{}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	for _, target := range []string{"chatgpt.com:443", "ws.chatgpt.com:443", "realtime.chatgpt.com:443", "codex-cloud-backend.chatgpt.com:443", "codex-cloud-environments.chatgpt.com:443"} {
+		if !manager.AllowsTarget(target) {
+			t.Errorf("Dot service denied: %s", target)
+		}
+	}
+	for _, target := range []string{"chatgpt.com:80", "ws.chatgpt.com:8443", "evil.chatgpt.com:443", "chatgpt.com.evil.test:443", "127.0.0.1:443", "[::1]:443", "CHATGPT.COM:443"} {
+		if manager.AllowsTarget(target) {
+			t.Errorf("out-of-scope service allowed: %s", target)
+		}
+	}
+	manager.Block()
+	if manager.AllowsTarget("ws.chatgpt.com:443") {
+		t.Fatal("blocked tunnel authorised a Dot service")
+	}
+}
+
 type egressProfileSequenceFS struct {
 	*fsutil.MemFS
 	reads atomic.Int32

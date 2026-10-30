@@ -27,34 +27,55 @@ import (
 )
 
 const (
-	QualifiedAppVersion  = "26.1013.40934"
-	QualifiedAppBuild    = "20770"
-	QualifiedASARSHA256  = "5ddc4e48259aa6f979e04529b1a5a4ae54b0f5c4ad6db5c6e004924c10916ddb"
-	QualifiedModuleAsset = "app-initial-90eb42395b7d.js"
+	QualifiedAppVersion    = "26.1013.40934"
+	QualifiedAppBuild      = "20770"
+	QualifiedASARSHA256    = "5ddc4e48259aa6f979e04529b1a5a4ae54b0f5c4ad6db5c6e004924c10916ddb"
+	QualifiedModuleAsset   = "app-initial-90eb42395b7d.js"
+	nativeOwnedModuleAsset = "app-initial-60f141238751.js"
 )
 
 var qualifiedAppPins = []Settings{
 	{AppVersion: QualifiedAppVersion, AppBuild: QualifiedAppBuild, ASARSHA256: QualifiedASARSHA256, ModuleAsset: QualifiedModuleAsset},
 	{AppVersion: "26.1016.51333", AppBuild: "21161", ASARSHA256: "9d0260dd37f9c45546d5a89d9d782b8362c9957b70b992e2c3f91df60a046b07", ModuleAsset: "app-initial-f3e281fb9a71.js"},
+	{AppVersion: "26.1027.30824", AppBuild: "22943", ASARSHA256: "36bf3d2b35e95e11852074b9ca9459b89efbecd6b8311345d060cf66de8f0ba6", ModuleAsset: nativeOwnedModuleAsset},
 }
 
-// qualifiedAppPin accepts only a reviewed build and its exact renderer archive.
+// qualifiedAppPin reuses known contracts or discovers them in the installed
+// archive. Version and build numbers describe a session; they never gate it.
 func qualifiedAppPin(app string, pins []Settings) (Settings, error) {
 	info, err := readAppPlist(filepath.Join(app, "Contents", "Info.plist"))
 	if err != nil {
 		return Settings{}, err
 	}
-	for _, pin := range pins {
-		if pin.AppVersion != info["CFBundleShortVersionString"] || pin.AppBuild != info["CFBundleVersion"] {
-			continue
-		}
-		pin.AppPath = app
-		if err := AppCheck(&pin); err != nil {
-			return Settings{}, err
-		}
-		return pin, nil
+	archive := filepath.Join(app, "Contents", "Resources", "app.asar")
+	digest, err := nativeArchiveDigest(archive)
+	if err != nil {
+		return Settings{}, err
 	}
-	return Settings{}, fmt.Errorf("Native app %s (build %s) is not supported by this CQ version; update CQ before enabling Dots", info["CFBundleShortVersionString"], info["CFBundleVersion"])
+	for _, pin := range pins {
+		if pin.ASARSHA256 == digest {
+			pin.AppPath, pin.AppVersion, pin.AppBuild = app, info["CFBundleShortVersionString"], info["CFBundleVersion"]
+			return pin, nil
+		}
+	}
+	asset, bindings, err := discoverNativeBindings(archive)
+	if err != nil {
+		return Settings{}, fmt.Errorf("Native Dots compatibility check failed for %s (build %s): %w", info["CFBundleShortVersionString"], info["CFBundleVersion"], err)
+	}
+	return Settings{AppPath: app, AppVersion: info["CFBundleShortVersionString"], AppBuild: info["CFBundleVersion"], ASARSHA256: digest, ModuleAsset: asset, NativeBindings: bindings}, nil
+}
+
+func nativeArchiveDigest(path string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, file); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // InstallOptions declares credential sources; their contents are never persisted.
@@ -155,7 +176,7 @@ func ValidateInstallLocation(options InstallOptions) (string, error) {
 	return root, nil
 }
 
-// AppCheck verifies the qualified application without changing its signed bundle.
+// AppCheck checks the discovered application snapshot without changing its signed bundle.
 func AppCheck(settings *Settings) error {
 	info, err := readAppPlist(filepath.Join(settings.AppPath, "Contents", "Info.plist"))
 	if err != nil {

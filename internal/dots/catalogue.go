@@ -93,7 +93,9 @@ func (c *CatalogueClient) Get(ctx context.Context, account Account, path string,
 	request.Header.Set("Accept-Encoding", "identity")
 	client := c.HTTP
 	if client == nil {
-		client = &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		bounded := probeHTTPClient()
+		bounded.Timeout = 20 * time.Second
+		client = bounded
 	}
 	response, err := client.Do(request)
 	if err != nil {

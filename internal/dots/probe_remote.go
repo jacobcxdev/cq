@@ -2,6 +2,7 @@ package dots
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"io"
@@ -24,7 +25,8 @@ func (p *Probe) remoteControl(w http.ResponseWriter, r *http.Request) {
 	if !strings.Contains(address, ":") {
 		address = net.JoinHostPort(address, "443")
 	}
-	dialer := &net.Dialer{Timeout: 25 * time.Second}
+	handshake, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
 	var upstream net.Conn
 	if origin.Scheme == "https" {
 		publicTLS, rootErr := cloudPublicTLS()
@@ -34,10 +36,21 @@ func (p *Probe) remoteControl(w http.ResponseWriter, r *http.Request) {
 		}
 		publicTLS.ServerName = origin.Hostname()
 		publicTLS.NextProtos = []string{"http/1.1"}
-		upstream, err = (&tls.Dialer{NetDialer: dialer, Config: publicTLS}).DialContext(r.Context(), "tcp", address)
+		var raw net.Conn
+		raw, err = dotsDialContext(handshake, "tcp", address)
+		if err == nil {
+			wrapped := tls.Client(raw, publicTLS)
+			err = wrapped.HandshakeContext(handshake)
+			if err != nil {
+				_ = raw.Close()
+			} else {
+				upstream = wrapped
+			}
+		}
 	} else {
-		upstream, err = dialer.DialContext(r.Context(), "tcp", address)
+		upstream, err = dotsDialContext(handshake, "tcp", address)
 	}
+	cancel()
 	if err != nil {
 		w.WriteHeader(502)
 		return
@@ -123,7 +136,7 @@ func probeHTTPClient() *http.Client {
 	transport.DisableKeepAlives = true
 	transport.ForceAttemptHTTP2 = false
 	transport.DisableCompression = true
-	transport.DialContext = (&net.Dialer{Timeout: 25 * time.Second, KeepAlive: 30 * time.Second}).DialContext
+	transport.DialContext = dotsDialContext
 	transport.TLSHandshakeTimeout = 25 * time.Second
 	transport.ResponseHeaderTimeout = 25 * time.Second
 	publicTLS, err := cloudPublicTLS()

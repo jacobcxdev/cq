@@ -46,9 +46,9 @@ func executorOwnerHeaders(s *Settings, owner Account, alias string, now time.Tim
 
 func executorDirectRequest(s *Settings, doer httputil.Doer, now func() time.Time, alias string) executorRequest {
 	if doer == nil {
-		transport := http.DefaultTransport.(*http.Transport).Clone()
-		transport.Proxy = nil
-		doer = &http.Client{Timeout: 25 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		client := probeHTTPClient()
+		client.Timeout = 25 * time.Second
+		doer = client
 	}
 	return func(ctx context.Context, owner Account, host, method, path string, body []byte) (int, string, []byte, error) {
 		if host != "chatgpt.com" && host != executorRegistry {

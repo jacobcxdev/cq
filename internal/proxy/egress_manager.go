@@ -221,7 +221,19 @@ func (m *EgressManager) AllowsTarget(target string) bool {
 			port = "443"
 		}
 	}
-	return target == net.JoinHostPort(strings.ToLower(u.Hostname()), port) || target == "auth.openai.com:443" || target == "api.openai.com:443"
+	return target == net.JoinHostPort(strings.ToLower(u.Hostname()), port) || IsCodexServiceTarget(target)
+}
+
+// IsCodexServiceTarget identifies the public control-plane origins shared by
+// Codex and Dots. It does not permit arbitrary desktop or browser traffic.
+func IsCodexServiceTarget(target string) bool {
+	switch target {
+	case "chatgpt.com:443", "auth.openai.com:443", "api.openai.com:443",
+		"ws.chatgpt.com:443", "realtime.chatgpt.com:443",
+		"codex-cloud-backend.chatgpt.com:443", "codex-cloud-environments.chatgpt.com:443":
+		return true
+	}
+	return false
 }
 
 type managedEgressConn struct {

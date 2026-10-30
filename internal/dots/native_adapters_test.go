@@ -121,7 +121,7 @@ func TestNativeAdaptersFollowStableProfilesAcrossRootRotation(t *testing.T) {
 	if err != nil {
 		t.Skip("Node required for native JavaScript regression")
 	}
-	for _, asset := range []string{QualifiedModuleAsset, "app-initial-f3e281fb9a71.js"} {
+	for _, asset := range []string{QualifiedModuleAsset, "app-initial-f3e281fb9a71.js", nativeOwnedModuleAsset} {
 		t.Run(asset, func(t *testing.T) {
 			testNativeAdaptersRootRotation(t, node, asset)
 		})

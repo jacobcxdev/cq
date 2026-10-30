@@ -74,8 +74,12 @@ func (b *Board) request(ctx context.Context, method string, params map[string]an
 		return nil, e
 	}
 	asset, export := boardBusAsset, "gPt"
-	if b.settings.ModuleAsset == "app-initial-f3e281fb9a71.js" {
+	if bindings := b.settings.NativeBindings; bindings != nil {
+		asset, export = bindings.BusAsset, bindings.Bus
+	} else if b.settings.ModuleAsset == "app-initial-f3e281fb9a71.js" {
 		asset, export = "app-shared-60f4bb85435f.js", "MFt"
+	} else if b.settings.ModuleAsset == nativeOwnedModuleAsset {
+		asset, export = "app-shared-7815d5a1a42a.js", "zRt"
 	}
 	expression := strings.NewReplacer("BUS_ASSET", nativeJSON("app://-/assets/"+asset), "BUS_EXPORT", export, "BOARD_METHOD", nativeJSON(method), "BOARD_PARAMS", nativeJSON(params)).Replace(boardRequestJS)
 	value, e := nativeOne(ctx, b.native, expression)

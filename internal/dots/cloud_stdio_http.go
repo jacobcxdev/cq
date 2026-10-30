@@ -94,7 +94,7 @@ func cloudEventSink(root string) func(map[string]any) {
 func cloudStdioDefaults(cfg *Settings) cloudStdioDependencies {
 	tlsConfig, tlsErr := cloudPublicTLS()
 	event := cloudEventSink(cfg.RuntimeRoot)
-	transport := &http.Transport{TLSClientConfig: tlsConfig}
+	transport := &http.Transport{DialContext: dotsDialContext, TLSClientConfig: tlsConfig}
 	client := &http.Client{Transport: transport, Timeout: 25 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	var httpClient cloudHTTPDoer = client
 	if tlsErr != nil {
@@ -120,7 +120,7 @@ func cloudStdioDefaults(cfg *Settings) cloudStdioDependencies {
 				event(map[string]any{"owner_tls_failure_type": "unavailable"})
 				return nil, 0, tlsErr
 			}
-			dialer := websocket.Dialer{HandshakeTimeout: 20 * time.Second, TLSClientConfig: tlsConfig,
+			dialer := websocket.Dialer{HandshakeTimeout: 20 * time.Second, NetDialContext: dotsDialContext, TLSClientConfig: tlsConfig,
 				Subprotocols: []string{"codex-app-server", "codex-client.desktop", "openai-bearer." + account.Token}}
 			headers := http.Header{"Chatgpt-Account-Id": []string{account.AccountID}, "X-Openai-Product-Sku": []string{"codex"}, "X-Openai-Allow-Environmentless-Fallback": []string{"true"}}
 			connection, response, err := dialer.DialContext(ctx, "wss://codex-cloud-backend.chatgpt.com/", headers)
