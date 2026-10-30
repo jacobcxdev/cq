@@ -217,3 +217,34 @@ func TestCheckRedirectLimit(t *testing.T) {
 		t.Errorf("error = %q, want to contain %q", err.Error(), "too many redirects")
 	}
 }
+
+type clientEgressRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f clientEgressRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestNewClientWithTransportPreservesSecurityDefaults(t *testing.T) {
+	request, _ := http.NewRequest(http.MethodGet, "https://selected.invalid", nil)
+	called := false
+	selected := clientEgressRoundTripper(func(r *http.Request) (*http.Response, error) {
+		called = true
+		if r.Header.Get("User-Agent") != "cq/egress-test" {
+			t.Error("user agent missing on selected egress")
+		}
+		return nil, errors.New("selected egress unavailable")
+	})
+	client := NewClientWithTransport(time.Second, "egress-test", selected)
+	if _, err := client.Do(request); err == nil || !called {
+		t.Fatal("configured egress was bypassed")
+	}
+	if request.Header.Get("User-Agent") != "" {
+		t.Fatal("caller request mutated")
+	}
+	redirected, _ := http.NewRequest(http.MethodGet, "https://other.invalid", nil)
+	redirected.Header.Set("Authorization", "Bearer synthetic")
+	if err := client.CheckRedirect(redirected, []*http.Request{request}); err != nil {
+		t.Fatal(err)
+	}
+	if redirected.Header.Get("Authorization") != "" {
+		t.Fatal("cross-host credential retained")
+	}
+}

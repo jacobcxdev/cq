@@ -32,14 +32,11 @@ type CodexWebSocketAttemptExecutor struct {
 }
 
 func NewCodexWebSocketAttemptExecutor(inventory codex.CredentialInventory, secrets codex.ExactSecretResolver) *CodexWebSocketAttemptExecutor {
+	egress, _ := NewCodexEgress("") // Empty policy is always valid.
 	return &CodexWebSocketAttemptExecutor{
 		Inventory: inventory,
 		Secrets:   secrets,
-		Dialer: websocket.Dialer{
-			Proxy:             http.ProxyFromEnvironment,
-			HandshakeTimeout:  30 * time.Second,
-			EnableCompression: true,
-		},
+		Dialer:    egress.WebSocket,
 	}
 }
 

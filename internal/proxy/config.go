@@ -37,10 +37,13 @@ const (
 )
 
 type ProxyRescueBootstrapConfig struct {
-	SchemaVersion int    `json:"schema_version"`
-	LocalToken    string `json:"local_token"`
-	StateRoot     string `json:"state_root"`
-	Port          int    `json:"port"`
+	SchemaVersion         int    `json:"schema_version"`
+	LocalToken            string `json:"local_token"`
+	StateRoot             string `json:"state_root"`
+	Port                  int    `json:"port"`
+	CodexEgressProxy      string `json:"codex_egress_proxy,omitempty"`
+	CodexWireGuardProfile string `json:"codex_wireguard_profile,omitempty"`
+	CodexEgressInterface  string `json:"codex_egress_interface,omitempty"`
 }
 
 type DefaultPaths struct {
@@ -76,8 +79,13 @@ type Config struct {
 	Port           int    `json:"port"`
 	ClaudeUpstream string `json:"claude_upstream"`
 	CodexUpstream  string `json:"codex_upstream"`
-	LocalToken     string `json:"local_token"`
-	Headroom       bool   `json:"headroom,omitempty"`
+	// CodexEgressProxy applies to Codex upstream HTTP and WebSocket traffic.
+	// Empty preserves ambient proxy settings; direct disables them.
+	CodexEgressProxy      string `json:"codex_egress_proxy,omitempty"`
+	CodexWireGuardProfile string `json:"codex_wireguard_profile,omitempty"`
+	CodexEgressInterface  string `json:"codex_egress_interface,omitempty"`
+	LocalToken            string `json:"local_token"`
+	Headroom              bool   `json:"headroom,omitempty"`
 	// HeadroomMode controls the compression strategy: "token" or "cache".
 	// Omitted when empty so legacy configs without the field remain valid.
 	// When omitted, cq defaults to cache mode. Explicit "token" preserves the
@@ -110,7 +118,10 @@ type Config struct {
 
 var configKnownFields = map[string]bool{
 	"port": true, "claude_upstream": true, "codex_upstream": true,
-	"local_token": true, "headroom": true, "headroom_mode": true,
+	"codex_egress_proxy":      true,
+	"codex_wireguard_profile": true,
+	"codex_egress_interface":  true,
+	"local_token":             true, "headroom": true, "headroom_mode": true,
 	"pinned_claude_account": true, "diagnostics_log": true,
 	"payload_diagnostics_log": true, "codex_turn_routing": true,
 	"codex_ws_turn_routing": true, "codex_lease_retention_days": true,
@@ -146,6 +157,12 @@ func (c *Config) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON merges preserved future fields with fields known to this build.
 func (c Config) MarshalJSON() ([]byte, error) {
+	if err := validateCodexEgressInterface(c.CodexWireGuardProfile, c.CodexEgressInterface); err != nil {
+		return nil, err
+	}
+	if err := ValidateCodexEgressSettings(c.CodexEgressProxy, c.CodexWireGuardProfile); err != nil {
+		return nil, err
+	}
 	type wireConfig Config
 	knownData, err := json.Marshal(wireConfig(c))
 	if err != nil {
@@ -220,6 +237,12 @@ func (c *Config) setDefaults() {
 }
 
 func (c *Config) validate() error {
+	if err := validateCodexEgressInterface(c.CodexWireGuardProfile, c.CodexEgressInterface); err != nil {
+		return err
+	}
+	if err := ValidateCodexEgressSettings(c.CodexEgressProxy, c.CodexWireGuardProfile); err != nil {
+		return err
+	}
 	if c.LocalToken == "" {
 		return fmt.Errorf("local_token is required")
 	}
@@ -310,6 +333,50 @@ func LoadProxyRescueBootstrapConfig() (*ProxyRescueBootstrapConfig, error) {
 	}
 	bootstrap, decodeErr := decodeProxyRescueBootstrap(data)
 	if decodeErr == nil {
+		// Respect manual egress edits on restart, without depending on the rest
+		// of normal configuration being semantically valid during recovery.
+		if normal, err := os.ReadFile(paths.ConfigFile); err == nil {
+			if trimmed := bytes.TrimSpace(normal); len(trimmed) == 0 || trimmed[0] != '{' {
+				return nil, errors.New("invalid Codex egress configuration: expected an object")
+			}
+			var fields struct {
+				CodexEgressProxy      json.RawMessage `json:"codex_egress_proxy"`
+				CodexWireGuardProfile json.RawMessage `json:"codex_wireguard_profile"`
+				CodexEgressInterface  json.RawMessage `json:"codex_egress_interface"`
+			}
+			if json.Unmarshal(normal, &fields) == nil {
+				var egress string
+				if raw := fields.CodexEgressProxy; raw != nil {
+					if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &egress) != nil {
+						return nil, errors.New("invalid codex_egress_proxy: expected a string")
+					}
+				}
+				if err := ValidateCodexEgressProxy(egress); err != nil {
+					return nil, err
+				}
+				bootstrap.CodexEgressProxy = egress
+				var profile string
+				if raw := fields.CodexWireGuardProfile; raw != nil {
+					if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &profile) != nil {
+						return nil, errors.New("invalid codex_wireguard_profile: expected a string")
+					}
+				}
+				if err := ValidateCodexEgressSettings(egress, profile); err != nil {
+					return nil, err
+				}
+				bootstrap.CodexWireGuardProfile = profile
+				var selectedInterface string
+				if raw := fields.CodexEgressInterface; raw != nil {
+					if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) || json.Unmarshal(raw, &selectedInterface) != nil {
+						return nil, errors.New("invalid codex_egress_interface")
+					}
+				}
+				bootstrap.CodexEgressInterface = selectedInterface
+				if err := validateCodexEgressInterface(profile, selectedInterface); err != nil {
+					return nil, err
+				}
+			}
+		}
 		return bootstrap, nil
 	}
 	fallback, fallbackErr := loadProxyRescueBootstrapFromNormalConfig(paths.ConfigFile)
@@ -328,6 +395,9 @@ func loadProxyRescueBootstrapFromNormalConfig(configPath string) (*ProxyRescueBo
 		LocalToken              string `json:"local_token"`
 		ProxyResilienceStateDir string `json:"proxy_resilience_state_dir"`
 		Port                    int    `json:"port"`
+		CodexEgressProxy        string `json:"codex_egress_proxy"`
+		CodexWireGuardProfile   string `json:"codex_wireguard_profile"`
+		CodexEgressInterface    string `json:"codex_egress_interface"`
 	}
 	if err := json.Unmarshal(data, &minimal); err != nil {
 		return nil, fmt.Errorf("parse proxy config: %w", err)
@@ -336,10 +406,13 @@ func loadProxyRescueBootstrapFromNormalConfig(configPath string) (*ProxyRescueBo
 		minimal.Port = DefaultPort
 	}
 	return validateProxyRescueBootstrap(&ProxyRescueBootstrapConfig{
-		SchemaVersion: 1,
-		LocalToken:    minimal.LocalToken,
-		StateRoot:     minimal.ProxyResilienceStateDir,
-		Port:          minimal.Port,
+		SchemaVersion:         1,
+		LocalToken:            minimal.LocalToken,
+		StateRoot:             minimal.ProxyResilienceStateDir,
+		Port:                  minimal.Port,
+		CodexEgressProxy:      minimal.CodexEgressProxy,
+		CodexWireGuardProfile: minimal.CodexWireGuardProfile,
+		CodexEgressInterface:  minimal.CodexEgressInterface,
 	})
 }
 
@@ -362,6 +435,12 @@ func decodeProxyRescueBootstrap(data []byte) (*ProxyRescueBootstrapConfig, error
 func validateProxyRescueBootstrap(bootstrap *ProxyRescueBootstrapConfig) (*ProxyRescueBootstrapConfig, error) {
 	if bootstrap == nil || bootstrap.SchemaVersion != 1 || bootstrap.LocalToken == "" || bootstrap.Port < 1 || bootstrap.Port > 65535 {
 		return nil, errors.New("proxy rescue bootstrap invalid")
+	}
+	if err := ValidateCodexEgressSettings(bootstrap.CodexEgressProxy, bootstrap.CodexWireGuardProfile); err != nil {
+		return nil, err
+	}
+	if err := validateCodexEgressInterface(bootstrap.CodexWireGuardProfile, bootstrap.CodexEgressInterface); err != nil {
+		return nil, err
 	}
 	clean := filepath.Clean(bootstrap.StateRoot)
 	if bootstrap.StateRoot == "" || !filepath.IsAbs(bootstrap.StateRoot) || clean != bootstrap.StateRoot || clean == string(filepath.Separator) {
@@ -439,10 +518,13 @@ func SaveConfig(cfg *Config) error {
 		return nil
 	}
 	bootstrap, err := json.Marshal(ProxyRescueBootstrapConfig{
-		SchemaVersion: 1,
-		LocalToken:    saved.LocalToken,
-		StateRoot:     saved.ProxyResilienceStateDir,
-		Port:          saved.Port,
+		SchemaVersion:         1,
+		LocalToken:            saved.LocalToken,
+		StateRoot:             saved.ProxyResilienceStateDir,
+		Port:                  saved.Port,
+		CodexEgressProxy:      saved.CodexEgressProxy,
+		CodexWireGuardProfile: saved.CodexWireGuardProfile,
+		CodexEgressInterface:  saved.CodexEgressInterface,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal proxy rescue bootstrap: %w", err)

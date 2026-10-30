@@ -27,6 +27,7 @@ type RuntimeSupervisorRoleDependencies struct {
 	WorkerManifest   WorkerManifestV1
 	AdoptListener    func(*os.File) (net.Listener, error)
 	Serve            func(context.Context, net.Listener, http.Handler) error
+	Configure        func(*RuntimeSupervisor) error
 }
 
 func RunRuntimeSupervisorRole(ctx context.Context, manifest RuntimeRoleManifestV1, dependencies RuntimeSupervisorRoleDependencies) error {
@@ -63,6 +64,9 @@ func RunValidatedRuntimeSupervisorRole(ctx context.Context, manifest RuntimeRole
 	_ = files.Listener.Close()
 	files.Listener = nil
 	defer listener.Close()
+	if dependencies.Configure != nil {
+		return RunAdoptedRuntimeSupervisorConfigured(ctx, listener, dependencies.SupervisorHolder, dependencies.Launcher, dependencies.Checkpoints, dependencies.CallerAdmissions, dependencies.WorkerManifest, dependencies.Configure, dependencies.Serve)
+	}
 	supervisor, err := NewRuntimeSupervisor(listener, dependencies.SupervisorHolder, dependencies.Launcher, dependencies.Checkpoints)
 	if err != nil {
 		return err

@@ -3,13 +3,44 @@ package main
 import (
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+func TestProxyRegistryCodexUsesExplicitEgress(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.URL.Host != "codex.invalid" || r.Header.Get("Authorization") != "Bearer synthetic" {
+			t.Error("wrong registry egress request")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"models":[{"slug":"proxy-model","display_name":"Proxy model"}]}`)
+	}))
+	defer server.Close()
+	pipeline, err := newProxyRegistryPipeline(&proxy.Config{ClaudeUpstream: "http://claude.invalid", CodexUpstream: "http://codex.invalid", CodexEgressProxy: server.URL}, proxyRegistryDependencies{
+		FS: fsutil.NewMemFS(), HomeDir: "/home/test", Roots: testCQRoots(),
+		HTTPClient:          registryModelsDoer{wantToken: "ambient"},
+		ClaudeToken:         func() (string, error) { return "", errors.New("Claude unavailable") },
+		CredentialAuthority: externalRegistryAuthority(time.Now(), "synthetic"), Stderr: io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pipeline.Refresher.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("proxy calls = %d", calls.Load())
+	}
+}
 
 func TestRunProxyRegistryUsesFederatedCredentialAuthority(t *testing.T) {
 	now := time.Now()

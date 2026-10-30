@@ -143,6 +143,7 @@ type registryPipelineOptions struct {
 	ClaudeUpstream            string
 	CodexUpstream             string
 	HTTPClient                httputil.Doer
+	CodexHTTPClient           httputil.Doer
 	CodexClientVersion        string
 	ResolveCodexClientVersion func() string
 	RefreshInterval           time.Duration
@@ -326,8 +327,12 @@ func newRegistryPipelineWithCodexAuthority(opts registryPipelineOptions, authori
 	}
 	opts.CodexToken = nil
 	opts.CodexTokenContext = nil
+	codexClient := opts.CodexHTTPClient
+	if codexClient == nil {
+		codexClient = opts.HTTPClient
+	}
 	opts.CodexAuthenticatedDo = func(ctx context.Context, req *http.Request) (*http.Response, error) {
-		return codexRegistryModelsRequest(ctx, authority, opts.HTTPClient, time.Now(), req)
+		return codexRegistryModelsRequest(ctx, authority, codexClient, time.Now(), req)
 	}
 	return newRegistryPipeline(opts)
 }

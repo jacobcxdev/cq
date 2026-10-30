@@ -96,6 +96,48 @@ func TestLinuxCodexInstalledProcessVerifierBindsWorkerToSystemdSupervisor(t *tes
 	}
 }
 
+func TestLinuxCodexInstalledWorkerPortMustMatchServicePort(t *testing.T) {
+	executable := testCodexInstalledLinuxExecutableProof()
+	supervisor := testCodexInstalledLinuxProcess(4242, 501, executable)
+	worker := testCodexInstalledLinuxWorkerProcess(5252, supervisor, executable)
+	dependencies := codexInstalledLinuxProcessVerifierDependencies{
+		captureExecutable: func(string) (codexInstalledExecutableProof, error) { return executable, nil },
+		captureProcess: func(pid int) (LinuxProcessIdentity, error) {
+			if pid != supervisor.PID {
+				return LinuxProcessIdentity{}, errors.New("unknown supervisor")
+			}
+			return supervisor, nil
+		},
+		loadPort: func() (int, error) { return 29280, nil },
+	}
+	for _, test := range []struct {
+		name   string
+		suffix []string
+		want   bool
+	}{
+		{name: "legacy", want: true},
+		{name: "matching port", suffix: []string{"--port", "29280"}, want: true},
+		{name: "wrong port", suffix: []string{"--port", "29281"}},
+		{name: "malformed port", suffix: []string{"--port", "not-a-port"}},
+		{name: "noncanonical port", suffix: []string{"--port", "029280"}},
+		{name: "missing port", suffix: []string{"--port"}},
+		{name: "extra argument", suffix: []string{"--port", "29280", "extra"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := worker
+			candidate.Arguments = append(append([]string(nil), worker.Arguments...), test.suffix...)
+			owner, port, err := codexInstalledLinuxListenerOwner(candidate, 501, executable, dependencies)
+			if test.want {
+				if err != nil || !owner.Equal(supervisor) || port != 29280 {
+					t.Fatalf("listener owner = (%#v, %d, %v)", owner, port, err)
+				}
+			} else if !errors.Is(err, errCodexInstalledProcessAttestation) || owner.Valid() || port != 0 {
+				t.Fatalf("invalid listener owner = (%#v, %d, %v)", owner, port, err)
+			}
+		})
+	}
+}
+
 func TestLinuxCodexInstalledProcessVerifierBindsIsolatedCandidateToPersistentUnit(t *testing.T) {
 	executable := testCodexInstalledLinuxExecutableProof()
 	candidate := testCodexInstalledLinuxProcess(6262, 501, executable)

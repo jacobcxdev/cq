@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -216,5 +217,18 @@ func TestRescueRelayPropagatesCancellationWithoutDeadlineOrRetry(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("upstream calls = %d", calls.Load())
+	}
+}
+
+func TestRescueRelayUnavailableNeverDispatches(t *testing.T) {
+	called := false
+	relay := &RescueRelay{Unavailable: true, Origin: testRescueOrigin(t), Transport: rescueRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+		called = true
+		return nil, errors.New("must not dispatch")
+	})}
+	response := httptest.NewRecorder()
+	relay.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://local.test/responses", nil))
+	if response.Code != http.StatusServiceUnavailable || called {
+		t.Fatal("unavailable rescue dispatched or returned success")
 	}
 }

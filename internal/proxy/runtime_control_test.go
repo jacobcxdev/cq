@@ -107,6 +107,86 @@ func TestRuntimeControlWorkerABIRejectsPublicListenerFDAndNonCanonicalValues(t *
 	}
 }
 
+func TestRuntimeRoleCommandArgumentsAcceptLegacyAndCanonicalPort(t *testing.T) {
+	manifest := RuntimeRoleManifestV1{
+		SchemaVersion: 1, Role: RuntimeRoleWorker, ManifestDigest: sha256.Sum256([]byte("worker")),
+		ProxyInstanceID: "primary", RuntimeInstanceID: "runtime",
+		ListenerFD: RuntimeNoListenerFD, LifecycleFD: RuntimeLifecycleFD,
+		ControlFD: RuntimeControlFD, SecretFD: RuntimeSecretFD, WorkFD: RuntimeWorkFD,
+		LifecycleHolderIdentityDigest: sha256.Sum256([]byte("holder")),
+	}
+	for _, role := range []RuntimeRole{RuntimeRoleWorker, RuntimeRoleSupervisor} {
+		t.Run(string(role), func(t *testing.T) {
+			want := manifest
+			want.Role = role
+			if role == RuntimeRoleSupervisor {
+				want.ListenerFD, want.WorkFD = RuntimeListenerFD, RuntimeNoWorkFD
+			}
+			for _, test := range []struct {
+				name   string
+				suffix []string
+				port   int
+			}{
+				{name: "legacy"},
+				{name: "port", suffix: []string{"--port", "29280"}, port: 29280},
+				{name: "minimum port", suffix: []string{"--port", "1"}, port: 1},
+				{name: "maximum port", suffix: []string{"--port", "65535"}, port: 65535},
+			} {
+				t.Run(test.name, func(t *testing.T) {
+					arguments := append(RuntimeRoleArguments(want), test.suffix...)
+					got, port, err := ParseRuntimeRoleCommandArguments(arguments)
+					if err != nil || got != want || port != test.port {
+						t.Fatalf("command parse = (%#v, %d, %v), want (%#v, %d, nil)", got, port, err, want, test.port)
+					}
+					if len(test.suffix) > 0 {
+						if _, err := ParseRuntimeRoleArguments(arguments); !errors.Is(err, ErrRuntimeRoleManifest) {
+							t.Fatalf("manifest-only parser accepted command suffix: %v", err)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestRuntimeRoleCommandArgumentsRejectMalformedSuffixAndManifest(t *testing.T) {
+	valid := []string{
+		"--runtime-role", "worker", "--runtime-schema", "1",
+		"--runtime-manifest-digest", strings.Repeat("01", 32),
+		"--proxy-instance", "primary", "--runtime-instance", "runtime",
+		"--work-fd", "7", "--lifecycle-fd", "4", "--control-fd", "5",
+		"--lifecycle-holder-digest", strings.Repeat("02", 32), "--secret-fd", "6",
+	}
+	for _, suffix := range [][]string{
+		{"--port"}, {"--port", ""}, {"--port", "0"}, {"--port", "-1"},
+		{"--port", "65536"}, {"--port", "+29280"}, {"--port", "029280"},
+		{"--port", " 29280"}, {"--port", "29280 "}, {"--port", "not-a-port"},
+		{"--port", "999999999999999999999999"}, {"--other", "29280"},
+		{"--port", "29280", "--port", "29280"}, {"--port", "29280", "extra"},
+	} {
+		t.Run(strings.Join(suffix, "/"), func(t *testing.T) {
+			arguments := append(append([]string(nil), valid...), suffix...)
+			manifest, port, err := ParseRuntimeRoleCommandArguments(arguments)
+			if !errors.Is(err, ErrRuntimeRoleManifest) || manifest != (RuntimeRoleManifestV1{}) || port != 0 {
+				t.Fatalf("invalid command parse = (%#v, %d, %v)", manifest, port, err)
+			}
+		})
+	}
+	for name, arguments := range map[string][]string{
+		"empty":              nil,
+		"prefix port":        append([]string{"--port", "29280"}, valid...),
+		"reordered manifest": append(append([]string{valid[2], valid[3], valid[0], valid[1]}, valid[4:]...), "--port", "29280"),
+		"invalid manifest":   append(append([]string{valid[0], "unknown"}, valid[2:]...), "--port", "29280"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			manifest, port, err := ParseRuntimeRoleCommandArguments(arguments)
+			if !errors.Is(err, ErrRuntimeRoleManifest) || manifest != (RuntimeRoleManifestV1{}) || port != 0 {
+				t.Fatalf("invalid command parse = (%#v, %d, %v)", manifest, port, err)
+			}
+		})
+	}
+}
+
 type recordingReadCloser struct {
 	*bytes.Reader
 	closed bool

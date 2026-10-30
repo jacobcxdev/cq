@@ -94,6 +94,16 @@ func runUnixProxyAdoptedRuntimeWithLifecycle(ctx context.Context, listener net.L
 	}
 	defer admissions.Close()
 	workerManifest := proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(manifestDigest[:])}
+	cfg, err := loadRuntimeEgressConfig(listener)
+	if err != nil {
+		return err
+	}
+	egress, err := proxy.StartRuntimeEgress(ctx, cfg, fsutil.OSFileSystem{})
+	if err != nil {
+		return err
+	}
+	defer egress.Close()
+	setRuntimeWorkerPort(launcher, cfg.Port)
 	bootstrap, err := proxy.LoadProxyRescueBootstrapConfig()
 	if errors.Is(err, os.ErrNotExist) {
 		return wrapUnixProxyRuntimeError("run normal supervisor", proxy.RunAdoptedRuntimeSupervisorConfigured(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, configure, serve))
@@ -129,7 +139,7 @@ func runUnixProxyAdoptedRuntimeWithLifecycle(ctx context.Context, listener net.L
 		if err := supervisor.SetCallerAuthority(callerAuthority); err != nil {
 			return err
 		}
-		relay := &proxy.RescueRelay{Transport: http.DefaultTransport, Origin: origin}
+		relay := &proxy.RescueRelay{Transport: egress.HTTP, Origin: origin}
 		if err := supervisor.ConfigureRescue(ctx, relay, state.RuntimeMode); err != nil {
 			return err
 		}
