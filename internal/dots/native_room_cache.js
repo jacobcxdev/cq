@@ -42,6 +42,14 @@
         if (profiles.length !== expected.size || profiles.some(p=>!expected.delete(p.id)
                 || typeof p.messaging_room_id !== 'string' || !p.messaging_room_id) || expected.size)
             throw Error('Native catalogue identity changed');
+        // New native caches own producer lifetime and ingestion. The legacy
+        // guard cannot preserve their separate key, signal and retention args.
+        if (m.CQNativeOwnedReads) {
+            if (cache.read.length !== 6 || typeof cache.readRoom !== 'function'
+                    || typeof cache.readHistory !== 'function')
+                throw Error('Native messaging read contract changed');
+            return {installed:true,ownedReads:0,nativeOwnership:true};
+        }
         const state = (GUARD)(cache, profiles.map(p=>p.messaging_room_id), m.Ymr);
         globalThis[key] = state;
         return {installed:true,ownedReads:state.ownedReads};

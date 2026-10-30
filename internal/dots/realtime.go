@@ -101,7 +101,7 @@ func newRealtimeProxy(s *Settings, d realtimeDependencies) (*realtimeProxy, erro
 		}
 	}
 	if d.http == nil {
-		d.http = &http.Client{Transport: &http.Transport{Proxy: nil, TLSClientConfig: d.publicTLS, DisableCompression: true}, Timeout: 25 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		d.http = &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: dotsDialContext, TLSClientConfig: d.publicTLS, DisableCompression: true}, Timeout: 25 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	}
 	catalogue := &CatalogueClient{Settings: s, HTTP: d.http}
 	if d.inventory == nil {
@@ -114,8 +114,7 @@ func newRealtimeProxy(s *Settings, d realtimeDependencies) (*realtimeProxy, erro
 		d.roots = catalogue.PrimaryRoots
 	}
 	if d.dial == nil {
-		dialer := &net.Dialer{Timeout: 25 * time.Second}
-		d.dial = dialer.DialContext
+		d.dial = dotsDialContext
 	}
 	if d.celsiusAddress == nil {
 		d.celsiusAddress = func() (string, error) {

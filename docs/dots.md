@@ -39,9 +39,15 @@ cq codex dots --root /absolute/private/dots list --json
 
 `--account-source` is optional. Runtime helpers use the staged CQ executable. The installer generates private configuration, so no hand-written settings file, profile IDs or research directory is needed.
 
-The installation root must be private and outside source checkouts, app bundles and production credential or app-data directories. Existing roots must belong to the current user and have mode `0700`; configuration uses `0600` and staged executables use `0700`. Symlink destinations are rejected. The installer accepts only the reviewed app versions, builds and renderer hashes in [the Go installer](../internal/dots/install.go). Current bindings cover ChatGPT builds `20770` and `21161`. After a reviewed app update, `start` or `sync` refreshes the renderer pin while preserving accounts, stable handles and setup records. An already-running app reports `restart_required`; CQ does not attach new bindings to its old session. Other app updates require qualification and a compatible CQ build.
+The installation root must be private and outside source checkouts, app bundles and production credential or app-data directories. Existing roots must belong to the current user and have mode `0700`; configuration uses `0600` and staged executables use `0700`. Symlink destinations are rejected. The installer accepts only the reviewed app versions, builds and renderer hashes in [the Go installer](../internal/dots/install.go). Current bindings cover ChatGPT builds `20770`, `21161` and `22943`. Build `22943` bindings and native cache ownership are checked against extracted renderer contracts; these checks do not establish live native UI or egress readiness. After a reviewed app update, `start` or `sync` refreshes the renderer pin while preserving accounts, stable handles and setup records. An already-running app reports `restart_required`; CQ does not attach new bindings to its old session. Other app updates require qualification and a compatible CQ build.
 
 The qualified native app permits authenticated local proxy requests on `localhost:8000`. Dots therefore requires loopback port `8000` to be free. If another service owns it, startup stops without terminating that service or choosing an unsupported port.
+
+## CQ egress
+
+When CQ has `codex_wireguard_profile` or a remote `codex_egress_proxy` configured, the adapter's Dot control-plane HTTP and WebSocket connections use the supervisor's existing private egress broker. This covers discovery, messaging, live updates, owner cloud sessions and computer signalling. Dots do not read the WireGuard profile or start another tunnel. The CQ service must be running; a missing broker or failed tunnel blocks these requests without direct fallback. Each new connection reads the current broker descriptor so a service restart does not leave the adapter using an obsolete socket.
+
+This applies only while the compatible Dots adapter is running and the desktop app was launched through CQ. The launcher's ordinary-app recovery path does not provide Dots egress. Check `cq codex dots status` after an app update. Local IPC, unrelated desktop hosts and independently launched child processes retain their existing networking. CQ does not change system VPN, DNS or routing settings.
 
 ## Setup and manual reminders
 
@@ -108,7 +114,7 @@ Controls verify process ownership, executable and adapter identity before signal
 
 Normal mode uses a private Chromium debugging pipe and an owner-only Unix socket, with no debugging TCP port. The broker must remain alive for the app session. Ordinary termination and IPC-server failures keep its pipes open until the app exits; forcibly killing the broker or a runtime crash can close the pipe and cause Electron to quit. The normal updater remains enabled; an updated app needs a newly qualified pin before the next CQ launch.
 
-The pinned renderer gives shared Dot room/history reads their own request lifetime. Closing one chat no longer cancels a shared read still needed by another chat. This adapter neither retries those reads nor changes send behaviour. The signed app bundle stays unchanged.
+On older pinned renderers CQ gives shared Dot room/history reads their own request lifetime. Build `22943` owns that lifetime and ingestion natively, so CQ validates its current contract and leaves those methods unchanged. Closing one chat does not cancel a shared read still needed by another chat. This adapter neither retries those reads nor changes send behaviour. The signed app bundle stays unchanged.
 
 Native messaging starts its primary WebSocket without waiting for secondary account URL lookups. Each secondary connects independently and reconnects after failures with a delay capped at 30 seconds, restoring active subscriptions and presence. An unavailable broker returns a retryable bootstrap error instead of silently leaving secondary Dots on a primary-only connection. This recovery never retries message sends.
 

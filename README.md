@@ -589,6 +589,13 @@ transport and must be configured separately. Credential eligibility and
 read-only treatment of system/external tokens are unchanged. It routes requests
 received by CQ; other
 Codex app connections and child processes are not captured automatically.
+The optional Dots adapter shares this egress when a supported desktop app is
+launched through **ChatGPT via CQ** or `cq codex dots start`. Its catalogue,
+messaging, status, owner cloud sessions and computer-signalling connections use
+the supervisor's existing private broker. A configured egress failure blocks
+these requests instead of falling back to the host route. The adapter must be
+running; a normal app launch or an unsupported app update does not acquire this
+routing. Local IPC and unrelated desktop connections retain their existing route.
 Egress configuration and profile contents are checked every five seconds. Valid
 changes atomically replace the egress generation without restarting the service
 or workers. Connections from the old generation close and clients reconnect;
@@ -636,7 +643,8 @@ The supervisor owns one egress manager for both workers and rescue traffic.
 Workers use a private authenticated Unix socket and receive no WireGuard keys.
 Rescue continues through that same manager while workers drain or recover;
 there is no second copy of the WireGuard identity. The broker restricts origin
-connections to the configured Codex backend and OpenAI authentication endpoint.
+connections to the configured Codex backend and the explicit OpenAI/Codex/Dots
+service origins; it is not a general-purpose desktop proxy.
 Foreground execution owns the same reloadable manager directly. No proxy
 settings are exported to child processes. Do not concurrently use the same
 WireGuard keys in another VPN client.

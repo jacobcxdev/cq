@@ -27,15 +27,17 @@ import (
 )
 
 const (
-	QualifiedAppVersion  = "26.1013.40934"
-	QualifiedAppBuild    = "20770"
-	QualifiedASARSHA256  = "5ddc4e48259aa6f979e04529b1a5a4ae54b0f5c4ad6db5c6e004924c10916ddb"
-	QualifiedModuleAsset = "app-initial-90eb42395b7d.js"
+	QualifiedAppVersion    = "26.1013.40934"
+	QualifiedAppBuild      = "20770"
+	QualifiedASARSHA256    = "5ddc4e48259aa6f979e04529b1a5a4ae54b0f5c4ad6db5c6e004924c10916ddb"
+	QualifiedModuleAsset   = "app-initial-90eb42395b7d.js"
+	nativeOwnedModuleAsset = "app-initial-60f141238751.js"
 )
 
 var qualifiedAppPins = []Settings{
 	{AppVersion: QualifiedAppVersion, AppBuild: QualifiedAppBuild, ASARSHA256: QualifiedASARSHA256, ModuleAsset: QualifiedModuleAsset},
 	{AppVersion: "26.1016.51333", AppBuild: "21161", ASARSHA256: "9d0260dd37f9c45546d5a89d9d782b8362c9957b70b992e2c3f91df60a046b07", ModuleAsset: "app-initial-f3e281fb9a71.js"},
+	{AppVersion: "26.1027.30824", AppBuild: "22943", ASARSHA256: "36bf3d2b35e95e11852074b9ca9459b89efbecd6b8311345d060cf66de8f0ba6", ModuleAsset: nativeOwnedModuleAsset},
 }
 
 // qualifiedAppPin accepts only a reviewed build and its exact renderer archive.

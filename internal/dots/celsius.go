@@ -58,7 +58,7 @@ func NewCelsiusBroker(cfg *Settings, event func(map[string]any)) *CelsiusBroker 
 		if err != nil {
 			return nil, err
 		}
-		dialer := websocket.Dialer{HandshakeTimeout: 20 * time.Second, EnableCompression: false, TLSClientConfig: roots}
+		dialer := websocket.Dialer{HandshakeTimeout: 20 * time.Second, NetDialContext: dotsDialContext, EnableCompression: false, TLSClientConfig: roots}
 		conn, response, err := dialer.DialContext(ctx, endpoint, nil)
 		if response != nil && response.Body != nil {
 			response.Body.Close()
