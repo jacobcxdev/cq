@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"errors"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +17,24 @@ import (
 )
 
 func TestRuntimeSupervisorRoleBootstrapsWorkerAndCheckpointBeforeServe(t *testing.T) {
+	events, err := runSupervisorRoleConfigurationFixture(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"boot:worker-description", "checkpoint:worker-description", "serve"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+func TestRuntimeSupervisorRoleConfiguresSharedOwnerBeforeWorker(t *testing.T) {
+	stopped := errors.New("configuration stopped")
+	called := false
+	events, err := runSupervisorRoleConfigurationFixture(t, func(*RuntimeSupervisor) error { called = true; return stopped })
+	if !called || !errors.Is(err, stopped) || len(events) != 0 {
+		t.Fatalf("configuration before boot: called=%v events=%v err=%v", called, events, err)
+	}
+}
+func runSupervisorRoleConfigurationFixture(t *testing.T, configure func(*RuntimeSupervisor) error) ([]string, error) {
 	lifecyclePath := t.TempDir() + "/lifecycle.lock"
 	if err := os.WriteFile(lifecyclePath, []byte("lock"), 0o600); err != nil {
 		t.Fatal(err)
@@ -69,6 +88,7 @@ func TestRuntimeSupervisorRoleBootstrapsWorkerAndCheckpointBeforeServe(t *testin
 		SupervisorHolder: supervisorHolder, Launcher: launcher, Checkpoints: checkpoint,
 		WorkerManifest: WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: "artifact"},
 		AdoptListener:  func(*os.File) (net.Listener, error) { return &runtimeTestListener{}, nil },
+		Configure:      configure,
 		Serve: func(_ context.Context, _ net.Listener, handler http.Handler) error {
 			if handler == nil {
 				t.Fatal("missing selected worker handler")
@@ -77,11 +97,5 @@ func TestRuntimeSupervisorRoleBootstrapsWorkerAndCheckpointBeforeServe(t *testin
 			return nil
 		},
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"boot:worker-description", "checkpoint:worker-description", "serve"}
-	if !reflect.DeepEqual(events, want) {
-		t.Fatalf("events = %#v, want %#v", events, want)
-	}
+	return events, err
 }

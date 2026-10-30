@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -503,6 +504,7 @@ type proxyRegistryDependencies struct {
 	HomeDir                   string
 	Roots                     userdirs.Roots
 	HTTPClient                httputil.Doer
+	CodexHTTPClient           httputil.Doer
 	CodexClientVersion        string
 	ResolveCodexClientVersion func() string
 	ClaudeToken               func() (string, error)
@@ -515,6 +517,17 @@ func newProxyRegistryPipeline(cfg *proxy.Config, deps proxyRegistryDependencies)
 	if cfg == nil {
 		return nil, fmt.Errorf("registry pipeline: missing proxy config")
 	}
+	codexClient := deps.CodexHTTPClient
+	if cfg.CodexWireGuardProfile != "" && codexClient == nil {
+		return nil, errors.New("registry pipeline: WireGuard requires the runtime-owned Codex egress client")
+	}
+	if cfg.CodexEgressProxy != "" && codexClient == nil {
+		egress, err := proxy.NewCodexEgress(cfg.CodexEgressProxy)
+		if err != nil {
+			return nil, err
+		}
+		codexClient = httputil.NewClientWithTransport(30*time.Second, version, egress.HTTP)
+	}
 	return newRegistryPipelineWithCodexAuthority(registryPipelineOptions{
 		FS:                        deps.FS,
 		HomeDir:                   deps.HomeDir,
@@ -522,6 +535,7 @@ func newProxyRegistryPipeline(cfg *proxy.Config, deps proxyRegistryDependencies)
 		ClaudeUpstream:            cfg.ClaudeUpstream,
 		CodexUpstream:             cfg.CodexUpstream,
 		HTTPClient:                deps.HTTPClient,
+		CodexHTTPClient:           codexClient,
 		CodexClientVersion:        deps.CodexClientVersion,
 		ResolveCodexClientVersion: deps.ResolveCodexClientVersion,
 		ClaudeToken:               deps.ClaudeToken,
@@ -597,10 +611,11 @@ func parseProxyCommandOptions(args []string) (proxyCommandOptions, error) {
 func parseProxyCommandOptionsFor(command string, args []string) (proxyCommandOptions, error) {
 	var opts proxyCommandOptions
 	if command == "proxy start" && len(args) > 0 && args[0] == "--runtime-role" {
-		manifest, err := proxy.ParseRuntimeRoleArguments(args)
+		manifest, port, err := proxy.ParseRuntimeRoleCommandArguments(args)
 		if err != nil {
 			return opts, err
 		}
+		opts.Port = port
 		opts.RuntimeRole = &manifest
 		return opts, nil
 	}
@@ -745,16 +760,38 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		return err
 	}
 	if supervisorRole != nil {
+		// The validated supervisor must publish the shared owner before its
+		// first worker launches, just like the adopted-listener supervisor.
+		listener, listenerErr := net.FileListener(supervisorFiles.Listener)
+		if listenerErr != nil {
+			return listenerErr
+		}
+		egressCfg, cfgErr := loadRuntimeEgressConfig(listener)
+		_ = listener.Close()
+		if cfgErr != nil {
+			return cfgErr
+		}
+		owner, ownerErr := proxy.StartRuntimeEgress(context.Background(), egressCfg, fsutil.OSFileSystem{})
+		if ownerErr != nil {
+			return ownerErr
+		}
+		defer func() { returnErr = errors.Join(returnErr, owner.Close()) }()
+		setRuntimeWorkerPort(supervisorLauncher, egressCfg.Port)
 		store, err := proxy.OpenNormalCallerAdmissionStore(fsutil.OSFileSystem{}, proxy.NormalCallerAdmissionPath(roots.State))
 		if err != nil {
 			return err
 		}
 		defer store.Close()
+		configure, closeRescue, rescueErr := runtimeRescueConfiguration(context.Background(), store, owner)
+		if rescueErr != nil {
+			return rescueErr
+		}
+		defer func() { returnErr = errors.Join(returnErr, closeRescue()) }()
 		err = proxy.RunValidatedRuntimeSupervisorRole(context.Background(), *supervisorRole, proxy.RuntimeSupervisorRoleDependencies{
 			Files: supervisorFiles, SupervisorHolder: supervisorHolder, Launcher: supervisorLauncher,
 			Checkpoints: &proxy.RuntimeHashCheckpointStore{}, CallerAdmissions: store,
 			WorkerManifest: proxy.WorkerManifestV1{SchemaVersion: 1, WorkerArtifactDigest: hex.EncodeToString(supervisorRole.ManifestDigest[:])},
-			Serve:          serveRuntimeSupervisor,
+			Serve:          serveRuntimeSupervisor, Configure: configure,
 		})
 		supervisorFiles = proxy.RuntimeRoleFiles{}
 		return err
@@ -774,6 +811,9 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if opts.Port != 0 {
 		cfg.Port = opts.Port
 	}
+	if err := proxy.ValidateCodexEgressSettings(cfg.CodexEgressProxy, cfg.CodexWireGuardProfile); err != nil {
+		return err
+	}
 	if intent != nil {
 		return runInstalledHTTPValidationStartupFn(context.Background(), cfg, version, intent)
 	}
@@ -785,6 +825,16 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	codexClientBuild := defaultCodexRoutingClientBuild()
 	fsys := fsutil.OSFileSystem{}
+	var codexEgress *proxy.CodexEgress
+	if workerRole != nil {
+		codexEgress, err = proxy.OpenRuntimeEgressClient(cfg.Port, fsys)
+	} else {
+		codexEgress, err = proxy.OpenReloadingCodexEgress(context.Background(), cfg, fsys)
+	}
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, codexEgress.Close()) }()
 	var resilienceState *proxy.ProxyResilienceState
 	if stateDir := cfg.ResolvedProxyResilienceStateDir(); stateDir != "" {
 		resilienceState, err = proxy.OpenProxyResilienceState(context.Background(), proxy.ProxyResilienceStateOptions{
@@ -796,6 +846,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		defer func() { returnErr = errors.Join(returnErr, resilienceState.Close()) }()
 	}
 	refreshClient := newHTTPClientFn(30*time.Second, version)
+	codexHTTPClient := httputil.NewClientWithTransport(30*time.Second, version, codexEgress.HTTP)
 	servingAttestor := proxy.NewServingAttestor()
 	httpRequirements, _ := proxy.DefaultCodexRoutingRequirements(version, codexClientBuild)
 	activeCanary, err := openProxyCodexCanary(
@@ -820,7 +871,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	legacyFinaliseVerifier := newProxyLegacyMaintenanceFinaliseVerifier(version, codexClientBuild, cfg.Port, servingAttestor)
 	openCredentialControl := func(ctx context.Context) (*codexprov.CredentialControl, error) {
 		return codexprov.OpenDefaultRecoveringCredentialRefreshControlWithLegacyMaintenanceVerifierAndRecoveryRecorder(
-			ctx, fsys, refreshClient, legacyFinaliseVerifier,
+			ctx, fsys, codexHTTPClient, legacyFinaliseVerifier,
 			codexprov.CredentialEndpointRecoveryRecorderFunc(codexCanaryEndpointRecoveryRecorder(activeCanary)),
 		)
 	}
@@ -982,7 +1033,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Inventory: credentialControl,
 		Secrets:   credentialControl,
 		Transport: &proxy.CodexTokenTransport{
-			Inner: http.DefaultTransport,
+			Inner: codexEgress.HTTP,
 		},
 	}
 	codexRequestRouter := &proxy.CodexRequestRouter{
@@ -1024,6 +1075,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	codexRequestScope.Chooser = codexSelector
 	codexWebSocketExecutor := proxy.NewCodexWebSocketAttemptExecutor(credentialControl, credentialControl)
 	codexWebSocketExecutor.Reserve = codexReserve
+	codexWebSocketExecutor.Dialer = codexEgress.WebSocket
 
 	if err := proxy.WriteClaudeCodeModelCapabilitiesCache(); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: model capabilities cache: %v (continuing without cache write)\n", err)
@@ -1040,6 +1092,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			HomeDir:                   homeDir,
 			Roots:                     roots,
 			HTTPClient:                refreshClient,
+			CodexHTTPClient:           codexHTTPClient,
 			CodexClientVersion:        codexClientBuild,
 			ResolveCodexClientVersion: defaultCodexRoutingClientBuild,
 			ClaudeToken:               firstClaudeAccessToken,
@@ -1151,7 +1204,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 					fmt.Fprintln(os.Stderr, "cq: Cyber pool discovery stopped after panic")
 				}
 			}()
-			runCyberPoolDiscovery(proxyCtx, newCodexRegistryControlAdapter(credentialControl), refreshClient, cfg.CodexUpstream, codexClientBuild, resilienceState.Routing, cyberEligibility, sessionPolicy)
+			runCyberPoolDiscovery(proxyCtx, newCodexRegistryControlAdapter(credentialControl), codexHTTPClient, cfg.CodexUpstream, codexClientBuild, resilienceState.Routing, cyberEligibility, sessionPolicy)
 		}()
 		defer func() { proxyCancel(); <-cyberDiscoveryDone }()
 	}
@@ -1280,7 +1333,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			return nil
 		},
 	}
-	resetService, resetServiceErr := newCodexResetService(fsys, credentialControl, refreshClient, roots)
+	resetService, resetServiceErr := newCodexResetService(fsys, credentialControl, codexHTTPClient, roots)
 	if resetServiceErr != nil {
 		return fmt.Errorf("Codex reset scheduler: %w", resetServiceErr)
 	}
@@ -1555,6 +1608,9 @@ func setProxyStatusConfigDefaults(cfg *proxy.Config) {
 }
 
 func validateProxyStatusConfig(cfg *proxy.Config) error {
+	if err := proxy.ValidateCodexEgressSettings(cfg.CodexEgressProxy, cfg.CodexWireGuardProfile); err != nil {
+		return err
+	}
 	if cfg.LocalToken == "" {
 		return errors.New("local_token is required")
 	}
@@ -1607,4 +1663,78 @@ func validateProxyStatusRoutingMode(field string, mode proxy.CodexRoutingMode) e
 	default:
 		return fmt.Errorf("invalid %s %q: must be \"off\", \"observe\", or \"enforce\"", field, mode)
 	}
+}
+
+func loadRuntimeEgressConfig(listener net.Listener) (*proxy.Config, error) {
+	cfg, err := proxy.LoadCodexEgressConfig()
+	if err != nil {
+		bootstrap, bootstrapErr := proxy.LoadProxyRescueBootstrapConfig()
+		if bootstrapErr != nil {
+			return nil, errors.New("runtime egress configuration unavailable")
+		}
+		cfg = &proxy.Config{}
+		if bootstrap != nil {
+			cfg.CodexEgressProxy = bootstrap.CodexEgressProxy
+			cfg.CodexWireGuardProfile = bootstrap.CodexWireGuardProfile
+			cfg.CodexEgressInterface = bootstrap.CodexEgressInterface
+		}
+	}
+	_, portText, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		return nil, errors.New("runtime listener port unavailable")
+	}
+	cfg.Port, err = strconv.Atoi(portText)
+	if err != nil {
+		return nil, errors.New("runtime listener port unavailable")
+	}
+	return cfg, nil
+}
+
+func setRuntimeWorkerPort(launcher proxy.RuntimeWorkerLauncher, port int) {
+	if process, ok := launcher.(*proxy.RuntimeProcessWorkerLauncher); ok {
+		command := process.Command
+		if command == nil {
+			command = exec.CommandContext
+		}
+		process.Command = func(ctx context.Context, executable string, args ...string) *exec.Cmd {
+			return command(ctx, executable, append(args, "--port", strconv.Itoa(port))...)
+		}
+	}
+}
+
+func runtimeRescueConfiguration(ctx context.Context, admissions proxy.NormalCallerAdmissionConsumer, egress *proxy.CodexEgress) (func(*proxy.RuntimeSupervisor) error, func() error, error) {
+	bootstrap, err := proxy.LoadProxyRescueBootstrapConfig()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, func() error { return nil }, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("load rescue bootstrap: %w", err)
+	}
+	state, err := proxy.OpenProxyRescueState(ctx, proxy.ProxyResilienceStateOptions{FS: fsutil.OSFileSystem{}, Root: bootstrap.StateRoot, Random: rand.Reader, Now: time.Now})
+	if err != nil {
+		return nil, nil, fmt.Errorf("open rescue state: %w", err)
+	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		state.Close()
+		return nil, nil, errors.New("create caller authority key failed")
+	}
+	authority, err := proxy.NewNormalCallerAuthority(key, 1, []proxy.NormalCallerCredentialV1{{Domain: proxy.NormalCallerLocal, Bearer: bootstrap.LocalToken, SubjectID: "local-control"}}, admissions, time.Now, rand.Reader)
+	clear(key)
+	if err != nil {
+		state.Close()
+		return nil, nil, err
+	}
+	origin, err := url.Parse(proxy.DefaultCodexUpstream)
+	if err != nil {
+		state.Close()
+		return nil, nil, err
+	}
+	configure := func(supervisor *proxy.RuntimeSupervisor) error {
+		if err := supervisor.SetCallerAuthority(authority); err != nil {
+			return err
+		}
+		return supervisor.ConfigureRescue(ctx, &proxy.RescueRelay{Origin: origin, Transport: egress.HTTP}, state.RuntimeMode)
+	}
+	return configure, state.Close, nil
 }

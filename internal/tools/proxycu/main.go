@@ -627,14 +627,14 @@ func run(args []string, dependencies testDependencies) error {
 }
 
 type goTestEvent struct {
-	Time        string  `json:"Time"`
-	Action      string  `json:"Action"`
-	Package     string  `json:"Package"`
-	Test        string  `json:"Test"`
-	Elapsed     float64 `json:"Elapsed"`
-	Output      string  `json:"Output"`
-	OutputType  string  `json:"OutputType"`
-	FailedBuild string  `json:"FailedBuild"`
+	Time        string          `json:"Time"`
+	Action      string          `json:"Action"`
+	Package     string          `json:"Package"`
+	Test        string          `json:"Test"`
+	Elapsed     float64         `json:"Elapsed"`
+	Output      string          `json:"Output"`
+	FailedBuild string          `json:"FailedBuild"`
+	OutputType  json.RawMessage `json:"OutputType"`
 }
 
 type testEventState struct {
@@ -696,6 +696,23 @@ func verifyTestEvents(selection proxy.CUTestPackageV1, reader io.Reader, raceEna
 		var event goTestEvent
 		if err := decoder.Decode(&event); err != nil {
 			return fmt.Errorf("decode go test event: %w", err)
+		}
+		// Go 1.27 classifies output separately from the run/pass protocol.
+		// Accept only its documented string enum on output events; retain the
+		// closed member set and all lifecycle/cardinality checks below.
+		if event.OutputType != nil {
+			var kind string
+			if bytes.Equal(bytes.TrimSpace(event.OutputType), []byte("null")) || json.Unmarshal(event.OutputType, &kind) != nil {
+				return fmt.Errorf("go test OutputType must be a string")
+			}
+			if event.Action != "output" {
+				return fmt.Errorf("go test OutputType is only valid for output events")
+			}
+			switch kind {
+			case "", "frame", "error", "error-continue":
+			default:
+				return fmt.Errorf("unsupported go test OutputType %q", kind)
+			}
 		}
 		var trailing any
 		if err := decoder.Decode(&trailing); err != io.EOF {
@@ -821,7 +838,7 @@ func rejectDuplicateGoTestEventMembers(line []byte) error {
 		}
 		seen[name] = struct{}{}
 		switch name {
-		case "Time", "Action", "Package", "Test", "Elapsed", "Output", "OutputType", "FailedBuild":
+		case "Time", "Action", "Package", "Test", "Elapsed", "Output", "FailedBuild", "OutputType":
 		default:
 			if unsupported == "" {
 				unsupported = name

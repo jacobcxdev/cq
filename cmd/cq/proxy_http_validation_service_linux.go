@@ -306,13 +306,14 @@ func validLinuxInstalledHTTPValidationCandidateWorker(
 	binding installedHTTPValidationServiceBinding,
 ) bool {
 	if !worker.Valid() || worker.ParentPID != supervisor.PID || worker.UID != supervisor.UID ||
-		worker.CgroupPath != supervisor.CgroupPath || worker.Executable != supervisor.Executable || len(worker.Arguments) != 23 ||
+		worker.CgroupPath != supervisor.CgroupPath || worker.Executable != supervisor.Executable || len(worker.Arguments) < 3 ||
 		worker.Arguments[0] != worker.Executable.Path || worker.Arguments[1] != "proxy" || worker.Arguments[2] != "start" ||
 		hex.EncodeToString(worker.Executable.SHA256[:]) != binding.executableSHA256 {
 		return false
 	}
-	manifest, err := proxy.ParseRuntimeRoleArguments(worker.Arguments[3:])
-	return err == nil && manifest.Role == proxy.RuntimeRoleWorker && manifest.ProxyInstanceID == linuxValidationCandidateProxyInstanceID &&
+	manifest, workerPort, err := proxy.ParseRuntimeRoleCommandArguments(worker.Arguments[3:])
+	return err == nil && (workerPort == 0 || workerPort == binding.port) &&
+		manifest.Role == proxy.RuntimeRoleWorker && manifest.ProxyInstanceID == linuxValidationCandidateProxyInstanceID &&
 		manifest.ManifestDigest == worker.Executable.SHA256
 }
 

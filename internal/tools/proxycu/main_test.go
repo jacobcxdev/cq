@@ -743,3 +743,43 @@ func TestRunAcceptsManifestedCU1(t *testing.T) {
 		t.Fatalf("unit = %q, want CU-1", got)
 	}
 }
+
+func TestVerifyTestEventsOutputTypeCompatibility(t *testing.T) {
+	selection := proxy.CUTestPackageV1{Package: "./internal/proxy", TopLevelTests: []string{"TestOne"}, FullTestIDs: []string{"TestOne"}, MinimumPassCount: 1}
+	const pkg = "github.com/jacobcxdev/cq/internal/proxy"
+	start := `{"Action":"start","Package":"` + pkg + `"}` + "\n"
+	run := `{"Action":"run","Package":"` + pkg + `","Test":"TestOne"}` + "\n"
+	pass := `{"Action":"pass","Package":"` + pkg + `","Test":"TestOne"}` + "\n"
+	terminal := `{"Action":"pass","Package":"` + pkg + `"}` + "\n"
+	for _, kind := range []string{`""`, `"frame"`, `"error"`, `"error-continue"`} {
+		t.Run("accept "+kind, func(t *testing.T) {
+			output := `{"Action":"output","Package":"` + pkg + `","Test":"TestOne","Output":"synthetic output\n","OutputType":` + kind + `}` + "\n"
+			if err := verifyTestEvents(selection, strings.NewReader(start+run+output+pass+terminal), true); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	for name, event := range map[string]string{
+		"unknown type":   `{"Action":"output","Package":"` + pkg + `","Test":"TestOne","OutputType":"future"}`,
+		"number type":    `{"Action":"output","Package":"` + pkg + `","Test":"TestOne","OutputType":1}`,
+		"null type":      `{"Action":"output","Package":"` + pkg + `","Test":"TestOne","OutputType":null}`,
+		"duplicate type": `{"Action":"output","Package":"` + pkg + `","Test":"TestOne","OutputType":"error","OutputType":"frame"}`,
+		"case alias":     `{"Action":"output","Package":"` + pkg + `","Test":"TestOne","outputtype":"frame"}`,
+		"unknown member": `{"Action":"output","Package":"` + pkg + `","Test":"TestOne","OutputType":"frame","Future":true}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := verifyTestEvents(selection, strings.NewReader(start+run+event+"\n"+pass+terminal), true); err == nil {
+				t.Fatal("accepted invalid output classification")
+			}
+		})
+	}
+	classifiedPass := `{"Action":"pass","Package":"` + pkg + `","Test":"TestOne","OutputType":"frame"}` + "\n"
+	if err := verifyTestEvents(selection, strings.NewReader(start+run+classifiedPass+terminal), true); err == nil {
+		t.Fatal("accepted output classification on a pass event")
+	}
+	output := `{"Action":"output","Package":"` + pkg + `","Test":"TestOne","OutputType":"error"}` + "\n"
+	failure := `{"Action":"fail","Package":"` + pkg + `","Test":"TestOne"}` + "\n"
+	if err := verifyTestEvents(selection, strings.NewReader(start+run+output+failure+terminal), true); err == nil {
+		t.Fatal("output metadata concealed failure")
+	}
+}

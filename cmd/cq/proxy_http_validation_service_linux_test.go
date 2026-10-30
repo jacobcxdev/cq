@@ -156,6 +156,29 @@ func TestLinuxInstalledHTTPValidationCandidateBindsExactListener(t *testing.T) {
 		t.Fatalf("authority = (%#v, %v)", authority, err)
 	}
 
+	legacyArguments := append([]string(nil), worker.Arguments...)
+	for _, test := range []struct {
+		name   string
+		suffix []string
+		want   bool
+	}{
+		{name: "explicit matching worker port", suffix: []string{"--port", "29280"}, want: true},
+		{name: "wrong worker port", suffix: []string{"--port", "29281"}},
+		{name: "malformed worker port", suffix: []string{"--port", "not-a-port"}},
+		{name: "noncanonical worker port", suffix: []string{"--port", "029280"}},
+		{name: "missing worker port", suffix: []string{"--port"}},
+		{name: "extra worker argument", suffix: []string{"--port", "29280", "extra"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			worker.Arguments = append(append([]string(nil), legacyArguments...), test.suffix...)
+			_, err := validateInstalledHTTPValidationCandidateWithLinuxOperations(29280, operations)
+			if (err == nil) != test.want {
+				t.Fatalf("candidate worker validation error = %v, want accepted %v", err, test.want)
+			}
+		})
+	}
+	worker.Arguments = legacyArguments
+
 	calls := 0
 	operations.captureProcess = func(int) (proxy.LinuxProcessIdentity, error) {
 		calls++

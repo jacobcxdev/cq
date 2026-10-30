@@ -5,6 +5,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -135,5 +136,48 @@ func TestLinuxRuntimeInspectionFailsClosed(t *testing.T) {
 	}
 	if _, err := inspectLinuxProxyRuntimeWithOperations(context.Background(), "/home/test/bin/cq", 19280, operations); err == nil {
 		t.Fatal("unavailable procfs unexpectedly accepted")
+	}
+}
+
+func TestLinuxRuntimeWorkerArgumentsAcceptOnlyExactRoleCommand(t *testing.T) {
+	executable := testCodexInstalledLinuxExecutableProof()
+	supervisor := testCodexInstalledLinuxProcess(4242, 501, executable)
+	worker := testCodexInstalledLinuxWorkerProcess(5252, supervisor, executable)
+	for _, test := range []struct {
+		name   string
+		suffix []string
+		want   bool
+	}{
+		{name: "legacy", want: true},
+		{name: "explicit port", suffix: []string{"--port", "29280"}, want: true},
+		{name: "malformed port", suffix: []string{"--port", "not-a-port"}},
+		{name: "noncanonical port", suffix: []string{"--port", "029280"}},
+		{name: "out of range port", suffix: []string{"--port", "65536"}},
+		{name: "unknown suffix", suffix: []string{"--other", "29280"}},
+		{name: "extra argument", suffix: []string{"--port", "29280", "extra"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			arguments := append(append([]string(nil), worker.Arguments...), test.suffix...)
+			if got := linuxRuntimeWorkerArgumentsMatch(arguments, supervisor.Executable); got != test.want {
+				t.Fatalf("worker argv match = %v, want %v", got, test.want)
+			}
+		})
+	}
+	for name, mutate := range map[string]func([]string){
+		"wrong executable":      func(arguments []string) { arguments[0] = "/other/cq" },
+		"wrong command":         func(arguments []string) { arguments[2] = "stop" },
+		"wrong role":            func(arguments []string) { arguments[4] = "supervisor" },
+		"wrong manifest digest": func(arguments []string) { arguments[8] = strings.Repeat("01", 32) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			arguments := append(append([]string(nil), worker.Arguments...), "--port", "29280")
+			mutate(arguments)
+			if linuxRuntimeWorkerArgumentsMatch(arguments, supervisor.Executable) {
+				t.Fatal("unrelated worker accepted")
+			}
+		})
+	}
+	if linuxRuntimeWorkerArgumentsMatch(nil, supervisor.Executable) {
+		t.Fatal("empty worker argv accepted")
 	}
 }

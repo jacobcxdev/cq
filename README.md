@@ -547,6 +547,9 @@ Config lives at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json`. 
 | `port` | `19280` | Loopback listen port. |
 | `claude_upstream` | `https://api.anthropic.com` | Claude API upstream. |
 | `codex_upstream` | `https://chatgpt.com/backend-api/codex` | ChatGPT OAuth-compatible Codex upstream. |
+| `codex_egress_proxy` | unset | Codex upstream egress: ambient defaults, `direct`, or an HTTP/HTTPS/SOCKS5 proxy origin. Live reload. |
+| `codex_wireguard_profile` | unset | Absolute private WireGuard profile path; mutually exclusive with `codex_egress_proxy`. Live reload. |
+| `codex_egress_interface` | unset | Optional macOS network interface for WireGuard outer UDP sockets (for example `en0`). Fails closed if binding is unavailable. |
 | `local_token` | generated | Local control/proxy bearer token. |
 | `headroom` | `false` | Enable request headroom compression. |
 | `headroom_mode` | `cache` | `cache` or `token` compression strategy. |
@@ -562,6 +565,81 @@ Config lives at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json`. 
 | `codex_window_priming` | disabled | Priming enablement and per-window model overrides. |
 | `diagnostics_log` | unset | Causal routing trace JSONL path; restart required. |
 | `payload_diagnostics_log` | unset | Raw request/response and WebSocket payload JSONL path; restart required. |
+
+For example, `"codex_egress_proxy": "http://127.0.0.1:8080"` sends Codex
+upstream HTTP (including streaming responses) and WebSocket connections through
+that proxy. The setting also covers the proxy's Codex model registry requests,
+window priming, CQ-owned managed credential refresh, and rescue relay. A failed proxy connection fails the request;
+CQ never retries it directly. HTTPS proxy certificates and upstream TLS
+certificates are verified normally. Proxy URLs accept only an origin (an
+optional trailing slash is allowed), without credentials, query, or fragment.
+Use an independently secured local forwarding endpoint for authenticated remote
+egress rather than placing proxy credentials in CQ configuration. Both
+`socks5://127.0.0.1:1080` and `socks5h://127.0.0.1:1080` use remote DNS and the
+same context-aware dialer for HTTP and WebSockets. HTTP CONNECT also supports
+WebSockets; SOCKS is an additional choice, not a requirement for WSS.
+
+Omitting the field or setting it to `""` preserves existing environment proxy
+behavior; `"direct"` explicitly ignores environment proxies for these Codex
+requests. This does not bypass a system VPN. The setting does not change process
+environment, Claude/Gemini egress, or standalone quota checks. When this runtime
+owns the credential coordinator, its eligible CQ-managed Codex refreshes use the
+same configured egress; an already running external coordinator retains its own
+transport and must be configured separately. Credential eligibility and
+read-only treatment of system/external tokens are unchanged. It routes requests
+received by CQ; other
+Codex app connections and child processes are not captured automatically.
+Egress configuration and profile contents are checked every five seconds. Valid
+changes atomically replace the egress generation without restarting the service
+or workers. Connections from the old generation close and clients reconnect;
+CQ never runs old and new WireGuard identities concurrently. Invalid changes
+block new and existing egress rather than continuing a stale or direct route.
+Unchanged profile snapshots preserve existing connections.
+
+For a VPN managed inside CQ, set `codex_wireguard_profile` to an absolute path
+such as `/absolute/private-directory/us.conf`, leaving `codex_egress_proxy`
+unset. The profile must be an owner-only regular file (0600) in a private
+owner-only directory (0700); CQ never copies its keys into JSON configuration.
+The supported WireGuard profile format is `[Interface]` `PrivateKey`,
+`Address`, `DNS` (IP literals), optional `MTU`, and `[Peer]` `PublicKey`,
+`Endpoint`, `AllowedIPs`, optional `PresharedKey` and `PersistentKeepalive`.
+Multiple peers use WireGuard longest-prefix routing. Peer keys must be unique,
+and the same exact AllowedIPs prefix cannot belong to two peers; overlapping
+broad/narrow prefixes are supported. Scripts/hooks, search-domain DNS entries,
+other unsupported directives, and OpenVPN `.ovpn` profiles are rejected. OpenVPN
+would require a separate native engine; this integration remains WireGuard-only.
+
+CQ snapshots each profile generation and lazily starts the official
+WireGuard userspace stack on the first selected request. HTTP/SSE, WebSocket,
+registry and CQ-owned managed refresh traffic share that stack. It creates no
+host TUN interface, route, DNS setting, privileged helper, or child process.
+Destination DNS runs through the profile's DNS servers inside the tunnel, and
+both DNS servers and destination IPs must be covered by `AllowedIPs`. DNS lookups
+try profile servers in order, with at most five seconds per server inside the
+overall connection budget. Addresses outside those routes fail; there is no
+direct fallback. Inner connection/DNS setup is bounded to 30 seconds and honors cancellation; established streams
+retain their existing request/session lifetimes. Shutdown closes the stack.
+Profile and configuration edits use the live reload behavior above.
+
+By default encrypted outer UDP packets follow host routing. On macOS,
+`codex_egress_interface` explicitly binds and verifies IPv4/IPv6 sockets to the
+selected network interface; loss or identity change fails closed. This uses
+per-socket routing, without editing routes, DNS or firewall settings. Kernel
+Network Extension policies and VPN kill switches can still block or mediate
+traffic; binding is not a promise to bypass those controls. A hostname in a peer
+`Endpoint` uses the system resolver for bootstrap; a literal endpoint IP avoids that lookup. This feature does not
+bypass an active system VPN or configure a VPN account. A compatible Nord manual
+WireGuard profile can supply the peer configuration; the Nord app is not needed
+for CQ's userspace tunnel.
+
+The supervisor owns one egress manager for both workers and rescue traffic.
+Workers use a private authenticated Unix socket and receive no WireGuard keys.
+Rescue continues through that same manager while workers drain or recover;
+there is no second copy of the WireGuard identity. The broker restricts origin
+connections to the configured Codex backend and OpenAI authentication endpoint.
+Foreground execution owns the same reloadable manager directly. No proxy
+settings are exported to child processes. Do not concurrently use the same
+WireGuard keys in another VPN client.
 
 ## Diagnostics and privacy
 

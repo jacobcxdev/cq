@@ -122,6 +122,26 @@ func RuntimeRoleArguments(manifest RuntimeRoleManifestV1) []string {
 	)
 }
 
+// ParseRuntimeRoleCommandArguments accepts the role manifest arguments with an
+// optional trailing port. A zero port means the command did not specify one.
+func ParseRuntimeRoleCommandArguments(arguments []string) (RuntimeRoleManifestV1, int, error) {
+	port := 0
+	roleArguments := arguments
+	if len(arguments) == 22 && arguments[20] == "--port" {
+		var err error
+		port, err = parseCanonicalRuntimeDecimal(arguments[21])
+		if err != nil || port < 1 || port > 65_535 {
+			return RuntimeRoleManifestV1{}, 0, ErrRuntimeRoleManifest
+		}
+		roleArguments = arguments[:20]
+	}
+	manifest, err := ParseRuntimeRoleArguments(roleArguments)
+	if err != nil {
+		return RuntimeRoleManifestV1{}, 0, err
+	}
+	return manifest, port, nil
+}
+
 func ParseRuntimeRoleArguments(arguments []string) (RuntimeRoleManifestV1, error) {
 	var manifest RuntimeRoleManifestV1
 	if len(arguments) < 2 {

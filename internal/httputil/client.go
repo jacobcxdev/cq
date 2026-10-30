@@ -69,10 +69,16 @@ func (t *uaTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 // NewClient creates an HTTP client with the given timeout and a default User-Agent.
 // The version string is included in the User-Agent header.
 func NewClient(timeout time.Duration, version string) *http.Client {
+	return NewClientWithTransport(timeout, version, http.DefaultTransport)
+}
+
+// NewClientWithTransport retains User-Agent and redirect safety while using
+// the caller's selected network transport. It never changes shared defaults.
+func NewClientWithTransport(timeout time.Duration, version string, transport http.RoundTripper) *http.Client {
 	ua := "cq/" + version
 	return &http.Client{
 		Timeout:   timeout,
-		Transport: &uaTransport{base: http.DefaultTransport, ua: ua},
+		Transport: &uaTransport{base: transport, ua: ua},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= 10 {
 				return errors.New("too many redirects")

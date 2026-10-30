@@ -80,11 +80,7 @@ func CaptureLinuxRuntimeWorker(ctx context.Context, supervisor LinuxProcessIdent
 		}
 		facts, err := captureLinuxProcessMatchFacts(pid, defaultLinuxProcOperations())
 		if err != nil || facts.ParentPID != supervisor.PID || facts.UID != supervisor.UID || facts.CgroupPath != supervisor.CgroupPath ||
-			len(facts.Arguments) != 23 || facts.Arguments[0] != supervisor.Executable.Path || facts.Arguments[1] != "proxy" || facts.Arguments[2] != "start" {
-			continue
-		}
-		manifest, err := ParseRuntimeRoleArguments(facts.Arguments[3:])
-		if err != nil || manifest.Role != RuntimeRoleWorker || manifest.ManifestDigest != supervisor.Executable.SHA256 {
+			!linuxRuntimeWorkerArgumentsMatch(facts.Arguments, supervisor.Executable) {
 			continue
 		}
 		process, err := CaptureLinuxProcess(pid)
@@ -98,6 +94,14 @@ func CaptureLinuxRuntimeWorker(ctx context.Context, supervisor LinuxProcessIdent
 		return LinuxProcessIdentity{}, errLinuxProcIdentity
 	}
 	return matches[0], nil
+}
+
+func linuxRuntimeWorkerArgumentsMatch(arguments []string, executable LinuxExecutableIdentity) bool {
+	if len(arguments) < 3 || arguments[0] != executable.Path || arguments[1] != "proxy" || arguments[2] != "start" {
+		return false
+	}
+	manifest, _, err := ParseRuntimeRoleCommandArguments(arguments[3:])
+	return err == nil && manifest.Role == RuntimeRoleWorker && manifest.ManifestDigest == executable.SHA256
 }
 
 func inspectLinuxProxyRuntimeWithOperations(ctx context.Context, executable string, port int, operations linuxRuntimeInspectionOperations) (LinuxProxyRuntimeIdentity, error) {

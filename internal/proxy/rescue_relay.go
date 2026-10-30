@@ -10,10 +10,13 @@ import (
 type RescueRelay struct {
 	Transport http.RoundTripper
 	Origin    *url.URL
+	// Unavailable refuses rather than running a competing VPN identity while
+	// a separate normal worker drains or recovers.
+	Unavailable bool
 }
 
 func (relay *RescueRelay) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
-	if relay == nil || request == nil || !validRescueOrigin(relay.Origin) {
+	if relay == nil || relay.Unavailable || request == nil || !validRescueOrigin(relay.Origin) {
 		writeRescueError(writer, http.StatusServiceUnavailable, "rescue_unavailable")
 		return
 	}

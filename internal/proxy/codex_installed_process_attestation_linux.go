@@ -174,10 +174,10 @@ func codexInstalledLinuxListenerOwner(
 	if port, ok := codexInstalledLinuxCandidatePort(current.Arguments, executable.path); ok {
 		return current, port, nil
 	}
-	if len(current.Arguments) != 23 || current.ParentPID <= 1 {
+	if current.ParentPID <= 1 {
 		return LinuxProcessIdentity{}, 0, errCodexInstalledProcessAttestation
 	}
-	manifest, err := ParseRuntimeRoleArguments(current.Arguments[3:])
+	manifest, workerPort, err := ParseRuntimeRoleCommandArguments(current.Arguments[3:])
 	if err != nil || manifest.Role != RuntimeRoleWorker || manifest.ManifestDigest != executable.sha256 {
 		return LinuxProcessIdentity{}, 0, errCodexInstalledProcessAttestation
 	}
@@ -187,7 +187,7 @@ func codexInstalledLinuxListenerOwner(
 		return LinuxProcessIdentity{}, 0, errCodexInstalledProcessAttestation
 	}
 	port, err := dependencies.loadPort()
-	if err != nil || !validCodexInstalledLinuxPort(port) {
+	if err != nil || !validCodexInstalledLinuxPort(port) || (workerPort != 0 && workerPort != port) {
 		return LinuxProcessIdentity{}, 0, errCodexInstalledProcessAttestation
 	}
 	return supervisor, port, nil
