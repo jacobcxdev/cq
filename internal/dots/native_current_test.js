@@ -24,6 +24,7 @@ const scope={watch:()=>()=>{},get(key){
  if(key===JWt)return{data,roomMetadata:new Map()};if(key===IC)return enabled;
 }};
 const M_=api;
+const H_=()=>({}),HC={};
 return{namespace:{${Object.entries(fixture.exports).map(([alias,local])=>`${alias}:${local}`).join(',')}},
  scope,auth,state,disable(){enabled=false;}};
 `);
