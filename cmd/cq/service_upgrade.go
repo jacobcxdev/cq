@@ -134,8 +134,12 @@ func (lifecycle *serviceLifecycle) upgradeWithWaitTimeout(ctx context.Context, o
 		stateErr := lifecycle.Store.Save(record)
 		return reverted, errors.Join(cause, wrapServiceError("restore previous refresh", refreshErr), wrapServiceError("restore previous ownership", stateErr))
 	}
-	if err := lifecycle.Platform.InstallRefresh(ctx, candidate.Path); err != nil {
-		return rollback(fmt.Errorf("install upgraded refresh: %w", err))
+	keepRefresh := sameRuntime && status.Refresh.Registered && status.Refresh.Healthy &&
+		sameServiceExecutable(status.Refresh.ConfiguredExecutable, candidate.Path)
+	if !keepRefresh {
+		if err := lifecycle.Platform.InstallRefresh(ctx, candidate.Path); err != nil {
+			return rollback(fmt.Errorf("install upgraded refresh: %w", err))
+		}
 	}
 	if _, err := lifecycle.waitHealthy(ctx); err != nil {
 		return rollback(err)
