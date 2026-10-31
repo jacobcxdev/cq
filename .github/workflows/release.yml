@@ -515,6 +515,7 @@ jobs:
         run: |
           brew tap jacobcxdev/tap
           brew trust --cask jacobcxdev/tap/cq
+          brew trust --cask jacobcxdev/tap/cq-network
           brew audit --cask --strict jacobcxdev/tap/cq-network
           brew audit --cask --strict jacobcxdev/tap/cq
 

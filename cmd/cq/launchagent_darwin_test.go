@@ -26,7 +26,7 @@ func TestPlistTemplate(t *testing.T) {
 		"<string>refresh</string>",
 		"<integer>1800</integer>",
 		"<true/>",
-		"<string>Background</string>",
+		"<string>Standard</string>",
 		"<string>/Users/test/Library/Logs/cq/refresh.log</string>",
 	} {
 		if !strings.Contains(out, want) {

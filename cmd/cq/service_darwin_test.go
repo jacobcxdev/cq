@@ -53,7 +53,7 @@ func TestDarwinServiceInstallsExactProxyAndRefreshLaunchAgents(t *testing.T) {
 		processType string
 	}{
 		{proxyAgentLabel, "Interactive"},
-		{agentLabel, "Background"},
+		{agentLabel, "Standard"},
 	} {
 		data, err := os.ReadFile(platform.plistPath(check.label))
 		if err != nil {
@@ -80,6 +80,32 @@ func TestDarwinServiceInstallsExactProxyAndRefreshLaunchAgents(t *testing.T) {
 		t.Fatalf("launchctl calls = %#v\nwant = %#v", runner.calls, wantCalls)
 	}
 	assertNoDarwinTemporaryFiles(t, filepath.Dir(platform.plistPath(proxyAgentLabel)))
+}
+
+func TestDarwinLaunchAgentProcessPolicy(t *testing.T) {
+	for _, test := range []struct {
+		label string
+		want  string
+	}{
+		{agentLabel, "Standard"},
+		{proxyAgentLabel, "Interactive"},
+		{nativeNetworkIdentifier, "Interactive"},
+		{"test.other", "Background"},
+	} {
+		t.Run(test.label, func(t *testing.T) {
+			data, err := renderDarwinLaunchAgent(darwinLaunchAgentDefinition{
+				Label:             test.label,
+				ProgramArguments:  []string{"/test/cq"},
+				StandardErrorPath: "/test/cq.log",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), "<key>ProcessType</key>\n\t<string>"+test.want+"</string>") {
+				t.Errorf("%s must use %s process policy", test.label, test.want)
+			}
+		})
+	}
 }
 
 func TestDarwinServiceWaitsForOldProxyBeforeBootstrap(t *testing.T) {

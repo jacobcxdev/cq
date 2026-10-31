@@ -27,7 +27,6 @@ import (
 	wgconn "golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/conn/bindtest"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 // This is a real WireGuard handshake and encrypted packet path, but even the
@@ -51,7 +50,7 @@ func TestWireGuardInMemoryEgressStreamsAndDNSFailover(t *testing.T) {
 	serverIP := netip.MustParseAddr("10.13.0.1")
 	clientIP := netip.MustParseAddr("10.13.0.2")
 	binds := bindtest.NewChannelBinds()
-	tun, stack, err := netstack.CreateNetTUN([]netip.Addr{serverIP}, nil, 1420)
+	tun, stack, err := createWireGuardNetTUN([]netip.Addr{serverIP}, 1420)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,9 +186,11 @@ func TestWireGuardInMemoryEgressStreamsAndDNSFailover(t *testing.T) {
 		_ = server.Shutdown(shutdown)
 		_ = server.Close()
 		_ = dns.Close()
-		_ = runtime.Close()
+		// Shutdown does not join hijacked WebSocket handlers. Finish all
+		// fixture I/O before closing the client's userspace network.
 		workers.Wait()
 		handlers.Wait()
+		_ = runtime.Close()
 	}()
 	egress, err := codexEgressWithDialer(runtime.DialContext, runtime.Close)
 	if err != nil {
@@ -352,7 +353,7 @@ func TestWireGuardInMemoryMultiplePeersLongestPrefixAndNoFallback(t *testing.T) 
 	t.Cleanup(workers.Wait)
 	server := func(id uint16, private [32]byte, ips []netip.Addr, label string, calls *atomic.Int32) *device.Device {
 		t.Helper()
-		tun, stack, e := netstack.CreateNetTUN(ips, nil, 1420)
+		tun, stack, e := createWireGuardNetTUN(ips, 1420)
 		if e != nil {
 			t.Fatal(e)
 		}

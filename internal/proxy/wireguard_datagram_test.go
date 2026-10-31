@@ -17,7 +17,6 @@ import (
 	wgconn "golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/conn/bindtest"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 func TestWireGuardConnectedDatagramsPreservePacketsAndTunnelDNS(t *testing.T) {
@@ -260,7 +259,7 @@ func wireGuardDatagramPeer(t *testing.T, serverIPs []netip.Addr) (*wireGuardRunt
 	}
 	clientIPs := []netip.Addr{netip.MustParseAddr("10.17.0.2"), netip.MustParseAddr("fd17::2")}
 	binds := bindtest.NewChannelBinds()
-	tun, stack, err := netstack.CreateNetTUN(serverIPs, nil, 1420)
+	tun, stack, err := createWireGuardNetTUN(serverIPs, 1420)
 	if err != nil {
 		t.Fatal(err)
 	}

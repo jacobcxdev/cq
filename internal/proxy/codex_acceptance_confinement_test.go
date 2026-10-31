@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestCodexAcceptanceExecutionFailureClassification(t *testing.T) {
@@ -55,7 +56,13 @@ func TestCodexAcceptanceDiagnosticHelperProcess(t *testing.T) {
 	case "rate":
 		fmt.Fprintln(os.Stderr, "unexpected status 429 Too Many Requests")
 	case "signal":
-		_ = syscall.Kill(os.Getpid(), syscall.SIGTERM)
+		if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+			t.Fatal(err)
+		}
+		// Signal delivery is asynchronous. Do not race the expected signal
+		// termination against the ordinary failure exit below.
+		time.Sleep(5 * time.Second)
+		t.Fatal("SIGTERM did not terminate helper")
 	}
 	fmt.Fprintln(os.Stderr, strings.Repeat("synthetic-private-diagnostic", 1024))
 	os.Exit(23)
