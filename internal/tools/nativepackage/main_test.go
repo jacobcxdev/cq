@@ -3,13 +3,17 @@ package main
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testManifest() manifest {
@@ -47,6 +51,7 @@ func TestNativeManifestPinAndClosedSchema(t *testing.T) {
 	for _, change := range []func(*manifest){
 		func(m *manifest) { m.SchemaVersion = 2 }, func(m *manifest) { m.Version = "0.41.0/../bad" }, func(m *manifest) { m.SourceCommit = "main" },
 		func(m *manifest) { m.AssetID = 0 }, func(m *manifest) { m.SHA256 = "TODO" }, func(m *manifest) { m.MinimumMacOS = `13.0"; system("bad")` },
+		func(m *manifest) { m.MinimumMacOS = "14.0" }, func(m *manifest) { m.MinimumMacOS = "12.0" },
 	} {
 		bad := m
 		change(&bad)
@@ -228,7 +233,7 @@ func TestNativeArchiveRejectsEntriesBeneathSymlinks(t *testing.T) {
 func TestNativeCaskPinsIndependentVersionWithoutActivation(t *testing.T) {
 	m := testManifest()
 	text := renderCask(m)
-	for _, value := range []string{`cask "cq-network" do`, `version "0.41.0"`, m.SHA256, m.url(), `app "CQNetwork.app"`, `depends_on macos: ">= 13.0"`, `args:       ["disable"]`, `launchctl: "dev.jacobcx.cq.network"`} {
+	for _, value := range []string{`cask "cq-network" do`, `version "0.41.0"`, m.SHA256, m.url(), `app "CQNetwork.app"`, `depends_on macos: :ventura`, `args:       ["disable"]`, `launchctl: "dev.jacobcx.cq.network"`} {
 		if !strings.Contains(text, value) {
 			t.Fatalf("cask missing %q", value)
 		}
@@ -237,6 +242,32 @@ func TestNativeCaskPinsIndependentVersionWithoutActivation(t *testing.T) {
 		if strings.Contains(text, value) {
 			t.Fatalf("cask activates or signs during installation: %s", value)
 		}
+	}
+}
+
+func TestNativeCaskParsesWithHomebrew(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("native companion cask is validated on macOS")
+	}
+	brew, err := exec.LookPath("brew")
+	if err != nil {
+		t.Skip("Homebrew is not installed")
+	}
+	file := filepath.Join(t.TempDir(), "cq-network.rb")
+	if err := os.WriteFile(file, []byte(renderCask(testManifest())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Load the real Homebrew DSL from content. This neither creates a tap nor
+	// installs the companion or asks Homebrew to trust an external cask path.
+	script := `cask = Cask::CaskLoader::FromContentLoader.new(File.read(ARGV.fetch(0))).load(config: nil)
+requirement = cask.depends_on.macos
+abort "wrong macOS requirement" unless requirement.comparator == ">=" && requirement.minimum_version == MacOSVersion.new("13.0")`
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, brew, "ruby", "-r", "cask/cask_loader", "-e", script, file)
+	command.Env = append(os.Environ(), "HOMEBREW_NO_AUTO_UPDATE=1")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("Homebrew rejected generated cask: %v\n%s", err, output)
 	}
 }
 

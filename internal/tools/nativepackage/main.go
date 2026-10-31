@@ -23,7 +23,6 @@ var (
 	versionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
 	commitPattern  = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	digestPattern  = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	macOSPattern   = regexp.MustCompile(`^[1-9][0-9]*\.[0-9]+(?:\.[0-9]+)?$`)
 )
 
 type manifest struct {
@@ -41,7 +40,7 @@ func (m manifest) url() string {
 	return "https://github.com/" + repository + "/releases/download/" + m.tag() + "/" + m.asset()
 }
 func (m manifest) validate() error {
-	if m.SchemaVersion != 1 || !versionPattern.MatchString(m.Version) || !commitPattern.MatchString(m.SourceCommit) || m.AssetID <= 0 || !digestPattern.MatchString(m.SHA256) || !macOSPattern.MatchString(m.MinimumMacOS) {
+	if m.SchemaVersion != 1 || !versionPattern.MatchString(m.Version) || !commitPattern.MatchString(m.SourceCommit) || m.AssetID <= 0 || !digestPattern.MatchString(m.SHA256) || m.MinimumMacOS != "13.0" {
 		return errors.New("native release manifest has invalid or missing identity, source, checksum or minimum macOS")
 	}
 	return nil
@@ -272,7 +271,7 @@ func renderCask(m manifest) string {
     skip "Native releases require reviewed signatures and notarisation"
   end
 
-  depends_on macos: ">= %s"
+  depends_on macos: :ventura
 
   app "CQNetwork.app"
 
@@ -289,5 +288,5 @@ func renderCask(m manifest) string {
     macOS will ask you to approve CQ Network. ChatGPT is not restarted.
   EOS
 end
-`, m.Version, m.SHA256, m.url(), m.MinimumMacOS)
+`, m.Version, m.SHA256, m.url())
 }
