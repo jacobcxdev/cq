@@ -569,6 +569,10 @@ func renderDarwinLaunchAgent(definition darwinLaunchAgentDefinition) ([]byte, er
 		// Both proxies directly serve user requests; background CPU and I/O
 		// throttling otherwise delays traffic and broker health checks.
 		processType = "Interactive"
+	} else if definition.Label == agentLabel {
+		// Refresh must complete promptly during installation health checks.
+		// Background policy can delay even process initialisation under load.
+		processType = "Standard"
 	}
 	writeDarwinString(&output, "ProcessType", processType)
 	writeDarwinString(&output, "StandardErrorPath", definition.StandardErrorPath)

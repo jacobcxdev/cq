@@ -100,7 +100,7 @@ manual post-install service command.
   `cq service restart`
 
 On macOS, the proxy uses launchd's `Interactive` process policy because it serves
-user requests. Scheduled refresh remains `Background`. Installations created
+user requests. Scheduled refresh uses `Standard` so background throttling does not delay installation health checks. Installations created
 before this fix need one `cq service restart` after upgrading to reload the proxy
 job's policy. A normal executable upgrade preserves launchd's cached policy.
 The explicit service restart drains and reloads the proxy, retaining its pinned
