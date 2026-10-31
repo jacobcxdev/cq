@@ -2,6 +2,7 @@ package dots
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -16,7 +17,7 @@ import (
 )
 
 func helperBaseURL(role string, settings *Settings, current string, load func() (*proxy.Config, error), recoverApp func(context.Context, *Settings) error) (string, error) {
-	if role != "desktop-launch" && role != "account-watch" {
+	if role != "desktop-launch" && role != "account-watch" && role != "repair" {
 		return current, nil
 	}
 	cfg, err := load()
@@ -107,7 +108,15 @@ func RunHelper(ctx context.Context, role, root string, args []string, stdin io.R
 	case "desktop-launch":
 		return RunDesktopLaunch(worker, settings, controller)
 	case "desktop-recover":
-		return RunDesktopRecovery(worker, settings)
+		return RunDesktopRecovery(worker, settings, controller)
+	case "repair":
+		repair, cancel := context.WithTimeout(worker, nativeStartupTimeout)
+		defer cancel()
+		result, err := controller.Execute(repair, Request{Operation: "repair"})
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(result)
 	default:
 		return errors.New("Unsupported Dots helper role")
 	}

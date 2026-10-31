@@ -16,6 +16,10 @@ post-install command is required.
 brew install --cask jacobcxdev/tap/cq
 ```
 
+On macOS 13 and later, the Cask includes the signed CQ Network companion. With WireGuard
+configured, `cq codex network enable` requests macOS approval to route native
+ChatGPT traffic without restarting it. See [Native network releases](docs/native-network-releases.md).
+
 Existing formula installations must migrate once so the legacy Homebrew service
 cannot conflict with Cask-owned services:
 
@@ -588,14 +592,36 @@ same configured egress; an already running external coordinator retains its own
 transport and must be configured separately. Credential eligibility and
 read-only treatment of system/external tokens are unchanged. It routes requests
 received by CQ; other
-Codex app connections and child processes are not captured automatically.
+Codex app connections and child processes are not captured by the HTTP proxy.
 The optional Dots adapter shares this egress when a supported desktop app is
 launched through **ChatGPT via CQ** or `cq codex dots start`. Its catalogue,
 messaging, status, owner cloud sessions and computer-signalling connections use
 the supervisor's existing private broker. A configured egress failure blocks
 these requests instead of falling back to the host route. The adapter must be
-running; a normal app launch or an unsupported app update does not acquire this
-routing. Local IPC and unrelated desktop connections retain their existing route.
+running; a normal app launch does not acquire the multi-account catalogue.
+Local IPC and unrelated desktop connections retain their existing route.
+
+On macOS, the signed CQ Network companion can also route native ChatGPT traffic
+through the configured WireGuard profile, including launches from the normal
+ChatGPT Dock icon:
+
+```sh
+cq codex network enable
+cq codex network status
+cq codex network disable
+```
+
+Enable requires the signed companion, a running CQ service and a configured
+WireGuard profile. macOS may require approval in System Settings. It does not
+restart or modify ChatGPT, install a TLS certificate, or read Keychain items.
+The extension verifies the source process's OpenAI signature and installed app
+location. Public TCP and UDP flows use CQ's existing WireGuard runtime; other
+apps and local destinations retain their original routes. Selected traffic
+fails closed if the broker or tunnel is unavailable. Existing connections are
+not moved; new connections acquire routing without restarting ChatGPT. System
+DNS behaviour remains unchanged. This network routing does not itself enable
+multi-account Dots; use the Dots launcher for that separate integration.
+
 Egress configuration and profile contents are checked every five seconds. Valid
 changes atomically replace the egress generation without restarting the service
 or workers. Connections from the old generation close and clients reconnect;
@@ -741,6 +767,10 @@ cq codex dots status
 cq codex dots stop
 cq codex dots sync
 cq codex login
+cq codex network
+cq codex network disable
+cq codex network enable
+cq codex network status
 cq codex remove
 cq codex resets
 cq codex resets list

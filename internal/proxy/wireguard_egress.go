@@ -142,11 +142,23 @@ func (r *wireGuardRuntime) allows(ip netip.Addr) bool {
 }
 
 func (r *wireGuardRuntime) DialContext(parent context.Context, network, address string) (net.Conn, error) {
+	return r.dialContext(parent, network, address, false)
+}
+
+// DialNativeContext preserves the shared tunnel and its resolver, but prevents
+// a captured application flow from reaching private or reserved destinations.
+func (r *wireGuardRuntime) DialNativeContext(parent context.Context, network, address string) (net.Conn, error) {
+	return r.dialContext(parent, network, address, true)
+}
+
+func (r *wireGuardRuntime) dialContext(parent context.Context, network, address string, publicOnly bool) (net.Conn, error) {
 	if err := parent.Err(); err != nil {
 		return nil, err
 	}
-	if network != "tcp" && network != "tcp4" && network != "tcp6" {
-		return nil, errors.New("WireGuard egress supports TCP requests only")
+	switch network {
+	case "tcp", "tcp4", "tcp6", "udp", "udp4", "udp6":
+	default:
+		return nil, errors.New("WireGuard egress supports TCP and connected UDP requests only")
 	}
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
@@ -157,7 +169,7 @@ func (r *wireGuardRuntime) DialContext(parent context.Context, network, address 
 		return nil, errors.New("invalid WireGuard destination")
 	}
 	ip, literalErr := netip.ParseAddr(host)
-	if literalErr == nil && !r.allows(ip) {
+	if literalErr == nil && (!r.allows(ip) || !wireGuardNetworkFamily(network, ip) || (publicOnly && !isNativePublicAddress(ip))) {
 		return nil, errors.New("WireGuard destination is outside AllowedIPs")
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
@@ -178,11 +190,20 @@ func (r *wireGuardRuntime) DialContext(parent context.Context, network, address 
 		}
 	}
 	for _, candidate := range ips {
-		if !r.allows(candidate) || (network == "tcp4" && !candidate.Is4()) || (network == "tcp6" && candidate.Is4()) {
+		if !r.allows(candidate) || !wireGuardNetworkFamily(network, candidate) || (publicOnly && !isNativePublicAddress(candidate)) {
 			continue
 		}
 		connection, dialErr := stack.DialContext(ctx, network, netip.AddrPortFrom(candidate.Unmap(), uint16(number)).String())
 		if dialErr == nil {
+			if ctx.Err() != nil {
+				_ = connection.Close()
+				return nil, r.dialError(parent, ctx.Err())
+			}
+			if strings.HasPrefix(network, "udp") {
+				// Expose only connected Read/Write. The underlying UDPConn's
+				// WriteTo could otherwise select an unvalidated destination.
+				return &wireGuardDatagramConn{Conn: connection}, nil
+			}
 			return connection, nil
 		}
 		if ctx.Err() != nil {
@@ -190,6 +211,62 @@ func (r *wireGuardRuntime) DialContext(parent context.Context, network, address 
 		}
 	}
 	return nil, r.dialError(parent, errors.New("WireGuard destination unavailable or outside AllowedIPs"))
+}
+
+func wireGuardNetworkFamily(network string, ip netip.Addr) bool {
+	ip = ip.Unmap()
+	return (!strings.HasSuffix(network, "4") || ip.Is4()) && (!strings.HasSuffix(network, "6") || ip.Is6())
+}
+
+type wireGuardDatagramConn struct{ net.Conn }
+
+// GlobalUnicast includes private, documentation and benchmarking allocations.
+// Native flows exclude those as well as special IPv6 transition allocations,
+// which could otherwise translate a public-looking address to a local target.
+func isNativePublicAddress(ip netip.Addr) bool {
+	if ip.Zone() != "" {
+		return false
+	}
+	ip = ip.Unmap()
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() {
+		return false
+	}
+	if ip.Is4() {
+		for _, prefix := range nativeExcludedIPv4 {
+			if prefix.Contains(ip) {
+				return false
+			}
+		}
+		return true
+	}
+	if !netip.MustParsePrefix("2000::/3").Contains(ip) {
+		return false
+	}
+	for _, prefix := range nativeExcludedIPv6 {
+		if prefix.Contains(ip) {
+			return false
+		}
+	}
+	return true
+}
+
+var nativeExcludedIPv4 = [...]netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
+var nativeExcludedIPv6 = [...]netip.Prefix{
+	netip.MustParsePrefix("2001::/23"),
+	netip.MustParsePrefix("2001:db8::/32"),
+	netip.MustParsePrefix("2002::/16"),
+	netip.MustParsePrefix("3fff::/20"),
 }
 
 func (r *wireGuardRuntime) lookupHost(ctx context.Context, stack *netstack.Net, host string) ([]netip.Addr, error) {

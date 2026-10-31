@@ -55,12 +55,13 @@ type ClaudeCmd struct {
 
 // CodexCmd groups Codex-specific subcommands.
 type CodexCmd struct {
-	Dots     CodexDotsCmd   `cmd:"" help:"Manage multi-account Dots"`
-	Login    LoginCmd       `cmd:"" help:"Add Codex account"`
-	Accounts AccountsCmd    `cmd:"" help:"List Codex accounts"`
-	Switch   SwitchCmd      `cmd:"" help:"Switch active Codex account"`
-	Remove   RemoveCmd      `cmd:"" help:"Remove Codex account"`
-	Resets   CodexResetsCmd `cmd:"" help:"Inspect and use banked reset credits"`
+	Dots     CodexDotsCmd    `cmd:"" help:"Manage multi-account Dots"`
+	Network  CodexNetworkCmd `cmd:"" help:"Manage native ChatGPT network routing"`
+	Login    LoginCmd        `cmd:"" help:"Add Codex account"`
+	Accounts AccountsCmd     `cmd:"" help:"List Codex accounts"`
+	Switch   SwitchCmd       `cmd:"" help:"Switch active Codex account"`
+	Remove   RemoveCmd       `cmd:"" help:"Remove Codex account"`
+	Resets   CodexResetsCmd  `cmd:"" help:"Inspect and use banked reset credits"`
 }
 
 type CodexResetsCmd struct {
@@ -265,6 +266,13 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if handled, err := runNativeProxyEntry(os.Args[1:], os.Stdout); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: native proxy: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if handled, err := runCodexDotsEntry(os.Args[1:], os.Stdout, os.Stderr); handled {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: %v\n", err)
@@ -424,6 +432,9 @@ func runAgent(args []string) error {
 func dispatch(ctx *kong.Context, cli *CLI) error {
 	if strings.HasPrefix(ctx.Command(), "codex dots ") {
 		return defaultDotsRunner().execute(context.Background(), &cli.Codex.Dots, strings.TrimPrefix(ctx.Command(), "codex dots "), cli.JSON, os.Stdout, os.Stderr)
+	}
+	if strings.HasPrefix(ctx.Command(), "codex network ") {
+		return defaultNativeNetworkRunner().execute(context.Background(), strings.TrimPrefix(ctx.Command(), "codex network "), cli.JSON, os.Stdout)
 	}
 	switch ctx.Command() {
 	case "check", "check <providers>":

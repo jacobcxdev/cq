@@ -1,0 +1,209 @@
+package main
+
+import (
+	"archive/zip"
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func testManifest() manifest {
+	return manifest{1, "0.41.0", strings.Repeat("a", 40), 123, strings.Repeat("b", 64), "13.0"}
+}
+
+func TestNativeManifestPinAndClosedSchema(t *testing.T) {
+	m := testManifest()
+	var output bytes.Buffer
+	if err := run([]string{"pin", m.Version, m.SourceCommit, "123", m.SHA256, m.MinimumMacOS}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var got manifest
+	if err := json.Unmarshal(output.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got != m {
+		t.Fatalf("pin %+v", got)
+	}
+	file := filepath.Join(t.TempDir(), "manifest.json")
+	if err := os.WriteFile(file, output.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var info bytes.Buffer
+	if err := run([]string{"info", file}, &info); err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(info.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	if fields["source_commit"] != m.SourceCommit || fields["asset_id"] != float64(m.AssetID) {
+		t.Fatalf("pin identity lost in info: %s", info.String())
+	}
+	for _, change := range []func(*manifest){
+		func(m *manifest) { m.SchemaVersion = 2 }, func(m *manifest) { m.Version = "0.41.0/../bad" }, func(m *manifest) { m.SourceCommit = "main" },
+		func(m *manifest) { m.AssetID = 0 }, func(m *manifest) { m.SHA256 = "TODO" }, func(m *manifest) { m.MinimumMacOS = `13.0"; system("bad")` },
+	} {
+		bad := m
+		change(&bad)
+		if err := bad.validate(); err == nil {
+			t.Fatalf("invalid manifest accepted %+v", bad)
+		}
+	}
+	for _, data := range []string{strings.TrimSpace(output.String()) + ` {}`, strings.Replace(output.String(), `"schema_version": 1`, `"unknown": true, "schema_version": 1`, 1)} {
+		file := filepath.Join(t.TempDir(), "manifest.json")
+		if err := os.WriteFile(file, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := run([]string{"info", file}, &bytes.Buffer{}); err == nil {
+			t.Fatal("invalid manifest JSON accepted")
+		}
+	}
+}
+
+func releaseFixture(t *testing.T, m manifest, change func(map[string]any)) string {
+	t.Helper()
+	value := map[string]any{"tag_name": m.tag(), "target_commitish": m.SourceCommit, "draft": false, "prerelease": true, "assets": []any{map[string]any{"id": m.AssetID, "name": m.asset(), "digest": "sha256:" + m.SHA256, "state": "uploaded", "browser_download_url": m.url()}}, "additional_github_field": "ignored"}
+	if change != nil {
+		change(value)
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "release.json")
+	if err := os.WriteFile(file, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
+func TestNativeReleaseRequiresExactPublishedAsset(t *testing.T) {
+	m := testManifest()
+	if err := verifyRelease(m, releaseFixture(t, m, nil), false); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(map[string]any){
+		func(r map[string]any) { r["target_commitish"] = "main" }, func(r map[string]any) { r["tag_name"] = "v0.41.0" }, func(r map[string]any) { r["draft"] = true }, func(r map[string]any) { r["prerelease"] = false },
+		func(r map[string]any) { r["assets"] = []any{} }, func(r map[string]any) { r["assets"] = append(r["assets"].([]any), r["assets"].([]any)[0]) },
+		func(r map[string]any) { r["assets"].([]any)[0].(map[string]any)["id"] = 124 }, func(r map[string]any) {
+			r["assets"].([]any)[0].(map[string]any)["digest"] = "sha256:" + strings.Repeat("c", 64)
+		},
+		func(r map[string]any) {
+			r["assets"].([]any)[0].(map[string]any)["browser_download_url"] = "https://example.invalid/asset.zip"
+		},
+	} {
+		if err := verifyRelease(m, releaseFixture(t, m, change), false); err == nil {
+			t.Fatal("changed native release accepted")
+		}
+	}
+}
+
+func TestNativeReleaseDraftAllowedOnlyForStaging(t *testing.T) {
+	m := testManifest()
+	file := releaseFixture(t, m, func(release map[string]any) { release["draft"] = true })
+	if err := verifyRelease(m, file, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRelease(m, file, false); err == nil {
+		t.Fatal("draft native asset passed publication gate")
+	}
+}
+
+type archiveEntry struct {
+	name, body string
+	mode       os.FileMode
+}
+
+func archiveFixture(t *testing.T, extra ...archiveEntry) (manifest, string) {
+	t.Helper()
+	entries := []archiveEntry{
+		{"CQNetwork.app/Contents/Info.plist", "plist", 0o644},
+		{"CQNetwork.app/Contents/MacOS/CQNetwork", "host", 0o755},
+		{"CQNetwork.app/Contents/Library/SystemExtensions/CQNetworkProxy.systemextension/Contents/Info.plist", "plist", 0o644},
+		{"CQNetwork.app/Contents/Library/SystemExtensions/CQNetworkProxy.systemextension/Contents/MacOS/CQNetworkProxy", "provider", 0o755},
+	}
+	entries = append(entries, extra...)
+	var data bytes.Buffer
+	writer := zip.NewWriter(&data)
+	for _, entry := range entries {
+		header := &zip.FileHeader{Name: entry.name}
+		header.SetMode(entry.mode)
+		file, err := writer.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := file.Write([]byte(entry.body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "native.zip")
+	if err := os.WriteFile(file, data.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := testManifest()
+	digest := sha256.Sum256(data.Bytes())
+	m.SHA256 = hex.EncodeToString(digest[:])
+	return m, file
+}
+
+func TestNativeArchiveValidatesDigestAndExtractionBoundary(t *testing.T) {
+	m, file := archiveFixture(t, archiveEntry{"CQNetwork.app/Contents/host-link", "MacOS/CQNetwork", os.ModeSymlink | 0o777})
+	if err := verifyArchive(m, file); err != nil {
+		t.Fatal(err)
+	}
+	m.SHA256 = strings.Repeat("d", 64)
+	if err := verifyArchive(m, file); err == nil {
+		t.Fatal("wrong digest accepted")
+	}
+	for _, entry := range []archiveEntry{
+		{"../outside", "bad", 0o644}, {"CQNetwork.app/../../outside", "bad", 0o644}, {"/outside", "bad", 0o644}, {"other.app/Contents/Info.plist", "bad", 0o644},
+		{"CQNetwork.app/Contents/Info.plist", "duplicate", 0o644}, {"CQNetwork.app/Contents/escape", "../../../outside", os.ModeSymlink | 0o777},
+		{"CQNetwork.app/Contents/escape", "/tmp/outside", os.ModeSymlink | 0o777}, {"CQNetwork.app/Contents/escape", strings.Repeat("x", 1025), os.ModeSymlink | 0o777},
+	} {
+		m, file := archiveFixture(t, entry)
+		if err := verifyArchive(m, file); err == nil {
+			t.Fatalf("unsafe entry accepted %s", entry.name)
+		}
+	}
+}
+
+func TestNativeCaskPinsIndependentVersionWithoutActivation(t *testing.T) {
+	m := testManifest()
+	text := renderCask(m)
+	for _, value := range []string{`cask "cq-network" do`, `version "0.41.0"`, m.SHA256, m.url(), `app "CQNetwork.app"`, `depends_on macos: ">= 13.0"`, `args:       ["disable"]`, `launchctl: "dev.jacobcx.cq.network"`} {
+		if !strings.Contains(text, value) {
+			t.Fatalf("cask missing %q", value)
+		}
+	}
+	for _, value := range []string{"installer script:", "postflight", "codesign --sign", "notarytool submit"} {
+		if strings.Contains(text, value) {
+			t.Fatalf("cask activates or signs during installation: %s", value)
+		}
+	}
+}
+
+func TestNativeArchiveRequiresHostAndProvider(t *testing.T) {
+	var data bytes.Buffer
+	archive := zip.NewWriter(&data)
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "empty.zip")
+	if err := os.WriteFile(file, data.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := testManifest()
+	digest := sha256.Sum256(data.Bytes())
+	m.SHA256 = hex.EncodeToString(digest[:])
+	if err := verifyArchive(m, file); err == nil {
+		t.Fatal("archive without host and provider accepted")
+	}
+}

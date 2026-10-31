@@ -90,6 +90,26 @@ func newEgressManager(cfg *Config, open egressOpener) (*EgressManager, error) {
 }
 
 func (m *EgressManager) DialContext(parent context.Context, network, address string) (net.Conn, error) {
+	return m.dialContext(parent, network, address, false)
+}
+
+// DialNativeContext is reserved for authenticated native-app flows. It cannot
+// select ambient or direct networking when the WireGuard profile is absent.
+func (m *EgressManager) DialNativeContext(parent context.Context, network, address string) (net.Conn, error) {
+	if !nativeEgressTarget(address) {
+		return nil, errors.New("native egress destination denied")
+	}
+	return m.dialContext(parent, network, address, true)
+}
+
+// NativeReady checks transport ownership without opening an origin connection.
+func (m *EgressManager) NativeReady() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return !m.closed && !m.blocked && m.current != nil && m.cfg.CodexWireGuardProfile != "" && m.current.backend.nativeDial != nil
+}
+
+func (m *EgressManager) dialContext(parent context.Context, network, address string, native bool) (net.Conn, error) {
 	if err := parent.Err(); err != nil {
 		return nil, err
 	}
@@ -99,10 +119,18 @@ func (m *EgressManager) DialContext(parent context.Context, network, address str
 		return nil, errors.New("Codex egress is unavailable; traffic is blocked")
 	}
 	generation := m.current
+	dial := generation.backend.DialContext
+	if native {
+		if m.cfg.CodexWireGuardProfile == "" || generation.backend.nativeDial == nil {
+			m.mu.Unlock()
+			return nil, errors.New("native egress requires WireGuard; traffic is blocked")
+		}
+		dial = generation.backend.nativeDial
+	}
 	m.mu.Unlock()
 	ctx, cancel := context.WithCancel(parent)
 	stop := context.AfterFunc(generation.life, cancel)
-	connection, err := generation.backend.DialContext(ctx, network, address)
+	connection, err := dial(ctx, network, address)
 	stop()
 	cancel()
 	if err != nil {

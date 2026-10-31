@@ -98,6 +98,9 @@ func (c Controller) Execute(ctx context.Context, r Request) (map[string]any, err
 		if r.Operation == "prime" || r.Operation == "broadcast" || r.Operation == "board" {
 			wait = 45 * time.Second
 		}
+		if r.Operation == "repair" {
+			wait = nativeStartupTimeout
+		}
 		lock, err := OperationLock(ctx, c.Root, wait)
 		if err != nil {
 			return nil, err
@@ -137,6 +140,8 @@ func (c Controller) Execute(ctx context.Context, r Request) (map[string]any, err
 	switch r.Operation {
 	case "start":
 		return c.Start(ctx, false)
+	case "repair":
+		return c.repair(ctx)
 	case "stop":
 		if err := StopRuntime(ctx, s, false); err != nil {
 			return nil, err
@@ -298,6 +303,16 @@ func (c Controller) Sync(ctx context.Context, preserveWatcher bool) (map[string]
 	}
 	if err != nil {
 		return nil, err
+	}
+	if result["native_catalog_ready"] == true {
+		awareness, err := NewAwareness(s, c.client(s), c.evaluator(s)).Reconcile(ctx)
+		if err != nil {
+			awareness = nil
+			for handle := range s.Dots {
+				awareness = append(awareness, map[string]any{"target": handle, "outcome": "unknown", "error": "awareness_reconciliation_failed"})
+			}
+		}
+		result["awareness"] = awareness
 	}
 	complete, retryable := true, false
 	for _, row := range accounts {

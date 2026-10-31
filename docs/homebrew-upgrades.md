@@ -41,6 +41,10 @@ For an explicit compatible runtime selection:
 cq service upgrade --owner=homebrew --candidate-executable=/absolute/path/to/cq --json
 ```
 
+Add `--wait-timeout=15s` to defer if drainage takes longer than 15 seconds,
+keeping the previous runtime active. Valid values are whole seconds from `1s`
+through `30s`; the default or `0` keeps the existing indefinite drainage wait.
+
 The stable package executable remains the ownership identity. LaunchAgent
 arguments name retained runtime copies; the proxy's startup reads the journal
 to select the committed copy or recover an unfinished handoff. Compatible

@@ -48,6 +48,34 @@ Commands:
   codex resets      Inspect and use banked reset credits
   codex validate    Validate installed Codex routing
   codex canary      Manage Codex routing canary
+  codex network     Manage native ChatGPT network routing
+`,
+	"codex network": `Usage: cq codex network <command>
+
+Manage opt-in native ChatGPT routing through CQ's configured WireGuard profile.
+Requires the signed CQ Network companion on macOS. ChatGPT is not restarted.
+
+Commands:
+  network enable    Install the user broker and request macOS network approval
+  network status    Show extension and authenticated broker readiness
+  network disable   Disable CQ's manager and remove its user broker
+`,
+	"codex network enable": `Usage: cq codex network enable
+
+Validate CQ's configured WireGuard broker, install the persistent user broker,
+and enable the signed network extension for ChatGPT. macOS may request approval.
+No ChatGPT restart or certificate installation is required. Local destinations
+and other applications keep their existing routes.
+`,
+	"codex network status": `Usage: cq codex network status
+
+Show native ChatGPT routing readiness. A healthy result requires the extension,
+the registered user broker, and its authenticated CQ connection to be ready.
+`,
+	"codex network disable": `Usage: cq codex network disable
+
+Disable CQ's transparent proxy manager and remove only its per-user LaunchAgent.
+The installed network extension and ChatGPT application are left in place.
 `,
 	"codex resets": `Usage: cq codex resets <command>
 
@@ -186,10 +214,12 @@ Commands:
 
 Install and start proxy and refresh services for the current user.
 `,
-	"service upgrade": `Usage: cq service upgrade --owner=homebrew --candidate-executable=PATH [--service-executable=PATH] [--json]
+	"service upgrade": `Usage: cq service upgrade --owner=homebrew --candidate-executable=PATH [--service-executable=PATH] [--wait-timeout=DURATION] [--json]
 
 Upgrade compatible macOS Homebrew proxy and refresh services for the current user.
 Queue new requests while existing turns finish, then switch the runtime.
+Use --wait-timeout=15s to bound drainage; 1s through 30s in whole seconds are valid.
+The default or 0 waits indefinitely for active work.
 A deferred upgrade keeps the previous runtime active and exits unsuccessfully.
 `,
 	"service restart": `Usage: cq service restart

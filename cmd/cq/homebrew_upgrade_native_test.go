@@ -443,11 +443,11 @@ func init(){
 		if err != nil {
 			f.t.Fatal(err)
 		}
-		requestMarker := "ExpectedGeneration: generation, Candidate: candidate})"
+		requestMarker := "WaitTimeoutSeconds: int(waitTimeout / time.Second)"
 		if bytes.Count(data, []byte(requestMarker)) != 1 {
 			f.t.Fatal("bounded fixture drain injection boundary missing")
 		}
-		data = bytes.Replace(data, []byte(requestMarker), []byte("ExpectedGeneration: generation, Candidate: candidate, WaitTimeoutSeconds: nativeFixtureUpgradeWaitSeconds()})"), 1)
+		data = bytes.Replace(data, []byte(requestMarker), []byte("WaitTimeoutSeconds: nativeFixtureUpgradeWaitSeconds()"), 1)
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			f.t.Fatal(err)
 		}

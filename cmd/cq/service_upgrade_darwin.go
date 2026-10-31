@@ -45,8 +45,8 @@ func configureDarwinServiceUpgrades(lifecycle *serviceLifecycle, platform *darwi
 	}
 	lifecycle.RuntimeArtifacts = darwinServiceRuntimeArtifacts{RuntimeArtifactStore: artifacts}
 	lifecycle.RuntimeReceipt = receipts.Load
-	lifecycle.RuntimeApply = func(ctx context.Context, candidate installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
-		return applyDarwinServiceRuntimeUpgrade(ctx, artifacts, receipts, candidate)
+	lifecycle.RuntimeApply = func(ctx context.Context, candidate installer.RuntimeArtifact, waitTimeout time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+		return applyDarwinServiceRuntimeUpgrade(ctx, artifacts, receipts, candidate, waitTimeout)
 	}
 	lifecycle.RuntimeInitialise = func(ctx context.Context) error {
 		for _, label := range []string{proxyAgentLabel, agentLabel} {
@@ -261,7 +261,7 @@ func darwinSelectedRuntimeArtifact(ctx context.Context, artifacts installer.Runt
 	return artifact, nil
 }
 
-func applyDarwinServiceRuntimeUpgrade(ctx context.Context, artifacts installer.RuntimeArtifactStore, store proxy.RuntimeUpgradeStore, candidate installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
+func applyDarwinServiceRuntimeUpgrade(ctx context.Context, artifacts installer.RuntimeArtifactStore, store proxy.RuntimeUpgradeStore, candidate installer.RuntimeArtifact, waitTimeout time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
 	if err := artifacts.Verify(ctx, candidate); err != nil {
 		return proxy.RuntimeUpgradeReceiptV1{}, err
 	}
@@ -281,7 +281,7 @@ func applyDarwinServiceRuntimeUpgrade(ctx context.Context, artifacts installer.R
 		return previous, err
 	}
 	id := hex.EncodeToString(transaction)
-	payload, err := json.Marshal(proxy.RuntimeUpgradeRequestV1{SchemaVersion: 1, TransactionID: id, ExpectedGeneration: generation, Candidate: candidate})
+	payload, err := json.Marshal(proxy.RuntimeUpgradeRequestV1{SchemaVersion: 1, TransactionID: id, ExpectedGeneration: generation, Candidate: candidate, WaitTimeoutSeconds: int(waitTimeout / time.Second)})
 	if err != nil {
 		return previous, err
 	}

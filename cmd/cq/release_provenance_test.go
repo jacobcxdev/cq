@@ -258,7 +258,7 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 	for _, required := range []string{
 		`.github/scripts/format-homebrew-cask.sh dist/homebrew/Casks/cq.rb`,
 		`.github/scripts/format-homebrew-cask.sh "$cask"`,
-		"repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb",
+		"repos/jacobcxdev/homebrew-tap/contents/Casks/$token.rb",
 		"secrets.HOMEBREW_TAP_TOKEN",
 		"brew audit --cask --strict jacobcxdev/tap/cq",
 		`.github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"`,
@@ -280,20 +280,72 @@ func TestHomebrewCaskFormatterChecksTappedBytes(t *testing.T) {
 		`refusing to replace existing $formatting_tap tap`,
 		`brew tap-new --no-git "$formatting_tap"`,
 		`brew untap "$formatting_tap"`,
-		`cp "$1" "$formatting_root/Casks/cq.rb"`,
-		`brew style --fix "$formatting_tap/cq"`,
-		`brew style "$formatting_tap/cq"`,
-		`cp "$formatting_root/Casks/cq.rb" "$1"`,
+		`cp "$1" "$formatting_root/Casks/$token.rb"`,
+		`brew style --fix "$formatting_tap/$token"`,
+		`brew style "$formatting_tap/$token"`,
+		`cp "$formatting_root/Casks/$token.rb" "$1"`,
 	} {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Homebrew Cask formatter missing %q", required)
 		}
 	}
-	formatIndex := strings.Index(text, `brew style --fix "$formatting_tap/cq"`)
-	checkIndex := strings.Index(text, `brew style "$formatting_tap/cq"`)
-	copyIndex := strings.Index(text, `cp "$formatting_root/Casks/cq.rb" "$1"`)
+	formatIndex := strings.Index(text, `brew style --fix "$formatting_tap/$token"`)
+	checkIndex := strings.Index(text, `brew style "$formatting_tap/$token"`)
+	copyIndex := strings.Index(text, `cp "$formatting_root/Casks/$token.rb" "$1"`)
 	if formatIndex >= checkIndex || checkIndex >= copyIndex {
 		t.Fatal("Homebrew Cask formatter does not check formatted bytes before returning them")
+	}
+}
+
+func TestNativeCompanionPinRejectsChangedSource(t *testing.T) {
+	script, err := os.ReadFile("../../.github/scripts/prepare-native-network.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, gate, ok := strings.Cut(string(script), "# Go-only releases may reuse a native pin, but changed native sources may not.\n")
+	if !ok {
+		t.Fatal("native release has no source-tree gate")
+	}
+	gate, _, ok = strings.Cut(gate, `gh api "repos/jacobcxdev/cq/releases/tags/$tag"`)
+	if !ok {
+		t.Fatal("native source gate does not precede asset retrieval")
+	}
+	directory := t.TempDir()
+	git := `#!/bin/sh
+case "$*" in
+  "fetch --no-tags origin $source_commit") exit "${FETCH_ERROR:-0}" ;;
+  "rev-parse --verify FETCH_HEAD^{commit}") echo "${FETCH_COMMIT:-$source_commit}" ;;
+  "rev-parse --verify $source_commit:native/macos-network") echo source-tree ;;
+  "rev-parse --verify HEAD:native/macos-network") echo "${CURRENT_TREE:-source-tree}" ;;
+  "diff --quiet HEAD -- native/macos-network") exit "${DIRTY:-0}" ;;
+  "ls-files --others --exclude-standard -- native/macos-network") printf '%s' "${UNTRACKED:-}" ;;
+  *) echo "unexpected git operation: $*" >&2; exit 99 ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(directory, "git"), []byte(git), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		env  []string
+		fail bool
+	}{
+		{name: "unchanged native tree on a Go-only release"},
+		{name: "changed native tree", env: []string{"CURRENT_TREE=changed-tree"}, fail: true},
+		{name: "uncommitted native edit", env: []string{"DIRTY=1"}, fail: true},
+		{name: "untracked native source", env: []string{"UNTRACKED=native/macos-network/new.swift"}, fail: true},
+		{name: "wrong fetched commit", env: []string{"FETCH_COMMIT=wrong-commit"}, fail: true},
+		{name: "failed source fetch", env: []string{"FETCH_ERROR=1"}, fail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			command := exec.Command("bash", "-c", "set -euo pipefail\n"+gate)
+			command.Env = append(os.Environ(), "PATH="+directory+string(os.PathListSeparator)+os.Getenv("PATH"), "source_commit="+strings.Repeat("a", 40))
+			command.Env = append(command.Env, tc.env...)
+			output, err := command.CombinedOutput()
+			if (err != nil) != tc.fail {
+				t.Fatalf("source gate failure = %v, want %v: %s", err, tc.fail, output)
+			}
+		})
 	}
 }
 
@@ -468,8 +520,8 @@ func TestCICoversSupportedNativePlatforms(t *testing.T) {
 	if !strings.Contains(text, "done < <(git tag --sort=-v:refname)") {
 		t.Error("CI does not use pipe-safe previous-tag selection")
 	}
-	if count := strings.Count(text, "runs-on: macos-15"); count != 2 {
-		t.Fatalf("CI has %d macOS jobs, want Codex and Homebrew only", count)
+	if count := strings.Count(text, "runs-on: macos-15"); count != 3 {
+		t.Fatalf("CI has %d macOS jobs, want native companion, Codex and Homebrew", count)
 	}
 	if count := strings.Count(text, "go test -race -count=1 ./..."); count != 1 {
 		t.Fatalf("full race suite appears in %d job definitions, want Linux matrix only", count)

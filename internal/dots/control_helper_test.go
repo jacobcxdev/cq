@@ -45,6 +45,7 @@ func TestHelperProxyConfigurationWatcherFailedClosedAndOtherRolesUnchanged(t *te
 		wantError  bool
 	}{
 		{"account-watch", "native", 1, true},
+		{"repair", "native", 1, true},
 		{"desktop-launch", "isolated", 1, true},
 		{"desktop-recover", "native", 0, false},
 		{"relay", "native", 0, false},
@@ -66,7 +67,7 @@ func TestHelperProxyConfigurationWatcherFailedClosedAndOtherRolesUnchanged(t *te
 }
 
 func TestHelperProxyConfigurationOverridesInheritedBaseURL(t *testing.T) {
-	for _, role := range []string{"desktop-launch", "account-watch"} {
+	for _, role := range []string{"desktop-launch", "account-watch", "repair"} {
 		base, err := helperBaseURL(role, &Settings{IntegrationMode: "native"}, "https://stale.invalid", func() (*proxy.Config, error) {
 			return &proxy.Config{Port: 19321}, nil
 		}, func(context.Context, *Settings) error {

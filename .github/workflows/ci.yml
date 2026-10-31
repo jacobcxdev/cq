@@ -11,6 +11,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  native-network:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Validate pinned native companion release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          go test -race -count=1 ./internal/tools/nativepackage
+          .github/scripts/prepare-native-network.sh .github/native-network-release.json dist/native --allow-draft
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-network-cask
+          path: dist/native/*
+          if-no-files-found: error
+          retention-days: 1
+
   packages:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
@@ -84,7 +105,7 @@ jobs:
           compression-level: 0
 
   validate-codex:
-    needs: packages
+    needs: [packages, native-network]
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -120,6 +141,14 @@ jobs:
           name: ci-darwin-packages
           path: dist
 
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-network-cask
+          path: dist/homebrew/Casks
+
+      - name: Install verified native companion dependency for packaging tests
+        run: .github/scripts/install-native-network-validation.sh dist/homebrew/Casks/cq-network.rb dist/homebrew/Casks/CQNetwork_*_universal.zip
+
       - name: Format Homebrew Cask before validation
         run: .github/scripts/format-homebrew-cask.sh dist/homebrew/Casks/cq.rb
 
@@ -134,7 +163,7 @@ jobs:
           .github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"
 
   homebrew-lifecycle:
-    needs: packages
+    needs: [packages, native-network]
     runs-on: macos-15
     timeout-minutes: 15
     env:
@@ -155,6 +184,14 @@ jobs:
 
       - name: Update Homebrew
         run: brew update
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-network-cask
+          path: dist/homebrew/Casks
+
+      - name: Install verified native companion dependency for packaging tests
+        run: .github/scripts/install-native-network-validation.sh dist/homebrew/Casks/cq-network.rb dist/homebrew/Casks/CQNetwork_*_universal.zip
 
       - name: Format Homebrew Cask before validation
         run: .github/scripts/format-homebrew-cask.sh dist/homebrew/Casks/cq.rb

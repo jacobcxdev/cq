@@ -12,6 +12,27 @@ permissions:
   statuses: read
 
 jobs:
+  native-network:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Validate pinned native companion release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          go test -race -count=1 ./internal/tools/nativepackage
+          .github/scripts/prepare-native-network.sh .github/native-network-release.json dist/native --allow-draft
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-network-cask
+          path: dist/native/*
+          if-no-files-found: error
+          retention-days: 7
+
   validate-codex:
     runs-on: macos-15
     timeout-minutes: 30
@@ -77,7 +98,7 @@ jobs:
         run: go test -race -count=1 ./internal/proxy -run '^(TestCodexStage11LifecycleCorpusUsesProductionHandlers|TestCodexStage11LifecycleCorpusSmoke|TestCodexStage11ReviewedManifestMatchesCorpusAuthority)$'
 
   draft-build:
-    needs: validate-codex
+    needs: [validate-codex, native-network]
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 20
     steps:
@@ -141,8 +162,16 @@ jobs:
           name: release-homebrew-inputs
           path: dist
 
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-network-cask
+          path: dist/homebrew/Casks
+
       - name: Update Homebrew
         run: brew update
+
+      - name: Install verified native companion dependency for packaging tests
+        run: .github/scripts/install-native-network-validation.sh dist/homebrew/Casks/cq-network.rb dist/homebrew/Casks/CQNetwork_*_universal.zip
 
       - name: Format draft Homebrew Cask
         run: |
@@ -197,7 +226,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: homebrew-cask
-          path: dist/homebrew/Casks/cq.rb
+          path: dist/homebrew/Casks/*.rb
           if-no-files-found: error
           retention-days: 7
 
@@ -428,6 +457,15 @@ jobs:
       - name: Update Homebrew
         run: brew update
 
+      - name: Require the reviewed native asset to be public before publishing packages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          native_info=$(go run ./internal/tools/nativepackage info .github/native-network-release.json)
+          native_tag=$(jq -er .tag <<<"$native_info")
+          gh api "repos/jacobcxdev/cq/releases/tags/$native_tag" >"$RUNNER_TEMP/native-release.json"
+          go run ./internal/tools/nativepackage published .github/native-network-release.json "$RUNNER_TEMP/native-release.json"
+
       - name: Publish complete release and Homebrew Cask
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -447,29 +485,37 @@ jobs:
             *) echo "release draft state is invalid: $draft" >&2; exit 1 ;;
           esac
 
-          .github/scripts/format-homebrew-cask.sh "$cask"
-          endpoint="repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb"
-          encoded="$(base64 <"$cask" | tr -d '\n')"
-          current="$RUNNER_TEMP/cq-cask-current.json"
-          if GH_TOKEN="$HOMEBREW_TAP_TOKEN" gh api "$endpoint" >"$current" 2>/dev/null; then
-            current_content="$(jq -r '.content' "$current" | tr -d '\n')"
-            if [[ "$current_content" != "$encoded" ]]; then
+          # Publish the verified dependency first. Native releases are pinned
+          # independently, so Go-only releases leave its bytes unchanged.
+          for token in cq-network cq; do
+            cask="$RUNNER_TEMP/homebrew-cask/$token.rb"
+            test -f "$cask"
+            .github/scripts/format-homebrew-cask.sh "$cask"
+            endpoint="repos/jacobcxdev/homebrew-tap/contents/Casks/$token.rb"
+            encoded="$(base64 <"$cask" | tr -d '\n')"
+            current="$RUNNER_TEMP/$token-cask-current.json"
+            if GH_TOKEN="$HOMEBREW_TAP_TOKEN" gh api "$endpoint" >"$current" 2>/dev/null; then
+              current_content="$(jq -r '.content' "$current" | tr -d '\n')"
+              if [[ "$current_content" == "$encoded" ]]; then
+                continue
+              fi
               current_sha="$(jq -r '.sha' "$current")"
               GH_TOKEN="$HOMEBREW_TAP_TOKEN" gh api --method PUT "$endpoint" \
-                -f message="chore: updated cq ${RELEASE_TAG}" \
+                -f message="chore: updated ${token} for ${RELEASE_TAG}" \
                 -f content="$encoded" \
                 -f sha="$current_sha"
+            else
+              GH_TOKEN="$HOMEBREW_TAP_TOKEN" gh api --method PUT "$endpoint" \
+                -f message="chore: added ${token} for ${RELEASE_TAG}" \
+                -f content="$encoded"
             fi
-          else
-            GH_TOKEN="$HOMEBREW_TAP_TOKEN" gh api --method PUT "$endpoint" \
-              -f message="chore: added cq ${RELEASE_TAG}" \
-              -f content="$encoded"
-          fi
+          done
 
       - name: Audit published Homebrew Cask
         run: |
           brew tap jacobcxdev/tap
           brew trust --cask jacobcxdev/tap/cq
+          brew audit --cask --strict jacobcxdev/tap/cq-network
           brew audit --cask --strict jacobcxdev/tap/cq
 
       - name: Verify published release

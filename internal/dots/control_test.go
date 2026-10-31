@@ -63,6 +63,58 @@ func TestControllerStatusVerifiedAllConfiguredProfilesAndWorkspace(t *testing.T)
 	if !ok || len(roles) != 0 {
 		t.Fatalf("synthetic installation matched unrelated runtime processes: %#v", value["research_components"])
 	}
+	missing, ok := value["missing_workers"].([]string)
+	if !ok || len(missing) != 6 || value["workers_ready"] != false {
+		t.Fatalf("catalogue readiness hid missing workers: %#v", value)
+	}
+}
+
+func TestControllerWorkerFailureDoesNotSendSetup(t *testing.T) {
+	c, s := controllerFixture(t)
+	c.Native = nativeEvaluationFunc(func(_ context.Context, expression string) ([]any, error) {
+		if strings.Contains(expression, "safePost(") {
+			t.Fatal("setup send preceded worker startup")
+		}
+		return []any{map[string]any{"installed": true}}, nil
+	})
+	// No staged executable exists. Worker startup must fail before optional
+	// one-time setup creates delivery records or contacts a Dot.
+	if _, err := c.finishStart(context.Background(), s, map[string]any{"native_catalog_ready": true}); err == nil {
+		t.Fatal("missing worker executable accepted")
+	}
+	if _, err := os.Stat(filepath.Join(s.RuntimeRoot, "awareness")); !os.IsNotExist(err) {
+		t.Fatalf("failed startup attempted setup: %v", err)
+	}
+}
+
+func TestWorkerReadinessRequiresExactlyOneOfEachWorker(t *testing.T) {
+	_, settings := controllerFixture(t)
+	complete := []RuntimeProcess{{Role: "probe"}, {Role: "realtime"}, {Role: "native-broker"}, {Role: "relay"}, {Role: "executors"}, {Role: "account-watch"}}
+	if ready, missing := workerReadiness(settings, complete); !ready || len(missing) != 0 {
+		t.Fatalf("complete workers rejected: %v %v", ready, missing)
+	}
+	if ready, missing := workerReadiness(settings, complete[:4]); ready || len(missing) != 2 {
+		t.Fatalf("partial startup accepted: %v %v", ready, missing)
+	}
+	if ready, _ := workerReadiness(settings, append(complete, RuntimeProcess{Role: "relay"})); ready {
+		t.Fatal("duplicate worker accepted")
+	}
+	settings.Dots = map[string]Dot{"primary": {OwnerAlias: settings.SystemAlias}}
+	primary := append(append([]RuntimeProcess{}, complete[:4]...), complete[5])
+	if ready, missing := workerReadiness(settings, primary); !ready || len(missing) != 0 {
+		t.Fatalf("primary-only installation required secondary executors: %v %v", ready, missing)
+	}
+}
+
+func TestControllerRepairDoesNotLaunchAnUnownedApp(t *testing.T) {
+	c, _ := controllerFixture(t)
+	c.Native = nativeEvaluationFunc(func(context.Context, string) ([]any, error) {
+		t.Fatal("repair contacted renderer before proving owned app")
+		return nil, nil
+	})
+	if _, err := c.Execute(context.Background(), Request{Operation: "repair"}); err == nil || !strings.Contains(err.Error(), "CQ-owned") {
+		t.Fatalf("unowned repair result: %v", err)
+	}
 }
 
 func TestControllerStatusRejectedIncompleteOrForeignNativeCatalogue(t *testing.T) {
