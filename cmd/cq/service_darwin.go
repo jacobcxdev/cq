@@ -565,9 +565,9 @@ func renderDarwinLaunchAgent(definition darwinLaunchAgentDefinition) ([]byte, er
 	}
 	writeDarwinBool(&output, "RunAtLoad", definition.RunAtLoad)
 	processType := "Background"
-	if definition.Label == proxyAgentLabel {
-		// Proxy work directly serves user requests; background CPU and I/O
-		// throttling otherwise delays every child worker and credential query.
+	if definition.Label == proxyAgentLabel || definition.Label == nativeNetworkIdentifier {
+		// Both proxies directly serve user requests; background CPU and I/O
+		// throttling otherwise delays traffic and broker health checks.
 		processType = "Interactive"
 	}
 	writeDarwinString(&output, "ProcessType", processType)

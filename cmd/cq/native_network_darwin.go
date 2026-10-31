@@ -172,23 +172,48 @@ func (agent nativeNetworkAgent) install(ctx context.Context) error {
 		return err
 	}
 	_, printErr := agent.run(ctx, "/bin/launchctl", "print", target)
+	migrate := false
 	if printErr == nil {
 		if bytes.Equal(existing, definition) {
 			return nil
 		}
-		return errors.New("CQ Network LaunchAgent differs from the installed definition; disable it before enabling again")
-	}
-	if !isDarwinLaunchctlNotLoaded(printErr) {
+		legacy := bytes.Replace(definition, []byte("<key>ProcessType</key>\n\t<string>Interactive</string>"), []byte("<key>ProcessType</key>\n\t<string>Background</string>"), 1)
+		if !bytes.Equal(existing, legacy) {
+			return errors.New("CQ Network LaunchAgent differs from the installed definition; disable it before enabling again")
+		}
+		migrate = true
+	} else if !isDarwinLaunchctlNotLoaded(printErr) {
 		return fmt.Errorf("inspect CQ Network LaunchAgent: %w", printErr)
 	}
 	if err := prepareNativeNetworkLogDirectory(filepath.Dir(log)); err != nil {
 		return err
 	}
+	if migrate {
+		if _, err := agent.run(ctx, "/bin/launchctl", "bootout", target); err != nil && !isDarwinLaunchctlNotLoaded(err) {
+			return fmt.Errorf("stop legacy CQ Network user broker: %w", err)
+		}
+	}
+	restore := func(failure error) error {
+		if !migrate {
+			return failure
+		}
+		var restoreErr error
+		if _, err := agent.run(ctx, "/bin/launchctl", "bootout", target); err != nil && !isDarwinLaunchctlNotLoaded(err) {
+			restoreErr = fmt.Errorf("stop failed CQ Network user broker: %w", err)
+		}
+		if err := atomicWriteDarwinLaunchAgent(plist, existing); err != nil {
+			return errors.Join(failure, restoreErr, fmt.Errorf("restore previous CQ Network definition: %w", err))
+		}
+		if _, err := agent.run(ctx, "/bin/launchctl", "bootstrap", domain, plist); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore previous CQ Network user broker: %w", err))
+		}
+		return errors.Join(failure, restoreErr)
+	}
 	if err := atomicWriteDarwinLaunchAgent(plist, definition); err != nil {
-		return err
+		return restore(err)
 	}
 	if _, err := agent.run(ctx, "/bin/launchctl", "bootstrap", domain, plist); err != nil {
-		return fmt.Errorf("start CQ Network user broker: %w", err)
+		return restore(fmt.Errorf("start CQ Network user broker: %w", err))
 	}
 	return nil
 }
