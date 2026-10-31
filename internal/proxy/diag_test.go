@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1076,6 +1077,48 @@ func readPayloadEvents(t *testing.T, path string) []PayloadEvent {
 
 func readDiagnosticsEvents(t *testing.T, path string) []RouteEvent {
 	t.Helper()
+	return readDiagnosticsEventsWithSplit(t, path, bufio.ScanLines)
+}
+
+// A live JSONL snapshot can end partway through an append. Only its newline-
+// terminated records are complete; malformed complete records still fail below.
+func scanCompleteDiagnosticsLines(data []byte, atEOF bool) (int, []byte, error) {
+	if atEOF && bytes.IndexByte(data, '\n') < 0 {
+		return 0, nil, nil
+	}
+	return bufio.ScanLines(data, atEOF)
+}
+
+func TestScanCompleteDiagnosticsLines(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{name: "partial record", input: `{"provider":`},
+		{name: "valid unterminated record", input: `{"provider":"codex"}`},
+		{name: "complete and partial", input: "{\"provider\":\"codex\"}\n{\"provider\":", want: []string{`{"provider":"codex"}`}},
+		{name: "malformed complete record", input: "{\n", want: []string{"{"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			scanner := bufio.NewScanner(strings.NewReader(test.input))
+			scanner.Split(scanCompleteDiagnosticsLines)
+			var got []string
+			for scanner.Scan() {
+				got = append(got, scanner.Text())
+			}
+			if err := scanner.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("lines = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func readDiagnosticsEventsWithSplit(t *testing.T, path string, split bufio.SplitFunc) []RouteEvent {
+	t.Helper()
 	f, err := os.Open(path)
 	if err != nil {
 		t.Fatalf("open diagnostics log: %v", err)
@@ -1084,6 +1127,7 @@ func readDiagnosticsEvents(t *testing.T, path string) []RouteEvent {
 
 	var events []RouteEvent
 	scanner := bufio.NewScanner(f)
+	scanner.Split(split)
 	for scanner.Scan() {
 		var envelope struct {
 			EventType string `json:"event_type"`

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 type nativeNetworkTestExit int
@@ -65,6 +66,9 @@ func TestNativeNetworkAgentInstallUsesPrivateOwnLaunchAgent(t *testing.T) {
 	if strings.Contains(string(data), "& spaces") {
 		t.Fatal("plist arguments were not XML escaped")
 	}
+	if !bytes.Contains(data, []byte("<key>ProcessType</key>\n\t<string>Interactive</string>")) {
+		t.Fatal("user-facing native network broker must use Interactive scheduling")
+	}
 }
 
 func TestNativeNetworkAgentInstallDoesNotRestartExistingBroker(t *testing.T) {
@@ -97,6 +101,226 @@ func TestNativeNetworkAgentInstallDoesNotRestartExistingBroker(t *testing.T) {
 	}
 	if err := agent.install(context.Background()); err == nil {
 		t.Fatal("changed live broker silently replaced")
+	}
+}
+
+func TestNativeNetworkAgentMigratesOnlyLegacyScheduling(t *testing.T) {
+	for _, mode := range []string{"success", "bootout failure", "bootstrap failure", "rollback failure"} {
+		t.Run(mode, func(t *testing.T) {
+			agent := nativeNetworkTestAgent(t)
+			desired, err := agent.definition()
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacy := bytes.Replace(desired, []byte("<string>Interactive</string>"), []byte("<string>Background</string>"), 1)
+			plist, _, domain, target := agent.paths()
+			if err := atomicWriteDarwinLaunchAgent(plist, legacy); err != nil {
+				t.Fatal(err)
+			}
+			failure := errors.New("migration failed")
+			rollbackFailure := errors.New("rollback failed")
+			var commands [][]string
+			bootstraps := 0
+			agent.run = func(_ context.Context, executable string, args ...string) ([]byte, error) {
+				commands = append(commands, append([]string{executable}, args...))
+				switch args[0] {
+				case "bootout":
+					if mode == "bootout failure" {
+						return nil, failure
+					}
+				case "bootstrap":
+					bootstraps++
+					data, err := readNativeNetworkAgent(plist)
+					if err != nil {
+						t.Fatal(err)
+					}
+					want := desired
+					if bootstraps == 2 {
+						want = legacy
+					}
+					if !bytes.Equal(data, want) {
+						t.Fatal("bootstrap did not use the expected atomic definition")
+					}
+					if mode == "bootstrap failure" || mode == "rollback failure" {
+						if bootstraps == 1 {
+							return nil, failure
+						}
+						if mode == "rollback failure" {
+							return nil, rollbackFailure
+						}
+					}
+				}
+				return nil, nil
+			}
+			err = agent.install(context.Background())
+			want := [][]string{{"/bin/launchctl", "print", target}, {"/bin/launchctl", "bootout", target}}
+			wantData := legacy
+			if mode != "bootout failure" {
+				want = append(want, []string{"/bin/launchctl", "bootstrap", domain, plist})
+			}
+			if mode == "success" {
+				wantData = desired
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if !errors.Is(err, failure) {
+				t.Fatalf("migration error %v", err)
+			}
+			if mode == "bootstrap failure" || mode == "rollback failure" {
+				want = append(want, []string{"/bin/launchctl", "bootout", target}, []string{"/bin/launchctl", "bootstrap", domain, plist})
+			}
+			if mode == "rollback failure" && !errors.Is(err, rollbackFailure) {
+				t.Fatalf("rollback error was lost: %v", err)
+			}
+			if !reflect.DeepEqual(commands, want) {
+				t.Fatalf("commands %v, want %v", commands, want)
+			}
+			data, err := readNativeNetworkAgent(plist)
+			if err != nil || !bytes.Equal(data, wantData) {
+				t.Fatalf("unexpected final definition: %v", err)
+			}
+		})
+	}
+}
+
+func TestNativeNetworkAgentMigrationRollbackSurvivesCancellation(t *testing.T) {
+	for _, cancelAt := range []string{"bootout", "bootstrap"} {
+		t.Run(cancelAt, func(t *testing.T) {
+			agent := nativeNetworkTestAgent(t)
+			definition, err := agent.definition()
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacy := bytes.Replace(definition, []byte("<string>Interactive</string>"), []byte("<string>Background</string>"), 1)
+			plist, _, _, _ := agent.paths()
+			if err := atomicWriteDarwinLaunchAgent(plist, legacy); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			bootouts, bootstraps := 0, 0
+			restored := false
+			agent.run = func(commandCtx context.Context, _ string, args ...string) ([]byte, error) {
+				switch args[0] {
+				case "bootout":
+					bootouts++
+					if bootouts == 1 {
+						if cancelAt == "bootout" {
+							cancel()
+						}
+						return nil, nil
+					}
+				case "bootstrap":
+					bootstraps++
+					if bootstraps == 1 {
+						cancel()
+						return nil, commandCtx.Err()
+					}
+					restored = true
+				default:
+					return nil, nil
+				}
+				if commandCtx.Err() != nil {
+					t.Errorf("rollback inherited cancelled context: %v", commandCtx.Err())
+					return nil, commandCtx.Err()
+				}
+				deadline, ok := commandCtx.Deadline()
+				if remaining := time.Until(deadline); !ok || remaining <= 0 || remaining > 12*time.Second {
+					t.Errorf("rollback context is not bounded: %v, %t", deadline, ok)
+				}
+				return nil, nil
+			}
+			if err := agent.install(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("migration error %v", err)
+			}
+			if !restored || bootouts != 2 || bootstraps != 2 {
+				t.Fatalf("rollback did not restart old broker: restored=%t, bootouts=%d, bootstraps=%d", restored, bootouts, bootstraps)
+			}
+			data, err := readNativeNetworkAgent(plist)
+			if err != nil || !bytes.Equal(data, legacy) {
+				t.Fatalf("old definition was not restored: %v", err)
+			}
+		})
+	}
+}
+
+func TestNativeNetworkAgentMigrationWriteFailureRestartsUnchangedDefinition(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	agent := nativeNetworkTestAgent(t)
+	definition, err := agent.definition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := bytes.Replace(definition, []byte("<string>Interactive</string>"), []byte("<string>Background</string>"), 1)
+	plist, _, _, _ := agent.paths()
+	if err := atomicWriteDarwinLaunchAgent(plist, legacy); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Dir(plist)
+	t.Cleanup(func() {
+		if err := os.Chmod(directory, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	bootstraps := 0
+	agent.run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "bootout":
+			return nil, os.Chmod(directory, 0o500)
+		case "bootstrap":
+			bootstraps++
+			data, err := readNativeNetworkAgent(plist)
+			if err != nil || !bytes.Equal(data, legacy) {
+				t.Fatalf("bootstrap must use unchanged old definition: %v", err)
+			}
+		}
+		return nil, nil
+	}
+	if err := agent.install(context.Background()); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("write error %v", err)
+	}
+	if bootstraps != 1 {
+		t.Fatalf("old readable definition was not bootstrapped: %d", bootstraps)
+	}
+}
+
+func TestNativeNetworkAgentRejectsOtherLoadedDefinitionChanges(t *testing.T) {
+	for _, change := range []string{"argument", "extra key", "other scheduling"} {
+		t.Run(change, func(t *testing.T) {
+			agent := nativeNetworkTestAgent(t)
+			definition, err := agent.definition()
+			if err != nil {
+				t.Fatal(err)
+			}
+			definition = bytes.Replace(definition, []byte("<string>Interactive</string>"), []byte("<string>Background</string>"), 1)
+			switch change {
+			case "argument":
+				definition = bytes.Replace(definition, []byte("<string>run</string>"), []byte("<string>status</string>"), 1)
+			case "extra key":
+				definition = bytes.Replace(definition, []byte("</dict>"), []byte("<key>Disabled</key><true/>\n</dict>"), 1)
+			case "other scheduling":
+				definition = bytes.Replace(definition, []byte("<string>Background</string>"), []byte("<string>Standard</string>"), 1)
+			}
+			plist, _, _, target := agent.paths()
+			if err := atomicWriteDarwinLaunchAgent(plist, definition); err != nil {
+				t.Fatal(err)
+			}
+			agent.run = func(_ context.Context, executable string, args ...string) ([]byte, error) {
+				if executable != "/bin/launchctl" || !reflect.DeepEqual(args, []string{"print", target}) {
+					t.Fatalf("foreign definition reached mutation: %s %v", executable, args)
+				}
+				return nil, nil
+			}
+			if err := agent.install(context.Background()); err == nil {
+				t.Fatal("changed definition was accepted")
+			}
+			data, err := readNativeNetworkAgent(plist)
+			if err != nil || !bytes.Equal(data, definition) {
+				t.Fatalf("foreign definition changed: %v", err)
+			}
+		})
 	}
 }
 

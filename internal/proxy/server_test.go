@@ -1873,11 +1873,47 @@ func assertDiagnosticsLogDoesNotContain(t *testing.T, path, needle string) {
 	}
 }
 
+func TestWaitForDiagnosticsEventsHandlesIncompleteTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.jsonl")
+	if err := os.WriteFile(path, []byte(`{"provider":"codex","status_code":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				done <- fmt.Errorf("append diagnostic record panicked: %v", recovered)
+			}
+		}()
+		time.Sleep(30 * time.Millisecond)
+		file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		if err != nil {
+			done <- err
+			return
+		}
+		_, err = file.Write([]byte("200}\n"))
+		closeErr := file.Close()
+		if err == nil {
+			err = closeErr
+		}
+		done <- err
+	}()
+	t.Cleanup(func() {
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	})
+	events := waitForDiagnosticsEvents(t, path, 1)
+	if len(events) != 1 || events[0].StatusCode != 200 {
+		t.Fatalf("events = %#v", events)
+	}
+}
+
 func waitForDiagnosticsEvents(t *testing.T, path string, want int) []RouteEvent {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		events := readDiagnosticsEvents(t, path)
+		events := readDiagnosticsEventsWithSplit(t, path, scanCompleteDiagnosticsLines)
 		if len(events) >= want {
 			return events
 		}

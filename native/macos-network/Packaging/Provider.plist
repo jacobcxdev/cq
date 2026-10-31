@@ -11,6 +11,8 @@
     <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
     <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSMinimumSystemVersion</key><string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+    <key>NSSystemExtensionUsageDescription</key>
+    <string>CQ routes ChatGPT traffic through your selected connection. Other applications keep their original routes.</string>
     <key>NetworkExtension</key>
     <dict>
         <key>NEProviderClasses</key>
