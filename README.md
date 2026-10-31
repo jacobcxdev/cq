@@ -621,6 +621,8 @@ fails closed if the broker or tunnel is unavailable. Existing connections are
 not moved; new connections acquire routing without restarting ChatGPT. System
 DNS behaviour remains unchanged. This network routing does not itself enable
 multi-account Dots; use the Dots launcher for that separate integration.
+Local UDP forwarding requires numeric destinations and uses translated ephemeral
+source ports; multicast discovery is not guaranteed.
 
 Egress configuration and profile contents are checked every five seconds. Valid
 changes atomically replace the egress generation without restarting the service

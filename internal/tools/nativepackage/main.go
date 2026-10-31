@@ -198,6 +198,7 @@ func verifyArchive(m manifest, file string) error {
 	}
 	var size uint64
 	seen := make(map[string]bool)
+	symlinks := make(map[string]bool)
 	for _, entry := range archive.File {
 		name := strings.TrimSuffix(entry.Name, "/")
 		if name == "" || strings.Contains(name, "\\") || path.IsAbs(name) || path.Clean(name) != name || (name != "CQNetwork.app" && !strings.HasPrefix(name, "CQNetwork.app/") && name != "__MACOSX" && !strings.HasPrefix(name, "__MACOSX/")) || seen[name] {
@@ -209,6 +210,7 @@ func verifyArchive(m manifest, file string) error {
 			return errors.New("native archive expansion exceeds size limit")
 		}
 		if entry.Mode()&os.ModeSymlink != 0 {
+			symlinks[name] = true
 			if entry.UncompressedSize64 > 1024 {
 				return errors.New("native archive symlink exceeds size limit")
 			}
@@ -231,6 +233,15 @@ func verifyArchive(m manifest, file string) error {
 			}
 		} else if !entry.Mode().IsRegular() && !entry.Mode().IsDir() {
 			return errors.New("native archive has unsupported file type")
+		}
+	}
+	// Check after reading every entry so ZIP ordering cannot conceal a symlink
+	// ancestor. Lexically safe link targets may compose to escape the bundle.
+	for name := range seen {
+		for ancestor := path.Dir(name); ancestor != "."; ancestor = path.Dir(ancestor) {
+			if symlinks[ancestor] {
+				return errors.New("native archive entry has a symlink ancestor")
+			}
 		}
 	}
 	for _, name := range []string{"CQNetwork.app/Contents/Info.plist", "CQNetwork.app/Contents/MacOS/CQNetwork", "CQNetwork.app/Contents/Library/SystemExtensions/CQNetworkProxy.systemextension/Contents/Info.plist", "CQNetwork.app/Contents/Library/SystemExtensions/CQNetworkProxy.systemextension/Contents/MacOS/CQNetworkProxy"} {

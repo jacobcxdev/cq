@@ -175,6 +175,26 @@ func TestNativeArchiveValidatesDigestAndExtractionBoundary(t *testing.T) {
 	}
 }
 
+func TestNativeArchiveRejectsEntriesBeneathSymlinks(t *testing.T) {
+	entries := []archiveEntry{
+		{"CQNetwork.app/Contents/subdir/x", "../../A", os.ModeSymlink | 0o777},
+		{"CQNetwork.app/Contents/subdir/y", "x/../../../outside", os.ModeSymlink | 0o777},
+		{"CQNetwork.app/Contents/subdir/y/file", "must not escape", 0o644},
+	}
+	for _, reverse := range []bool{false, true} {
+		t.Run(map[bool]string{false: "ancestor first", true: "descendant first"}[reverse], func(t *testing.T) {
+			ordered := append([]archiveEntry(nil), entries...)
+			if reverse {
+				ordered[0], ordered[2] = ordered[2], ordered[0]
+			}
+			m, file := archiveFixture(t, ordered...)
+			if err := verifyArchive(m, file); err == nil {
+				t.Fatal("entry beneath composed symlink accepted")
+			}
+		})
+	}
+}
+
 func TestNativeCaskPinsIndependentVersionWithoutActivation(t *testing.T) {
 	m := testManifest()
 	text := renderCask(m)
