@@ -275,12 +275,12 @@ func renderCask(m manifest) string {
 
   app "CQNetwork.app"
 
-  uninstall script: {
-    executable: "#{appdir}/CQNetwork.app/Contents/MacOS/CQNetwork",
-    args:       ["disable"],
-  },
-  launchctl: "dev.jacobcx.cq.network",
-  delete:    "~/Library/LaunchAgents/dev.jacobcx.cq.network.plist"
+  uninstall launchctl: "dev.jacobcx.cq.network",
+            script:    {
+              executable: "#{appdir}/CQNetwork.app/Contents/MacOS/CQNetwork",
+              args:       ["disable"],
+            },
+            delete:    "~/Library/LaunchAgents/dev.jacobcx.cq.network.plist"
 
   caveats <<~EOS
     To enable native ChatGPT routing, configure CQ's WireGuard profile and run:

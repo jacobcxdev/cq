@@ -274,7 +274,9 @@ func TestNativeCaskParsesWithHomebrew(t *testing.T) {
 	// installs the companion or asks Homebrew to trust an external cask path.
 	script := `cask = Cask::CaskLoader::FromContentLoader.new(File.read(ARGV.fetch(0))).load(config: nil)
 requirement = cask.depends_on.macos
-abort "wrong macOS requirement" unless requirement.comparator == ">=" && requirement.minimum_version == MacOSVersion.new("13.0")`
+abort "wrong macOS requirement" unless requirement.comparator == ">=" && requirement.minimum_version == MacOSVersion.new("13.0")
+uninstall = cask.artifacts.grep(Cask::Artifact::Uninstall).fetch(0)
+abort "wrong uninstall directive order" unless uninstall.directives.keys.take(3) == [:launchctl, :script, :delete]`
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, brew, "ruby", "-r", "cask/cask_loader", "-e", script, file)
