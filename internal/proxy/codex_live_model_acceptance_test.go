@@ -20,8 +20,9 @@ import (
 )
 
 type codexLiveAcceptanceModelSelection struct {
-	model    string
-	snapshot modelregistry.Snapshot
+	model     string
+	snapshot  modelregistry.Snapshot
+	catalogue []byte
 }
 
 // Freeze the native recommendation once per test process. Direct and proxied
@@ -102,6 +103,7 @@ func discoverCodexLiveAcceptanceModel() (codexLiveAcceptanceModelSelection, erro
 		return selection, err
 	}
 	err = os.WriteFile(filepath.Join(codexHome, "models_cache.json"), catalogue, 0o600)
+	selection.catalogue = append([]byte(nil), catalogue...)
 	clearBytes(catalogue)
 	if err != nil {
 		return selection, errors.New("write live Codex model discovery catalogue")

@@ -3,6 +3,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -33,6 +34,10 @@ func TestCodexLiveProxyLatencyMatchesDirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	selection, err := codexLiveAcceptanceSelectedModel()
+	if err != nil {
+		t.Fatal(err)
+	}
 	listener, supervisor, traffic := newCodexLiveNormalAcceptanceServer(t, credential)
 	if listener.URL == "http://127.0.0.1:19280" || supervisor.TrafficMode() != TrafficModeNormal || !supervisor.AdmissionReady() {
 		t.Fatal("live Codex latency acceptance did not use isolated normal proxy")
@@ -45,17 +50,13 @@ func TestCodexLiveProxyLatencyMatchesDirect(t *testing.T) {
 		proxied := make([]time.Duration, 0, 3)
 		for sample := range 3 {
 			output := fmt.Sprintf("LIVE-LATENCY-%t-%d", webSocket, sample)
-			directIsolation := newCodexTaskAffinityAcceptanceIsolationDirectories(t)
-			if err := writeCodexLiveLatencyAuth(filepath.Join(directIsolation.codexHome, "auth.json"), credential); err != nil {
-				t.Fatal(err)
-			}
+			directIsolation, proxyIsolation := newCodexLiveLatencyProfiles(t, credential, selection.catalogue)
 			started := time.Now()
 			if err := runCodexLiveDirectLatencyTurn(ctx, client, directIsolation, webSocket, output); err != nil {
 				t.Fatalf("direct Codex latency sample: %v", err)
 			}
 			direct = append(direct, time.Since(started))
 
-			proxyIsolation := newCodexLiveAcceptanceIsolation(t, credential.localToken)
 			beforeWebSockets, beforeResponses, _ := traffic.snapshot()
 			started = time.Now()
 			if err := runCodexTaskAffinityAcceptanceTurnForTransport(ctx, codexTaskAffinityAcceptanceRunner{}, client, listener.URL, proxyIsolation, false, webSocket, output); err != nil {
@@ -77,6 +78,44 @@ func TestCodexLiveProxyLatencyMatchesDirect(t *testing.T) {
 		t.Logf("Codex live latency websocket=%t direct=%s proxied=%s overhead=%s limit=%s", webSocket, directMedian, proxyMedian, proxyMedian-directMedian, maximumProxyMedian-directMedian)
 		if proxyMedian > maximumProxyMedian {
 			t.Fatalf("proxied median %s exceeds direct median %s by more than %s", proxyMedian, directMedian, maximumProxyMedian-directMedian)
+		}
+	}
+}
+
+func newCodexLiveLatencyProfiles(t *testing.T, credential codexLiveAcceptanceCredential, catalogue []byte) (codexTaskAffinityAcceptanceIsolation, codexTaskAffinityAcceptanceIsolation) {
+	t.Helper()
+	direct := newCodexTaskAffinityAcceptanceIsolationDirectories(t)
+	if err := writeCodexLiveLatencyAuth(filepath.Join(direct.codexHome, "auth.json"), credential); err != nil {
+		t.Fatal(err)
+	}
+	proxied := newCodexLiveAcceptanceIsolation(t, credential.localToken)
+	for _, home := range []string{direct.codexHome, proxied.codexHome} {
+		if err := os.WriteFile(filepath.Join(home, "models_cache.json"), catalogue, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return direct, proxied
+}
+
+func TestCodexLiveLatencyProfilesShareFrozenCatalogue(t *testing.T) {
+	credential := codexLiveAcceptanceCredential{localToken: "synthetic-proxy-token"}
+	credential.material.AccessToken = "synthetic-direct-token"
+	credential.material.IDToken = "synthetic-direct-id"
+	credential.material.AccountID = "synthetic-direct-account"
+	catalogue := []byte(`{"models":[{"slug":"synthetic-model"}],"etag":"frozen-native-catalogue"}`)
+	direct, proxied := newCodexLiveLatencyProfiles(t, credential, catalogue)
+	if direct.codexHome == proxied.codexHome {
+		t.Fatal("direct and proxy profiles share a writable home")
+	}
+	for _, home := range []string{direct.codexHome, proxied.codexHome} {
+		path := filepath.Join(home, "models_cache.json")
+		body, err := os.ReadFile(path)
+		if err != nil || !bytes.Equal(body, catalogue) {
+			t.Fatalf("latency profile catalogue differs from frozen input: %v", err)
+		}
+		info, err := os.Stat(path)
+		if err != nil || info.Mode().Perm() != 0o600 {
+			t.Fatalf("latency profile catalogue permissions: %v", err)
 		}
 	}
 }
