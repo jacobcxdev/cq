@@ -246,7 +246,7 @@ func TestNativeArchiveRejectsEntriesBeneathSymlinks(t *testing.T) {
 func TestNativeCaskPinsIndependentVersionWithoutActivation(t *testing.T) {
 	m := testManifest()
 	text := renderCask(m)
-	for _, value := range []string{`cask "cq-network" do`, `version "0.41.0"`, m.SHA256, m.url(), `app "CQNetwork.app"`, `depends_on macos: :ventura`, `args:       ["disable"]`, `launchctl: "dev.jacobcx.cq.network"`} {
+	for _, value := range []string{`cask "cq-network" do`, `version "0.41.0"`, m.SHA256, `url "https://github.com/jacobcxdev/cq/releases/download/cq-network-v#{version}/CQNetwork_#{version}_universal.zip"`, `app "CQNetwork.app"`, `depends_on macos: :ventura`, `args:       ["disable"]`, `launchctl: "dev.jacobcx.cq.network"`} {
 		if !strings.Contains(text, value) {
 			t.Fatalf("cask missing %q", value)
 		}
@@ -270,16 +270,21 @@ func TestNativeCaskParsesWithHomebrew(t *testing.T) {
 	if err := os.WriteFile(file, []byte(renderCask(testManifest())), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	// Load the real Homebrew DSL from content. This neither creates a tap nor
-	// installs the companion or asks Homebrew to trust an external cask path.
-	script := `cask = Cask::CaskLoader::FromContentLoader.new(File.read(ARGV.fetch(0))).load(config: nil)
+	// Retain the fixture filename during evaluation: Homebrew's URL audit reads
+	// its source line to detect version interpolation. No tap or install is needed.
+	script := `file = ARGV.fetch(0)
+loader = Cask::CaskLoader::FromContentLoader.new(File.read(file))
+cask = loader.instance_eval(File.read(file), file)
+abort "resolved URL differs from pinned release" unless cask.url.to_s == ARGV.fetch(1)
 requirement = cask.depends_on.macos
 abort "wrong macOS requirement" unless requirement.comparator == ">=" && requirement.minimum_version == MacOSVersion.new("13.0")
 uninstall = cask.artifacts.grep(Cask::Artifact::Uninstall).fetch(0)
-abort "wrong uninstall directive order" unless uninstall.directives.keys.take(3) == [:launchctl, :script, :delete]`
+abort "wrong uninstall directive order" unless uninstall.directives.keys.take(3) == [:launchctl, :script, :delete]
+errors = Cask::Auditor.audit(cask, audit_strict: true, any_named_args: true)
+abort "strict cask audit failed" unless errors.empty?`
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, brew, "ruby", "-r", "cask/cask_loader", "-e", script, file)
+	command := exec.CommandContext(ctx, brew, "ruby", "-r", "cask/cask_loader", "-r", "cask/auditor", "-e", script, file, testManifest().url())
 	command.Env = append(os.Environ(), "HOMEBREW_NO_AUTO_UPDATE=1")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("Homebrew rejected generated cask: %v\n%s", err, output)
