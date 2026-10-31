@@ -158,7 +158,13 @@ func verifyRelease(m manifest, file string, allowDraft bool) error {
 			continue
 		}
 		count++
-		if asset.ID != m.AssetID || asset.Digest != "sha256:"+m.SHA256 || asset.State != "uploaded" || asset.URL != m.url() {
+		validURL := asset.URL == m.url()
+		if release.Draft && allowDraft {
+			// GitHub assigns draft downloads an untagged URL, then changes it
+			// on publication. Downloads use the separately pinned asset ID.
+			validURL = strings.HasPrefix(asset.URL, "https://github.com/"+repository+"/releases/download/") && strings.HasSuffix(asset.URL, "/"+m.asset())
+		}
+		if asset.ID != m.AssetID || asset.Digest != "sha256:"+m.SHA256 || asset.State != "uploaded" || !validURL {
 			return errors.New("native release asset identity or digest differs from reviewed manifest")
 		}
 	}

@@ -29,7 +29,12 @@ if [[ "$(git rev-parse --verify "$source_commit:native/macos-network")" != "$(gi
   echo "native sources differ from the pinned companion; sign and pin a new native release" >&2
   exit 1
 fi
-gh api "repos/jacobcxdev/cq/releases/tags/$tag" >"$temporary/release.json"
+release_api=$(gh release view "$tag" --repo jacobcxdev/cq --json apiUrl --jq .apiUrl)
+if [[ ! "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]]; then
+  echo "native release resolved outside its expected repository API" >&2
+  exit 1
+fi
+gh api "${release_api#https://api.github.com/}" >"$temporary/release.json"
 gh api "repos/jacobcxdev/cq/releases/assets/$asset_id" --header 'Accept: application/octet-stream' >"$temporary/$asset"
 if [[ $# -eq 3 ]]; then
   "$temporary/nativepackage" verify "$manifest" "$temporary/$asset" "$temporary/release.json" --allow-draft

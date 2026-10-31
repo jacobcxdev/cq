@@ -298,6 +298,9 @@ func TestHomebrewCaskFormatterChecksTappedBytes(t *testing.T) {
 }
 
 func TestNativeCompanionPinRejectsChangedSource(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native companion preparation uses POSIX shell paths")
+	}
 	script, err := os.ReadFile("../../.github/scripts/prepare-native-network.sh")
 	if err != nil {
 		t.Fatal(err)
@@ -306,7 +309,7 @@ func TestNativeCompanionPinRejectsChangedSource(t *testing.T) {
 	if !ok {
 		t.Fatal("native release has no source-tree gate")
 	}
-	gate, _, ok = strings.Cut(gate, `gh api "repos/jacobcxdev/cq/releases/tags/$tag"`)
+	gate, _, ok = strings.Cut(gate, `release_api=$(gh release view`)
 	if !ok {
 		t.Fatal("native source gate does not precede asset retrieval")
 	}

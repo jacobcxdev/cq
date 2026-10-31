@@ -105,12 +105,42 @@ func TestNativeReleaseRequiresExactPublishedAsset(t *testing.T) {
 
 func TestNativeReleaseDraftAllowedOnlyForStaging(t *testing.T) {
 	m := testManifest()
-	file := releaseFixture(t, m, func(release map[string]any) { release["draft"] = true })
+	draftURL := "https://github.com/" + repository + "/releases/download/untagged-de565141bccfa7e0646a/" + m.asset()
+	file := releaseFixture(t, m, func(release map[string]any) {
+		release["draft"] = true
+		release["assets"].([]any)[0].(map[string]any)["browser_download_url"] = draftURL
+	})
 	if err := verifyRelease(m, file, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := verifyRelease(m, file, false); err == nil {
 		t.Fatal("draft native asset passed publication gate")
+	}
+	file = releaseFixture(t, m, func(release map[string]any) {
+		release["assets"].([]any)[0].(map[string]any)["browser_download_url"] = draftURL
+	})
+	if err := verifyRelease(m, file, true); err == nil {
+		t.Fatal("untagged URL accepted for a published release")
+	}
+	for _, change := range []func(map[string]any){
+		func(release map[string]any) { release["target_commitish"] = "main" },
+		func(release map[string]any) { release["tag_name"] = "another-tag" },
+		func(release map[string]any) { release["assets"].([]any)[0].(map[string]any)["id"] = 124 },
+		func(release map[string]any) {
+			release["assets"].([]any)[0].(map[string]any)["digest"] = "sha256:" + strings.Repeat("c", 64)
+		},
+		func(release map[string]any) {
+			release["assets"].([]any)[0].(map[string]any)["browser_download_url"] = "https://example.invalid/" + m.asset()
+		},
+	} {
+		file = releaseFixture(t, m, func(release map[string]any) {
+			release["draft"] = true
+			release["assets"].([]any)[0].(map[string]any)["browser_download_url"] = draftURL
+			change(release)
+		})
+		if err := verifyRelease(m, file, true); err == nil {
+			t.Fatal("changed draft asset identity accepted")
+		}
 	}
 }
 
