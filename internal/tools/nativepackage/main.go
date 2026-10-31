@@ -249,7 +249,7 @@ func verifyArchive(m manifest, file string) error {
 			}
 		}
 	}
-	for _, name := range []string{"CQNetwork.app/Contents/Info.plist", "CQNetwork.app/Contents/MacOS/CQNetwork", "CQNetwork.app/Contents/Library/SystemExtensions/CQNetworkProxy.systemextension/Contents/Info.plist", "CQNetwork.app/Contents/Library/SystemExtensions/CQNetworkProxy.systemextension/Contents/MacOS/CQNetworkProxy"} {
+	for _, name := range []string{"CQNetwork.app/Contents/Info.plist", "CQNetwork.app/Contents/MacOS/CQNetwork", "CQNetwork.app/Contents/Library/SystemExtensions/dev.jacobcx.cq.network.proxy.systemextension/Contents/Info.plist", "CQNetwork.app/Contents/Library/SystemExtensions/dev.jacobcx.cq.network.proxy.systemextension/Contents/MacOS/CQNetworkProxy"} {
 		if !seen[name] {
 			return fmt.Errorf("native archive is missing %s", name)
 		}

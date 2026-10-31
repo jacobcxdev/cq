@@ -43,7 +43,12 @@ else
 fi
 /usr/bin/ditto -x -k "$temporary/$asset" "$temporary/unpacked"
 app="$temporary/unpacked/CQNetwork.app"
-provider="$app/Contents/Library/SystemExtensions/CQNetworkProxy.systemextension"
+provider="$app/Contents/Library/SystemExtensions/dev.jacobcx.cq.network.proxy.systemextension"
+provider_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$provider/Contents/Info.plist")
+if [[ "$(/usr/bin/basename "$provider" .systemextension)" != "$provider_identifier" ]]; then
+  echo "system extension filename must match its bundle identifier" >&2
+  exit 1
+fi
 requirement='anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "K2648T24P4"'
 /usr/bin/codesign --verify --deep --strict --all-architectures "-R=$requirement and identifier \"dev.jacobcx.cq.network\"" "$app"
 /usr/bin/codesign --verify --strict --all-architectures "-R=$requirement and identifier \"dev.jacobcx.cq.network.proxy\"" "$provider"

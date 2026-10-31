@@ -56,11 +56,17 @@ run_bounded /usr/bin/xcodebuild -exportArchive \
     -allowProvisioningUpdates
 
 app="$output/export/CQNetwork.app"
+provider="$app/Contents/Library/SystemExtensions/dev.jacobcx.cq.network.proxy.systemextension"
+provider_identifier=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$provider/Contents/Info.plist")
+if [ "$(/usr/bin/basename "$provider" .systemextension)" != "$provider_identifier" ]; then
+    echo "System extension filename must match its bundle identifier." >&2
+    exit 1
+fi
 /usr/bin/codesign --verify --deep --strict "$app"
 for architecture in arm64 x86_64; do
     /usr/bin/lipo "$app/Contents/MacOS/CQNetwork" -verify_arch "$architecture"
     /usr/bin/lipo \
-        "$app/Contents/Library/SystemExtensions/CQNetworkProxy.systemextension/Contents/MacOS/CQNetworkProxy" \
+        "$provider/Contents/MacOS/CQNetworkProxy" \
         -verify_arch "$architecture"
 done
 printf 'Signed app: %s\n' "$app"

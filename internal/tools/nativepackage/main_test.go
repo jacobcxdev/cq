@@ -156,11 +156,17 @@ type archiveEntry struct {
 
 func archiveFixture(t *testing.T, extra ...archiveEntry) (manifest, string) {
 	t.Helper()
+	return archiveFixtureWithProvider(t, "dev.jacobcx.cq.network.proxy", extra...)
+}
+
+func archiveFixtureWithProvider(t *testing.T, provider string, extra ...archiveEntry) (manifest, string) {
+	t.Helper()
+	providerRoot := "CQNetwork.app/Contents/Library/SystemExtensions/" + provider + ".systemextension"
 	entries := []archiveEntry{
 		{"CQNetwork.app/Contents/Info.plist", "plist", 0o644},
 		{"CQNetwork.app/Contents/MacOS/CQNetwork", "host", 0o755},
-		{"CQNetwork.app/Contents/Library/SystemExtensions/CQNetworkProxy.systemextension/Contents/Info.plist", "plist", 0o644},
-		{"CQNetwork.app/Contents/Library/SystemExtensions/CQNetworkProxy.systemextension/Contents/MacOS/CQNetworkProxy", "provider", 0o755},
+		{providerRoot + "/Contents/Info.plist", "plist", 0o644},
+		{providerRoot + "/Contents/MacOS/CQNetworkProxy", "provider", 0o755},
 	}
 	entries = append(entries, extra...)
 	var data bytes.Buffer
@@ -187,6 +193,13 @@ func archiveFixture(t *testing.T, extra ...archiveEntry) (manifest, string) {
 	digest := sha256.Sum256(data.Bytes())
 	m.SHA256 = hex.EncodeToString(digest[:])
 	return m, file
+}
+
+func TestNativeArchiveRejectsUnmatchedProviderFilename(t *testing.T) {
+	m, file := archiveFixtureWithProvider(t, "CQNetworkProxy")
+	if err := verifyArchive(m, file); err == nil {
+		t.Fatal("provider filename that differs from its identifier was accepted")
+	}
 }
 
 func TestNativeArchiveValidatesDigestAndExtractionBoundary(t *testing.T) {

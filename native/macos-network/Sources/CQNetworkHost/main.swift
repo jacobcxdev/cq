@@ -30,7 +30,11 @@ private final class Activation: NSObject, OSSystemExtensionRequestDelegate {
     func requestNeedsUserApproval(_ request: OSSystemExtensionRequest) {
         FileHandle.standardError.write(Data("Approve CQ Network in System Settings to enable app routing.\n".utf8))
     }
-    func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) { fail("CQ Network activation failed.") }
+    func request(_ request: OSSystemExtensionRequest, didFailWithError error: Error) {
+        let failure = error as NSError
+        let domain = failure.domain == OSSystemExtensionErrorDomain ? OSSystemExtensionErrorDomain + ", " : ""
+        fail("CQ Network activation failed (\(domain)code \(failure.code)).")
+    }
     func request(_ request: OSSystemExtensionRequest, didFinishWithResult result: OSSystemExtensionRequest.Result) {
         guard result == .completed else { fail("CQ Network activation will complete after a system restart.") }
         NETransparentProxyManager.loadAllFromPreferences { managers, error in
