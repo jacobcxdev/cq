@@ -18,6 +18,26 @@ import (
 
 const LauncherIdentifier = "dev.jacobcx.cq.chatgpt-launcher"
 
+const desktopFallbackMessage = "CQ could not enable Dots. ChatGPT may be running without Dots or CQ routing. Your existing chats have not been restarted. Run 'cq codex dots status' for details. When ready, quit ChatGPT and reopen ChatGPT via CQ."
+
+const desktopFallbackAlert = `display alert "CQ Dots unavailable" message "` + desktopFallbackMessage + `" as warning buttons {"OK"} default button "OK"`
+
+// Spotlight launches have no terminal for stderr. Show a native warning without
+// delaying recovery, tying it to a cancelled startup context, or opening a shell.
+func notifyDesktopFallback() {
+	command := exec.Command("/usr/bin/osascript", "-e", desktopFallbackAlert)
+	if err := command.Start(); err != nil {
+		fmt.Fprintln(os.Stderr, desktopFallbackMessage)
+		return
+	}
+	go func() {
+		defer func() { _ = recover() }()
+		if err := command.Wait(); err != nil {
+			fmt.Fprintln(os.Stderr, desktopFallbackMessage)
+		}
+	}()
+}
+
 // readAppPlist extracts top-level scalar values. macOS plutil only converts an
 // existing binary plist to stdout; no application files are rewritten.
 func readAppPlist(path string) (map[string]string, error) {
@@ -272,10 +292,13 @@ func RecoverApp(ctx context.Context, settings *Settings) error {
 			return fmt.Errorf("Native app recovery failed")
 		}
 		return nil
-	})
+	}, notifyDesktopFallback)
 }
 
-func recoverApp(running bool, err error, open func() error) error {
+func recoverApp(running bool, err error, open func() error, notify func()) error {
+	// This boundary covers immediate failure, missing configuration before the
+	// watchdog starts, and detached recovery after the launcher itself exits.
+	defer notify()
 	if err != nil {
 		return err
 	}
