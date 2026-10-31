@@ -25,6 +25,14 @@ type EgressDialer interface {
 // NewEgressBroker serves authenticated CONNECT requests on a caller-owned private
 // Unix listener. The token and destination policy must both be configured.
 func NewEgressBroker(dialer EgressDialer, token string, allowed func(string) bool) http.Handler {
+	return newEgressBroker(dialer, token, allowed, func(*http.Request) (string, bool) { return "tcp", true })
+}
+
+func newEgressBroker(dialer EgressDialer, token string, allowed func(string) bool, selectNetwork func(*http.Request) (string, bool)) http.Handler {
+	return newEgressBrokerWithIdle(dialer, token, allowed, selectNetwork, nativeDatagramIdle)
+}
+
+func newEgressBrokerWithIdle(dialer EgressDialer, token string, allowed func(string) bool, selectNetwork func(*http.Request) (string, bool), idleTimeout time.Duration) http.Handler {
 	expected := sha256.Sum256([]byte("Bearer " + token))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hijacked := false
@@ -51,7 +59,12 @@ func NewEgressBroker(dialer EgressDialer, token string, allowed func(string) boo
 			http.Error(w, "egress target denied", http.StatusForbidden)
 			return
 		}
-		upstream, err := dialer.DialContext(r.Context(), "tcp", target)
+		network, valid := selectNetwork(r)
+		if !valid {
+			http.Error(w, "invalid egress network", http.StatusBadRequest)
+			return
+		}
+		upstream, err := dialer.DialContext(r.Context(), network, target)
 		if err != nil || upstream == nil {
 			if upstream != nil {
 				_ = upstream.Close()
@@ -60,6 +73,9 @@ func NewEgressBroker(dialer EgressDialer, token string, allowed func(string) boo
 			return
 		}
 		defer upstream.Close()
+		if network == "udp" {
+			upstream = newNativeDatagramStream(upstream)
+		}
 		hijacker, ok := w.(http.Hijacker)
 		if !ok {
 			http.Error(w, "egress tunnel unavailable", http.StatusInternalServerError)
@@ -77,7 +93,13 @@ func NewEgressBroker(dialer EgressDialer, token string, allowed func(string) boo
 		if err = buffered.Flush(); err != nil {
 			return
 		}
-		closeBoth := func() { closeEgressBrokerConn(downstream); closeEgressBrokerConn(upstream) }
+		upstreamToClose := upstream
+		closeBoth := func() { closeEgressBrokerConn(downstream); closeEgressBrokerConn(upstreamToClose) }
+		if network == "udp" {
+			idle := newEgressBrokerIdle(idleTimeout, closeBoth)
+			defer idle.stop()
+			upstream = &egressBrokerIdleConn{Conn: upstream, idle: idle}
+		}
 		var cancellation sync.WaitGroup
 		cancellation.Add(1)
 		stop := context.AfterFunc(r.Context(), func() { defer cancellation.Done(); closeBoth() })
@@ -102,6 +124,89 @@ func NewEgressBroker(dialer EgressDialer, token string, allowed func(string) boo
 		}()
 		workers.Wait()
 	})
+}
+
+// A UDP deadline alone cannot wake a blocked write to the companion's stream.
+// Own both ends independently and renew only when a framed transfer progresses.
+type egressBrokerIdle struct {
+	mu       sync.Mutex
+	timer    *time.Timer
+	timeout  time.Duration
+	deadline time.Time
+	close    func()
+	closing  chan struct{}
+	stopped  bool
+}
+
+func newEgressBrokerIdle(timeout time.Duration, closeBoth func()) *egressBrokerIdle {
+	idle := &egressBrokerIdle{timeout: timeout, deadline: time.Now().Add(timeout), close: closeBoth}
+	idle.mu.Lock()
+	idle.timer = time.AfterFunc(timeout, idle.expire)
+	idle.mu.Unlock()
+	return idle
+}
+
+func (i *egressBrokerIdle) activity() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.stopped {
+		i.deadline = time.Now().Add(i.timeout)
+		i.timer.Reset(i.timeout)
+	}
+}
+
+func (i *egressBrokerIdle) expire() {
+	i.mu.Lock()
+	if i.stopped {
+		i.mu.Unlock()
+		return
+	}
+	// Reset may race an already queued callback. Check the current deadline
+	// before closing a flow that has since made progress.
+	if remaining := time.Until(i.deadline); remaining > 0 {
+		i.timer.Reset(remaining)
+		i.mu.Unlock()
+		return
+	}
+	i.stopped = true
+	done := make(chan struct{})
+	i.closing = done
+	i.mu.Unlock()
+	defer close(done)
+	defer func() { _ = recover() }()
+	i.close()
+}
+
+func (i *egressBrokerIdle) stop() {
+	i.mu.Lock()
+	i.stopped = true
+	i.timer.Stop()
+	closing := i.closing
+	i.mu.Unlock()
+	if closing != nil {
+		<-closing
+	}
+}
+
+type egressBrokerIdleConn struct {
+	net.Conn
+	idle *egressBrokerIdle
+}
+
+func (c *egressBrokerIdleConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 {
+		c.idle.activity()
+	}
+	return n, err
+}
+
+func (c *egressBrokerIdleConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if n > 0 {
+		c.idle.activity()
+	}
+	return n, err
 }
 
 func validEgressBrokerToken(token string) bool {

@@ -23,6 +23,20 @@ type serviceRuntimeArtifacts interface {
 }
 
 func (lifecycle *serviceLifecycle) Upgrade(ctx context.Context, owner installstate.Owner, candidatePath string) (proxy.RuntimeUpgradeReceiptV1, error) {
+	return lifecycle.upgradeWithWaitTimeout(ctx, owner, candidatePath, 0)
+}
+
+func validateServiceUpgradeWaitTimeout(timeout time.Duration) error {
+	if timeout < 0 || timeout > 30*time.Second || timeout%time.Second != 0 {
+		return fmt.Errorf("service upgrade: --wait-timeout must be 0 or whole seconds from 1s to 30s")
+	}
+	return nil
+}
+
+func (lifecycle *serviceLifecycle) upgradeWithWaitTimeout(ctx context.Context, owner installstate.Owner, candidatePath string, waitTimeout time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+	if err := validateServiceUpgradeWaitTimeout(waitTimeout); err != nil {
+		return proxy.RuntimeUpgradeReceiptV1{}, err
+	}
 	if err := lifecycle.validate(owner); err != nil {
 		return proxy.RuntimeUpgradeReceiptV1{}, err
 	}
@@ -92,7 +106,7 @@ func (lifecycle *serviceLifecycle) Upgrade(ctx context.Context, owner installsta
 		}
 	}
 	if !sameRuntime {
-		receipt, err = lifecycle.RuntimeApply(ctx, candidate)
+		receipt, err = lifecycle.RuntimeApply(ctx, candidate, waitTimeout)
 		if err != nil {
 			return receipt, err
 		}
@@ -110,7 +124,7 @@ func (lifecycle *serviceLifecycle) Upgrade(ctx context.Context, owner installsta
 		reverted := receipt
 		if !sameRuntime {
 			var revertErr error
-			reverted, revertErr = lifecycle.RuntimeApply(recovery, previous)
+			reverted, revertErr = lifecycle.RuntimeApply(recovery, previous, waitTimeout)
 			if revertErr != nil || reverted.Phase != "committed" {
 				return reverted, errors.Join(cause, fmt.Errorf("runtime rollback unverified: %s", reverted.Phase), revertErr)
 			}

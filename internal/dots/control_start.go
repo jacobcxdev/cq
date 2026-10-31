@@ -11,6 +11,33 @@ import (
 	"time"
 )
 
+const nativeStartupTimeout = 90 * time.Second
+
+func workerReadiness(s *Settings, rows []RuntimeProcess) (bool, []string) {
+	roles := []string{"account-watch", "native-broker", "probe", "realtime", "relay"}
+	for _, dot := range s.Dots {
+		if s.IntegrationMode == "native" && dot.OwnerAlias != s.SystemAlias {
+			roles = append(roles, "executors")
+			break
+		}
+	}
+	counts := map[string]int{}
+	for _, row := range rows {
+		counts[row.Role]++
+	}
+	ready := true
+	missing := []string{}
+	for _, role := range roles {
+		if counts[role] != 1 {
+			ready = false
+		}
+		if counts[role] == 0 {
+			missing = append(missing, role)
+		}
+	}
+	return ready, missing
+}
+
 // Status proves catalogue and workspace reads, rather than implying delivery.
 func (c Controller) Status(ctx context.Context) (map[string]any, error) {
 	s, err := c.settings()
@@ -64,7 +91,8 @@ func (c Controller) Status(ctx context.Context) (map[string]any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"native_catalog_ready": true, "profiles": len(s.Dots), "research_components": processRoles(rows), "controller_runtime": "go", "system_app_modified": false}, nil
+		workers, missing := workerReadiness(s, rows)
+		return map[string]any{"native_catalog_ready": true, "profiles": len(s.Dots), "research_components": processRoles(rows), "workers_ready": workers, "missing_workers": missing, "controller_runtime": "go", "system_app_modified": false}, nil
 	}
 	return nil, errors.New("Native catalogue or workspace status not ready")
 }
@@ -87,16 +115,6 @@ func (c Controller) finishStart(ctx context.Context, s *Settings, ready map[stri
 		}
 		ready["system_app_modified"] = false
 		return ready, nil
-	}
-	if _, err = InstallNativeRoomCache(ctx, s, c.evaluator(s)); err != nil {
-		return nil, err
-	}
-	awareness, err := NewAwareness(s, c.client(s), c.evaluator(s)).Reconcile(ctx)
-	if err != nil {
-		awareness = nil
-		for handle := range s.Dots {
-			awareness = append(awareness, map[string]any{"target": handle, "outcome": "unknown", "error": "awareness_reconciliation_failed"})
-		}
 	}
 	rows, err := RuntimeProcesses(ctx, s)
 	if err != nil {
@@ -150,12 +168,52 @@ func (c Controller) finishStart(ctx context.Context, s *Settings, ready map[stri
 	for key, value := range watch {
 		ready[key] = value
 	}
+	if _, err = InstallNativeRoomCache(ctx, s, c.evaluator(s)); err != nil {
+		return nil, err
+	}
+	// The watcher's first sync reconciles optional setup after workers are
+	// live. Setup must never consume the desktop launcher's startup budget.
+	awareness, err := NewAwareness(s, c.client(s), c.evaluator(s)).Summary()
+	if err != nil {
+		return nil, err
+	}
+	rows, err = RuntimeProcesses(ctx, s)
+	if err != nil {
+		return nil, err
+	}
+	ready["workers_ready"], ready["missing_workers"] = workerReadiness(s, rows)
+	ready["research_components"] = processRoles(rows)
+	if ready["workers_ready"] != true {
+		return nil, errors.New("Dot startup workers are incomplete")
+	}
 	ready["relay_started"] = true
 	ready["relay_existing"] = count["relay"] > 0
 	ready["secondary_executors_existing"] = count["executors"] > 0
 	ready["awareness"] = awareness
 	ready["system_app_modified"] = false
 	return ready, nil
+}
+
+// repair only completes startup for this installation's already running app.
+// Unlike Start, it cannot launch, stop or activate the native app.
+func (c Controller) repair(ctx context.Context) (map[string]any, error) {
+	s, err := c.settings()
+	if err != nil {
+		return nil, err
+	}
+	if s.IntegrationMode != "native" {
+		return nil, errors.New("Worker repair requires a native Dots installation")
+	}
+	rows, err := RuntimeProcesses(ctx, s)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		if row.Role == "app" && !c.restartRequired(s) {
+			return c.finishStart(ctx, s, nil)
+		}
+	}
+	return nil, errors.New("No compatible CQ-owned native app is running")
 }
 
 func (c Controller) Start(ctx context.Context, preserveWatcher bool) (result map[string]any, err error) {
@@ -260,16 +318,17 @@ func (c Controller) Start(ctx context.Context, preserveWatcher bool) (result map
 	if err != nil {
 		return nil, err
 	}
-	deadline := time.Now().Add(90 * time.Second)
+	startup, cancel := context.WithTimeout(ctx, nativeStartupTimeout)
+	defer cancel()
 	for {
-		ready, e := c.Status(ctx)
+		ready, e := c.Status(startup)
 		if e == nil {
 			return c.finishStart(ctx, s, ready)
 		}
-		if time.Now().After(deadline) {
+		if startup.Err() != nil {
 			return nil, errors.New("Native Dot startup failed")
 		}
-		if err = waitContext(ctx, 500*time.Millisecond); err != nil {
+		if err = waitContext(startup, 500*time.Millisecond); err != nil {
 			return nil, err
 		}
 	}

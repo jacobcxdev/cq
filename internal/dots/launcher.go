@@ -18,7 +18,7 @@ import (
 
 const LauncherIdentifier = "dev.jacobcx.cq.chatgpt-launcher"
 
-const desktopFallbackMessage = "CQ could not enable Dots. ChatGPT may be running without Dots or CQ routing. Your existing chats have not been restarted. Run 'cq codex dots status' for details. When ready, quit ChatGPT and reopen ChatGPT via CQ."
+const desktopFallbackMessage = "CQ startup is incomplete. Some Dots features or CQ routing may be unavailable. Your existing chats have not been restarted. Run 'cq codex dots status' for details. When ready, quit ChatGPT and reopen ChatGPT via CQ."
 
 const desktopFallbackAlert = `display alert "CQ Dots unavailable" message "` + desktopFallbackMessage + `" as warning buttons {"OK"} default button "OK"`
 

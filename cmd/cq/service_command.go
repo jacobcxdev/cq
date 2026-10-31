@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/installstate"
 )
@@ -22,6 +23,7 @@ type serviceCommand struct {
 	CandidateExecutable string
 	SnapshotFile        string
 	InstallerLockHeld   bool
+	WaitTimeout         time.Duration
 	HelpPath            []string
 }
 
@@ -86,7 +88,7 @@ func runServiceWithLifecycleInput(args []string, lifecycle *serviceLifecycle, ou
 	case "install":
 		return lifecycle.Install(ctx, command.Owner)
 	case "upgrade":
-		receipt, err := lifecycle.Upgrade(ctx, command.Owner, command.CandidateExecutable)
+		receipt, err := lifecycle.upgradeWithWaitTimeout(ctx, command.Owner, command.CandidateExecutable, command.WaitTimeout)
 		if command.JSON {
 			if encodeErr := json.NewEncoder(output).Encode(receipt); encodeErr != nil {
 				return errors.Join(err, encodeErr)
@@ -135,6 +137,7 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 	}
 
 	command := serviceCommand{Action: args[0], Owner: installstate.OwnerManual}
+	waitTimeoutSet := false
 	switch command.Action {
 	case "install", "upgrade", "restart", "snapshot", "status", "uninstall", "restore":
 	default:
@@ -154,6 +157,26 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 				return serviceCommand{}, fmt.Errorf("service %s: duplicate --json", command.Action)
 			}
 			command.JSON = true
+		case argument == "--wait-timeout" || strings.HasPrefix(argument, "--wait-timeout="):
+			if waitTimeoutSet {
+				return serviceCommand{}, fmt.Errorf("service %s: duplicate --wait-timeout", command.Action)
+			}
+			value := strings.TrimPrefix(argument, "--wait-timeout=")
+			if argument == "--wait-timeout" {
+				if index+1 >= len(args) {
+					return serviceCommand{}, fmt.Errorf("service %s: --wait-timeout requires a value", command.Action)
+				}
+				index++
+				value = args[index]
+			}
+			timeout, err := time.ParseDuration(value)
+			if err != nil {
+				return serviceCommand{}, fmt.Errorf("service upgrade: --wait-timeout must be 0 or whole seconds from 1s to 30s")
+			}
+			if err := validateServiceUpgradeWaitTimeout(timeout); err != nil {
+				return serviceCommand{}, err
+			}
+			command.WaitTimeout, waitTimeoutSet = timeout, true
 		case argument == "--owner":
 			if index+1 >= len(args) {
 				return serviceCommand{}, fmt.Errorf("service %s: --owner requires a value", command.Action)
@@ -192,6 +215,9 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 	}
 	if command.JSON && command.Action != "status" && command.Action != "upgrade" {
 		return serviceCommand{}, fmt.Errorf("service %s: --json is only valid with status or upgrade", command.Action)
+	}
+	if waitTimeoutSet && command.Action != "upgrade" {
+		return serviceCommand{}, fmt.Errorf("service %s: --wait-timeout is only valid with upgrade", command.Action)
 	}
 	packageAction := command.Action == "install" || command.Action == "upgrade" || command.Action == "uninstall" || command.Action == "snapshot" || command.Action == "restore"
 	if command.OwnerSet && !packageAction {

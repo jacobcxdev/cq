@@ -26,6 +26,7 @@ func desktopFixture(t *testing.T) (*Settings, Controller, desktopDependencies, *
 		start: func(context.Context, Controller) (map[string]any, error) {
 			return map[string]any{"native_catalog_ready": true}, nil
 		},
+		repair:  func(context.Context, Controller) error { return errors.New("no owned app") },
 		open:    func(context.Context, string) error { return nil },
 		recover: func(context.Context, *Settings) error { return nil },
 		wait:    func(context.Context, time.Duration) error { return nil },
@@ -58,7 +59,10 @@ func TestDesktopLaunchOrdersDetachedRecoveryBeforeBoundedStartAndNativeOpen(t *t
 		calls = append(calls, "start")
 		deadline, ok := ctx.Deadline()
 		if !ok || time.Until(deadline) > desktopStartTimeout || time.Until(deadline) < desktopStartTimeout-time.Second {
-			t.Fatal("startup is not bounded to 35 seconds")
+			t.Fatal("startup lacks its full readiness budget")
+		}
+		if desktopStartTimeout <= nativeStartupTimeout || desktopRecoveryDelay <= desktopStartTimeout {
+			t.Fatal("launcher or watchdog cuts native startup short")
 		}
 		return map[string]any{"native_catalog_ready": true}, nil
 	}
@@ -166,18 +170,18 @@ func TestDesktopLaunchFailuresRecoverWithoutExposingBackendDetails(t *testing.T)
 	}
 }
 
-func TestDesktopRecoveryWaitsFortySecondsAndHonoursItsOwnStop(t *testing.T) {
-	s, _, deps, _ := desktopFixture(t)
+func TestDesktopRecoveryWaitsForStartupAndHonoursItsOwnStop(t *testing.T) {
+	s, c, deps, _ := desktopFixture(t)
 	calls := 0
 	deps.wait = func(ctx context.Context, delay time.Duration) error {
-		if delay != 40*time.Second {
+		if delay != desktopRecoveryDelay {
 			t.Fatalf("recovery delay %v", delay)
 		}
 		calls++
 		return nil
 	}
 	deps.recover = func(context.Context, *Settings) error { calls++; return nil }
-	if err := runDesktopRecovery(context.Background(), s, deps); err != nil {
+	if err := runDesktopRecovery(context.Background(), s, c, deps); err != nil {
 		t.Fatal(err)
 	}
 	if calls != 2 {
@@ -185,15 +189,76 @@ func TestDesktopRecoveryWaitsFortySecondsAndHonoursItsOwnStop(t *testing.T) {
 	}
 	deps.wait = func(context.Context, time.Duration) error { return context.Canceled }
 	deps.recover = func(context.Context, *Settings) error { t.Fatal("stopped watchdog reopened app"); return nil }
-	if err := runDesktopRecovery(context.Background(), s, deps); err != context.Canceled {
+	if err := runDesktopRecovery(context.Background(), s, c, deps); err != context.Canceled {
 		t.Fatalf("watchdog cancellation %v", err)
 	}
 	s.IntegrationMode = "isolated"
-	if err := runDesktopRecovery(context.Background(), s, desktopDependencies{}); err == nil {
+	if err := runDesktopRecovery(context.Background(), s, c, desktopDependencies{}); err == nil {
 		t.Fatal("isolated profile recovery accepted")
 	}
 	if err := runDesktopLaunch(context.Background(), s, Controller{}, desktopDependencies{}); err == nil {
 		t.Fatal("isolated desktop launcher accepted")
+	}
+}
+
+func TestDesktopRecoveryRepairsOwnedWorkersBeforeFallback(t *testing.T) {
+	for _, detached := range []bool{false, true} {
+		t.Run(map[bool]string{false: "immediate", true: "detached"}[detached], func(t *testing.T) {
+			s, c, deps, watchdog := desktopFixture(t)
+			repairs := 0
+			opens := 0
+			deps.start = func(context.Context, Controller) (map[string]any, error) {
+				return nil, context.DeadlineExceeded
+			}
+			deps.repair = func(ctx context.Context, got Controller) error {
+				repairs++
+				deadline, ok := ctx.Deadline()
+				if got.Root != c.Root || ctx.Err() != nil || !ok || time.Until(deadline) > nativeStartupTimeout {
+					t.Fatal("repair lost identity or independent bounded context")
+				}
+				return nil
+			}
+			deps.recover = func(context.Context, *Settings) error {
+				t.Fatal("healthy repaired app triggered fallback warning")
+				return nil
+			}
+			deps.open = func(context.Context, string) error {
+				opens++
+				if detached {
+					t.Fatal("background repair activated app")
+				}
+				return nil
+			}
+			var err error
+			if detached {
+				err = runDesktopRecovery(context.Background(), s, c, deps)
+			} else {
+				err = runDesktopLaunch(context.Background(), s, c, deps)
+			}
+			if err != nil || repairs != 1 || !detached && watchdog.kills != 1 {
+				t.Fatalf("repair err=%v calls=%d watchdog kills=%d", err, repairs, watchdog.kills)
+			}
+			if !detached && opens != 1 {
+				t.Fatal("successful launcher repair did not activate app")
+			}
+		})
+	}
+}
+
+func TestDesktopRecoveryCancellationDuringRepairDoesNotWarn(t *testing.T) {
+	s, c, deps, _ := desktopFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	deps.repair = func(repair context.Context, _ Controller) error {
+		cancel()
+		return repair.Err()
+	}
+	deps.recover = func(context.Context, *Settings) error {
+		t.Fatal("cancelled watchdog showed fallback warning")
+		return nil
+	}
+	if err := runDesktopRecovery(ctx, s, c, deps); err != context.Canceled {
+		t.Fatalf("watchdog cancellation %v", err)
 	}
 }
 

@@ -9,8 +9,8 @@ import (
 	"time"
 )
 
-const desktopRecoveryDelay = 40 * time.Second
-const desktopStartTimeout = 35 * time.Second
+const desktopStartTimeout = nativeStartupTimeout + 30*time.Second
+const desktopRecoveryDelay = desktopStartTimeout + 5*time.Second
 
 type desktopWatchdog interface{ Kill() error }
 
@@ -20,6 +20,7 @@ type desktopDependencies struct {
 	stage   func(*Settings, string) (string, error)
 	spawn   func(*Settings, string, string, []string, []string) (desktopWatchdog, error)
 	start   func(context.Context, Controller) (map[string]any, error)
+	repair  func(context.Context, Controller) error
 	open    func(context.Context, string) error
 	recover func(context.Context, *Settings) error
 	wait    func(context.Context, time.Duration) error
@@ -33,6 +34,16 @@ func desktopDefaults() desktopDependencies {
 		},
 		start: func(ctx context.Context, c Controller) (map[string]any, error) {
 			return c.Execute(ctx, Request{Operation: "start"})
+		},
+		repair: func(ctx context.Context, c Controller) error {
+			result, err := c.Execute(ctx, Request{Operation: "repair"})
+			if err != nil {
+				return err
+			}
+			if result["native_catalog_ready"] != true || result["workers_ready"] != true {
+				return errors.New("Native Dots startup is incomplete")
+			}
+			return nil
 		},
 		open: func(ctx context.Context, app string) error {
 			query, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -71,6 +82,21 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 		return errors.New("Spotlight launcher requires a native Dots installation")
 	}
 	const failure = "CQ could not start Dots. Run cq codex dots status for details."
+	activateRepaired := func() error {
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err := deps.open(ctx, s.AppPath); err != nil {
+			return errors.New("Dots recovered, but native app activation failed")
+		}
+		return nil
+	}
+	repairNow := func() bool {
+		// Repair survives launcher cancellation, but cannot restart the app.
+		recovery, cancel := context.WithTimeout(context.Background(), nativeStartupTimeout)
+		defer cancel()
+		return deps.repair(recovery, c) == nil
+	}
 	recoverNow := func() bool {
 		// Startup cancellation must not cancel recovery of the user's other chats.
 		recovery, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -79,6 +105,9 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 	}
 	executable, err := deps.stage(s, c.Executable)
 	if err != nil {
+		if repairNow() {
+			return activateRepaired()
+		}
 		recoverNow()
 		return errors.New(failure)
 	}
@@ -89,6 +118,9 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 	env = setEnvironment(env, "CQ_DOTS_CQ_PATH", c.Executable)
 	watchdog, err := deps.spawn(s, executable, "desktop-recover", nil, env)
 	if err != nil {
+		if repairNow() {
+			return activateRepaired()
+		}
 		recoverNow()
 		return errors.New(failure)
 	}
@@ -102,6 +134,10 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 	result, err := deps.start(startup, c)
 	cancel()
 	if err != nil {
+		if repairNow() {
+			stopWatchdog = true
+			return activateRepaired()
+		}
 		stopWatchdog = recoverNow()
 		return errors.New(failure)
 	}
@@ -123,15 +159,24 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 
 // RunDesktopRecovery is a detached helper role, not a goroutine tied to the
 // launcher process. It never stops or relaunches an already running app.
-func RunDesktopRecovery(ctx context.Context, s *Settings) error {
-	return runDesktopRecovery(ctx, s, desktopDefaults())
+func RunDesktopRecovery(ctx context.Context, s *Settings, c Controller) error {
+	return runDesktopRecovery(ctx, s, c, desktopDefaults())
 }
 
-func runDesktopRecovery(ctx context.Context, s *Settings, deps desktopDependencies) error {
+func runDesktopRecovery(ctx context.Context, s *Settings, c Controller, deps desktopDependencies) error {
 	if s == nil || s.IntegrationMode != "native" {
 		return errors.New("Spotlight recovery requires a native Dots installation")
 	}
 	if err := deps.wait(ctx, desktopRecoveryDelay); err != nil {
+		return err
+	}
+	repair, cancel := context.WithTimeout(ctx, nativeStartupTimeout)
+	err := deps.repair(repair, c)
+	cancel()
+	if err == nil {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := deps.recover(ctx, s); err != nil {

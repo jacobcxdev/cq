@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
@@ -66,7 +68,7 @@ func homebrewUpgradeServiceFixture(t *testing.T) (*serviceLifecycle, *retainedSe
 	candidate := installer.RuntimeArtifact{Path: filepath.Join(t.TempDir(), "retained-candidate", "cq"), SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
 	lifecycle.RuntimeArtifacts = serviceUpgradeArtifacts{lifecycle.Executable: previous, previous.Path: previous, candidate.Path: candidate}
 	lifecycle.RuntimePreflight = func(context.Context, installstate.Record) error { return nil }
-	lifecycle.RuntimeApply = func(_ context.Context, artifact installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
+	lifecycle.RuntimeApply = func(_ context.Context, artifact installer.RuntimeArtifact, _ time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
 		platform.calls = append(platform.calls, "runtime-upgrade")
 		before, _ := lifecycle.RuntimeArtifacts.Stage(context.Background(), platform.live)
 		platform.live = artifact.Path
@@ -105,6 +107,81 @@ func TestHomebrewUpgradeKeepsJobsAndUsesRetainedRuntime(t *testing.T) {
 	}
 }
 
+func TestServiceUpgradeAcceptsBoundedWaitTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		flags []string
+		want  time.Duration
+	}{{nil, 0}, {[]string{"--wait-timeout=15s"}, 15 * time.Second}, {[]string{"--wait-timeout", "30s"}, 30 * time.Second}, {[]string{"--wait-timeout=1s"}, time.Second}, {[]string{"--wait-timeout=15000ms"}, 15 * time.Second}, {[]string{"--wait-timeout=0"}, 0}} {
+		args := append([]string{"upgrade", "--owner=homebrew", "--candidate-executable=/tmp/cq"}, tc.flags...)
+		if command, err := parseServiceCommand(args); err != nil || command.WaitTimeout != tc.want {
+			t.Errorf("bounded wait %v: got %v, %v", tc.flags, command.WaitTimeout, err)
+		}
+	}
+}
+
+func TestServiceUpgradeRejectsInvalidWaitTimeoutBeforeMutation(t *testing.T) {
+	for _, flags := range [][]string{{"--wait-timeout"}, {"--wait-timeout="}, {"--wait-timeout=bad"}, {"--wait-timeout=-1s"}, {"--wait-timeout=31s"}, {"--wait-timeout=500ms"}, {"--wait-timeout=1.5s"}, {"--wait-timeout=0", "--wait-timeout=15s"}} {
+		lifecycle, platform, _ := newServiceHarness(t)
+		args := append([]string{"upgrade", "--owner=homebrew", "--candidate-executable=/tmp/cq"}, flags...)
+		if err := runServiceWithLifecycle(args, lifecycle, io.Discard); err == nil || !strings.Contains(err.Error(), "--wait-timeout") {
+			t.Errorf("invalid wait accepted: %v: %v", flags, err)
+		}
+		if len(platform.calls) != 0 {
+			t.Fatalf("invalid wait mutated platform: %v", platform.calls)
+		}
+	}
+	for _, action := range []string{"status", "restart", "install"} {
+		if _, err := parseServiceCommand([]string{action, "--wait-timeout=0"}); err == nil || !strings.Contains(err.Error(), "only valid with upgrade") {
+			t.Errorf("wait accepted with %s: %v", action, err)
+		}
+	}
+	for _, invalid := range []time.Duration{-time.Second, time.Millisecond, 31 * time.Second} {
+		lifecycle, platform, _, _, candidate := homebrewUpgradeServiceFixture(t)
+		if _, err := lifecycle.upgradeWithWaitTimeout(context.Background(), installstate.OwnerHomebrew, candidate.Path, invalid); err == nil || len(platform.calls) != 0 {
+			t.Errorf("invalid lifecycle wait reached platform: %v: %v", invalid, err)
+		}
+	}
+}
+
+func TestServiceUpgradeForwardsWaitTimeoutIncludingRollback(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		flags    []string
+		want     time.Duration
+		rollback bool
+	}{{"default", nil, 0, false}, {"explicit zero", []string{"--wait-timeout=0"}, 0, false}, {"bounded", []string{"--wait-timeout=15s"}, 15 * time.Second, false}, {"bounded rollback", []string{"--wait-timeout=15s"}, 15 * time.Second, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle, platform, _, previous, candidate := homebrewUpgradeServiceFixture(t)
+			apply := lifecycle.RuntimeApply
+			var waits []time.Duration
+			lifecycle.RuntimeApply = func(ctx context.Context, artifact installer.RuntimeArtifact, wait time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+				waits = append(waits, wait)
+				return apply(ctx, artifact, wait)
+			}
+			if tc.rollback {
+				platform.installRefreshErr = errors.New("refresh failed")
+			}
+			args := append([]string{"upgrade", "--owner=homebrew", "--candidate-executable=" + candidate.Path}, tc.flags...)
+			err := runServiceWithLifecycle(args, lifecycle, io.Discard)
+			wantCalls := 1
+			if tc.rollback {
+				wantCalls = 2
+				if platform.live != previous.Path {
+					t.Fatal("bounded rollback did not retain previous runtime")
+				}
+			}
+			if (err != nil) != tc.rollback || len(waits) != wantCalls {
+				t.Fatalf("wait propagation: %v, %v", waits, err)
+			}
+			for _, wait := range waits {
+				if wait != tc.want {
+					t.Fatalf("runtime wait = %v, want %v", wait, tc.want)
+				}
+			}
+		})
+	}
+}
+
 func TestHomebrewUpgradeReconcilesVerifiedSelectedRuntimeWithoutHandoff(t *testing.T) {
 	for _, phase := range []string{"committed", "deferred", "rolled_back"} {
 		t.Run(phase, func(t *testing.T) {
@@ -119,7 +196,7 @@ func TestHomebrewUpgradeReconcilesVerifiedSelectedRuntimeWithoutHandoff(t *testi
 			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "prior-attempt", Generation: 2, Phase: phase, Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
 			lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
 			platform.calls = nil
-			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
+			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
 				t.Fatal("verified live artifact unnecessarily handed off")
 				return proxy.RuntimeUpgradeReceiptV1{}, nil
 			}
@@ -170,7 +247,7 @@ func TestHomebrewUpgradeDoesNotReconcileUnprovenLiveArtifact(t *testing.T) {
 			lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
 			barrierErr := errors.New("runtime handoff barrier retained")
 			called := false
-			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
+			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
 				called = true
 				return proxy.RuntimeUpgradeReceiptV1{}, barrierErr
 			}
@@ -188,7 +265,7 @@ func TestHomebrewSameRuntimeReconciliationRestoresMetadataOnFailure(t *testing.T
 			lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
 			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "prior-attempt", Generation: 2, Phase: "deferred", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
 			lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
-			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
+			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
 				t.Fatal("metadata rollback switched unchanged runtime")
 				return receipt, nil
 			}
@@ -348,7 +425,7 @@ func TestHomebrewTrueUninstallRemovesJobsAndState(t *testing.T) {
 }
 func TestHomebrewUpgradeDeferralKeepsOwnership(t *testing.T) {
 	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
-	lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error) {
+	lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
 		return proxy.RuntimeUpgradeReceiptV1{Phase: "deferred", Previous: previous, Candidate: candidate, ErrorCode: "worker_not_quiescent"}, nil
 	}
 	receipt, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, candidate.Path)

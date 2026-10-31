@@ -20,12 +20,13 @@ import (
 // CodexEgress supplies matching HTTP and WebSocket upstream policies. It never
 // changes process environment or the shared default transport.
 type CodexEgress struct {
-	HTTP      http.RoundTripper
-	WebSocket websocket.Dialer
-	close     func() error
-	closeOnce sync.Once
-	closeErr  error
-	dial      func(context.Context, string, string) (net.Conn, error)
+	HTTP       http.RoundTripper
+	WebSocket  websocket.Dialer
+	close      func() error
+	closeOnce  sync.Once
+	closeErr   error
+	dial       func(context.Context, string, string) (net.Conn, error)
+	nativeDial func(context.Context, string, string) (net.Conn, error)
 }
 
 func (e *CodexEgress) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -93,6 +94,7 @@ func openCodexWireGuardEgress(cfg *Config, p *wireGuardProfile) (*CodexEgress, e
 		_ = runtime.Close()
 		return nil, err
 	}
+	egress.nativeDial = runtime.DialNativeContext
 	return egress, nil
 }
 

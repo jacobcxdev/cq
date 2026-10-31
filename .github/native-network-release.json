@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "version": "0.41.0",
+  "source_commit": "faa14b3025c3d151a92e4d760e1a9e7f506d7af7",
+  "asset_id": 696220915,
+  "sha256": "2a2fc0c8333029d7bef5a9e0917390ef924896e8107e25fe1bb8cc99059caf8a",
+  "minimum_macos": "13.0"
+}

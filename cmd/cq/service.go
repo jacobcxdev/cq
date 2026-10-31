@@ -108,7 +108,7 @@ type serviceLifecycle struct {
 	DigestExecutable      func(string) (string, error)
 	MutationLocker        installer.InstallerLocker
 	RuntimeArtifacts      serviceRuntimeArtifacts
-	RuntimeApply          func(context.Context, installer.RuntimeArtifact) (proxy.RuntimeUpgradeReceiptV1, error)
+	RuntimeApply          func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error)
 	RuntimePreflight      func(context.Context, installstate.Record) error
 	RuntimeInitialise     func(context.Context) error
 	RuntimeRestoreRefresh func(context.Context, servicePlatformSnapshot) error

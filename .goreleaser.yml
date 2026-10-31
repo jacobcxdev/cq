@@ -58,6 +58,10 @@ homebrew_casks:
     binaries:
       - cq
     custom_block: |
+      on_ventura :or_newer do
+        depends_on cask: "jacobcxdev/tap/cq-network"
+      end
+
       cq_lifecycle_script = <<~'SH'
         #!/bin/bash
         set -euo pipefail

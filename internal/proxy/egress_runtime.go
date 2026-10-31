@@ -42,12 +42,17 @@ func defaultRuntimeEgressDependencies() runtimeEgressDependencies {
 }
 
 type runtimeEgressDescriptor struct {
-	Socket string `json:"socket"`
-	Token  string `json:"token"`
+	Socket      string `json:"socket"`
+	Token       string `json:"token,omitempty"`
+	NativeToken string `json:"native_token,omitempty"`
 }
 
 func runtimeEgressDescriptorPath(dir string, port int) string {
 	return filepath.Join(dir, "egress-"+strconv.Itoa(port)+".json")
+}
+
+func nativeEgressDescriptorPath(dir string, port int) string {
+	return filepath.Join(dir, "native-egress-"+strconv.Itoa(port)+".json")
 }
 
 // StartRuntimeEgress owns the manager and private broker for one supervisor.
@@ -103,7 +108,7 @@ func startRuntimeEgress(ctx context.Context, cfg *Config, fs fsutil.FileSystem, 
 		cleanupSocket()
 		return nil, errors.New("secure private egress listener failed")
 	}
-	var random [32]byte
+	var random [64]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		listener.Close()
 		cancel()
@@ -111,29 +116,60 @@ func startRuntimeEgress(ctx context.Context, cfg *Config, fs fsutil.FileSystem, 
 		cleanupSocket()
 		return nil, errors.New("create egress authority failed")
 	}
-	token := base64.RawURLEncoding.EncodeToString(random[:])
+	token := base64.RawURLEncoding.EncodeToString(random[:32])
+	nativeToken := base64.RawURLEncoding.EncodeToString(random[32:])
 	clear(random[:])
-	data, _ := json.Marshal(runtimeEgressDescriptor{Socket: socketPath, Token: token})
-	descriptorPath := runtimeEgressDescriptorPath(dir, cfg.Port)
-	if err := fsutil.SecureAtomicWrite(fs, descriptorPath, data); err != nil {
-		listener.Close()
-		cancel()
-		manager.Close()
-		cleanupSocket()
-		return nil, errors.New("publish private egress descriptor failed")
-	}
-	// Remember the exact published inode so shutdown never removes a successor's
-	// descriptor, even if another owner replaced it in the meantime.
-	var identity fsutil.SecureFileIdentity
+	// Keep the worker schema unchanged: already-running workers reject unknown
+	// fields. Native authority has a separate descriptor and capability.
+	workerData, _ := json.Marshal(runtimeEgressDescriptor{Socket: socketPath, Token: token})
+	nativeData, _ := json.Marshal(runtimeEgressDescriptor{Socket: socketPath, NativeToken: nativeToken})
+	defer clear(workerData)
+	defer clear(nativeData)
 	inspector, inspectOK := fs.(fsutil.SecurePathInspector)
-	identityOK := false
-	if inspectOK {
-		if info, e := inspector.Lstat(descriptorPath); e == nil {
-			identity, identityOK = inspector.FileIdentity(info)
+	identities := make(map[string]fsutil.SecureFileIdentity)
+	cleanupDescriptors := func() {
+		if opener, ok := fs.(fsutil.SecureDirectoryOpener); ok {
+			if directory, err := opener.OpenSecureDirectory(dir); err == nil {
+				defer directory.Close()
+				if remover, ok := directory.(fsutil.IdentityBoundRemover); ok {
+					for name, identity := range identities {
+						_ = remover.RemoveChecked(name, identity)
+					}
+				}
+			}
+		}
+	}
+	for _, descriptor := range []struct {
+		path string
+		data []byte
+	}{{runtimeEgressDescriptorPath(dir, cfg.Port), workerData}, {nativeEgressDescriptorPath(dir, cfg.Port), nativeData}} {
+		if err := fsutil.SecureAtomicWrite(fs, descriptor.path, descriptor.data); err != nil {
+			listener.Close()
+			cancel()
+			manager.Close()
+			cleanupDescriptors()
+			cleanupSocket()
+			return nil, errors.New("publish private egress descriptor failed")
+		}
+		// Never remove a successor's descriptor on shutdown.
+		if inspectOK {
+			if info, err := inspector.Lstat(descriptor.path); err == nil {
+				if identity, ok := inspector.FileIdentity(info); ok {
+					identities[filepath.Base(descriptor.path)] = identity
+				}
+			}
 		}
 	}
 	tracked := &runtimeEgressListener{Listener: listener, connections: make(map[*runtimeEgressConn]struct{})}
 	handler := NewEgressBroker(manager, token, manager.AllowsTarget)
+	var nativeDialer EgressDialer
+	if native, ok := manager.(interface {
+		DialNativeContext(context.Context, string, string) (net.Conn, error)
+		NativeReady() bool
+	}); ok {
+		nativeDialer = nativeRuntimeDialer{native.DialNativeContext, native.NativeReady}
+	}
+	nativeHandler := NewNativeEgressBroker(nativeDialer, nativeToken)
 	server := &http.Server{ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 32 * 1024, BaseContext: func(net.Listener) context.Context { return life }, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tracked.mu.Lock()
 		if tracked.closed {
@@ -144,7 +180,11 @@ func startRuntimeEgress(ctx context.Context, cfg *Config, fs fsutil.FileSystem, 
 		tracked.handlers.Add(1)
 		tracked.mu.Unlock()
 		defer tracked.handlers.Done()
-		handler.ServeHTTP(w, r)
+		if r.Header.Get("X-CQ-Native-Flow") == "1" {
+			nativeHandler.ServeHTTP(w, r)
+		} else {
+			handler.ServeHTTP(w, r)
+		}
 	})}
 	serveDone := make(chan struct{})
 	go func() {
@@ -186,16 +226,7 @@ func startRuntimeEgress(ctx context.Context, cfg *Config, fs fsutil.FileSystem, 
 		<-pollDone
 		tracked.handlers.Wait()
 		err := manager.Close()
-		if identityOK {
-			if opener, ok := fs.(fsutil.SecureDirectoryOpener); ok {
-				if directory, openErr := opener.OpenSecureDirectory(dir); openErr == nil {
-					if remover, ok := directory.(fsutil.IdentityBoundRemover); ok {
-						_ = remover.RemoveChecked(filepath.Base(descriptorPath), identity)
-					}
-					_ = directory.Close()
-				}
-			}
-		}
+		cleanupDescriptors()
 		cleanupSocket()
 		return err
 	}
@@ -285,11 +316,24 @@ func OpenRuntimeEgressClient(port int, fs fsutil.FileSystem) (*CodexEgress, erro
 	return openRuntimeEgressClient(port, fs, paths.RuntimeDir)
 }
 func openRuntimeEgressClient(port int, fs fsutil.FileSystem, dir string) (*CodexEgress, error) {
+	descriptor, err := readRuntimeEgressDescriptor(port, fs, dir)
+	if err != nil {
+		return nil, err
+	}
+	client := NewEgressBrokerClient(descriptor.Socket, descriptor.Token)
+	return codexEgressWithDialer(client.DialContext, nil)
+}
+
+func readRuntimeEgressDescriptor(port int, fs fsutil.FileSystem, dir string) (*runtimeEgressDescriptor, error) {
+	return readEgressDescriptor(fs, runtimeEgressDescriptorPath(dir, port), dir, port, false)
+}
+
+func readEgressDescriptor(fs fsutil.FileSystem, path, dir string, port int, native bool) (*runtimeEgressDescriptor, error) {
 	invalid := errors.New("runtime egress descriptor unavailable or invalid; no direct fallback")
 	if port < 1 || port > 65535 || !fsutil.IsCleanAbsoluteNonRootPath(dir) {
 		return nil, invalid
 	}
-	data, err := fsutil.ReadSecureFile(fs, runtimeEgressDescriptorPath(dir, port), 8192)
+	data, err := fsutil.ReadSecureFile(fs, path, 8192)
 	if err != nil {
 		return nil, invalid
 	}
@@ -303,8 +347,12 @@ func openRuntimeEgressClient(port int, fs fsutil.FileSystem, dir string) (*Codex
 	if decoder.Decode(new(any)) != io.EOF {
 		return nil, invalid
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(descriptor.Token)
-	if err != nil || len(raw) != 32 || base64.RawURLEncoding.EncodeToString(raw) != descriptor.Token {
+	token := descriptor.Token
+	if native {
+		token = descriptor.NativeToken
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(token)
+	if err != nil || len(raw) != 32 || base64.RawURLEncoding.EncodeToString(raw) != token {
 		return nil, invalid
 	}
 	clear(raw)
@@ -329,8 +377,36 @@ func openRuntimeEgressClient(port int, fs fsutil.FileSystem, dir string) (*Codex
 	if err := fsutil.ValidateSecureOwner(inspector, info); err != nil {
 		return nil, invalid
 	}
-	client := NewEgressBrokerClient(descriptor.Socket, descriptor.Token)
-	return codexEgressWithDialer(client.DialContext, nil)
+	return &descriptor, nil
+}
+
+type nativeRuntimeDialer struct {
+	dial  func(context.Context, string, string) (net.Conn, error)
+	ready func() bool
+}
+
+func (d nativeRuntimeDialer) DialContext(ctx context.Context, network, target string) (net.Conn, error) {
+	return d.dial(ctx, network, target)
+}
+
+func (d nativeRuntimeDialer) NativeReady() bool { return d.ready != nil && d.ready() }
+
+// NativeEgressDescriptorPath exposes only a validated path to the user-context
+// companion. Broker capabilities stay in the existing private descriptor.
+func NativeEgressDescriptorPath(fs fsutil.FileSystem) (string, error) {
+	cfg, err := LoadExistingConfig()
+	if err != nil || cfg == nil || cfg.CodexWireGuardProfile == "" {
+		return "", errors.New("native egress requires configured WireGuard")
+	}
+	paths, err := ResolveDefaultPaths()
+	if err != nil {
+		return "", errors.New("native egress runtime directory unavailable")
+	}
+	descriptor, err := readEgressDescriptor(fs, nativeEgressDescriptorPath(paths.RuntimeDir, cfg.Port), paths.RuntimeDir, cfg.Port, true)
+	if err != nil || descriptor.NativeToken == "" {
+		return "", errors.New("native egress broker unavailable; update the CQ service")
+	}
+	return nativeEgressDescriptorPath(paths.RuntimeDir, cfg.Port), nil
 }
 
 type runtimeEgressListener struct {

@@ -81,6 +81,11 @@ To release a new version:
    Homebrew Cask to [`jacobcxdev/homebrew-tap`](https://github.com/jacobcxdev/homebrew-tap).
 6. Verify the published package channels and installed transport validation.
 
+macOS packages also require the reviewed native companion pin. See
+[Native network releases](docs/native-network-releases.md) for the separate
+signing, notarisation and immutable-asset process. Go-only releases reuse that
+pin; CI does not receive Apple signing keys.
+
 ## Homebrew Cask Service Lifecycle
 
 The Homebrew Cask owns CQ as one complete installation. Its installer artifacts call
