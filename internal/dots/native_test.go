@@ -233,6 +233,184 @@ func TestNativeBrokerNeverReplacesExistingPath(t *testing.T) {
 		t.Fatal("public root accepted")
 	}
 }
+
+func abandonedNativeSocket(t *testing.T, root string) string {
+	t.Helper()
+	path := filepath.Join(root, nativeSocketName)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.SetUnlinkOnClose(false)
+	if err := os.Chmod(path, 0o600); err != nil {
+		listener.Close()
+		t.Fatal(err)
+	}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestNativeBrokerRecoversAbandonedSocket(t *testing.T) {
+	root := nativeTestRoot(t)
+	abandonedNativeSocket(t, root)
+	b, err := newNativeBroker(root)
+	if err != nil {
+		t.Fatalf("could not recover abandoned socket: %v", err)
+	}
+	defer b.close()
+	b.appPID = 12345
+	done := make(chan error, 1)
+	go func() {
+		defer func() {
+			if recover() != nil {
+				done <- errors.New("broker panic")
+			}
+		}()
+		done <- b.once(context.Background())
+	}()
+	identity, err := NativeIdentity(context.Background(), &Settings{RuntimeRoot: root})
+	if err != nil || identity["app_pid"] != 12345 {
+		t.Fatalf("recovered identity %v: %v", identity, err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNativeBrokerPreservesLiveLegacyListener(t *testing.T) {
+	root := nativeTestRoot(t)
+	path := filepath.Join(root, nativeSocketName)
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.Lstat(path)
+	if b, err := newNativeBroker(root); err == nil {
+		b.close()
+		t.Fatal("replaced live listener without a broker lock")
+	}
+	after, err := os.Lstat(path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatal("live listener path changed")
+	}
+	conn, err := net.DialTimeout("unix", path, time.Second)
+	if err != nil {
+		t.Fatal("live listener became unreachable")
+	}
+	conn.Close()
+}
+
+func TestNativeBrokerRejectsUnsafeAbandonedPaths(t *testing.T) {
+	for _, kind := range []string{"file", "directory", "symlink", "public-socket"} {
+		t.Run(kind, func(t *testing.T) {
+			root := nativeTestRoot(t)
+			path := filepath.Join(root, nativeSocketName)
+			var err error
+			switch kind {
+			case "file":
+				err = os.WriteFile(path, []byte("keep"), 0o600)
+			case "directory":
+				err = os.Mkdir(path, 0o700)
+			case "symlink":
+				err = os.Symlink(filepath.Join(root, "elsewhere"), path)
+			case "public-socket":
+				abandonedNativeSocket(t, root)
+				err = os.Chmod(path, 0o666)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _ := os.Lstat(path)
+			if b, err := newNativeBroker(root); err == nil {
+				b.close()
+				t.Fatal("unsafe path accepted")
+			}
+			after, err := os.Lstat(path)
+			if err != nil || !os.SameFile(before, after) {
+				t.Fatal("unsafe existing path changed")
+			}
+		})
+	}
+}
+
+func TestNativeBrokerConcurrentRecoveryKeepsOneOwner(t *testing.T) {
+	root := nativeTestRoot(t)
+	abandonedNativeSocket(t, root)
+	const attempts = 12
+	start := make(chan struct{})
+	results := make(chan *nativeBroker, attempts)
+	for range attempts {
+		go func() {
+			defer func() {
+				if recover() != nil {
+					results <- nil
+				}
+			}()
+			<-start
+			b, _ := newNativeBroker(root)
+			results <- b
+		}()
+	}
+	close(start)
+	var owners []*nativeBroker
+	for range attempts {
+		if b := <-results; b != nil {
+			owners = append(owners, b)
+		}
+	}
+	defer func() {
+		for _, b := range owners {
+			b.close()
+		}
+	}()
+	if len(owners) != 1 {
+		t.Fatalf("concurrent recovery started %d brokers", len(owners))
+	}
+}
+
+func TestNativeBrokerCloseReleasesOwnershipOnlyOnce(t *testing.T) {
+	root := nativeTestRoot(t)
+	first, err := newNativeBroker(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.close()
+	second, err := newNativeBroker(root)
+	if err != nil {
+		t.Fatalf("closed broker kept its lock: %v", err)
+	}
+	defer second.close()
+	before, _ := os.Lstat(second.path)
+	first.close()
+	after, err := os.Lstat(second.path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatal("repeated close removed the next broker's socket")
+	}
+}
+
+func TestNativeBrokerRejectsUnsafeLockWithoutChangingSocket(t *testing.T) {
+	root := nativeTestRoot(t)
+	path := abandonedNativeSocket(t, root)
+	before, _ := os.Lstat(path)
+	lock := filepath.Join(root, "native-debug.lock")
+	if err := os.Symlink(filepath.Join(root, "elsewhere"), lock); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := newNativeBroker(root); err == nil {
+		b.close()
+		t.Fatal("unsafe broker lock accepted")
+	}
+	after, err := os.Lstat(path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatal("socket changed without a verified lock")
+	}
+}
 func TestNativeDebuggerURLRejectsRemoteOrAmbiguousAuthority(t *testing.T) {
 	for _, v := range []string{"ws://evil.test:9999/devtools/page/x", "ws://127.0.0.1:9998/devtools/page/x", "ws://user@127.0.0.1:9999/devtools/page/x", "wss://127.0.0.1:9999/devtools/page/x", "ws://127.0.0.1:9999/devtools/browser/x"} {
 		if _, err := debuggerURL(v, 9999); err == nil {

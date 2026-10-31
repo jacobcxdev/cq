@@ -27,11 +27,26 @@ func TestLauncherRecoveryDoesNotRelaunchOrGuessUnknownAppState(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			calls := 0
-			err := recoverApp(test.running, test.queryError, func() error { calls++; return test.openError })
+			notices := 0
+			err := recoverApp(test.running, test.queryError, func() error { calls++; return test.openError }, func() { notices++ })
 			if err != test.want || calls != test.calls {
 				t.Fatalf("recovery err=%v calls=%d", err, calls)
 			}
+			if notices != 1 {
+				t.Fatalf("fallback was silent: notices=%d", notices)
+			}
 		})
+	}
+}
+
+func TestLauncherFallbackWarningRunsAfterRecovery(t *testing.T) {
+	var calls []string
+	err := recoverApp(false, nil, func() error {
+		calls = append(calls, "open")
+		return nil
+	}, func() { calls = append(calls, "warn") })
+	if err != nil || strings.Join(calls, ",") != "open,warn" {
+		t.Fatalf("fallback order %v: %v", calls, err)
 	}
 }
 
