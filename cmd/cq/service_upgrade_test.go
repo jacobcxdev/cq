@@ -201,6 +201,7 @@ func TestHomebrewUpgradeReconcilesVerifiedSelectedRuntimeWithoutHandoff(t *testi
 				return proxy.RuntimeUpgradeReceiptV1{}, nil
 			}
 			lifecycle.RuntimePrune = func(context.Context) error { t.Fatal("package reconciliation pruned rollback artifacts"); return nil }
+			refreshRuns := platform.refreshRuns
 			got, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, selected.Path)
 			if err != nil || got != receipt || platform.live != selected.Path || platform.refresh != selected.Path {
 				t.Fatalf("same-runtime reconciliation=%+v err=%v", got, err)
@@ -208,6 +209,47 @@ func TestHomebrewUpgradeReconcilesVerifiedSelectedRuntimeWithoutHandoff(t *testi
 			record, err := store.Load()
 			if err != nil || record.BinaryDigest != selected.SHA256 || record.Version != selected.Version {
 				t.Fatalf("reconciled ownership=%+v err=%v", record, err)
+			}
+			if platform.refreshRuns != refreshRuns {
+				t.Fatalf("healthy selected refresh was restarted: %v", platform.calls)
+			}
+		})
+	}
+}
+
+func TestHomebrewSameRuntimeReconcilesUnhealthyOrDifferentRefresh(t *testing.T) {
+	for _, condition := range []string{"unhealthy", "unregistered", "wrong target"} {
+		t.Run(condition, func(t *testing.T) {
+			lifecycle, platform, _, previous, candidate := homebrewUpgradeServiceFixture(t)
+			if _, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, candidate.Path); err != nil {
+				t.Fatal(err)
+			}
+			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "prior-attempt", Generation: 2, Phase: "committed", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
+			lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+				t.Fatal("refresh reconciliation changed the runtime")
+				return proxy.RuntimeUpgradeReceiptV1{}, nil
+			}
+			switch condition {
+			case "unhealthy":
+				platform.refreshHealthy = false
+			case "unregistered":
+				platform.refreshRegistered = false
+			case "wrong target":
+				platform.refresh = previous.Path
+			}
+			platform.calls = nil
+			refreshRuns := platform.refreshRuns
+			got, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, candidate.Path)
+			if condition == "unhealthy" {
+				if !errors.Is(err, ErrServiceUnhealthy) || platform.refreshHealthy {
+					t.Fatalf("unhealthy refresh was falsely accepted: %v", err)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if got != receipt || platform.live != candidate.Path || platform.refreshRuns != refreshRuns+1 {
+				t.Fatalf("refresh reconciliation changed runtime or skipped repair: receipt=%+v calls=%v err=%v", got, platform.calls, err)
 			}
 		})
 	}
@@ -270,6 +312,7 @@ func TestHomebrewSameRuntimeReconciliationRestoresMetadataOnFailure(t *testing.T
 				return receipt, nil
 			}
 			if failure == "refresh" {
+				platform.refreshHealthy = false
 				platform.installRefreshErr = errors.New("refresh failed")
 			} else {
 				lifecycle.Store = &failCandidateOwnershipStore{serviceStateStore: store, candidate: previous.SHA256}
