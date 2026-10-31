@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 type nativeNetworkTestExit int
@@ -179,6 +180,109 @@ func TestNativeNetworkAgentMigratesOnlyLegacyScheduling(t *testing.T) {
 				t.Fatalf("unexpected final definition: %v", err)
 			}
 		})
+	}
+}
+
+func TestNativeNetworkAgentMigrationRollbackSurvivesCancellation(t *testing.T) {
+	for _, cancelAt := range []string{"bootout", "bootstrap"} {
+		t.Run(cancelAt, func(t *testing.T) {
+			agent := nativeNetworkTestAgent(t)
+			definition, err := agent.definition()
+			if err != nil {
+				t.Fatal(err)
+			}
+			legacy := bytes.Replace(definition, []byte("<string>Interactive</string>"), []byte("<string>Background</string>"), 1)
+			plist, _, _, _ := agent.paths()
+			if err := atomicWriteDarwinLaunchAgent(plist, legacy); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			bootouts, bootstraps := 0, 0
+			restored := false
+			agent.run = func(commandCtx context.Context, _ string, args ...string) ([]byte, error) {
+				switch args[0] {
+				case "bootout":
+					bootouts++
+					if bootouts == 1 {
+						if cancelAt == "bootout" {
+							cancel()
+						}
+						return nil, nil
+					}
+				case "bootstrap":
+					bootstraps++
+					if bootstraps == 1 {
+						cancel()
+						return nil, commandCtx.Err()
+					}
+					restored = true
+				default:
+					return nil, nil
+				}
+				if commandCtx.Err() != nil {
+					t.Errorf("rollback inherited cancelled context: %v", commandCtx.Err())
+					return nil, commandCtx.Err()
+				}
+				deadline, ok := commandCtx.Deadline()
+				if remaining := time.Until(deadline); !ok || remaining <= 0 || remaining > 12*time.Second {
+					t.Errorf("rollback context is not bounded: %v, %t", deadline, ok)
+				}
+				return nil, nil
+			}
+			if err := agent.install(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("migration error %v", err)
+			}
+			if !restored || bootouts != 2 || bootstraps != 2 {
+				t.Fatalf("rollback did not restart old broker: restored=%t, bootouts=%d, bootstraps=%d", restored, bootouts, bootstraps)
+			}
+			data, err := readNativeNetworkAgent(plist)
+			if err != nil || !bytes.Equal(data, legacy) {
+				t.Fatalf("old definition was not restored: %v", err)
+			}
+		})
+	}
+}
+
+func TestNativeNetworkAgentMigrationWriteFailureRestartsUnchangedDefinition(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory write permissions")
+	}
+	agent := nativeNetworkTestAgent(t)
+	definition, err := agent.definition()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := bytes.Replace(definition, []byte("<string>Interactive</string>"), []byte("<string>Background</string>"), 1)
+	plist, _, _, _ := agent.paths()
+	if err := atomicWriteDarwinLaunchAgent(plist, legacy); err != nil {
+		t.Fatal(err)
+	}
+	directory := filepath.Dir(plist)
+	t.Cleanup(func() {
+		if err := os.Chmod(directory, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	bootstraps := 0
+	agent.run = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "bootout":
+			return nil, os.Chmod(directory, 0o500)
+		case "bootstrap":
+			bootstraps++
+			data, err := readNativeNetworkAgent(plist)
+			if err != nil || !bytes.Equal(data, legacy) {
+				t.Fatalf("bootstrap must use unchanged old definition: %v", err)
+			}
+		}
+		return nil, nil
+	}
+	if err := agent.install(context.Background()); !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("write error %v", err)
+	}
+	if bootstraps != 1 {
+		t.Fatalf("old readable definition was not bootstrapped: %d", bootstraps)
 	}
 }
 

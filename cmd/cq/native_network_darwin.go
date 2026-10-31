@@ -197,14 +197,19 @@ func (agent nativeNetworkAgent) install(ctx context.Context) error {
 		if !migrate {
 			return failure
 		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 12*time.Second)
+		defer cancel()
 		var restoreErr error
-		if _, err := agent.run(ctx, "/bin/launchctl", "bootout", target); err != nil && !isDarwinLaunchctlNotLoaded(err) {
+		if _, err := agent.run(cleanupCtx, "/bin/launchctl", "bootout", target); err != nil && !isDarwinLaunchctlNotLoaded(err) {
 			restoreErr = fmt.Errorf("stop failed CQ Network user broker: %w", err)
 		}
-		if err := atomicWriteDarwinLaunchAgent(plist, existing); err != nil {
-			return errors.Join(failure, restoreErr, fmt.Errorf("restore previous CQ Network definition: %w", err))
+		current, readErr := readNativeNetworkAgent(plist)
+		if readErr != nil || !bytes.Equal(current, existing) {
+			if err := atomicWriteDarwinLaunchAgent(plist, existing); err != nil {
+				return errors.Join(failure, restoreErr, fmt.Errorf("restore previous CQ Network definition: %w", err))
+			}
 		}
-		if _, err := agent.run(ctx, "/bin/launchctl", "bootstrap", domain, plist); err != nil {
+		if _, err := agent.run(cleanupCtx, "/bin/launchctl", "bootstrap", domain, plist); err != nil {
 			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore previous CQ Network user broker: %w", err))
 		}
 		return errors.Join(failure, restoreErr)
