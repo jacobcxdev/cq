@@ -288,5 +288,5 @@ func renderCask(m manifest) string {
     macOS will ask you to approve CQ Network. ChatGPT is not restarted.
   EOS
 end
-`, m.Version, m.SHA256, m.url())
+`, m.Version, m.SHA256, strings.ReplaceAll(m.url(), m.Version, "#{version}"))
 }
