@@ -15,7 +15,6 @@ import (
 	"golang.zx2c4.com/wireguard/conn/bindtest"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 // A real encrypted TCP SYN is held inside the peer's sequential receiver.
@@ -44,7 +43,7 @@ func testWireGuardCloseBeforeTUN(t *testing.T, queuedUp bool) {
 	serverIP := netip.MustParseAddr("10.16.0.1")
 	binds := bindtest.NewChannelBinds()
 	serverBind := &wireGuardObservedCloseBind{Bind: binds[1], closed: make(chan struct{})}
-	serverTUN, _, err := netstack.CreateNetTUN([]netip.Addr{serverIP}, nil, 1420)
+	serverTUN, _, err := createWireGuardNetTUN([]netip.Addr{serverIP}, 1420)
 	if err != nil {
 		t.Fatal(err)
 	}

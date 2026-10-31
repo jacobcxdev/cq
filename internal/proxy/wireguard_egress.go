@@ -14,7 +14,6 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	wgconn "golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
-	"golang.zx2c4.com/wireguard/tun/netstack"
 )
 
 func readWireGuardProfile(fs fsutil.FileSystem, path string) (*wireGuardProfile, error) {
@@ -40,7 +39,7 @@ type wireGuardRuntime struct {
 	bindFactory     func() wgconn.Bind
 	resolveEndpoint func(context.Context, string) (netip.AddrPort, error)
 	device          *device.Device
-	network         *netstack.Net
+	network         *wireGuardNetstack
 	closed          bool
 	life            context.Context
 	cancel          context.CancelFunc
@@ -72,7 +71,7 @@ func resolveWireGuardEndpoint(ctx context.Context, endpoint string) (netip.AddrP
 	return netip.AddrPortFrom(addresses[0].Unmap(), uint16(number)), nil
 }
 
-func (r *wireGuardRuntime) start(ctx context.Context) (*netstack.Net, error) {
+func (r *wireGuardRuntime) start(ctx context.Context) (*wireGuardNetstack, error) {
 	// Serialize setup with a context-selectable gate. Waiting requests must not
 	// inherit another request's endpoint-resolution timeout through a mutex.
 	select {
@@ -105,7 +104,7 @@ func (r *wireGuardRuntime) start(ctx context.Context) (*netstack.Net, error) {
 		}
 		endpoints[i] = endpoint
 	}
-	tun, network, err := netstack.CreateNetTUN(r.profile.addresses, nil, r.profile.mtu)
+	tun, network, err := createWireGuardNetTUN(r.profile.addresses, r.profile.mtu)
 	if err != nil {
 		return nil, errors.New("initialise WireGuard userspace network failed")
 	}
@@ -269,7 +268,7 @@ var nativeExcludedIPv6 = [...]netip.Prefix{
 	netip.MustParsePrefix("3fff::/20"),
 }
 
-func (r *wireGuardRuntime) lookupHost(ctx context.Context, stack *netstack.Net, host string) ([]netip.Addr, error) {
+func (r *wireGuardRuntime) lookupHost(ctx context.Context, stack *wireGuardNetstack, host string) ([]netip.Addr, error) {
 	// A successful UDP dial proves nothing about DNS reachability. Fail over
 	// whole lookups, with a bounded budget per configured server and the outer
 	// 30-second dial deadline bounding the complete sequence.
