@@ -187,9 +187,11 @@ func TestWireGuardInMemoryEgressStreamsAndDNSFailover(t *testing.T) {
 		_ = server.Shutdown(shutdown)
 		_ = server.Close()
 		_ = dns.Close()
-		_ = runtime.Close()
+		// Shutdown does not join hijacked WebSocket handlers. Finish all
+		// fixture I/O before closing the client's userspace network.
 		workers.Wait()
 		handlers.Wait()
+		_ = runtime.Close()
 	}()
 	egress, err := codexEgressWithDialer(runtime.DialContext, runtime.Close)
 	if err != nil {
