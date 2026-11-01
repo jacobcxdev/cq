@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +24,7 @@ import (
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	geminiprov "github.com/jacobcxdev/cq/internal/provider/gemini"
+	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
@@ -523,26 +527,37 @@ func invalidateProviderCache(id provider.ID) {
 	}
 }
 
-func runCheck(cli *CLI) error {
+func runCheck(cli *CLI) (returnErr error) {
 	roots, err := userdirs.Default()
 	if err != nil {
 		return fmt.Errorf("resolve CQ directories: %w", err)
 	}
-	httpClient := httputil.NewClient(10*time.Second, version)
-	codexProvider := codexprov.New(httpClient)
-
-	services := map[provider.ID]provider.Services{
-		provider.Claude: {Usage: claudeprov.New(httpClient)},
-		provider.Codex:  {Usage: codexProvider},
-		provider.Gemini: {Usage: geminiprov.New(httpClient, geminiOAuthClientSecret)},
-	}
-
 	providerIDs := []provider.ID{provider.Claude, provider.Codex, provider.Gemini}
 	if len(cli.Check.Providers) > 0 {
 		providerIDs = make([]provider.ID, len(cli.Check.Providers))
 		for i, p := range cli.Check.Providers {
 			providerIDs[i] = provider.ID(p)
 		}
+	}
+	httpClient := httputil.NewClient(10*time.Second, version)
+	codexHTTPClient, closeCodexClient := checkCodexHTTPClient(providerIDs, httpClient, checkClientDependencies{
+		loadConfig: proxy.LoadExistingConfig,
+		openEgress: func(port int) (http.RoundTripper, func() error, error) {
+			egress, err := proxy.OpenRuntimeEgressClient(port, fsutil.OSFileSystem{})
+			if err != nil {
+				return nil, nil, err
+			}
+			return egress.HTTP, egress.Close, nil
+		},
+	})
+	if closeCodexClient != nil {
+		defer func() { returnErr = errors.Join(returnErr, closeCodexClient()) }()
+	}
+	codexProvider := codexprov.New(codexHTTPClient)
+	services := map[provider.ID]provider.Services{
+		provider.Claude: {Usage: claudeprov.New(httpClient)},
+		provider.Codex:  {Usage: codexProvider},
+		provider.Gemini: {Usage: geminiprov.New(httpClient, geminiOAuthClientSecret)},
 	}
 
 	tty := isTerminal()
@@ -602,6 +617,38 @@ func runCheck(cli *CLI) error {
 	}
 	return renderer.Render(ctx, report)
 }
+
+type checkClientDependencies struct {
+	loadConfig func() (*proxy.Config, error)
+	openEgress func(int) (http.RoundTripper, func() error, error)
+}
+
+// Usage checks borrow the running broker instead of starting another tunnel.
+// Setup failures stay isolated to Codex and never fall back to direct egress.
+func checkCodexHTTPClient(providers []provider.ID, base httputil.Doer, deps checkClientDependencies) (httputil.Doer, func() error) {
+	if !slices.Contains(providers, provider.Codex) {
+		return base, nil
+	}
+	cfg, err := deps.loadConfig()
+	if errors.Is(err, os.ErrNotExist) {
+		return base, nil
+	}
+	if err != nil {
+		return checkClientError{fmt.Errorf("Codex usage egress configuration unavailable: %w", err)}, nil
+	}
+	if cfg.CodexEgressProxy == "" && cfg.CodexWireGuardProfile == "" {
+		return base, nil
+	}
+	transport, closeClient, err := deps.openEgress(cfg.Port)
+	if err != nil {
+		return checkClientError{fmt.Errorf("Codex usage runtime egress unavailable; no direct fallback: %w", err)}, nil
+	}
+	return httputil.NewClientWithTransport(10*time.Second, version, transport), closeClient
+}
+
+type checkClientError struct{ err error }
+
+func (c checkClientError) Do(*http.Request) (*http.Response, error) { return nil, c.err }
 
 type systemClock struct{}
 
