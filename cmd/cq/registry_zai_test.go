@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
@@ -49,7 +48,7 @@ func TestRegistryPipelineDiscoversZAIAfterConfiguration(t *testing.T) {
 		t.Fatalf("entries = %+v", entries)
 	}
 	pipeline.Publish()
-	loaded, err := modelregistry.LoadCodexEntriesFromCache(fsys, "/home/test/.codex/models_cache.json")
+	loaded, _, err := modelregistry.LoadCodexRegistryCache(fsys, testCQRoots())
 	if err != nil || len(loaded) != 1 || loaded[0].Provider != modelregistry.ProviderZAI {
 		t.Fatalf("cache: %+v, %v", loaded, err)
 	}
@@ -65,8 +64,9 @@ func TestRegistryPipelineDiscoversZAIAfterConfiguration(t *testing.T) {
 
 func TestModelsListZAIProvider(t *testing.T) {
 	fsys, stdout, _, deps := testModelsDeps()
+	deps.Roots.Cache = "/cq/cache"
 	snap := modelregistry.Snapshot{Entries: []modelregistry.Entry{{Provider: modelregistry.ProviderZAI, ID: "glm-5.3", Source: modelregistry.SourceNative, Raw: json.RawMessage(`{"slug":"glm-5.3"}`)}}}
-	if err := modelregistry.PublishCodexCache(fsys, codexModelCachePath(deps), snap, time.Now(), "test"); err != nil {
+	if err := modelregistry.PublishCodexRegistryCache(fsys, deps.Roots, snap); err != nil {
 		t.Fatal(err)
 	}
 	if err := runModelsList([]string{"--provider", "zai"}, deps); err != nil {

@@ -3,12 +3,15 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	cqhttp "github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
 
@@ -239,26 +242,161 @@ func TestServer_ModelsEndpoint_RegistryCatalog(t *testing.T) {
 
 // ── GET /models?client_version=... endpoint ───────────────────────────────────
 
+func TestServer_NativeCodexModelsUsesCallerEntitlements(t *testing.T) {
+	cat := modelregistry.NewCatalog(modelregistry.Snapshot{
+		Entries: []modelregistry.Entry{
+			{Provider: modelregistry.ProviderCodex, ID: "gpt-native", Source: modelregistry.SourceNative},
+			{Provider: modelregistry.ProviderCodex, ID: "pooled-only", Source: modelregistry.SourceNative},
+			{Provider: modelregistry.ProviderCodex, ID: "gpt-alias", Source: modelregistry.SourceOverlay, CloneFrom: "gpt-native"},
+		},
+		CodexRawByID: map[string]json.RawMessage{"gpt-native": json.RawMessage(`{"slug":"gpt-native","available_access_programs":{"cyber":[]}}`)},
+	})
+	calls := 0
+	srv := &Server{
+		Config:  &Config{ClaudeUpstream: "https://claude.example", CodexUpstream: "https://codex.example/backend-api/codex", LocalToken: "local"},
+		Catalog: cat,
+		CodexModelsTransport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			calls++
+			account := req.Header.Get("ChatGPT-Account-ID")
+			if req.Header.Get("Authorization") != "Bearer "+account || req.URL.String() != "https://codex.example/backend-api/codex/models?client_version=1.2.3" {
+				t.Error("native model request lost caller identity or client version")
+			}
+			if req.Header.Get("If-None-Match") != "" {
+				t.Error("upstream conditional request could reuse stale overlay response")
+			}
+			programmes := `[]`
+			if account == "blue-account" {
+				programmes = `["daybreak_blue"]`
+			}
+			body := `{"future_field":true,"models":[{"slug":"gpt-native","available_access_programs":{"cyber":` + programmes + `},"future_model_field":42}]}`
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Etag": {`"upstream"`}}, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}),
+		CodexTransport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			t.Fatal("native model discovery used pooled routing")
+			return nil, nil
+		}),
+	}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, account := range []string{"blue-account", "standard-account", "blue-account"} {
+		req := httptest.NewRequest(http.MethodGet, "/models?client_version=1.2.3", nil)
+		req.Header.Set("Authorization", "Bearer "+account)
+		req.Header.Set("ChatGPT-Account-ID", account)
+		req.Header.Set("If-None-Match", `"old"`)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+		}
+		var got struct {
+			Future bool `json:"future_field"`
+			Models []struct {
+				Slug     string `json:"slug"`
+				Programs struct {
+					Cyber []string `json:"cyber"`
+				} `json:"available_access_programs"`
+				Future int `json:"future_model_field"`
+			} `json:"models"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if !got.Future || len(got.Models) != 2 {
+			t.Fatalf("response used pooled catalogue or lost native fields: %s", w.Body.String())
+		}
+		for i, model := range got.Models {
+			want := "gpt-native"
+			if i == 1 {
+				want = "gpt-alias"
+			}
+			blue := len(model.Programs.Cyber) == 1 && model.Programs.Cyber[0] == "daybreak_blue"
+			if model.Slug != want || model.Future != 42 || blue != (account == "blue-account") {
+				t.Fatalf("wrong caller entitlements: %s", w.Body.String())
+			}
+		}
+		if w.Header().Get("Etag") != "" {
+			t.Error("transformed response retained upstream ETag")
+		}
+		if req.Header.Get("If-None-Match") != `"old"` || req.Header.Get("Authorization") != "Bearer "+account {
+			t.Fatal("incoming request mutated")
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("upstream calls = %d, want 3", calls)
+	}
+}
+
+func TestServer_NativeCodexModelsDoesNotFallbackOnAuthFailure(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			calls := 0
+			srv := &Server{
+				Config:  &Config{ClaudeUpstream: "https://claude.example", CodexUpstream: "https://codex.example"},
+				Catalog: modelregistry.NewCatalog(modelregistry.Snapshot{Entries: []modelregistry.Entry{{Provider: modelregistry.ProviderCodex, ID: "other-account", Source: modelregistry.SourceNative}}}),
+				CodexModelsTransport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					calls++
+					return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":"rejected"}`))}, nil
+				}),
+			}
+			req := httptest.NewRequest(http.MethodGet, "/models", nil)
+			req.Header.Set("Authorization", "Bearer signed-in")
+			w := httptest.NewRecorder()
+			srv.handleCodexNativeModels(w, req)
+			if w.Code != status || calls != 1 || w.Body.String() != `{"error":"rejected"}` {
+				t.Fatalf("auth rejection replaced with pooled catalogue: status=%d calls=%d body=%s", w.Code, calls, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestServer_NativeCodexModelsFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name, token, body string
+		err               error
+		want              int
+		calls             int
+	}{
+		{name: "missing authentication", want: http.StatusUnauthorized},
+		{name: "local proxy token", token: "local", want: http.StatusUnauthorized},
+		{name: "transport failure", token: "native", err: errors.New("private-credential-detail"), want: http.StatusBadGateway, calls: 1},
+		{name: "invalid response", token: "native", body: `{"models":null}`, want: http.StatusBadGateway, calls: 1},
+		{name: "oversized response", token: "native", body: strings.Repeat(" ", cqhttp.MaxResponseBody+1), want: http.StatusBadGateway, calls: 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			srv := &Server{
+				Config: &Config{LocalToken: "local", CodexUpstream: "https://codex.example"},
+				CodexModelsTransport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+					calls++
+					if test.err != nil {
+						return nil, test.err
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(test.body))}, nil
+				}),
+			}
+			req := httptest.NewRequest(http.MethodGet, "/models", nil)
+			if test.token != "" {
+				req.Header.Set("Authorization", "Bearer "+test.token)
+			}
+			w := httptest.NewRecorder()
+			srv.handleCodexNativeModels(w, req)
+			if w.Code != test.want || calls != test.calls || strings.Contains(w.Body.String(), "private-credential-detail") {
+				t.Fatalf("status=%d calls=%d body=%s", w.Code, calls, w.Body.String())
+			}
+		})
+	}
+}
+
 // TestServer_NativeCodexModelsEndpoint_ReturnsCodexShape verifies that
 // GET /models returns the Codex ModelsResponse shape.
 func TestServer_NativeCodexModelsEndpoint_ReturnsCodexShape(t *testing.T) {
-	snap := modelregistry.Snapshot{
-		Entries: []modelregistry.Entry{
-			{
-				Provider:      modelregistry.ProviderCodex,
-				ID:            "gpt-5.5",
-				Source:        modelregistry.SourceNative,
-				ContextWindow: 300000,
-				DisplayName:   "GPT 5.5",
-			},
-		},
-		FetchedAt: time.Now(),
-	}
-	cat := modelregistry.NewCatalog(snap)
-
 	srv := &Server{
-		Config:  &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "tok"},
-		Catalog: cat,
+		Config: &Config{ClaudeUpstream: "https://api.anthropic.com", CodexUpstream: "https://codex.example", LocalToken: "tok"},
+		CodexModelsTransport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"models":[{"slug":"gpt-5.5"}]}`))}, nil
+		}),
 	}
 	handler, err := srv.handler()
 	if err != nil {
@@ -267,6 +405,7 @@ func TestServer_NativeCodexModelsEndpoint_ReturnsCodexShape(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/models?client_version=1.2.3", nil)
+	req.Header.Set("Authorization", "Bearer signed-in")
 	handler.ServeHTTP(w, req)
 
 	if w.Code != http.StatusOK {
@@ -296,9 +435,9 @@ func TestServer_NativeCodexModelsEndpoint_ReturnsCodexShape(t *testing.T) {
 	}
 }
 
-// TestServer_NativeCodexModelsEndpoint_NilCatalog_Returns503 verifies that
-// GET /models returns 503 when no Catalog is configured.
-func TestServer_NativeCodexModelsEndpoint_NilCatalog_Returns503(t *testing.T) {
+// TestServer_NativeCodexModelsEndpoint_MissingTransport_Returns503 verifies that
+// GET /models returns 503 when native model discovery has no transport.
+func TestServer_NativeCodexModelsEndpoint_MissingTransport_Returns503(t *testing.T) {
 	srv := &Server{
 		Config:  &Config{ClaudeUpstream: "https://api.anthropic.com", LocalToken: "tok"},
 		Catalog: nil,

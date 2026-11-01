@@ -9,9 +9,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 type zaiModelsDoer func(*http.Request) (*http.Response, error)
@@ -50,10 +50,10 @@ func TestZAISourcePreservesNativeCodexMetadata(t *testing.T) {
 	}
 
 	fsys := fsutil.NewMemFS()
-	if err := PublishCodexCache(fsys, "/codex/models_cache.json", Snapshot{Entries: result.Entries, CodexRawByID: result.CodexRawByID}, time.Now(), "test"); err != nil {
+	if err := PublishCodexRegistryCache(fsys, userdirs.Roots{Cache: "/cq/cache"}, Snapshot{Entries: result.Entries}); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := LoadCodexEntriesFromCache(fsys, "/codex/models_cache.json")
+	loaded, _, err := LoadCodexRegistryCache(fsys, userdirs.Roots{Cache: "/cq/cache"})
 	if err != nil {
 		t.Fatal(err)
 	}

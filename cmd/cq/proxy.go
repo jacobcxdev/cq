@@ -1307,6 +1307,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			return codexHealthTracker.Health(context.Background())
 		},
 		CodexRequests:                    codexRequestRouter,
+		CodexModelsTransport:             codexEgress.HTTP,
 		CodexWebSocketExecutor:           codexWebSocketExecutor,
 		CodexWebSocketBroker:             codexWebSocketBroker,
 		Headroom:                         headroom,

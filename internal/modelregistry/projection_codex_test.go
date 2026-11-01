@@ -1,12 +1,11 @@
 package modelregistry
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 // --- CodexModelsResponse projection tests ---
@@ -201,186 +200,44 @@ func TestCodexModelsResponse_OverlayInheritsRawClone(t *testing.T) {
 	}
 }
 
-// --- PublishCodexCache tests ---
+// --- Native cache ownership tests ---
 
-func TestPublishCodexCache_EnvelopeFields(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	path := "/home/test/models_cache.json"
-
-	snap := makeCodexSnapshot(Entry{
-		Provider:    ProviderCodex,
-		ID:          "gpt-5.4",
-		DisplayName: "GPT-5.4",
-		Source:      SourceNative,
-	})
-
-	now := time.Unix(1700000000, 0)
-	if err := PublishCodexCache(fsys, path, snap, now, "1.2.3"); err != nil {
-		t.Fatalf("PublishCodexCache() error = %v", err)
-	}
-
-	data, err := fsys.ReadFile(path)
+func TestAugmentCodexModelsUsesNativeIDsAndCurrentAdditions(t *testing.T) {
+	const upstream = `{"models":[{"slug":"native","available_access_programs":{"cyber":["daybreak_blue"]}}]}`
+	snap := Snapshot{Entries: []Entry{
+		{Provider: ProviderCodex, ID: "pooled-only", Source: SourceNative},
+		{Provider: ProviderCodex, ID: "native", Source: SourceOverlay},
+		{Provider: ProviderCodex, ID: "alias", Source: SourceOverlay, CloneFrom: "native"},
+		{Provider: ProviderZAI, ID: "glm", Source: SourceNative, Raw: json.RawMessage(`{"slug":"glm"}`)},
+	}}
+	body, err := AugmentCodexModels([]byte(upstream), snap)
 	if err != nil {
-		t.Fatalf("ReadFile() error = %v", err)
+		t.Fatal(err)
 	}
-
-	var got struct {
-		FetchedAt     string            `json:"fetched_at"`
-		ClientVersion string            `json:"client_version"`
-		Models        []map[string]any  `json:"models"`
-		Etag          *string           `json:"etag"`
+	var got codexModelsResponse
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if len(got.Models) != 3 || !bytes.Contains(got.Models[0], []byte("daybreak_blue")) || !bytes.Contains(got.Models[1], []byte("daybreak_blue")) {
+		t.Fatalf("native response replaced or wrong additions: %s", body)
 	}
-
-	if got.FetchedAt == "" {
-		t.Error("fetched_at is empty")
+	body, err = AugmentCodexModels([]byte(upstream), Snapshot{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got.ClientVersion != "1.2.3" {
-		t.Errorf("client_version = %q, want 1.2.3", got.ClientVersion)
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
 	}
-	if len(got.Models) == 0 {
-		t.Error("models array is empty")
+	if len(got.Models) != 1 {
+		t.Fatalf("removed additions remained: %s", body)
 	}
 }
 
-func TestPublishCodexCache_FreshInstallNoCacheBestEffort(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	path := "/home/test/models_cache.json"
-
-	snap := makeCodexSnapshot(Entry{
-		Provider:    ProviderCodex,
-		ID:          "gpt-5.4",
-		DisplayName: "GPT-5.4",
-		Source:      SourceNative,
-	})
-
-	// No existing cache, no clientVersion — should succeed best-effort.
-	if err := PublishCodexCache(fsys, path, snap, time.Now(), ""); err != nil {
-		t.Fatalf("PublishCodexCache() with empty clientVersion should not error: %v", err)
-	}
-
-	data, _ := fsys.ReadFile(path)
-	if len(data) == 0 {
-		t.Fatal("file is empty after fresh install")
-	}
-}
-
-func TestPublishCodexCache_PreservesExistingEnvelopeFields(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	path := "/home/test/models_cache.json"
-
-	// Write existing cache with etag and client_version.
-	existing := `{
-  "fetched_at": "2024-01-01T00:00:00Z",
-  "etag": "\"abc123\"",
-  "client_version": "1.0.0",
-  "models": []
-}`
-	_ = fsys.WriteFile(path, []byte(existing), 0o600)
-
-	snap := makeCodexSnapshot(Entry{
-		Provider:    ProviderCodex,
-		ID:          "gpt-5.4",
-		DisplayName: "GPT-5.4",
-		Source:      SourceNative,
-	})
-
-	now := time.Unix(1700000000, 0)
-	if err := PublishCodexCache(fsys, path, snap, now, "2.0.0"); err != nil {
-		t.Fatalf("PublishCodexCache() error = %v", err)
-	}
-
-	data, _ := fsys.ReadFile(path)
-	var got struct {
-		FetchedAt     string  `json:"fetched_at"`
-		Etag          *string `json:"etag"`
-		ClientVersion string  `json:"client_version"`
-	}
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	// fetched_at must be updated to now.
-	if got.FetchedAt == "2024-01-01T00:00:00Z" {
-		t.Error("fetched_at was not updated")
-	}
-	// client_version must be updated.
-	if got.ClientVersion != "2.0.0" {
-		t.Errorf("client_version = %q, want 2.0.0", got.ClientVersion)
-	}
-	// etag preserved (we don't change it).
-	if got.Etag == nil || *got.Etag != `"abc123"` {
-		t.Errorf("etag = %v, want %q", got.Etag, `"abc123"`)
-	}
-}
-
-func TestPublishCodexCache_AtomicNoTempFile(t *testing.T) {
-	// Use MemFS: check that no .tmp key remains after a successful write.
-	fsys := fsutil.NewMemFS()
-	path := "/home/test/models_cache.json"
-
-	snap := makeCodexSnapshot(Entry{
-		Provider:    ProviderCodex,
-		ID:          "gpt-5.4",
-		DisplayName: "GPT-5.4",
-		Source:      SourceNative,
-	})
-
-	if err := PublishCodexCache(fsys, path, snap, time.Now(), "1.0"); err != nil {
-		t.Fatalf("PublishCodexCache() error = %v", err)
-	}
-
-	// The .tmp file should not exist.
-	if _, err := fsys.ReadFile(path + ".tmp"); err == nil {
-		t.Error("temp file still exists after successful publish")
-	}
-	// The real file must exist.
-	if _, err := fsys.ReadFile(path); err != nil {
-		t.Errorf("cache file missing after publish: %v", err)
-	}
-}
-
-func TestPublishCodexCache_OnlyCodexEntries(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	path := "/home/test/models_cache.json"
-
-	snap := Snapshot{
-		Entries: []Entry{
-			{Provider: ProviderAnthropic, ID: "claude-opus-4", Source: SourceNative},
-			{Provider: ProviderCodex, ID: "gpt-5.4", DisplayName: "GPT-5.4", Source: SourceNative},
-		},
-		FetchedAt: time.Now(),
-	}
-
-	if err := PublishCodexCache(fsys, path, snap, time.Now(), "1.0"); err != nil {
-		t.Fatalf("PublishCodexCache() error = %v", err)
-	}
-
-	data, _ := fsys.ReadFile(path)
-	var got struct {
-		Models []map[string]any `json:"models"`
-	}
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-
-	for _, m := range got.Models {
-		if slug, _ := m["slug"].(string); slug == "claude-opus-4" {
-			t.Error("Anthropic entry claude-opus-4 must not appear in Codex cache")
+func TestAugmentCodexModelsRejectsInvalidNativeResponse(t *testing.T) {
+	for _, body := range []string{`null`, `{}`, `{"models":null}`, `{"models":[{}]}`, `{"models":[{"slug":"duplicate"},{"slug":"duplicate"}]}`} {
+		if _, err := AugmentCodexModels([]byte(body), Snapshot{}); err == nil {
+			t.Errorf("accepted %s", body)
 		}
-	}
-
-	// gpt-5.4 must be present.
-	var found bool
-	for _, m := range got.Models {
-		if slug, _ := m["slug"].(string); slug == "gpt-5.4" {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("gpt-5.4 not found in Codex cache")
 	}
 }
 

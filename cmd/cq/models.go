@@ -535,14 +535,16 @@ func claudeModelCachePath(deps modelsDeps) string {
 	return filepath.Join(claudeHome, "cache", "model-capabilities.json")
 }
 
-// loadCachedNativeEntries reads the Codex models_cache.json and Claude Code
-// model-capabilities.json files published by the registry refresh and returns
-// their entries. Missing cache files are not an error; they just yield no
-// entries for that provider. Malformed caches surface as errors.
+// loadCachedNativeEntries prefers CQ-owned Codex/Z.ai metadata, falling back
+// to native Codex cache before the first CQ refresh. Claude capabilities retain
+// their existing cache. Native Codex writes cannot discard CQ provider identity.
 func loadCachedNativeEntries(deps modelsDeps) ([]modelregistry.Entry, error) {
-	var all []modelregistry.Entry
+	all, present, err := modelregistry.LoadCodexRegistryCache(deps.FS, deps.Roots)
+	if err != nil {
+		return nil, err
+	}
 
-	if path := codexModelCachePath(deps); path != "" {
+	if path := codexModelCachePath(deps); !present && path != "" {
 		codex, err := modelregistry.LoadCodexEntriesFromCache(deps.FS, path)
 		if err != nil {
 			return nil, err

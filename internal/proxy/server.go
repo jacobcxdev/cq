@@ -102,7 +102,9 @@ type Server struct {
 	CodexDiscover            CodexDiscoverer
 	CodexHealth              func() CodexHealth
 	CodexRequests            *CodexRequestRouter
-	CodexWebSocketExecutor   ExplicitWebSocketExecutor
+	// CodexModelsTransport uses Codex egress without pooled credential selection.
+	CodexModelsTransport   http.RoundTripper
+	CodexWebSocketExecutor ExplicitWebSocketExecutor
 	// CodexWebSocketBroker owns readiness-gated terminating WebSocket routing.
 	// Nil fails closed when WebSocket enforcement is effective.
 	CodexWebSocketBroker CodexWebSocketRoutingHandler
@@ -541,21 +543,6 @@ func (s *Server) rejectInvalidProxyToken(w http.ResponseWriter, r *http.Request,
 		LatencyMS:  time.Since(start).Milliseconds(),
 		Error:      diagnosticsErrorCode("authentication_error", "invalid proxy token"),
 	})
-}
-
-// handleCodexNativeModels serves GET /models?client_version=... in the native
-// Codex ModelsResponse shape. This endpoint is used by Codex CLI to fetch the
-// available model list. No proxy token is required — the proxy binds to 127.0.0.1
-// only, so only local processes can reach this endpoint.
-func (s *Server) handleCodexNativeModels(w http.ResponseWriter, r *http.Request) {
-	if s.Catalog == nil {
-		writeError(w, http.StatusServiceUnavailable, "api_error", "model registry not configured")
-		return
-	}
-	snap := s.Catalog.Snapshot()
-	resp := modelregistry.CodexModelsResponse(snap)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // handleRegistry serves GET /v1/registry and returns the current registry

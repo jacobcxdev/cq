@@ -283,12 +283,8 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 				fmt.Fprintf(opts.Stderr, "cq: registry: publish Claude capabilities: %v\n", err)
 			}
 		}
-		codexHome := opts.Env("CODEX_HOME")
-		if codexHome == "" {
-			codexHome = filepath.Join(opts.HomeDir, ".codex")
-		}
-		if err := modelregistry.PublishCodexCache(opts.FS, filepath.Join(codexHome, "models_cache.json"), snap, now, snap.CodexClientVersion); err != nil {
-			fmt.Fprintf(opts.Stderr, "cq: registry: publish Codex cache: %v\n", err)
+		if err := modelregistry.PublishCodexRegistryCache(opts.FS, opts.Roots, snap); err != nil {
+			fmt.Fprintf(opts.Stderr, "cq: registry: publish CQ model cache: %v\n", err)
 		}
 	}
 	done := make(chan struct{})
