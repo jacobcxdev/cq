@@ -1,3 +1,4 @@
+import CQNetwork
 import Foundation
 
 /// Pending capacity and scanner concurrency are separate bounds. Neither the
@@ -21,6 +22,11 @@ final class AdmissionScheduler {
 
     func reserve<Value>(identity: UUID, verify: @escaping () -> Value?, accepted: @escaping (Value) -> Void,
                         refused: @escaping () -> Void) -> PendingAdmission<Value>? {
+        reserve(identity: identity, verify: VerificationWork(verify: verify), accepted: accepted, refused: refused)
+    }
+
+    func reserve<Value>(identity: UUID, verify: VerificationWork<Value>, accepted: @escaping (Value) -> Void,
+                        refused: @escaping () -> Void) -> PendingAdmission<Value>? {
         guard capacity.wait(timeout: .now()) == .success else { return nil }
         let permit = AdmissionPermit { self.capacity.signal() }
         return PendingAdmission(identity: identity, operations: operations, timeout: timeout, permit: permit,
@@ -36,14 +42,13 @@ final class PendingAdmission<Value>: FlowBridge {
     private let operations: OperationQueue
     private let timeout: TimeInterval
     private let permit: AdmissionPermit
-    private let verify: () -> Value?
+    private let verify: VerificationWork<Value>
     private let accepted: (Value) -> Void
     private let refused: () -> Void
-    private var operation: BlockOperation?
     private var expiry: DispatchWorkItem?
 
     fileprivate init(identity: UUID, operations: OperationQueue, timeout: TimeInterval, permit: AdmissionPermit,
-                     verify: @escaping () -> Value?, accepted: @escaping (Value) -> Void, refused: @escaping () -> Void) {
+                     verify: VerificationWork<Value>, accepted: @escaping (Value) -> Void, refused: @escaping () -> Void) {
         self.identity = identity; self.operations = operations; self.timeout = timeout; self.permit = permit
         self.verify = verify; self.accepted = accepted; self.refused = refused
     }
@@ -52,39 +57,35 @@ final class PendingAdmission<Value>: FlowBridge {
         lock.lock()
         guard state == .created else { lock.unlock(); return }
         state = .running
-        let operation = BlockOperation { [weak self] in self?.perform() }
-        operation.completionBlock = { [permit] in permit.release() }
-        self.operation = operation
         let expiry = DispatchWorkItem { [weak self] in self?.cancel() }
         self.expiry = expiry
         lock.unlock()
         DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: expiry)
-        operations.addOperation(operation)
+        // The callback owns this admission until its shared check completes.
+        // Cancellation closes the flow but cannot free a running/queued scanner
+        // permit and allow an unbounded backlog of abandoned verifications.
+        verify.start(on: operations) { [self] value in
+            defer { permit.release() }
+            complete(value)
+        }
     }
 
     func cancel() {
         lock.lock()
         guard state == .created || state == .running else { lock.unlock(); return }
+        let started = state == .running
         state = .cancelled
-        let operation = self.operation
-        self.operation = nil
         expiry?.cancel()
         expiry = nil
         lock.unlock()
-        if let operation { operation.cancel() } else { permit.release() }
+        if !started { permit.release() }
         refused()
     }
 
-    private func perform() {
-        lock.lock()
-        let running = state == .running
-        lock.unlock()
-        guard running else { return }
-        let value = verify()
+    private func complete(_ value: Value?) {
         lock.lock()
         guard state == .running else { lock.unlock(); return }
         state = .finished
-        operation = nil
         expiry?.cancel()
         expiry = nil
         lock.unlock()
