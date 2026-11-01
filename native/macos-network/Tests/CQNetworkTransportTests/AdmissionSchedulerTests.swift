@@ -5,10 +5,10 @@ import XCTest
 
 final class AdmissionSchedulerTests: XCTestCase {
     func testQueuedBurstSharesSourceCheckWithoutReusingCompletedTrust() throws {
-        let scheduler = AdmissionScheduler(maximumPending: 32, workers: 4)
+        let scheduler = AdmissionScheduler()
         let entered = expectation(description: "source check started")
         let completed = expectation(description: "all queued flows admitted")
-        completed.expectedFulfillmentCount = 24
+        completed.expectedFulfillmentCount = 256
         let gate = DispatchSemaphore(value: 0)
         let count = LockedCount()
         let admission = TransparentFlowAdmission { _, _ in
@@ -19,7 +19,7 @@ final class AdmissionSchedulerTests: XCTestCase {
         }
         let token = Data(repeating: 7, count: 32)
         var pending: [PendingAdmission<AdmittedFlowDestinationPolicy>] = []
-        for i in 0..<24 {
+        for i in 0..<256 {
             let check = admission.prepareSourceVerification(auditToken: token, signingIdentifierHint: "com.openai.codex")
             let task = try XCTUnwrap(scheduler.reserve(identity: UUID(), verify: check,
                 accepted: { policy in
@@ -32,7 +32,8 @@ final class AdmissionSchedulerTests: XCTestCase {
             task.start()
             if i == 0 { wait(for: [entered], timeout: 1) }
         }
-        for _ in 0..<24 { gate.signal() }
+        XCTAssertNil(scheduler.reserve(identity: UUID(), verify: { true }, accepted: { _ in }, refused: {}))
+        for _ in 0..<256 { gate.signal() }
         wait(for: [completed], timeout: 2)
         XCTAssertEqual(count.value, 1)
         XCTAssertNotNil(admission.prepareSourceVerification(auditToken: token, signingIdentifierHint: "com.openai.codex")())

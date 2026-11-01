@@ -110,6 +110,27 @@ func TestNativeNetworkEnableWaitsForAuthenticatedReadiness(t *testing.T) {
 	}
 }
 
+func TestNativeNetworkEnableWaitsForExtensionReplacement(t *testing.T) {
+	var events []string
+	runner := nativeNetworkTestRunner(&events)
+	checks := 0
+	runner.host = func(_ context.Context, args ...string) ([]byte, error) {
+		if args[0] == "status" {
+			checks++
+			if checks <= 6 {
+				return []byte(`{"ready":false}`), errors.New("starting")
+			}
+		}
+		return []byte(healthyNativeNetworkStatus), nil
+	}
+	if err := runner.execute(context.Background(), "enable", false, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if checks != 7 {
+		t.Fatalf("status checks %d", checks)
+	}
+}
+
 func TestNativeNetworkStatusRejectsFalseReadiness(t *testing.T) {
 	for _, data := range []string{
 		`{}`, `null`, `{"ready":true}`, `{"ready":true,"extension_connected":true,"broker_registered":true,"broker_ready":false}`,
@@ -170,7 +191,7 @@ func TestNativeNetworkEnableStopsAfterBoundedReadinessChecks(t *testing.T) {
 	if err := runner.execute(context.Background(), "enable", false, io.Discard); err == nil {
 		t.Fatal("pending activation reported success")
 	}
-	if checks != 4 {
+	if checks != 31 {
 		t.Fatalf("status checks %d", checks)
 	}
 }

@@ -7,7 +7,9 @@ final class AdmissionScheduler {
     private let operations: OperationQueue
     private let timeout: TimeInterval
 
-    init(maximumPending: Int = 32, workers: Int = 4, timeout: TimeInterval = 30) {
+    // The provider already bounds all pending and active flows at 256. A lower
+    // pending limit dropped ordinary connection bursts before shared checks ran.
+    init(maximumPending: Int = 256, workers: Int = 4, timeout: TimeInterval = 30) {
         precondition(maximumPending > 0 && workers > 0 && timeout > 0)
         capacity = DispatchSemaphore(value: maximumPending)
         operations = OperationQueue()
