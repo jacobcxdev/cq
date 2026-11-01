@@ -3,6 +3,7 @@ import CQNetworkIPC
 import Darwin
 import Foundation
 import NetworkExtension
+import os
 
 public final class CQTransparentProxyProvider: NETransparentProxyProvider {
     private let registry = BrokerSessionRegistry()
@@ -10,6 +11,7 @@ public final class CQTransparentProxyProvider: NETransparentProxyProvider {
     private var sessions: [ObjectIdentifier: FlowBridge] = [:]
     private var admission: TransparentFlowAdmission?
     private let verification = AdmissionScheduler()
+    private let logger = Logger(subsystem: "dev.jacobcx.cq.network", category: "admission")
     private var running = false
 
     public override func startProxy(options: [String: Any]? = nil, completionHandler: @escaping (Error?) -> Void) {
@@ -71,19 +73,28 @@ public final class CQTransparentProxyProvider: NETransparentProxyProvider {
             return immediate == .passThrough ? false : TransparentFlowAdmission.refuse(flow)
         }
         guard (udp || endpoint != nil), let token = flow.metaData.sourceAppAuditToken, token.count == 32 else {
+            logger.debug("refused_source_metadata")
             return TransparentFlowAdmission.refuse(flow)
         }
         let uid = token.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 4, as: UInt32.self) }
-        guard uid != 0 else { return TransparentFlowAdmission.refuse(flow) }
+        guard uid != 0 else {
+            logger.debug("refused_source_uid")
+            return TransparentFlowAdmission.refuse(flow)
+        }
         let id = ObjectIdentifier(flow)
         let identity = UUID()
         lock.lock()
-        guard running, sessions.count < 256 else { lock.unlock(); return TransparentFlowAdmission.refuse(flow) }
-        let pending = verification.reserve(identity: identity, verify: { () -> AdmittedFlowDestinationPolicy? in
-            let result = udp ? admission.udpAdmission(for: flow) : admission.admission(for: flow, remoteHost: endpoint?.hostname)
-            guard case .proxy(let destinations) = result else { return nil }
-            return destinations
-        }, accepted: { [weak self] destinations in
+        guard running else { lock.unlock(); return TransparentFlowAdmission.refuse(flow) }
+        guard sessions.count < 256 else {
+            lock.unlock()
+            logger.debug("refused_flow_capacity")
+            return TransparentFlowAdmission.refuse(flow)
+        }
+        // Capture the batch before queueing, so queued members share the check
+        // they arrived during rather than each rescanning the complete bundle.
+        let verifySource = admission.prepareSourceVerification(for: flow)
+        let queuedAt = DispatchTime.now().uptimeNanoseconds
+        let pending = verification.reserve(identity: identity, verify: verifySource, accepted: { [weak self] destinations in
             guard let self else { _ = TransparentFlowAdmission.refuse(flow); return }
             self.lock.lock()
             guard self.running, let current = self.sessions[id] as? PendingAdmission<AdmittedFlowDestinationPolicy>,
@@ -100,10 +111,13 @@ public final class CQTransparentProxyProvider: NETransparentProxyProvider {
             }
             self.sessions[id] = bridge
             self.lock.unlock()
+            let elapsed = (DispatchTime.now().uptimeNanoseconds - queuedAt) / 1_000_000
+            self.logger.debug("source_verified wait_ms=\(elapsed, privacy: .public)")
             self.registry.recordAdmitted(uid: uid, udp: udp)
             bridge.start()
         }, refused: { [weak self] in
             if let self {
+                self.logger.debug("source_verification_refused_or_expired")
                 self.lock.lock()
                 if let current = self.sessions[id] as? PendingAdmission<AdmittedFlowDestinationPolicy>, current.identity == identity {
                     self.sessions.removeValue(forKey: id)
@@ -112,7 +126,11 @@ public final class CQTransparentProxyProvider: NETransparentProxyProvider {
             }
             _ = TransparentFlowAdmission.refuse(flow)
         })
-        guard let pending else { lock.unlock(); return TransparentFlowAdmission.refuse(flow) }
+        guard let pending else {
+            lock.unlock()
+            logger.debug("refused_verification_capacity")
+            return TransparentFlowAdmission.refuse(flow)
+        }
         sessions[id] = pending
         lock.unlock()
         pending.start()

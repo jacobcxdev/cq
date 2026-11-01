@@ -6,6 +6,7 @@ import NetworkExtension
 /// system extension and does not create a VPN configuration or change routing.
 public final class TransparentFlowAdmission {
     private let verifySource: (Data?, String) -> SourceVerdict
+    private let sourceChecks = SourceVerificationBatches()
     private let policy = FlowPolicy()
 
     public init(applicationURL: URL) {
@@ -48,6 +49,22 @@ public final class TransparentFlowAdmission {
     public func udpAdmission(for flow: NEAppProxyFlow) -> FlowAdmission {
         udpAdmission(auditToken: flow.metaData.sourceAppAuditToken,
                      signingIdentifierHint: flow.metaData.sourceAppSigningIdentifier)
+    }
+
+    public func prepareSourceVerification(for flow: NEAppProxyFlow) -> () -> AdmittedFlowDestinationPolicy? {
+        prepareSourceVerification(auditToken: flow.metaData.sourceAppAuditToken,
+                                  signingIdentifierHint: flow.metaData.sourceAppSigningIdentifier)
+    }
+
+    func prepareSourceVerification(auditToken: Data?, signingIdentifierHint: String) -> () -> AdmittedFlowDestinationPolicy? {
+        guard let auditToken, auditToken.count == 32,
+              SourceVerifier.signingIdentifiers.contains(signingIdentifierHint) else { return { nil } }
+        let check = sourceChecks.prepare(auditToken: auditToken, signingIdentifier: signingIdentifierHint) { [verifySource] in
+            verifySource(auditToken, signingIdentifierHint)
+        }
+        return {
+            check.verify() == .verified ? AdmittedFlowDestinationPolicy() : nil
+        }
     }
 
     func udpAdmission(auditToken: Data?, signingIdentifierHint: String) -> FlowAdmission {

@@ -4,6 +4,72 @@ import XCTest
 @testable import CQNetworkTransport
 
 final class AdmissionSchedulerTests: XCTestCase {
+    func testQueuedBurstSharesSourceCheckWithoutReusingCompletedTrust() throws {
+        let scheduler = AdmissionScheduler(maximumPending: 32, workers: 4)
+        let entered = expectation(description: "source check started")
+        let completed = expectation(description: "all queued flows admitted")
+        completed.expectedFulfillmentCount = 24
+        let gate = DispatchSemaphore(value: 0)
+        let count = LockedCount()
+        let admission = TransparentFlowAdmission { _, _ in
+            count.increment()
+            if count.value == 1 { entered.fulfill() }
+            _ = gate.wait(timeout: .now() + 3)
+            return .verified
+        }
+        let token = Data(repeating: 7, count: 32)
+        var pending: [PendingAdmission<AdmittedFlowDestinationPolicy>] = []
+        for i in 0..<24 {
+            let check = admission.prepareSourceVerification(auditToken: token, signingIdentifierHint: "com.openai.codex")
+            let task = try XCTUnwrap(scheduler.reserve(identity: UUID(), verify: check,
+                accepted: { policy in
+                    XCTAssertEqual(policy.decision(remoteHost: "8.8.8.8"), .proxy)
+                    XCTAssertEqual(policy.decision(remoteHost: "127.0.0.1"), .passThrough)
+                    XCTAssertEqual(policy.decision(remoteHost: nil), .block)
+                    completed.fulfill()
+                }, refused: { XCTFail("valid queued flow refused") }))
+            pending.append(task)
+            task.start()
+            if i == 0 { wait(for: [entered], timeout: 1) }
+        }
+        for _ in 0..<24 { gate.signal() }
+        wait(for: [completed], timeout: 2)
+        XCTAssertEqual(count.value, 1)
+        XCTAssertNotNil(admission.prepareSourceVerification(auditToken: token, signingIdentifierHint: "com.openai.codex")())
+        XCTAssertEqual(count.value, 2)
+        withExtendedLifetime(pending) {}
+    }
+
+    func testSharedSourceResultCannotReopenCancelledFlow() throws {
+        let scheduler = AdmissionScheduler(maximumPending: 2, workers: 2)
+        let entered = expectation(description: "shared source check started")
+        let closed = expectation(description: "first flow cancelled")
+        let accepted = expectation(description: "second flow admitted")
+        let gate = DispatchSemaphore(value: 0)
+        let count = LockedCount()
+        let admission = TransparentFlowAdmission { _, _ in
+            count.increment()
+            entered.fulfill()
+            _ = gate.wait(timeout: .now() + 3)
+            return .verified
+        }
+        let token = Data(repeating: 7, count: 32)
+        let first = try XCTUnwrap(scheduler.reserve(identity: UUID(),
+            verify: admission.prepareSourceVerification(auditToken: token, signingIdentifierHint: "com.openai.codex"),
+            accepted: { _ in XCTFail("cancelled flow reopened") }, refused: { closed.fulfill() }))
+        first.start()
+        wait(for: [entered], timeout: 1)
+        first.cancel()
+        let second = try XCTUnwrap(scheduler.reserve(identity: UUID(),
+            verify: admission.prepareSourceVerification(auditToken: token, signingIdentifierHint: "com.openai.codex"),
+            accepted: { _ in accepted.fulfill() }, refused: { XCTFail("second flow refused") }))
+        second.start()
+        gate.signal()
+        wait(for: [closed, accepted], timeout: 1)
+        XCTAssertEqual(count.value, 1)
+        withExtendedLifetime((first, second)) {}
+    }
+
     func testSlowVerificationDoesNotBlockUnrelatedOrLocalPreflight() throws {
         let scheduler = AdmissionScheduler(maximumPending: 1, workers: 1)
         let entered = expectation(description: "slow verifier started")
