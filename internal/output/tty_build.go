@@ -14,9 +14,10 @@ import (
 )
 
 var icons = map[provider.ID]string{
-	provider.Claude: "\u273B", // ✻
-	provider.Codex:  "\uF120", //
-	provider.Gemini: "\uF51B", //
+	provider.Claude: "\u273B",     // ✻
+	provider.Codex:  "\uF120",     //
+	provider.Gemini: "\uF51B",     //
+	provider.ZAI:    "\U000F0B21", // nf-md-alpha_z_box
 }
 
 // BuildTTYModel converts a Report into a structured TTYModel ready for rendering.
