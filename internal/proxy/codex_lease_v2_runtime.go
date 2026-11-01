@@ -680,7 +680,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	var restoredRequiresAccount bool
 	if !redistributing {
-		restoredRequiresAccount, err = runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity, ingressContinuity)
+		restoredRequiresAccount, err = runtime.validateRequestContinuity(restored, requestIdentity, selected.AccountKey, plan.RequestKind, plan.Evidence, plan.authenticatedCallerContinuity, ingressContinuity)
 	}
 	if err != nil {
 		return nil, err
@@ -740,6 +740,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 		return nil, ErrCodexConcurrentTurn
 	}
 
+	preTurnCompactionReset := !requiresAccountContinuity && codexLeasePreTurnCompactionCanBeginTurn(current.Record, plan.RequestKind)
 	desired := codexLeaseRuntimeMutationRecord(current.Record)
 	desired.State = LeaseProvisional
 	if current.Record.EverAdmitted {
@@ -754,7 +755,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	if migrateTurnStateLatch && !constantTimeCodexLeaseDigestEqual(current.Record.TurnStateHash, runtime.store.hash("turn-state", plan.Evidence.TurnState)) {
 		desired.TurnStateHash = runtime.store.hash("turn-state", plan.Evidence.TurnState)
 	}
-	if !requiresAccountContinuity && (redistributing || codexLeaseAccountUnavailableCanBeginRequest(current.Record) || codexLeaseAffinityInvalidationCanBeginRequest(restored, current.Record, plan.Evidence) || codexLeaseRecordAllowsPortableReset(current.Record)) {
+	if !requiresAccountContinuity && (redistributing || codexLeaseAccountUnavailableCanBeginRequest(current.Record) || codexLeaseAffinityInvalidationCanBeginRequest(restored, current.Record, plan.Evidence) || codexLeaseRecordAllowsPortableReset(current.Record) || preTurnCompactionReset) {
 		if current.Record.EverAdmitted {
 			desired.AccountHash = current.Record.AccountHash
 		}
@@ -815,7 +816,7 @@ func (runtime *CodexLeaseRuntime) BeginRequestContext(ctx context.Context, plan 
 	}
 	handle.newTurn = newTurn
 	handle.relatchTurnStateOnAdmission = runtime.canRelatchAuthenticatedTurnState(current.Record, selected.AccountKey, plan.Evidence, plan.authenticatedCallerContinuity) ||
-		(current.Record.HasTurnState && (redistributing || codexLeasePortableUnavailableContinuation(current.Record, plan.Evidence)))
+		(current.Record.HasTurnState && (redistributing || codexLeasePortableUnavailableContinuation(current.Record, plan.Evidence) || preTurnCompactionReset))
 	return handle, nil
 }
 
@@ -835,6 +836,18 @@ func codexLeaseRecordRequiresAccount(record CodexJournalRecordV2) bool {
 	default:
 		return true
 	}
+}
+
+// Pre-turn compaction prepares portable input for the first real turn. Once
+// drained, it must not make that full create inherit the preparation account.
+// A real turn admission, failed compaction, or live observer closes this boundary.
+func codexLeasePreTurnCompactionCanBeginTurn(record CodexJournalRecordV2, kind CodexRequestKind) bool {
+	return kind == CodexRequestTurn && record.EverAdmitted &&
+		record.AdmissionRequestKind == CodexRequestCompaction && record.AdmissionCompactionPhase == CodexCompactionPreTurn &&
+		record.AdmissionRequestGeneration == record.Generation &&
+		record.RequestKind == CodexRequestCompaction && record.CompactionPhase == CodexCompactionPreTurn &&
+		codexLeaseCurrentAttemptState(record) == CodexAttemptProviderCompleted &&
+		record.SocketLineageExtinct && codexLeaseRuntimeCanBeginRequest(record)
 }
 
 func codexLeaseRecordAllowsPortableReset(record CodexJournalRecordV2) bool {
@@ -2051,7 +2064,7 @@ func (runtime *CodexLeaseRuntime) restoredRecord(restored CodexRestoredLane, ide
 	return CodexRestoredRecord{}, false
 }
 
-func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestoredLane, requestIdentity CodexJournalRecordIdentity, selected codex.AccountKey, evidence CodexLeaseRequestEvidence, authenticatedCallerContinuity bool, ingressContinuity ...*codexLeaseIngressContinuityBinding) (bool, error) {
+func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestoredLane, requestIdentity CodexJournalRecordIdentity, selected codex.AccountKey, kind CodexRequestKind, evidence CodexLeaseRequestEvidence, authenticatedCallerContinuity bool, ingressContinuity ...*codexLeaseIngressContinuityBinding) (bool, error) {
 	var authority CodexRestoredRecord
 	var found bool
 	newTurn := restored.Classification == CodexRestoredLaneUnseen
@@ -2069,7 +2082,8 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 	if newTurn && authenticatedCallerContinuity && (!found || !authority.Record.Authoritative) {
 		return true, nil
 	}
-	portableUnavailable := found && !newTurn && codexLeasePortableUnavailableContinuation(authority.Record, evidence)
+	portableReset := found && !newTurn && (codexLeasePortableUnavailableContinuation(authority.Record, evidence) ||
+		(evidence.PreviousResponseID == "" && !evidence.HasTurnState && !authenticatedCallerContinuity && codexLeasePreTurnCompactionCanBeginTurn(authority.Record, kind)))
 	if !newTurn && found {
 		ingress := firstIngressContinuity(ingressContinuity)
 		canMigrateLatch := runtime.canMigrateAuthenticatedTurnStateLatch(authority.Record, selected, evidence, authenticatedCallerContinuity)
@@ -2078,7 +2092,7 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 		}
 		missingAuthenticatedState := authenticatedCallerContinuity && authority.Record.HasTurnState && !evidence.HasTurnState
 		missingDisplacedState := authority.Record.HasTurnState && !evidence.HasTurnState && evidence.PreviousResponseID == "" && evidence.displacedTurnState != "" && constantTimeCodexLeaseDigestEqual(authority.Record.PreviousTurnStateHash, runtime.store.hash("turn-state", evidence.displacedTurnState))
-		if authority.Record.HasTurnState != evidence.HasTurnState && !missingAuthenticatedState && !missingDisplacedState && !portableUnavailable {
+		if authority.Record.HasTurnState != evidence.HasTurnState && !missingAuthenticatedState && !missingDisplacedState && !portableReset {
 			return false, &codexContinuityError{reason: codexContinuityTurnStatePresenceMismatch}
 		}
 		if evidence.HasTurnState && !constantTimeCodexLeaseDigestEqual(authority.Record.TurnStateHash, runtime.store.hash("turn-state", evidence.TurnState)) &&
@@ -2092,7 +2106,7 @@ func (runtime *CodexLeaseRuntime) validateRequestContinuity(restored CodexRestor
 		}
 	}
 	requiresAccount := authenticatedCallerContinuity || evidence.PreviousResponseID != "" || evidence.HasTurnState || (found && !newTurn && codexLeaseRecordRequiresAccount(authority.Record))
-	if portableUnavailable {
+	if portableReset {
 		requiresAccount = false
 	}
 	if requiresAccount && (!found || authority.Record.AccountHash == "" || !constantTimeCodexLeaseDigestEqual(authority.Record.AccountHash, runtime.store.hash("account", string(selected)))) {

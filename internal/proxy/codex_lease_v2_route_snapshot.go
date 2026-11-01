@@ -21,6 +21,7 @@ type CodexLeaseRouteSnapshot struct {
 	BoundChoice               RouteChoice
 	BoundRequiresAccount      bool
 	BoundRequestCompleted     bool
+	BoundPreTurnCompleted     bool
 	HistoricalAuthoritative   bool
 	RestartableFailedHead     bool
 	AffinityPresent           bool
@@ -154,6 +155,7 @@ func (coordinator *CodexContinuityCoordinator) LoadRouteSnapshot(ctx context.Con
 				snapshot.BoundChoice = cloneRouteChoice(record.Choice)
 				snapshot.BoundRequiresAccount = codexLeaseRecordRequiresAccount(record.Record)
 				snapshot.BoundRequestCompleted = codexLeaseCurrentAttemptState(record.Record) == CodexAttemptProviderCompleted
+				snapshot.BoundPreTurnCompleted = codexLeasePreTurnCompactionCanBeginTurn(record.Record, CodexRequestTurn)
 				break
 			}
 		}

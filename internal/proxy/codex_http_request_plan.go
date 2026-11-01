@@ -594,6 +594,16 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 			snapshot.AffinityPresent = false
 		}
 	}
+	// The full create after pre-turn compaction establishes its own account.
+	// Keep preparation as soft affinity, but do not enforce it as turn authority.
+	if input.ExpectedBound == nil && snapshot.BoundPreTurnCompleted && metadata.RequestKind == CodexRequestTurn && codexHTTPRequestAccountUnavailablePortable(protocol) {
+		snapshot.BoundAccountKey = ""
+		snapshot.BoundIdentity = CodexJournalRecordIdentity{}
+		snapshot.BoundRecordGeneration = 0
+		snapshot.BoundChoice = RouteChoice{}
+		snapshot.BoundRequiresAccount = false
+		snapshot.AffinityRequiresAccount = false
+	}
 	snapshot = codexHTTPRequestDetachPortableUnavailableRoute(snapshot, protocol, input.ExpectedBound)
 	snapshot = codexHTTPRequestDetachInvalidatedPortableRoute(snapshot, protocol, input.ExpectedBound)
 
@@ -1312,15 +1322,32 @@ func (factory *CodexHTTPRequestPlanFactory) adoptWebSocketPrewarm(ctx context.Co
 	if factory.Now != nil {
 		now = factory.Now()
 	}
-	accountValues := map[codex.AccountKey]PoolValue{}
-	if factory.SessionPolicy != nil {
-		accountValues = factory.SessionPolicy.Resolve([]byte(metadata.SessionID), accounts).AccountValues
+	caller, _ := runtimeCallerAuthority(ctx)
+	cyberActive := factory.CyberEligibility != nil && protocol.CyberAccessProgram != ""
+	var decision SessionPolicyDecision
+	if cyberActive {
+		decision, err = enforceSessionCyberPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, reservation.AccountKey, now)
+	} else {
+		decision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, reservation.AccountKey, now)
+	}
+	if err != nil {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "pool_policy", Stage: "prewarm_adoption", Outcome: "error", Reason: string(codexRequestFailureReason(err)), AccountHint: codexTraceAccountHint(reservation.AccountKey)})
+		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
+	}
+	if decision.Status == PolicyDecisionSelected {
+		inventory = filterCodexHTTPRequestInventory(inventory, decision.Allowed)
+	}
+	if cyberActive {
+		inventory, decision.Allowed = filterCodexCyberInventory(factory.CyberEligibility, inventory, protocol)
+		if !containsCodexHTTPRequestAccountKey(codexHTTPRequestPlanAccountKeys(inventory), reservation.AccountKey) {
+			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)
+		}
 	}
 	dispatch, err := factory.buildDispatch(ctx, CodexFrozenDispatchInput{
 		Inventory:         inventory,
 		Capacity:          factory.Capacity,
 		Requirements:      codexHTTPRequestPlanRequirements(protocol),
-		AccountValues:     accountValues,
+		AccountValues:     decision.AccountValues,
 		DefaultAccountKey: factory.DefaultAccountKey,
 		BoundAccountKey:   reservation.AccountKey,
 		AcceptedRevision:  input.AcceptedRevision,
@@ -1366,7 +1393,7 @@ func (factory *CodexHTTPRequestPlanFactory) adoptWebSocketPrewarm(ctx context.Co
 	result.Frozen = frozen
 	result.leaseHandle = handle
 	result.Lifecycle = NewCodexHTTPRequestLifecycle(handle)
-	result.receipt = factory.registerCodexTurnReceipt(protocol, SessionPolicyDecision{}, reservation.AccountKey, dispatchAccounts[0], codexNoAffinityShadowResult{Comparison: CodexTurnReceiptShadowNotApplicable})
+	result.receipt = factory.registerCodexTurnReceipt(protocol, decision, reservation.AccountKey, dispatchAccounts[0], codexNoAffinityShadowResult{Comparison: CodexTurnReceiptShadowNotApplicable})
 	result.Lifecycle = wrapCodexTurnReceiptLifecycle(result.Lifecycle, result.receipt)
 	return result, nil
 }

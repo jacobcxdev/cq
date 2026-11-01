@@ -611,6 +611,7 @@ func TestCodexLeaseV2RetentionKeepsOpaqueAffinityUntilFinalLaneExpires(t *testin
 		resolved,
 		codexLeaseRuntimeRequestIdentity(resolved),
 		"account",
+		CodexRequestTurn,
 		CodexLeaseRequestEvidence{HasEncryptedState: true},
 		false,
 	)
@@ -627,16 +628,17 @@ func TestCodexLeaseV2RetentionKeepsOpaqueAffinityUntilFinalLaneExpires(t *testin
 		current,
 		codexLeaseRuntimeRequestIdentity(current),
 		"account",
+		CodexRequestTurn,
 		CodexLeaseRequestEvidence{HasEncryptedState: true},
 		false,
 	)
 	if err != nil || requiresAccount {
 		t.Fatalf("pruned-source current encrypted replay = required %v error %v", requiresAccount, err)
 	}
-	if requiresAccount, err := runtimeLease.validateRequestContinuity(resolved, codexLeaseRuntimeRequestIdentity(resolved), "other", CodexLeaseRequestEvidence{HasEncryptedState: true}, false); err != nil || requiresAccount {
+	if requiresAccount, err := runtimeLease.validateRequestContinuity(resolved, codexLeaseRuntimeRequestIdentity(resolved), "other", CodexRequestTurn, CodexLeaseRequestEvidence{HasEncryptedState: true}, false); err != nil || requiresAccount {
 		t.Fatalf("pruned-source alternate account replay = required %v error %v", requiresAccount, err)
 	}
-	if requiresAccount, err := runtimeLease.validateRequestContinuity(restored, codexLeaseRuntimeRequestIdentity(restored), "account", CodexLeaseRequestEvidence{HasEncryptedState: true}, false); err != nil || requiresAccount {
+	if requiresAccount, err := runtimeLease.validateRequestContinuity(restored, codexLeaseRuntimeRequestIdentity(restored), "account", CodexRequestTurn, CodexLeaseRequestEvidence{HasEncryptedState: true}, false); err != nil || requiresAccount {
 		t.Fatalf("unresolved pruned-source encrypted replay = required %v error %v", requiresAccount, err)
 	}
 	removal, summary, err := coordinator.BeginAccountRemoval(context.Background(), "account")
