@@ -51,19 +51,16 @@ public final class TransparentFlowAdmission {
                      signingIdentifierHint: flow.metaData.sourceAppSigningIdentifier)
     }
 
-    public func prepareSourceVerification(for flow: NEAppProxyFlow) -> () -> AdmittedFlowDestinationPolicy? {
+    public func prepareSourceVerification(for flow: NEAppProxyFlow) -> VerificationWork<AdmittedFlowDestinationPolicy> {
         prepareSourceVerification(auditToken: flow.metaData.sourceAppAuditToken,
                                   signingIdentifierHint: flow.metaData.sourceAppSigningIdentifier)
     }
 
-    func prepareSourceVerification(auditToken: Data?, signingIdentifierHint: String) -> () -> AdmittedFlowDestinationPolicy? {
+    func prepareSourceVerification(auditToken: Data?, signingIdentifierHint: String) -> VerificationWork<AdmittedFlowDestinationPolicy> {
         guard let auditToken, auditToken.count == 32,
-              SourceVerifier.signingIdentifiers.contains(signingIdentifierHint) else { return { nil } }
-        let check = sourceChecks.prepare(auditToken: auditToken, signingIdentifier: signingIdentifierHint) { [verifySource] in
+              SourceVerifier.signingIdentifiers.contains(signingIdentifierHint) else { return VerificationWork { nil } }
+        return sourceChecks.prepare(auditToken: auditToken, signingIdentifier: signingIdentifierHint) { [verifySource] in
             verifySource(auditToken, signingIdentifierHint)
-        }
-        return {
-            check.verify() == .verified ? AdmittedFlowDestinationPolicy() : nil
         }
     }
 
@@ -109,7 +106,7 @@ public enum FlowAdmission {
 /// Created only after an OS flow's source is verified. UDP packet destinations
 /// can change, but the source identity is fixed for that admitted NE flow.
 public struct AdmittedFlowDestinationPolicy {
-    fileprivate init() {}
+    init() {}
 
     public func decision(remoteHost: String?) -> FlowDecision {
         FlowPolicy().decision(source: .verified, remoteHost: remoteHost)

@@ -15,6 +15,10 @@ identifier share one in-progress source check. The result is retained only by
 those waiting flows; a flow arriving after the check finishes starts another
 full check. No successful trust cache, PID-only identity or skipped bundle
 validation is used. Cancellation and destination checks remain per flow.
+Each in-progress check occupies one scanner worker; waiting flows register
+callbacks rather than blocking other workers. Cancelled waiting flows retain
+their bounded admission slots until the shared check completes, preventing a
+backlog of abandoned verification work.
 
 Metadata-only debug events in subsystem `dev.jacobcx.cq.network`, category
 `admission`, distinguish flow-capacity and verification-capacity refusals and

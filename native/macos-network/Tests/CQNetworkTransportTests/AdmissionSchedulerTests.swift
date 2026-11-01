@@ -4,6 +4,40 @@ import XCTest
 @testable import CQNetworkTransport
 
 final class AdmissionSchedulerTests: XCTestCase {
+    func testSharedWaitersDoNotStarveAnotherSource() throws {
+        let scheduler = AdmissionScheduler()
+        let waiting = expectation(description: "shared source check started")
+        let other = expectation(description: "different source admitted before shared source completes")
+        let completed = expectation(description: "shared flows admitted")
+        completed.expectedFulfillmentCount = 4
+        let gate = DispatchSemaphore(value: 0)
+        let token = Data(repeating: 7, count: 32)
+        let admission = TransparentFlowAdmission { source, _ in
+            if source == token { waiting.fulfill(); _ = gate.wait(timeout: .now() + 3) }
+            return .verified
+        }
+        var pending: [PendingAdmission<AdmittedFlowDestinationPolicy>] = []
+        for _ in 0..<4 {
+            let check = admission.prepareSourceVerification(auditToken: token, signingIdentifierHint: "com.openai.codex")
+            let task = try XCTUnwrap(scheduler.reserve(identity: UUID(), verify: check,
+                accepted: { _ in completed.fulfill() }, refused: { XCTFail("shared source refused") }))
+            pending.append(task)
+            task.start()
+        }
+        wait(for: [waiting], timeout: 1)
+        var anotherToken = token
+        anotherToken[31] = 8
+        let task = try XCTUnwrap(scheduler.reserve(identity: UUID(),
+            verify: admission.prepareSourceVerification(auditToken: anotherToken, signingIdentifierHint: "com.openai.codex"),
+            accepted: { _ in other.fulfill() }, refused: { XCTFail("different source refused") }))
+        pending.append(task)
+        task.start()
+        XCTAssertEqual(XCTWaiter.wait(for: [other], timeout: 0.2), .completed)
+        gate.signal()
+        wait(for: [completed], timeout: 1)
+        withExtendedLifetime(pending) {}
+    }
+
     func testQueuedBurstSharesSourceCheckWithoutReusingCompletedTrust() throws {
         let scheduler = AdmissionScheduler()
         let entered = expectation(description: "source check started")
@@ -36,7 +70,12 @@ final class AdmissionSchedulerTests: XCTestCase {
         for _ in 0..<256 { gate.signal() }
         wait(for: [completed], timeout: 2)
         XCTAssertEqual(count.value, 1)
-        XCTAssertNotNil(admission.prepareSourceVerification(auditToken: token, signingIdentifierHint: "com.openai.codex")())
+        let fresh = expectation(description: "later source checked again")
+        let next = try XCTUnwrap(scheduler.reserve(identity: UUID(),
+            verify: admission.prepareSourceVerification(auditToken: token, signingIdentifierHint: "com.openai.codex"),
+            accepted: { _ in fresh.fulfill() }, refused: { XCTFail("later source refused") }))
+        next.start()
+        wait(for: [fresh], timeout: 1)
         XCTAssertEqual(count.value, 2)
         withExtendedLifetime(pending) {}
     }
@@ -171,6 +210,113 @@ final class AdmissionSchedulerTests: XCTestCase {
         wait(for: [completed], timeout: 1)
         XCTAssertEqual(state.maximum, 2)
         withExtendedLifetime(pending) {}
+    }
+
+    func testCancelledQueuedCheckRetainsCapacityUntilItCompletes() throws {
+        let scheduler = AdmissionScheduler(maximumPending: 2, workers: 1)
+        let entered = expectation(description: "first scanner started")
+        let accepted = expectation(description: "first flow admitted")
+        let closed = expectation(description: "queued flow cancelled once")
+        let drained = expectation(description: "queued check and its permit completed")
+        let gate = DispatchSemaphore(value: 0)
+        let first = try XCTUnwrap(scheduler.reserve(identity: UUID(), verify: { () -> Bool? in
+            entered.fulfill()
+            _ = gate.wait(timeout: .now() + 3)
+            return true
+        }, accepted: { _ in accepted.fulfill() }, refused: { XCTFail("first flow refused") }))
+        first.start()
+        wait(for: [entered], timeout: 1)
+        let queued = VerificationWork { true }
+        let second = try XCTUnwrap(scheduler.reserve(identity: UUID(), verify: queued,
+            accepted: { _ in XCTFail("cancelled queued flow reopened") }, refused: { closed.fulfill() }))
+        second.start()
+        queued.start(on: OperationQueue()) { _ in drained.fulfill() }
+        second.cancel()
+        second.cancel()
+        XCTAssertNil(scheduler.reserve(identity: UUID(), verify: { true }, accepted: { _ in }, refused: {}))
+        gate.signal()
+        wait(for: [accepted, closed, drained], timeout: 1)
+        XCTAssertNotNil(scheduler.reserve(identity: UUID(), verify: { true }, accepted: { _ in }, refused: {}))
+    }
+
+    func testCancelledSharedMembersRetainEveryPermitUntilCheckCompletes() throws {
+        let scheduler = AdmissionScheduler(maximumPending: 2)
+        let entered = expectation(description: "shared scanner started")
+        let closed = expectation(description: "both shared flows cancelled")
+        closed.expectedFulfillmentCount = 2
+        let drained = expectation(description: "shared callbacks and permits completed")
+        let gate = DispatchSemaphore(value: 0)
+        let check = VerificationWork { () -> Bool? in
+            entered.fulfill()
+            _ = gate.wait(timeout: .now() + 3)
+            return true
+        }
+        var pending: [PendingAdmission<Bool>] = []
+        for _ in 0..<2 {
+            let task = try XCTUnwrap(scheduler.reserve(identity: UUID(), verify: check,
+                accepted: { _ in XCTFail("cancelled shared flow reopened") }, refused: { closed.fulfill() }))
+            pending.append(task)
+            task.start()
+        }
+        wait(for: [entered], timeout: 1)
+        check.start(on: OperationQueue()) { _ in drained.fulfill() }
+        pending.forEach { $0.cancel() }
+        XCTAssertNil(scheduler.reserve(identity: UUID(), verify: { true }, accepted: { _ in }, refused: {}))
+        gate.signal()
+        wait(for: [closed, drained], timeout: 1)
+        XCTAssertNotNil(scheduler.reserve(identity: UUID(), verify: { true }, accepted: { _ in }, refused: {}))
+    }
+
+    func testAbandonedOrCancelledUnstartedAdmissionSchedulesNoScanner() throws {
+        let scheduler = AdmissionScheduler(maximumPending: 1)
+        let closed = expectation(description: "unstarted flow cancelled once")
+        let count = LockedCount()
+        weak var abandoned: VerificationWork<Bool>?
+        do {
+            let check = VerificationWork { count.increment(); return true }
+            abandoned = check
+            let pending = try XCTUnwrap(scheduler.reserve(identity: UUID(), verify: check,
+                accepted: { _ in XCTFail("unstarted flow admitted") }, refused: { closed.fulfill() }))
+            pending.cancel()
+            pending.cancel()
+            pending.start()
+            XCTAssertNotNil(scheduler.reserve(identity: UUID(), verify: { true }, accepted: { _ in }, refused: {}))
+        }
+        wait(for: [closed], timeout: 1)
+        XCTAssertNil(abandoned)
+        XCTAssertEqual(count.value, 0)
+    }
+
+    func testSharedCompletionRacingCancellationHasOneOutcomePerFlow() throws {
+        let scheduler = AdmissionScheduler(maximumPending: 64)
+        let entered = expectation(description: "shared scanner started")
+        let outcomes = expectation(description: "each flow resolved once")
+        outcomes.expectedFulfillmentCount = 64
+        let drained = expectation(description: "every shared permit released")
+        let gate = DispatchSemaphore(value: 0)
+        let check = VerificationWork { () -> Bool? in
+            entered.fulfill()
+            _ = gate.wait(timeout: .now() + 3)
+            return true
+        }
+        var pending: [PendingAdmission<Bool>] = []
+        for _ in 0..<64 {
+            let task = try XCTUnwrap(scheduler.reserve(identity: UUID(), verify: check,
+                accepted: { _ in outcomes.fulfill() }, refused: { outcomes.fulfill() }))
+            pending.append(task)
+            task.start()
+        }
+        wait(for: [entered], timeout: 1)
+        check.start(on: OperationQueue()) { _ in drained.fulfill() }
+        DispatchQueue.global().async { gate.signal() }
+        DispatchQueue.concurrentPerform(iterations: pending.count) { index in
+            pending[index].cancel()
+            pending[index].cancel()
+        }
+        wait(for: [outcomes, drained], timeout: 1)
+        for _ in 0..<64 {
+            XCTAssertNotNil(scheduler.reserve(identity: UUID(), verify: { true }, accepted: { _ in }, refused: {}))
+        }
     }
 }
 

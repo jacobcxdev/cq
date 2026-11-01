@@ -9,14 +9,14 @@ final class SourceVerificationBatches {
         let signingIdentifier: String
     }
     private final class Reference {
-        weak var check: SourceVerificationBatch?
-        init(_ check: SourceVerificationBatch) { self.check = check }
+        weak var check: VerificationWork<AdmittedFlowDestinationPolicy>?
+        init(_ check: VerificationWork<AdmittedFlowDestinationPolicy>) { self.check = check }
     }
     private let lock = NSLock()
     private var checks: [Identity: Reference] = [:]
 
     func prepare(auditToken: Data, signingIdentifier: String,
-                 verify: @escaping () -> SourceVerdict) -> SourceVerificationBatch {
+                 verify: @escaping () -> SourceVerdict) -> VerificationWork<AdmittedFlowDestinationPolicy> {
         let identity = Identity(auditToken: auditToken, signingIdentifier: signingIdentifier)
         lock.lock()
         defer { lock.unlock() }
@@ -24,38 +24,51 @@ final class SourceVerificationBatches {
         // cannot leave a growing identity cache behind.
         checks = checks.filter { $0.value.check != nil }
         if let check = checks[identity]?.check, check.isPending { return check }
-        let check = SourceVerificationBatch(verify: verify)
+        let check = VerificationWork { verify() == .verified ? AdmittedFlowDestinationPolicy() : nil }
         checks[identity] = Reference(check)
         return check
     }
 }
 
-final class SourceVerificationBatch {
-    private let condition = NSCondition()
-    private let perform: () -> SourceVerdict
-    private var running = false
-    private var verdict: SourceVerdict?
+/// One scanner operation per batch. Waiting admissions register callbacks rather
+/// than occupying scanner workers while another member verifies their source.
+public final class VerificationWork<Value> {
+    private let lock = NSLock()
+    private let perform: () -> Value?
+    private var queued = false
+    private var finished = false
+    private var value: Value?
+    private var completions: [(Value?) -> Void] = []
 
-    init(verify: @escaping () -> SourceVerdict) { perform = verify }
+    public init(verify: @escaping () -> Value?) { perform = verify }
 
     var isPending: Bool {
-        condition.lock()
-        defer { condition.unlock() }
-        return verdict == nil
+        lock.lock()
+        defer { lock.unlock() }
+        return !finished
     }
 
-    func verify() -> SourceVerdict {
-        condition.lock()
-        while running && verdict == nil { condition.wait() }
-        if let verdict { condition.unlock(); return verdict }
-        running = true
-        condition.unlock()
-        let result = perform()
-        condition.lock()
-        verdict = result
-        running = false
-        condition.broadcast()
-        condition.unlock()
-        return result
+    public func start(on queue: OperationQueue, completion: @escaping (Value?) -> Void) {
+        lock.lock()
+        if finished {
+            let value = value
+            lock.unlock()
+            completion(value)
+            return
+        }
+        completions.append(completion)
+        guard !queued else { lock.unlock(); return }
+        queued = true
+        lock.unlock()
+        queue.addOperation {
+            let value = self.perform()
+            self.lock.lock()
+            self.value = value
+            self.finished = true
+            let completions = self.completions
+            self.completions.removeAll()
+            self.lock.unlock()
+            completions.forEach { $0(value) }
+        }
     }
 }
