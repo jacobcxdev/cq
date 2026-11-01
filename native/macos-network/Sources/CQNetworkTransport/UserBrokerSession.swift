@@ -29,9 +29,14 @@ public final class UserBrokerSession: NSObject, CQUserBroker {
 
     private func establish() {
         guard !stopped else { return }
+        guard let machService = try? CQNetworkIdentity.machService() else {
+            stopped = true
+            setReady(false)
+            return
+        }
         generation += 1
         let currentGeneration = generation
-        let connection = NSXPCConnection(machServiceName: CQNetworkIdentity.machService, options: .privileged)
+        let connection = NSXPCConnection(machServiceName: machService, options: .privileged)
         connection.setCodeSigningRequirement(CQNetworkIdentity.requirement(for: CQNetworkIdentity.provider))
         connection.exportedInterface = NSXPCInterface(with: CQUserBroker.self)
         connection.exportedObject = self

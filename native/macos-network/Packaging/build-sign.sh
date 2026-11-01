@@ -63,12 +63,22 @@ if [ "$(/usr/bin/basename "$provider" .systemextension)" != "$provider_identifie
     exit 1
 fi
 for bundle in "$app" "$provider"; do
+    build_number=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$bundle/Contents/Info.plist")
+    if [ "$build_number" != "$CQ_BUILD_NUMBER" ]; then
+        echo "Host and provider build versions must match the requested build." >&2
+        exit 1
+    fi
     usage_description=$(/usr/libexec/PlistBuddy -c 'Print :NSSystemExtensionUsageDescription' "$bundle/Contents/Info.plist")
     if ! printf '%s' "$usage_description" | /usr/bin/grep -q '[^[:space:]]'; then
         echo "System extension bundles require a usage description." >&2
         exit 1
     fi
 done
+mach_service=$(/usr/libexec/PlistBuddy -c 'Print :NetworkExtension:NEMachServiceName' "$provider/Contents/Info.plist")
+if [ "$mach_service" != "K2648T24P4.dev.jacobcx.cq.network.proxy.$CQ_BUILD_NUMBER" ]; then
+    echo "Provider Mach service must identify the packaged build." >&2
+    exit 1
+fi
 /usr/bin/codesign --verify --deep --strict "$app"
 for architecture in arm64 x86_64; do
     /usr/bin/lipo "$app/Contents/MacOS/CQNetwork" -verify_arch "$architecture"

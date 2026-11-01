@@ -26,7 +26,8 @@ public final class CQTransparentProxyProvider: NETransparentProxyProvider {
         ]
         setTunnelNetworkSettings(settings) { [weak self] error in
             guard let self, error == nil else { completionHandler(error ?? CQNetworkError.unavailable()); return }
-            self.registry.start()
+            do { try self.registry.start() }
+            catch { completionHandler(CQNetworkError.invalidRequest()); return }
             self.lock.lock()
             self.running = true
             self.lock.unlock()

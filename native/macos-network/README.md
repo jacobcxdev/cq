@@ -87,6 +87,12 @@ WireGuard profile or private broker descriptor itself.
 
 ## Notarisation
 
+Each build declares a distinct `NEMachServiceName` using its increasing build
+number. Host and provider derive the same name from their signed bundle versions;
+release validation checks both versions and the declared service. This avoids
+stale service registration during extension replacement (`FB17032197`), following
+[Apple DTS guidance](https://developer.apple.com/forums/thread/779395).
+
 For a release, upload the actual archive using the account already signed into
 Xcode. Copy the export options and change only its destination:
 
