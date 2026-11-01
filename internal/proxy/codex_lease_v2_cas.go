@@ -735,7 +735,7 @@ func validateCodexLeaseHeadTransition(laneExists bool, storedCurrent, storedLast
 func (store *CodexLeaseStore) buildCodexLeaseRecordAfterImage(old CodexJournalRecordV2, exists bool, input CodexJournalRecordV2, beginRequest, migrateTurnStateLatch, affinityInvalidationReset bool, fence CodexLeaseRecordFence, now time.Time) (CodexJournalRecordV2, uint64, bool, error) {
 	result := cloneCodexJournalRecordV2(input)
 	bindingReassignment := exists && codexLeaseAccountUnavailableAdmission(old, input)
-	bindingReset := exists && beginRequest && (codexLeaseAccountUnavailableBeginRequest(old, input) || affinityInvalidationReset || codexLeaseRecordAllowsPortableReset(old))
+	bindingReset := exists && beginRequest && (codexLeaseAccountUnavailableBeginRequest(old, input) || affinityInvalidationReset || codexLeaseRecordAllowsPortableReset(old) || codexLeasePreTurnCompactionBeginRequest(old, input))
 	unadmittedBindingReset := bindingReset && !old.EverAdmitted
 	if result.SessionHash == "" || result.ThreadHash == "" || result.NamespaceHash == "" || result.TurnHash == "" || result.ModeEpoch == 0 || result.ProtocolSchema != CurrentCodexLeaseSchema {
 		return CodexJournalRecordV2{}, 0, false, fmt.Errorf("%w: incomplete record identity/protocol", ErrCodexLeaseInvalidMutation)
@@ -945,6 +945,11 @@ func codexLeaseAccountUnavailableAdmission(old, desired CodexJournalRecordV2) bo
 	return constantTimeCodexLeaseDigestEqual(old.AttemptEnvelope.Slots[current.Slot-1].AccountHash, desired.AccountHash)
 }
 
+func codexLeasePreTurnCompactionBeginRequest(old, desired CodexJournalRecordV2) bool {
+	return codexLeasePreTurnCompactionCanBeginTurn(old, desired.RequestKind) && desired.CompactionPhase == "" &&
+		!desired.NonMigratable && desired.State == LeaseBoundActive
+}
+
 func codexLeaseAccountUnavailableBeginRequest(old, desired CodexJournalRecordV2) bool {
 	if !codexLeaseAccountUnavailableCanBeginRequest(old) || desired.NonMigratable {
 		return false
@@ -1084,7 +1089,7 @@ func codexLeaseCurrentRequestCacheRefreshEligible(old, result CodexJournalRecord
 
 func (store *CodexLeaseStore) buildCodexBeginRequestAfterImage(old, desired CodexJournalRecordV2, affinityInvalidationReset bool, fence CodexLeaseRecordFence, now time.Time) (CodexCurrentRequest, error) {
 	request := cloneCodexCurrentRequest(desired.CodexCurrentRequest)
-	bindingReset := codexLeaseAccountUnavailableBeginRequest(old, desired) || affinityInvalidationReset || codexLeaseRecordAllowsPortableReset(old)
+	bindingReset := codexLeaseAccountUnavailableBeginRequest(old, desired) || affinityInvalidationReset || codexLeaseRecordAllowsPortableReset(old) || codexLeasePreTurnCompactionBeginRequest(old, desired)
 	unadmittedBindingReset := bindingReset && !old.EverAdmitted
 	if request.Generation != 0 || request.CurrentAttemptGeneration != 0 || len(request.Attempts) != 1 {
 		return CodexCurrentRequest{}, fmt.Errorf("%w: BeginRequest requires a store-owned generation and one prepared attempt", ErrCodexLeaseInvalidMutation)

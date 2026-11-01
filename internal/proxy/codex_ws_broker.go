@@ -883,6 +883,19 @@ func (broker *codexTerminatingWSBroker) serveFrameReserveAttempt(ctx context.Con
 			})
 			if err == nil {
 				active.prewarm = CodexPrewarmReservation{}
+			} else {
+				var planErr *CodexHTTPRequestPlanError
+				if errors.As(err, &planErr) && planErr.Code == CodexHTTPRequestPlanDispatch &&
+					(planErr.Reason == CodexRequestFailureSessionPolicyContinuity || planErr.Reason == CodexRequestFailureCapabilityRouteUnavailable) {
+					// The provisional anchor belongs to an account this request
+					// cannot use. Ask for full history before creating a durable lease.
+					if cancelErr := planner.cancelWebSocketPrewarm(active.prewarm); cancelErr != nil {
+						return newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, cancelErr)
+					}
+					closeCodexWSActiveUpstream(active)
+					emitCodexTrace(ctx, CodexTraceEvent{Phase: "failover", Outcome: "resynchronise", Reason: "prewarm_policy_changed", Retry: true})
+					return writeCodexWSAccountUnavailableClose(downstream)
+				}
 			}
 		}
 	} else {
