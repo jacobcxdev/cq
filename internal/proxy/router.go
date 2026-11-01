@@ -30,6 +30,8 @@ const (
 	ProviderClaude Provider = iota
 	// ProviderCodex routes to the OpenAI Responses API.
 	ProviderCodex
+	// ProviderZAI routes to Z.ai Responses with its own Coding Plan key.
+	ProviderZAI
 )
 
 // RouteModelWithCatalog maps a model name to the provider that serves it,
@@ -41,6 +43,9 @@ func RouteModelWithCatalog(model string, cat *modelregistry.Catalog) Provider {
 		snap := cat.Snapshot()
 		for _, e := range snap.Entries {
 			if strings.ToLower(e.ID) == normalised {
+				if e.Provider == modelregistry.ProviderZAI {
+					return ProviderZAI
+				}
 				if e.Provider == modelregistry.ProviderAnthropic {
 					return ProviderClaude
 				}
@@ -56,6 +61,8 @@ func RouteModelWithCatalog(model string, cat *modelregistry.Catalog) Provider {
 func RouteModel(model string) Provider {
 	lower := strings.ToLower(ParseModel(model))
 	switch {
+	case strings.HasPrefix(lower, "glm-"):
+		return ProviderZAI
 	case strings.HasPrefix(lower, "gpt-"):
 		return ProviderCodex
 	case strings.HasPrefix(lower, "o1") ||

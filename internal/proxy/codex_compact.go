@@ -15,6 +15,9 @@ func (s *Server) handleCodexCompactResponsesRoute(w http.ResponseWriter, r *http
 		rejectCodexCompactWebSocket(w, codexCompactResponsesPath)
 		return
 	}
+	if handled, _ := s.tryHandleZAI(w, r); handled {
+		return
+	}
 	s.handleNativeCodexCompact(w, r, codexCompactResponsesPath)
 }
 
@@ -27,6 +30,9 @@ func (s *Server) handleCodexCompactResponsesGetRoute(w http.ResponseWriter, r *h
 func (s *Server) handleLegacyCodexCompactResponsesRoute(w http.ResponseWriter, r *http.Request) {
 	if isWebSocketUpgrade(r) {
 		rejectCodexCompactWebSocket(w, legacyCodexCompactResponsesPath)
+		return
+	}
+	if handled, _ := s.tryHandleZAI(w, r); handled {
 		return
 	}
 	s.handleNativeCodexCompact(w, r, legacyCodexCompactResponsesPath)

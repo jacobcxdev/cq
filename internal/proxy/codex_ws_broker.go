@@ -216,6 +216,21 @@ func (handler *codexTerminatingWebSocketHandler) BeginDrain() {
 }
 
 func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, downstream *websocket.Conn, header http.Header) error {
+	if downstream == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	return handler.serve(ctx, downstream, header)
+}
+
+func (handler *codexTerminatingWebSocketHandler) ServeInitial(ctx context.Context, downstream *websocket.Conn, header http.Header, kind int, payload []byte, acceptsModel func(string) bool) error {
+	if downstream == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	bound := &providerBoundWebSocketConn{websocketRelayConn: downstream, acceptsModel: acceptsModel}
+	return handler.serve(ctx, &prefetchedWebSocketConn{websocketRelayConn: bound, kind: kind, payload: payload, pending: true}, header)
+}
+
+func (handler *codexTerminatingWebSocketHandler) serve(ctx context.Context, downstream websocketRelayConn, header http.Header) error {
 	if handler == nil || downstream == nil || handler.plans == nil || handler.upstream == nil || handler.upstreamURL == "" {
 		return ErrCodexLeaseWriterUnavailable
 	}
@@ -239,7 +254,9 @@ func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, down
 	if err != nil {
 		return err
 	}
-	downstream.SetReadLimit(codexWebSocketMessageMaxBytes)
+	if conn, ok := downstream.(*websocket.Conn); ok {
+		conn.SetReadLimit(codexWebSocketMessageMaxBytes)
+	}
 	return broker.Serve(ctx, downstream)
 }
 

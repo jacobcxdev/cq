@@ -87,6 +87,10 @@ type Server struct {
 	Selector  ClaudeSelector
 	Discover  ClaudeDiscoverer
 	Transport http.RoundTripper
+	// Z.ai uses separate credentials and transport from Codex accounts.
+	ZAIAPIKey    func() (string, error)
+	ZAIUpstream  string
+	ZAITransport http.RoundTripper
 	// RuntimeNormalHandler is set only by the socket supervisor. It forwards
 	// public work to the selected private worker instead of running normal
 	// proxy semantics in the supervisor process.
@@ -708,6 +712,9 @@ func (s *Server) handleCodexResponsesRoute(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", fmt.Sprintf("%s only supports POST", codexResponsesPath))
 		return
 	}
+	if handled, _ := s.tryHandleZAI(w, r); handled {
+		return
+	}
 	s.handleNativeCodex(w, r)
 }
 
@@ -719,6 +726,9 @@ func (s *Server) handleLegacyCodexResponsesRoute(w http.ResponseWriter, r *http.
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", fmt.Sprintf("%s only supports POST or websocket upgrade", legacyCodexResponsesPath))
+		return
+	}
+	if handled, _ := s.tryHandleZAI(w, r); handled {
 		return
 	}
 	s.handleNativeCodex(w, r)
@@ -1219,6 +1229,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	statusCode := 0
 	diagError := ""
 	routeKind := "codex_legacy_websocket"
+	diagnosticsProvider := "codex"
 	_, wsMode := s.codexRoutingHealth()
 	webSocketEnforcing := wsMode.Effective == CodexRoutingEnforce
 	if webSocketEnforcing {
@@ -1240,7 +1251,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			Time:       start.UTC(),
 			Method:     r.Method,
 			Path:       r.URL.Path,
-			Provider:   "codex",
+			Provider:   diagnosticsProvider,
 			RouteKind:  routeKind,
 			StatusCode: statusCode,
 			LatencyMS:  time.Since(start).Milliseconds(),
@@ -1259,13 +1270,18 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusCode, "invalid_request_error", "Codex WebSocket request requires HTTP")
 		return
 	}
-	if webSocketEnforcing && s.CodexWebSocketBroker == nil {
+	zaiEnabled := s.hasZAICatalog()
+	if !zaiEnabled && s.ZAIAPIKey != nil {
+		key, keyErr := s.zaiKey()
+		zaiEnabled = keyErr == nil && key != ""
+	}
+	if webSocketEnforcing && s.CodexWebSocketBroker == nil && !zaiEnabled {
 		statusCode = http.StatusServiceUnavailable
 		diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing unavailable")
 		writeError(w, http.StatusServiceUnavailable, "api_error", "Codex WebSocket routing unavailable")
 		return
 	}
-	if !webSocketEnforcing {
+	if !webSocketEnforcing && !zaiEnabled {
 		if router, executor := s.codexWebSocketRouting(); router == nil || executor == nil {
 			statusCode = http.StatusServiceUnavailable
 			diagError = diagnosticsErrorCode("api_error", "no codex accounts configured")
@@ -1274,7 +1290,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	upstreamURL := ""
-	if !webSocketEnforcing {
+	if !webSocketEnforcing && !zaiEnabled {
 		var err error
 		upstreamURL, err = codexAppServerWebSocketURL(s.Config.CodexUpstream)
 		if err != nil {
@@ -1285,7 +1301,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	fmt.Fprintf(os.Stderr, "cq: route %s /responses (websocket upgrade) provider=codex (native)\n", r.Method)
+	fmt.Fprintf(os.Stderr, "cq: route %s /responses (websocket upgrade)\n", r.Method)
 
 	upgrader := websocket.Upgrader{
 		CheckOrigin:       func(_ *http.Request) bool { return true },
@@ -1302,6 +1318,27 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	defer clientConn.Close()
 	clientConn.SetReadLimit(codexWebSocketMessageMaxBytes)
 
+	var firstKind int
+	var firstFrame []byte
+	if zaiEnabled {
+		stopCancelClose := context.AfterFunc(r.Context(), func() { _ = clientConn.Close() })
+		firstKind, firstFrame, err = clientConn.ReadMessage()
+		stopCancelClose()
+		if err != nil {
+			return
+		}
+		if firstKind == websocket.TextMessage && RouteModelWithCatalog(extractCodexWebSocketFrameModel(firstFrame), s.Catalog) == ProviderZAI {
+			// Keep the runtime request admission until this provider's socket closes.
+			diagnosticsProvider = "zai"
+			routeKind = "zai_native_websocket"
+			fmt.Fprintf(os.Stderr, "cq: route %s /responses model=%q provider=zai (native websocket)\n", r.Method, extractCodexWebSocketFrameModel(firstFrame))
+			if err := s.serveZAIWebSocket(r.Context(), clientConn, r.Header, firstKind, firstFrame); err != nil {
+				_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "Z.ai upstream unavailable"), time.Now().Add(time.Second))
+			}
+			return
+		}
+	}
+
 	if webSocketEnforcing {
 		if release, ok := r.Context().Value(runtimeUpgradeRequestReleaseKey{}).(func()); ok {
 			release()
@@ -1309,7 +1346,19 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		brokerContext := withCodexWSFrameObservationSink(r.Context(), func(diagnostics *routeDiagnostics) {
 			s.emitCodexWebSocketFrameObservation(diagnostics)
 		})
-		if err := s.CodexWebSocketBroker.Serve(brokerContext, clientConn, r.Header); err != nil {
+		var brokerErr error
+		if firstFrame != nil {
+			if broker, ok := s.CodexWebSocketBroker.(initialCodexWebSocketRoutingHandler); ok {
+				brokerErr = broker.ServeInitial(brokerContext, clientConn, r.Header, firstKind, firstFrame, func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) != ProviderZAI })
+			} else {
+				brokerErr = errors.New("Codex WebSocket initial-frame routing unavailable")
+			}
+		} else if s.CodexWebSocketBroker != nil {
+			brokerErr = s.CodexWebSocketBroker.Serve(brokerContext, clientConn, r.Header)
+		} else {
+			brokerErr = errors.New("Codex WebSocket routing unavailable")
+		}
+		if err := brokerErr; err != nil {
 			failure := classifyCodexWebSocketFailure(err)
 			decision := "broker_failed"
 			if failure.plan {
@@ -1334,9 +1383,18 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	messageType, message, err := clientConn.ReadMessage()
-	if err != nil {
-		return
+	messageType, message := firstKind, firstFrame
+	if message == nil {
+		messageType, message, err = clientConn.ReadMessage()
+		if err != nil {
+			return
+		}
+	}
+	if upstreamURL == "" {
+		upstreamURL, err = codexAppServerWebSocketURL(s.Config.CodexUpstream)
+		if err != nil {
+			return
+		}
 	}
 	requestedModel := ""
 	if messageType == websocket.TextMessage {
@@ -1386,7 +1444,11 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	var downstreamFrameIndex atomic.Int64
 	downstreamFrameIndex.Store(1)
 	var upstreamFrameIndex atomic.Int64
-	relayErr := relayWebSocketPairGuarded(r.Context(), clientConn, upstreamConn, func(fromClient bool, messageType int, message []byte) {
+	downstreamRelay := websocketRelayConn(clientConn)
+	if zaiEnabled {
+		downstreamRelay = &providerBoundWebSocketConn{websocketRelayConn: clientConn, acceptsModel: func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) != ProviderZAI }}
+	}
+	relayErr := relayWebSocketPairGuarded(r.Context(), downstreamRelay, upstreamConn, func(fromClient bool, messageType int, message []byte) {
 		direction := "upstream_response"
 		frameIndex := int(upstreamFrameIndex.Add(1))
 		if fromClient {
@@ -1744,6 +1806,10 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 			fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=%s\n",
 				r.Method, r.URL.Path, routeModel, providerName(routeProvider))
 		}
+		if routeProvider == ProviderZAI {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "Z.ai models require the Responses endpoint")
+			return
+		}
 		if routeProvider == ProviderCodex {
 			s.handleCodex(w, r, buf)
 			return
@@ -1934,6 +2000,8 @@ func clientKindFromUserAgent(ua string) string {
 
 func providerName(provider Provider) string {
 	switch provider {
+	case ProviderZAI:
+		return "zai"
 	case ProviderCodex:
 		return "codex"
 	default:

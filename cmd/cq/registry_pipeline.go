@@ -14,6 +14,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
@@ -212,6 +213,22 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		opts.RefreshInterval = 5 * time.Minute
 	}
 	seedEntries := cachedRegistryEntries(opts)
+	zaiToken := func(context.Context) (string, error) {
+		return zaiprov.ReadAPIKey(opts.FS, opts.Env, opts.Roots.Config)
+	}
+	zaiKey, zaiKeyErr := zaiToken(context.Background())
+	if zaiKeyErr != nil {
+		fmt.Fprintln(opts.Stderr, "cq: registry: Z.ai credentials unavailable")
+	}
+	if zaiKeyErr != nil || zaiKey == "" {
+		filtered := seedEntries[:0]
+		for _, entry := range seedEntries {
+			if entry.Provider != modelregistry.ProviderZAI {
+				filtered = append(filtered, entry)
+			}
+		}
+		seedEntries = filtered
+	}
 	seedVersion := modelregistry.DiscoverCodexClientVersion(opts.FS, codexModelCachePath(modelsDeps{HomeDir: opts.HomeDir, Env: opts.Env}))
 	seedSnap := modelregistry.Snapshot{Entries: seedEntries, CodexClientVersion: seedVersion}
 	catalog := modelregistry.NewCatalog(seedSnap)
@@ -241,6 +258,10 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 			FS:   opts.FS,
 			Path: modelregistry.OverlayPath(opts.Roots),
 		},
+	}
+
+	if zaiKeyErr == nil && zaiKey != "" {
+		refresher.ZAI = &modelregistry.ZAISource{Client: opts.HTTPClient, Token: zaiToken}
 	}
 
 	p := &registryPipeline{

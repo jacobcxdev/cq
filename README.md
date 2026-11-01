@@ -1,6 +1,6 @@
 # cq
 
-`cq` is a quota dashboard, account manager, model-registry publisher, and local Claude/Codex API router. It checks **Claude**, **Codex**, and **Gemini** quota in parallel, presents per-account and aggregate burn information, and can keep local AI clients on healthy accounts without exposing provider credentials.
+`cq` is a quota dashboard, account manager, model-registry publisher, and local Claude/Codex/Z.ai API router. It checks **Claude**, **Codex**, **Gemini**, and **Z.ai** quota in parallel, presents per-account and aggregate burn information, and can keep local AI clients on healthy accounts without exposing provider credentials.
 
 ![cq output](assets/screenshot.png)
 
@@ -99,15 +99,16 @@ install Python or optional integrations.
 ## Quick start
 
 ```bash
-cq                                # Check Claude, Codex, and Gemini
+cq                                # Check Claude, Codex, Gemini, and Z.ai
 cq check claude codex             # Check selected providers
 cq check gemini                   # Check Gemini through Antigravity HTTP APIs
+cq check zai                      # Check Z.ai Coding Plan quota
 cq --json                         # Machine-readable report
 cq --refresh                      # Bypass quota cache
 cq --version
 ```
 
-`check` accepts `claude`, `codex`, and `gemini`. Provider fetches run concurrently. Multi-account work also runs concurrently within each provider.
+`check` accepts `claude`, `codex`, `gemini`, and `zai`. Provider fetches run concurrently. Multi-account work also runs concurrently within each provider.
 
 Use context-sensitive help for exact flags and safety confirmations:
 
@@ -126,7 +127,7 @@ cq operation --help
 
 | Area | Capabilities |
 |------|--------------|
-| Quota | Parallel Claude, Codex, and Gemini checks; provider selection; cache bypass; stale-account backfill; TTY and JSON output. |
+| Quota | Parallel Claude, Codex, Gemini, and Z.ai checks; provider selection; cache bypass; stale-account backfill; TTY and JSON output. |
 | Analysis | Remaining quota, reset times, pace, smoothed burn rate, projected burndown, correction-deadline gauge, multi-account aggregate, provider availability. |
 | Accounts | Claude and Codex OAuth login, listing, activation, switching, removal, and token refresh; read-only Gemini account inspection. |
 | Background work | One-shot OAuth refresh and per-user periodic refresh on macOS, Windows, and Linux. |
@@ -134,7 +135,7 @@ cq operation --help
 | Routing controls | Claude/Codex pins, Codex default, account allowlist, quota/fairness selection, durable continuity, quota-window priming, capability pools, session bindings, rescue mode. |
 | Codex assurance | Installed HTTP/WebSocket validation, routing canary, candidate runtime lifecycle, client-bearer barrier, release receipts, durable operation recovery, legacy endpoint transition. |
 | Efficiency feedback | Privacy-safe Codex request-shape telemetry, turn receipts, observational no-affinity comparison, Codex Stop-hook output. |
-| Model registry | Anthropic/Codex source merge, local listing, refresh, overlays, Codex cache publication, Claude Code capability and picker publication. |
+| Model registry | Anthropic/Codex/Z.ai source merge, local listing, refresh, overlays, Codex cache publication, Claude Code capability and picker publication. |
 | Diagnostics | Strict proxy snapshot, routing metadata JSONL, opt-in raw payload JSONL, health and runtime evidence, safe error classification. |
 
 ## Quota checks and output
@@ -144,6 +145,7 @@ cq operation --help
 - **Claude** discovers stored accounts, fetches profile and usage data in parallel, refreshes eligible tokens, and reports each account.
 - **Codex** discovers system, CQ-managed, and declared external accounts. Ordinary checks do not activate, remove, refresh, or rewrite system credentials. Eligible CQ-owned credentials refresh only through CQ's coordinator.
 - **Gemini** reads Antigravity Keychain credential and cached project ID concurrently, calls Antigravity OAuth and quota HTTP APIs directly, and never invokes `agy`. Credential/project stores remain read-only; refreshed tokens live only in process memory.
+- **Z.ai** reads a Coding Plan API key and reports 5-hour and weekly subscription quota. Monthly MCP usage appears separately when supplied by the API. Reset times remain unknown when Z.ai omits them.
 
 ### Cache and history
 
@@ -258,6 +260,22 @@ cq gemini accounts --json
 ```
 
 Gemini authentication and project selection remain owned by Antigravity. cq reads Keychain service `gemini`, account `antigravity`, plus Antigravity's project cache. It does not provide Gemini login, switch, or removal commands.
+
+### Z.ai Coding Plan
+
+Set `ZAI_API_KEY`, or save a JSON object with an `api_key` field in `$XDG_CONFIG_HOME/cq/zai.json` (default `~/.config/cq/zai.json`). Keep the credential file at mode `0600` and its directory at `0700`. Environment credentials take precedence. A saved file also works for the background proxy service.
+
+CQ supports individual Coding Plan subscriptions through Z.ai's global endpoint. Group plans and regional endpoints are not configured separately.
+
+```bash
+cq --refresh check zai
+cq models refresh
+cq models list --provider zai
+```
+
+Registry refresh fetches Z.ai's native Codex model catalogue from `https://api.z.ai/api/v1/models` and includes its models in the existing Codex picker. Native Responses HTTP requests use the Z.ai key through CQ's proxy. CQ bridges Codex WebSocket requests to Z.ai's HTTP event stream and keeps tool continuation history for that connection. Codex account credentials remain scoped to Codex upstream requests. GLM models require native Responses; CQ does not translate Anthropic Messages requests for them. Z.ai currently does not support Responses compaction; CQ returns `501` for those requests.
+
+See [Z.ai's Codex setup](https://docs.z.ai/devpack/tool/codex) for the supported Responses endpoint and model capabilities.
 
 ### Token refresh
 
@@ -524,6 +542,7 @@ cq models list
 cq models list --json
 cq models list --provider codex
 cq models list --provider anthropic
+cq models list --provider zai
 
 cq models overlay add --provider codex --id gpt-5.5 --clone-from gpt-5.4
 cq models overlay remove --provider codex --id gpt-5.5

@@ -518,6 +518,9 @@ func headerVisibleWidth(r quota.Result, id provider.ID) int {
 
 // providerDisplayName returns the capitalised display name for a provider ID.
 func providerDisplayName(id provider.ID) string {
+	if id == provider.ZAI {
+		return "Z.ai"
+	}
 	name := string(id)
 	if len(name) == 0 {
 		return ""

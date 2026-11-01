@@ -11,7 +11,7 @@ type SourceResult struct {
 	// Entries are the parsed model entries from the upstream provider.
 	Entries []Entry
 	// CodexRawByID holds the full upstream JSON keyed by model slug/ID.
-	// Populated only by CodexSource.
+	// Populated by CodexSource and ZAISource.
 	CodexRawByID map[string]json.RawMessage
 	// AnthropicRawByID holds the full upstream JSON keyed by model ID.
 	// Populated only by AnthropicSource.

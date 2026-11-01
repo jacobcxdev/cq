@@ -44,6 +44,8 @@ type Refresher struct {
 	Anthropic NativeSource
 	// Codex fetches the Codex model catalogue. May be nil to skip.
 	Codex NativeSource
+	// ZAI fetches the Z.ai Responses model catalogue. May be nil to skip.
+	ZAI NativeSource
 	// Now returns the current time. Defaults to time.Now when nil.
 	Now func() time.Time
 
@@ -86,6 +88,7 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 	}{
 		{ProviderAnthropic, r.Anthropic},
 		{ProviderCodex, r.Codex},
+		{ProviderZAI, r.ZAI},
 	}
 
 	configuredSources := 0

@@ -25,6 +25,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
@@ -1299,6 +1300,9 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Selector:  selector,
 		Discover:  discover,
 		Transport: transport,
+		ZAIAPIKey: func() (string, error) {
+			return zaiprov.ReadAPIKey(fsys, os.Getenv, roots.Config)
+		},
 		CodexHealth: func() proxy.CodexHealth {
 			return codexHealthTracker.Health(context.Background())
 		},

@@ -30,8 +30,14 @@ func LoadCodexEntriesFromCache(fsys fsutil.FileSystem, path string) ([]Entry, er
 		if err := json.Unmarshal(raw, &info); err != nil || info.Slug == "" {
 			continue
 		}
+		provider := ProviderCodex
+		var nativeRaw json.RawMessage
+		if envelope.CQProviders[info.Slug] == ProviderZAI {
+			provider = ProviderZAI
+			nativeRaw = raw
+		}
 		entries = append(entries, Entry{
-			Provider:         ProviderCodex,
+			Provider:         provider,
 			ID:               info.Slug,
 			DisplayName:      info.DisplayName,
 			Description:      info.Description,
@@ -40,6 +46,7 @@ func LoadCodexEntriesFromCache(fsys fsutil.FileSystem, path string) ([]Entry, er
 			Priority:         info.Priority,
 			Visibility:       info.Visibility,
 			Source:           SourceNative,
+			Raw:              nativeRaw,
 		})
 	}
 	return entries, nil
