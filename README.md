@@ -624,6 +624,12 @@ multi-account Dots; use the Dots launcher for that separate integration.
 Local UDP forwarding requires numeric destinations and uses translated ephemeral
 source ports; multicast discovery is not guaranteed.
 
+LAN DNS resolvers with globally allocated addresses stay on their active local
+interface. CQ checks the interface subnet and binds the DNS socket's local
+address; other DNS destinations retain WireGuard routing. DNS transport traces
+record the route, numeric destination, transaction ID, header counts and bounded
+error codes. They omit query names, records, payloads and credentials.
+
 Egress configuration and profile contents are checked every five seconds. Valid
 changes atomically replace the egress generation without restarting the service
 or workers. Connections from the old generation close and clients reconnect;

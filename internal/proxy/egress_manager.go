@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -25,14 +26,16 @@ type egressOpener func(*Config) (*CodexEgress, [32]byte, error)
 // a profile closes old tunnels before exposing the new generation. Existing
 // streams reconnect; the service and worker processes do not need a restart.
 type EgressManager struct {
-	change  sync.Mutex
-	mu      sync.Mutex
-	current *egressGeneration
-	cfg     Config
-	open    egressOpener
-	active  map[*managedEgressConn]struct{}
-	closed  bool
-	blocked bool
+	change          sync.Mutex
+	mu              sync.Mutex
+	current         *egressGeneration
+	cfg             Config
+	open            egressOpener
+	active          map[*managedEgressConn]struct{}
+	closed          bool
+	blocked         bool
+	dnsLocalAddress func(netip.Addr) (netip.Addr, bool)
+	dnsDialLocal    func(context.Context, string, string, netip.Addr) (net.Conn, error)
 }
 
 func NewCodexEgressManager(cfg *Config, fs fsutil.FileSystem) (*EgressManager, error) {
@@ -86,7 +89,8 @@ func newEgressManager(cfg *Config, open egressOpener) (*EgressManager, error) {
 		return nil, errors.New("initialize Codex egress manager failed")
 	}
 	life, cancel := context.WithCancel(context.Background())
-	return &EgressManager{current: &egressGeneration{backend: backend, digest: digest, life: life, cancel: cancel}, cfg: *cfg, open: open, active: make(map[*managedEgressConn]struct{})}, nil
+	return &EgressManager{current: &egressGeneration{backend: backend, digest: digest, life: life, cancel: cancel}, cfg: *cfg, open: open, active: make(map[*managedEgressConn]struct{}),
+		dnsLocalAddress: nativeDNSLocalAddress, dnsDialLocal: dialNativeLocalDNS}, nil
 }
 
 func (m *EgressManager) DialContext(parent context.Context, network, address string) (net.Conn, error) {
@@ -125,7 +129,10 @@ func (m *EgressManager) dialContext(parent context.Context, network, address str
 			m.mu.Unlock()
 			return nil, errors.New("native egress requires WireGuard; traffic is blocked")
 		}
-		dial = generation.backend.nativeDial
+		// The LAN DNS exception still belongs to this generation: blocking or
+		// replacing egress must cancel its dials and close its active sockets.
+		dial = nativeDNSTraceDialer{EgressDialer: nativeRuntimeDialer{dial: generation.backend.nativeDial},
+			emit: writeNativeDNSEvent, localAddress: m.dnsLocalAddress, dialLocal: m.dnsDialLocal}.DialContext
 	}
 	m.mu.Unlock()
 	ctx, cancel := context.WithCancel(parent)
