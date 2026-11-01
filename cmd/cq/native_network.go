@@ -85,7 +85,8 @@ func (runner nativeNetworkRunner) execute(ctx context.Context, operation string,
 	if operation == "enable" {
 		// The extension and persistent user broker connect asynchronously. Never
 		// treat an activation request as proof that routing is ready.
-		for attempt := 0; err != nil && attempt < 3; attempt++ {
+		// A replacement can take several seconds to start on macOS.
+		for attempt := 0; err != nil && attempt < 30; attempt++ {
 			if waitErr := runner.wait(ctx, 500*time.Millisecond); waitErr != nil {
 				break
 			}

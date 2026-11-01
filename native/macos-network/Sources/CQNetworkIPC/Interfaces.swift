@@ -4,7 +4,16 @@ public enum CQNetworkIdentity {
     public static let team = "K2648T24P4"
     public static let host = "dev.jacobcx.cq.network"
     public static let provider = "dev.jacobcx.cq.network.proxy"
-    public static let machService = team + "." + provider
+    // launchd can retain the previous extension's service registration during
+    // replacement (FB17032197). Give each packaged build its own service name.
+    public static func machService(buildVersion: String? = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String) throws -> String {
+        guard let buildVersion else { throw CQNetworkError.invalidRequest() }
+        let components = buildVersion.split(separator: ".", omittingEmptySubsequences: false)
+        guard (1...3).contains(components.count), components.allSatisfy({
+            !$0.isEmpty && $0.utf8.allSatisfy { (48...57).contains($0) }
+        }) else { throw CQNetworkError.invalidRequest() }
+        return team + "." + provider + "." + buildVersion
+    }
 
     public static func requirement(for identifier: String) -> String {
         precondition(identifier == host || identifier == provider)

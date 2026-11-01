@@ -54,6 +54,9 @@ requirement='anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2
 /usr/bin/codesign --verify --strict --all-architectures "-R=$requirement and identifier \"dev.jacobcx.cq.network.proxy\"" "$provider"
 /usr/bin/xcrun stapler validate "$app"
 /usr/sbin/spctl --assess --type execute "$app"
+build_number=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")
+[[ "$build_number" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :NetworkExtension:NEMachServiceName' "$provider/Contents/Info.plist")" == "K2648T24P4.dev.jacobcx.cq.network.proxy.$build_number" ]]
 for bundle in "$app" "$provider"; do
   usage_description=$(/usr/libexec/PlistBuddy -c 'Print :NSSystemExtensionUsageDescription' "$bundle/Contents/Info.plist")
   if ! printf '%s' "$usage_description" | /usr/bin/grep -q '[^[:space:]]'; then
@@ -61,6 +64,7 @@ for bundle in "$app" "$provider"; do
     exit 1
   fi
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$bundle/Contents/Info.plist")" == "$version" ]]
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$bundle/Contents/Info.plist")" == "$build_number" ]]
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$bundle/Contents/Info.plist")" == "$minimum_macos" ]]
 done
 for architecture in arm64 x86_64; do

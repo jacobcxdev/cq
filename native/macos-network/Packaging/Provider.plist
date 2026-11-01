@@ -21,7 +21,7 @@
             <string>CQNetworkTransport.CQTransparentProxyProvider</string>
         </dict>
         <key>NEMachServiceName</key>
-        <string>K2648T24P4.dev.jacobcx.cq.network.proxy</string>
+        <string>K2648T24P4.dev.jacobcx.cq.network.proxy.$(CURRENT_PROJECT_VERSION)</string>
     </dict>
 </dict>
 </plist>

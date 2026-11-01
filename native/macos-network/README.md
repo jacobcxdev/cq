@@ -10,6 +10,17 @@ independently validated ChatGPT bundle. Display names, build numbers and CDHashe
 are not used as identity. These checks inspect public code signatures and do not
 query Keychain or request permissions.
 
+Flows already waiting for the same complete OS audit token and signing
+identifier share one in-progress source check. The result is retained only by
+those waiting flows; a flow arriving after the check finishes starts another
+full check. No successful trust cache, PID-only identity or skipped bundle
+validation is used. Cancellation and destination checks remain per flow.
+
+Metadata-only debug events in subsystem `dev.jacobcx.cq.network`, category
+`admission`, distinguish flow-capacity and verification-capacity refusals and
+report verification wait time. Broker readiness alone does not establish that
+new flows are passing admission.
+
 The provider must interpret admission decisions as follows:
 
 - `passThrough`: return `false`; leave unrelated apps and local destinations on
@@ -75,6 +86,12 @@ receives authenticated connections over XPC rather than reading that user's
 WireGuard profile or private broker descriptor itself.
 
 ## Notarisation
+
+Each build declares a distinct `NEMachServiceName` using its increasing build
+number. Host and provider derive the same name from their signed bundle versions;
+release validation checks both versions and the declared service. This avoids
+stale service registration during extension replacement (`FB17032197`), following
+[Apple DTS guidance](https://developer.apple.com/forums/thread/779395).
 
 For a release, upload the actual archive using the account already signed into
 Xcode. Copy the export options and change only its destination:

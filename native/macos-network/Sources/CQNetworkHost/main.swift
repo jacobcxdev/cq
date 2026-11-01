@@ -63,6 +63,9 @@ private final class Activation: NSObject, OSSystemExtensionRequestDelegate {
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 guard let command = arguments.first else { fail("Usage: cq-network run --cq PATH | activate --application PATH | status | disable") }
+let machService: String
+do { machService = try CQNetworkIdentity.machService() }
+catch { fail("CQ Network requires a valid packaged build version.") }
 func option(_ flag: String) -> String? {
     guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count else { return nil }
     return arguments[index + 1]
@@ -107,7 +110,7 @@ case "activate":
         if existing != nil {
             // Verify the already-running provider's signed identity. Do not
             // rewrite or restart a live configuration during repeated enable.
-            let connection = NSXPCConnection(machServiceName: CQNetworkIdentity.machService, options: .privileged)
+            let connection = NSXPCConnection(machServiceName: machService, options: .privileged)
             connection.setCodeSigningRequirement(CQNetworkIdentity.requirement(for: CQNetworkIdentity.provider))
             connection.remoteObjectInterface = NSXPCInterface(with: CQExtensionSession.self)
             retained = connection
@@ -138,7 +141,7 @@ case "status":
         guard manager?.isEnabled == true, manager?.connection.status == .connected else {
             reportStatus(extensionConnected: false, registered: false, brokerReady: false)
         }
-        let connection = NSXPCConnection(machServiceName: CQNetworkIdentity.machService, options: .privileged)
+        let connection = NSXPCConnection(machServiceName: machService, options: .privileged)
         connection.setCodeSigningRequirement(CQNetworkIdentity.requirement(for: CQNetworkIdentity.provider))
         connection.remoteObjectInterface = NSXPCInterface(with: CQExtensionSession.self)
         retained = connection

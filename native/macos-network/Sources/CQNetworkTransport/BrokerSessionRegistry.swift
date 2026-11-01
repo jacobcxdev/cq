@@ -15,8 +15,8 @@ public final class BrokerSessionRegistry: NSObject, NSXPCListenerDelegate {
     }
     private var metrics: [uid_t: Metrics] = [:]
 
-    public func start() {
-        let listener = NSXPCListener(machServiceName: CQNetworkIdentity.machService)
+    public func start() throws {
+        let listener = NSXPCListener(machServiceName: try CQNetworkIdentity.machService())
         listener.setConnectionCodeSigningRequirement(CQNetworkIdentity.requirement(for: CQNetworkIdentity.host))
         listener.delegate = self
         self.listener = listener
