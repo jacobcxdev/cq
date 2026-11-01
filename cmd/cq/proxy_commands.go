@@ -902,7 +902,7 @@ func parseModelsListArguments(argv []string) (ModelsListArgumentsV1, bool) {
 			}
 			arguments.JSON = true
 		case "--provider":
-			if arguments.Provider != "" || index+1 >= len(argv) || (argv[index+1] != "anthropic" && argv[index+1] != "codex") {
+			if arguments.Provider != "" || index+1 >= len(argv) || (argv[index+1] != "anthropic" && argv[index+1] != "codex" && argv[index+1] != "zai") {
 				return ModelsListArgumentsV1{}, false
 			}
 			arguments.Provider = argv[index+1]
@@ -923,7 +923,7 @@ func parseModelsOverlayArguments(argv []string, allowClone bool) (ModelsOverlayA
 		value := argv[index+1]
 		switch argv[index] {
 		case "--provider":
-			if arguments.Provider != "" || (value != "anthropic" && value != "codex") {
+			if arguments.Provider != "" || (value != "anthropic" && value != "codex" && value != "zai") {
 				return ModelsOverlayArgumentsV1{}, false
 			}
 			arguments.Provider = value
@@ -1140,7 +1140,7 @@ func globalFlagInsideProviderSlice(argv []string) bool {
 		if argument == "check" {
 			continue
 		}
-		if argument == "claude" || argument == "codex" || argument == "gemini" {
+		if argument == "claude" || argument == "codex" || argument == "gemini" || argument == "zai" {
 			if seenFlagAfterProvider {
 				return true
 			}
@@ -1160,7 +1160,7 @@ func isOrdinaryGlobalFlag(argument string) bool {
 
 func validProviders(providers []string) bool {
 	for _, provider := range providers {
-		if provider != "claude" && provider != "codex" && provider != "gemini" {
+		if provider != "claude" && provider != "codex" && provider != "gemini" && provider != "zai" {
 			return false
 		}
 	}

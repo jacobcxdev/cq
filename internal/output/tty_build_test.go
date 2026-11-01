@@ -689,6 +689,7 @@ func TestProviderDisplayName(t *testing.T) {
 		{provider.Claude, "Claude"},
 		{provider.Codex, "Codex"},
 		{provider.Gemini, "Gemini"},
+		{provider.ZAI, "Z.ai"},
 		{provider.ID(""), ""},
 	}
 	for _, tt := range tests {

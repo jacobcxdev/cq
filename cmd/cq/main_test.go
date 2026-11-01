@@ -54,6 +54,24 @@ func TestCacheTTL(t *testing.T) {
 	}
 }
 
+func TestCheckAcceptsZAI(t *testing.T) {
+	for _, args := range [][]string{{"check", "zai"}, {"check", "codex", "zai"}, {"--json", "check", "zai"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			var cli CLI
+			parser, err := kong.New(&cli, kong.Writers(io.Discard, io.Discard), kong.Exit(func(int) {}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := parser.Parse(args); err != nil {
+				t.Fatalf("Parse(%v): %v", args, err)
+			}
+			if got := cli.Check.Providers[len(cli.Check.Providers)-1]; got != "zai" {
+				t.Fatalf("last provider = %q, want zai", got)
+			}
+		})
+	}
+}
+
 // --- AccountManager ---
 
 func TestAccountManager(t *testing.T) {

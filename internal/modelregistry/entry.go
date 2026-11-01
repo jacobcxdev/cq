@@ -11,6 +11,7 @@ type Provider string
 const (
 	ProviderAnthropic Provider = "anthropic"
 	ProviderCodex     Provider = "codex"
+	ProviderZAI       Provider = "zai"
 )
 
 // Source indicates where a registry entry originated.
@@ -47,7 +48,7 @@ func (e Entry) Validate() error {
 		return errors.New("modelregistry: entry missing provider")
 	}
 	switch e.Provider {
-	case ProviderAnthropic, ProviderCodex:
+	case ProviderAnthropic, ProviderCodex, ProviderZAI:
 	default:
 		return errors.New("modelregistry: unknown provider " + string(e.Provider))
 	}

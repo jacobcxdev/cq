@@ -240,6 +240,9 @@ func buildReport(now time.Time, ordered []provider.ID, fetched map[provider.ID][
 			Availability: providerAvailability(results, now),
 			Results:      results,
 		}
+		if id == provider.ZAI {
+			pr.Name = "Z.ai"
+		}
 		if windows, summary := aggregate.Compute(results, now.Unix(), string(id), burnRates); len(windows) > 0 && summary != nil {
 			pr.Aggregate = &AggregateReport{
 				ProviderID: id,

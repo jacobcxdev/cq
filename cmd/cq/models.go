@@ -332,6 +332,9 @@ func runModelsList(args []string, deps modelsDeps) error {
 		if entry.Provider == modelregistry.ProviderAnthropic {
 			route = "Anthropic API"
 			origin = "Claude cache"
+		} else if entry.Provider == modelregistry.ProviderZAI {
+			route = "Z.ai API"
+			origin = "Z.ai catalogue"
 		}
 		if entry.Source == modelregistry.SourceOverlay {
 			origin = "User overlay"
@@ -591,8 +594,8 @@ func filterModelEntries(entries []modelregistry.Entry, provider modelregistry.Pr
 
 func parseModelsProvider(value string) (modelregistry.Provider, error) {
 	provider := modelregistry.Provider(value)
-	if provider != modelregistry.ProviderAnthropic && provider != modelregistry.ProviderCodex {
-		return "", fmt.Errorf("models: unknown provider %q (want anthropic or codex)", value)
+	if provider != modelregistry.ProviderAnthropic && provider != modelregistry.ProviderCodex && provider != modelregistry.ProviderZAI {
+		return "", fmt.Errorf("models: unknown provider %q (want anthropic, codex or zai)", value)
 	}
 	return provider, nil
 }

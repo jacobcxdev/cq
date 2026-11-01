@@ -564,7 +564,7 @@ List active registry models.
 
 Options:
   --json              Output JSON
-  --provider PROVIDER Filter by provider: anthropic or codex
+  --provider PROVIDER Filter by provider: anthropic, codex or zai
 `,
 	"models refresh": `Usage: cq models refresh
 
@@ -589,7 +589,7 @@ Commands:
 Add or update user model overlay.
 
 Options:
-  --provider PROVIDER Provider to publish under: anthropic or codex
+  --provider PROVIDER Provider to publish under: anthropic, codex or zai
   --id MODEL          Model ID to add
   --clone-from MODEL  Native model ID to copy metadata from
 `,
@@ -598,7 +598,7 @@ Options:
 Remove user model overlay.
 
 Options:
-  --provider PROVIDER Provider to remove from: anthropic or codex
+  --provider PROVIDER Provider to remove from: anthropic, codex or zai
   --id MODEL          Model ID to remove
 `,
 	"models overlay prune": `Usage: cq models overlay prune

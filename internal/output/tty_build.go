@@ -14,9 +14,10 @@ import (
 )
 
 var icons = map[provider.ID]string{
-	provider.Claude: "\u273B", // ✻
-	provider.Codex:  "\uF120", //
-	provider.Gemini: "\uF51B", //
+	provider.Claude: "\u273B",     // ✻
+	provider.Codex:  "\uF120",     //
+	provider.Gemini: "\uF51B",     //
+	provider.ZAI:    "\U000F0C36", // nf-md-alpha_z_box_outline
 }
 
 // BuildTTYModel converts a Report into a structured TTYModel ready for rendering.
@@ -518,6 +519,9 @@ func headerVisibleWidth(r quota.Result, id provider.ID) int {
 
 // providerDisplayName returns the capitalised display name for a provider ID.
 func providerDisplayName(id provider.ID) string {
+	if id == provider.ZAI {
+		return "Z.ai"
+	}
 	name := string(id)
 	if len(name) == 0 {
 		return ""

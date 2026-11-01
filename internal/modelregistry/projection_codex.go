@@ -17,10 +17,11 @@ type codexModelsResponseOut struct {
 
 // codexCacheEnvelope is the on-disk format of models_cache.json.
 type codexCacheEnvelope struct {
-	FetchedAt     string            `json:"fetched_at"`
-	Etag          *string           `json:"etag,omitempty"`
-	ClientVersion string            `json:"client_version,omitempty"`
-	Models        []json.RawMessage `json:"models"`
+	FetchedAt     string              `json:"fetched_at"`
+	Etag          *string             `json:"etag,omitempty"`
+	ClientVersion string              `json:"client_version,omitempty"`
+	Models        []json.RawMessage   `json:"models"`
+	CQProviders   map[string]Provider `json:"cq_providers,omitempty"`
 }
 
 // codexFallbackContextWindow is used for overlay entries that declare no
@@ -32,7 +33,7 @@ const codexFallbackContextWindow = 272000
 const codexFallbackTruncationBytesLimit = 10000
 
 // CodexModelsResponse builds the models response payload from the snapshot.
-// Only Codex entries are included.
+// Codex and Z.ai Responses entries are included.
 //
 // For native entries with raw JSON in CodexRawByID, the raw bytes are used
 // verbatim (round-trip guarantee).
@@ -44,7 +45,7 @@ const codexFallbackTruncationBytesLimit = 10000
 func CodexModelsResponse(snap Snapshot) codexModelsResponseOut {
 	models := make([]json.RawMessage, 0)
 	for _, e := range snap.Entries {
-		if e.Provider != ProviderCodex {
+		if e.Provider != ProviderCodex && e.Provider != ProviderZAI {
 			continue
 		}
 		raw := codexEntryRaw(e, snap.CodexRawByID)
@@ -55,6 +56,9 @@ func CodexModelsResponse(snap Snapshot) codexModelsResponseOut {
 
 // codexEntryRaw returns the JSON bytes for a single Codex entry.
 func codexEntryRaw(e Entry, rawByID map[string]json.RawMessage) json.RawMessage {
+	if e.Provider == ProviderZAI && len(e.Raw) > 0 {
+		return e.Raw
+	}
 	// Native entry: use the stored raw JSON verbatim.
 	if e.Source == SourceNative {
 		if raw, ok := rawByID[e.ID]; ok && raw != nil {
@@ -191,6 +195,15 @@ func PublishCodexCache(fsys fsutil.FileSystem, path string, snap Snapshot, now t
 	// Build the models list from the snapshot.
 	resp := CodexModelsResponse(snap)
 	existing.Models = resp.Models
+	existing.CQProviders = nil
+	for _, entry := range snap.Entries {
+		if entry.Provider == ProviderZAI {
+			if existing.CQProviders == nil {
+				existing.CQProviders = make(map[string]Provider)
+			}
+			existing.CQProviders[entry.ID] = entry.Provider
+		}
+	}
 
 	data, err := json.MarshalIndent(existing, "", "  ")
 	if err != nil {
