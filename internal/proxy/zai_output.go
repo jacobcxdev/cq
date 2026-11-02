@@ -10,8 +10,8 @@ import (
 
 const zaiMaxSSEEventBytes = 1 << 20
 
-// Z.ai emits plaintext collaboration arguments without the marker Codex uses
-// to distinguish them from encrypted collaboration arguments.
+// Z.ai emits plaintext reasoning and collaboration arguments in shapes Codex
+// cannot safely replay to other providers without normalisation.
 func normaliseZAIResponse(data []byte) ([]byte, error) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
@@ -26,7 +26,7 @@ func normaliseZAIResponse(data []byte) ([]byte, error) {
 	}
 	changed := false
 	if item, ok := envelope["item"]; ok {
-		updated, itemChanged, err := normaliseZAICollaborationCall(item)
+		updated, itemChanged, err := normaliseZAIResponseItem(item)
 		if err != nil {
 			return nil, err
 		}
@@ -48,7 +48,7 @@ func normaliseZAIResponse(data []byte) ([]byte, error) {
 		}
 		outputChanged := false
 		for i, item := range output {
-			updated, itemChanged, err := normaliseZAICollaborationCall(item)
+			updated, itemChanged, err := normaliseZAIResponseItem(item)
 			if err != nil {
 				return nil, err
 			}
@@ -78,13 +78,52 @@ func normaliseZAIResponse(data []byte) ([]byte, error) {
 	return json.Marshal(envelope)
 }
 
-func normaliseZAICollaborationCall(raw json.RawMessage) (json.RawMessage, bool, error) {
+func normaliseZAIResponseItem(raw json.RawMessage) (json.RawMessage, bool, error) {
 	var call map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &call); err != nil || call == nil {
 		return raw, false, nil
 	}
 	var kind, namespace, name string
-	if json.Unmarshal(call["type"], &kind) != nil || kind != "function_call" ||
+	if json.Unmarshal(call["type"], &kind) != nil {
+		return raw, false, nil
+	}
+	if kind == "reasoning" {
+		if encrypted, ok := call["encrypted_content"]; ok && !bytes.Equal(bytes.TrimSpace(encrypted), []byte("null")) {
+			return raw, false, nil
+		}
+		var content []map[string]json.RawMessage
+		if json.Unmarshal(call["content"], &content) != nil || len(content) == 0 {
+			return raw, false, nil
+		}
+		var summary []json.RawMessage
+		if previous, ok := call["summary"]; ok && json.Unmarshal(previous, &summary) != nil {
+			return raw, false, nil
+		}
+		for _, part := range content {
+			var partType string
+			var text *string
+			if len(part) != 2 || json.Unmarshal(part["type"], &partType) != nil || partType != "reasoning_text" ||
+				json.Unmarshal(part["text"], &text) != nil || text == nil {
+				return raw, false, nil
+			}
+			part["type"] = json.RawMessage(`"summary_text"`)
+			encoded, err := json.Marshal(part)
+			if err != nil {
+				return nil, false, err
+			}
+			summary = append(summary, encoded)
+		}
+		var err error
+		call["summary"], err = json.Marshal(summary)
+		if err != nil {
+			return nil, false, err
+		}
+		delete(call, "content")
+		delete(call, "encrypted_content")
+		updated, err := json.Marshal(call)
+		return updated, err == nil, err
+	}
+	if kind != "function_call" ||
 		json.Unmarshal(call["namespace"], &namespace) != nil || namespace != "collaboration" ||
 		json.Unmarshal(call["name"], &name) != nil {
 		return raw, false, nil
