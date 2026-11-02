@@ -154,4 +154,37 @@ homebrew_casks:
             super(command: command, successor: successor, reinstall: reinstall, **kwargs) # rubocop:disable Style/SuperArguments
           end
         end)
+        # Homebrew's reinstall normally purges its predecessor without a backup.
+        # Use its existing upgrade transaction for this exact CQ cask instance.
+        require "cask/installer"
+        unless %i[install uninstall_existing_cask].all? { |method| ::Cask::Installer.instance_method(method).arity == 0 }
+          raise "CQ reinstall requires supported Homebrew installer callbacks"
+        end
+        cq_cask = cask
+        ::Cask::Installer.prepend(Module.new do
+          define_method(:uninstall_existing_cask) do
+            return super() unless @cask.equal?(cq_cask)
+            return unless @cask.installed?
+
+            installed = ::Cask::CaskLoader.load_from_installed_caskfile(@cask.installed_caskfile, api_fallback: false)
+            @cq_reinstall_predecessor = self.class.new(installed, command: @command, verbose: verbose?, upgrade: true)
+            @cq_reinstall_predecessor.start_upgrade(successor: @cask)
+          end
+
+          define_method(:install) do
+            return super() unless @cask.equal?(cq_cask)
+            return super() unless reinstall?
+
+            begin
+              super()
+            rescue
+              @cq_reinstall_predecessor&.revert_upgrade(predecessor: @cask)
+              raise
+            else
+              @cq_reinstall_predecessor&.finalize_upgrade
+            ensure
+              @cq_reinstall_predecessor = nil
+            end
+          end
+        end)
       end

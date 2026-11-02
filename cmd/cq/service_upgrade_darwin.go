@@ -306,6 +306,16 @@ func submitDarwinServiceRuntimeUpgrade(ctx context.Context, store proxy.RuntimeU
 		body, readErr := httputil.ReadBody(response.Body)
 		response.Body.Close()
 		if err == nil && response.StatusCode != http.StatusAccepted {
+			if response.StatusCode == http.StatusConflict && readErr == nil {
+				switch string(bytes.TrimSpace(body)) {
+				case "runtime upgrade unsupported":
+					return previous, fmt.Errorf("%w: running service does not support runtime handoff (HTTP 409)", ErrServiceUpgradeMaintenance)
+				case "runtime upgrade unavailable":
+					if mode := rejectedDarwinUpgradeTrafficMode(request, client); mode != "" {
+						return previous, fmt.Errorf("%w: traffic mode is %s (HTTP 409)", ErrServiceUpgradeDeferred, mode)
+					}
+				}
+			}
 			return previous, fmt.Errorf("runtime upgrade request rejected: HTTP %d", response.StatusCode)
 		}
 		submissionErr = errors.Join(submissionErr, readErr)
@@ -323,6 +333,41 @@ func submitDarwinServiceRuntimeUpgrade(ctx context.Context, store proxy.RuntimeU
 	return awaitDarwinServiceRuntimeUpgrade(wait, store, candidate, id, previous, prepared, submissionErr, func() error {
 		return probeDarwinServiceRuntimeUpgrade(request, client, candidate, id)
 	})
+}
+
+// Older controllers use one conflict response for mode and transaction refusals.
+// Query only the authenticated loopback status and never echo its response body.
+func rejectedDarwinUpgradeTrafficMode(submission *http.Request, client httputil.Doer) proxy.TrafficMode {
+	ctx, cancel := context.WithTimeout(submission.Context(), time.Second)
+	defer cancel()
+	request := submission.Clone(ctx)
+	statusURL := *submission.URL
+	statusURL.Path, statusURL.RawPath, statusURL.RawQuery = proxy.RuntimeRescueStatusPath, "", ""
+	request.URL = &statusURL
+	request.Method = http.MethodGet
+	request.Body, request.GetBody, request.ContentLength = nil, nil, 0
+	request.Header.Del("Content-Type")
+	request.Close = true
+	response, err := client.Do(request)
+	if response != nil {
+		defer response.Body.Close()
+	}
+	if err != nil || response == nil || response.StatusCode != http.StatusOK {
+		return ""
+	}
+	body, err := httputil.ReadBody(response.Body)
+	var status struct {
+		Mode proxy.TrafficMode `json:"mode"`
+	}
+	if err != nil || json.Unmarshal(body, &status) != nil {
+		return ""
+	}
+	switch status.Mode {
+	case proxy.TrafficModeRescue, proxy.TrafficModeRescueDraining, proxy.TrafficModeRescueExitDraining, proxy.TrafficModeDrain:
+		return status.Mode
+	default:
+		return ""
+	}
 }
 
 // A paused listener cannot answer status during a healthy drain. Probe failures
