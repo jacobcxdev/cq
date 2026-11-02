@@ -5,11 +5,13 @@ CQ stages each executable in private, immutable storage before package cleanup.
 It stops admitting new work before waiting for active HTTP requests, SSE streams
 and WebSocket turns to finish. Each broker WebSocket session reconnects with
 `1012` after its current turn completes; idle sessions reconnect immediately.
-Drainage has no default deadline, so overlapping chats cannot keep renewing work
-on the retiring worker. Raw relayed WebSocket connections must close before
-upgrading. New connections can wait in the kernel backlog during drainage and
-while the successor starts. A full backlog or loss of both successor and guard
-can still interrupt service; this is not an unconditional zero-downtime promise.
+Normal package upgrades allow 15 seconds for drainage. If active work cannot
+finish in that time, CQ resumes admissions on the previous runtime and defers
+the upgrade. Retry after that work finishes. Raw relayed WebSocket connections
+must close before upgrading. New connections can wait in the kernel backlog
+during drainage and while the successor starts. A full backlog or loss of both
+successor and guard can still interrupt service; this is not an unconditional
+zero-downtime promise.
 
 Use `brew upgrade jacobcxdev/tap/cq` for normal package upgrades. Homebrew's
 same-token successor callback keeps CQ services installed. Genuine uninstall
@@ -28,9 +30,10 @@ contents. Cleanup errors emit a warning without reverting a completed upgrade.
 
 `cq service status` shows active and pending runtime versions. The JSON form
 adds `active_runtime_version`, `pending_runtime_version` and `upgrade_phase`.
-An explicit bounded upgrade can defer and keep its predecessor active. Normal
-package upgrades wait for the recorded transaction to finish. A failed package
-hook exits unsuccessfully instead of claiming the candidate became active.
+Normal package upgrades and explicit bounded upgrades can defer and keep their
+predecessor active. Package upgrades wait for the recorded transaction to finish.
+A failed package hook exits unsuccessfully instead of claiming the candidate
+became active.
 A failed successor resumes the retained predecessor. A refresh-job failure
 selects the previous runtime through a fresh transaction and restores refresh
 and package ownership; failure remains visible to Homebrew for package rollback.
@@ -43,7 +46,8 @@ cq service upgrade --owner=homebrew --candidate-executable=/absolute/path/to/cq 
 
 Add `--wait-timeout=15s` to defer if drainage takes longer than 15 seconds,
 keeping the previous runtime active. Valid values are whole seconds from `1s`
-through `30s`; the default or `0` keeps the existing indefinite drainage wait.
+through `30s`; for this explicit command, the default or `0` waits indefinitely
+for drainage. Normal `service install` and Homebrew upgrades use 15 seconds.
 
 The stable package executable remains the ownership identity. LaunchAgent
 arguments name retained runtime copies; the proxy's startup reads the journal

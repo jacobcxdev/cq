@@ -132,7 +132,7 @@ func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installsta
 	if owner == installstate.OwnerHomebrew && lifecycle.RuntimeArtifacts != nil {
 		_, err := lifecycle.Store.Load()
 		if err == nil {
-			_, err = lifecycle.Upgrade(ctx, owner, lifecycle.Executable)
+			_, err = lifecycle.upgradeWithWaitTimeout(ctx, owner, lifecycle.Executable, 15*time.Second)
 			return err
 		}
 		if !errors.Is(err, installstate.ErrNotInstalled) {
@@ -323,6 +323,15 @@ func (lifecycle *serviceLifecycle) Status(ctx context.Context) (serviceStatus, e
 		if lifecycle.RuntimeArtifacts != nil {
 			status.ActiveRuntimeVersion = record.Version
 		}
+		if record.Owner == installstate.OwnerHomebrew {
+			digestExecutable := lifecycle.DigestExecutable
+			if digestExecutable == nil {
+				digestExecutable = installstate.DigestFile
+			}
+			if _, err := digestExecutable(record.Executable); err != nil {
+				status.Conflict = fmt.Sprintf("package executable is unavailable: %v", err)
+			}
+		}
 	} else if !errors.Is(err, installstate.ErrNotInstalled) {
 		return serviceStatus{}, fmt.Errorf("load service ownership: %w", err)
 	}
@@ -333,6 +342,10 @@ func (lifecycle *serviceLifecycle) Status(ctx context.Context) (serviceStatus, e
 			status.ActiveRuntimeVersion = receipt.Previous.Version
 			if receipt.Phase == "committed" {
 				status.ActiveRuntimeVersion = receipt.Candidate.Version
+				if status.Refresh.Registered && !sameServiceExecutable(status.Refresh.ConfiguredExecutable, receipt.Candidate.Path) {
+					status.Refresh.Healthy = false
+					status.Refresh.Error = "refresh service uses a different runtime"
+				}
 			} else if receipt.Phase != "rolled_back" && receipt.Phase != "failed" {
 				status.PendingRuntimeVersion = receipt.Candidate.Version
 			}

@@ -107,6 +107,26 @@ func TestHomebrewUpgradeKeepsJobsAndUsesRetainedRuntime(t *testing.T) {
 	}
 }
 
+func TestHomebrewInstallBoundsRuntimeDrain(t *testing.T) {
+	lifecycle, platform, _, _, candidate := homebrewUpgradeServiceFixture(t)
+	lifecycle.RuntimeArtifacts.(serviceUpgradeArtifacts)[lifecycle.Executable] = candidate
+	apply := lifecycle.RuntimeApply
+	var waits []time.Duration
+	lifecycle.RuntimeApply = func(ctx context.Context, artifact installer.RuntimeArtifact, wait time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+		waits = append(waits, wait)
+		return apply(ctx, artifact, wait)
+	}
+	if err := lifecycle.Install(context.Background(), installstate.OwnerHomebrew); err != nil {
+		t.Fatal(err)
+	}
+	if len(waits) != 1 || waits[0] != 15*time.Second {
+		t.Fatalf("package install drain waits = %v, want [15s]", waits)
+	}
+	if platform.live != candidate.Path || platform.refresh != candidate.Path {
+		t.Fatal("quiet package upgrade did not select the candidate")
+	}
+}
+
 func TestServiceUpgradeAcceptsBoundedWaitTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		flags []string
