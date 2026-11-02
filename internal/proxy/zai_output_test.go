@@ -76,6 +76,103 @@ func TestNormaliseZAIResponsePlaintextCollaborationCalls(t *testing.T) {
 	}
 }
 
+func TestNormaliseZAIResponsePlaintextReasoning(t *testing.T) {
+	const item = `{"type":"reasoning","id":"reasoning-1","content":[{"type":"reasoning_text","text":"First line\nGLM \u03bb"},{"type":"reasoning_text","text":"Second part"}],"summary":[{"type":"summary_text","text":"Existing summary","extra":9007199254740993}],"encrypted_content":null,"extra":9007199254740995}`
+	const expected = `{"type":"reasoning","id":"reasoning-1","summary":[{"type":"summary_text","text":"Existing summary","extra":9007199254740993},{"type":"summary_text","text":"First line\nGLM \u03bb"},{"type":"summary_text","text":"Second part"}],"extra":9007199254740995}`
+	for _, shape := range []string{"item", "response", "bare"} {
+		t.Run(shape, func(t *testing.T) {
+			wrap := func(value string) string {
+				switch shape {
+				case "item":
+					return `{"type":"response.output_item.done","item":` + value + `}`
+				case "response":
+					return `{"type":"response.completed","response":{"output":[` + value + `]}}`
+				default:
+					return `{"output":[` + value + `]}`
+				}
+			}
+			got, err := normaliseZAIResponse([]byte(wrap(item)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var values [2]any
+			for i, data := range [][]byte{got, []byte(wrap(expected))} {
+				decoder := json.NewDecoder(bytes.NewReader(data))
+				decoder.UseNumber()
+				if err := decoder.Decode(&values[i]); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if !reflect.DeepEqual(values[0], values[1]) {
+				t.Fatalf("reasoning not preserved as summary: %s", got)
+			}
+			second, err := normaliseZAIResponse(got)
+			if err != nil || !bytes.Equal(second, got) {
+				t.Fatalf("second normalisation changed output: %v", err)
+			}
+		})
+	}
+}
+
+func TestNormaliseZAIResponseReasoningWithoutSummary(t *testing.T) {
+	for _, fields := range []string{"", `,"summary":null`, `,"summary":[]`} {
+		body := `{"item":{"type":"reasoning","content":[{"type":"reasoning_text","text":"Preserved text"}]` + fields + `}}`
+		got, err := normaliseZAIResponse([]byte(body))
+		if err != nil || !bytes.Contains(got, []byte(`"summary":[{"text":"Preserved text","type":"summary_text"}]`)) || bytes.Contains(got, []byte(`"content"`)) {
+			t.Fatalf("reasoning not normalised: %s, error %v", got, err)
+		}
+	}
+}
+
+func TestNormaliseZAIResponsePreservesEncryptedAndUnknownReasoning(t *testing.T) {
+	for _, item := range []string{
+		`{"type":"reasoning","content":[{"type":"reasoning_text","text":"opaque companion"}],"encrypted_content":"ciphertext"}`,
+		`{"type":"reasoning","content":[{"type":"reasoning_text","text":"opaque companion"}],"encrypted_content":""}`,
+		`{"type":"reasoning","content":[]}`,
+		`{"type":"reasoning","content":null}`,
+		`{"type":"reasoning","content":{"type":"reasoning_text","text":"wrong shape"}}`,
+		`{"type":"reasoning","content":[{"type":"reasoning_text","text":"known"},{"type":"future_text","text":"unknown"}]}`,
+		`{"type":"reasoning","content":[{"type":"reasoning_text","text":"known","extra":"preserve"}]}`,
+		`{"type":"reasoning","content":[{"type":"reasoning_text","text":null}]}`,
+		`{"type":"reasoning","content":[{"type":"reasoning_text"}]}`,
+		`{"type":"reasoning","content":[{"type":"reasoning_text","text":"known"}],"summary":{}}`,
+	} {
+		body := ` {"type":"response.output_item.done", "item":` + item + `} `
+		got, err := normaliseZAIResponse([]byte(body))
+		if err != nil || string(got) != body {
+			t.Fatalf("unsupported reasoning changed: %s, error %v", got, err)
+		}
+	}
+}
+
+func TestCopyZAIResponseSSEPreservesReasoningDeltas(t *testing.T) {
+	const delta = "event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"item_id\":\"r\",\"content_index\":0,\"delta\":\"Full text\"}\n\n"
+	const done = "event: response.output_item.done\ndata: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"r\",\"type\":\"reasoning\",\"summary\":[],\"content\":[{\"type\":\"reasoning_text\",\"text\":\"Full text\"}],\"encrypted_content\":null}}\n\n"
+	var output bytes.Buffer
+	if err := copyZAIResponseSSE(&output, iotest.OneByteReader(strings.NewReader(delta+done))); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(output.String(), delta) {
+		t.Fatalf("reasoning delta changed: %q", output.String())
+	}
+	observations, err := ParseCodexSSE(output.Bytes(), zaiMaxSSEEventBytes)
+	if err != nil || len(observations) != 2 {
+		t.Fatalf("invalid SSE: %#v, %v", observations, err)
+	}
+	var event struct {
+		Item struct {
+			Summary []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"summary"`
+			Content json.RawMessage `json:"content"`
+		} `json:"item"`
+	}
+	if err := json.Unmarshal(observations[1].Data, &event); err != nil || len(event.Item.Summary) != 1 || event.Item.Summary[0].Type != "summary_text" || event.Item.Summary[0].Text != "Full text" || event.Item.Content != nil {
+		t.Fatalf("completed reasoning not normalised once: %s, error %v", observations[1].Data, err)
+	}
+}
+
 func TestNormaliseZAIResponsePreservesUnrelatedAndEncryptedCalls(t *testing.T) {
 	tests := []string{
 		" {\r\n \"type\": \"response.created\", \"response\": {\"id\": \"r\"} } \n",
