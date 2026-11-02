@@ -61,7 +61,7 @@ func TestPrepareRequiresExplicitActivationAndPreservesCertificate(t *testing.T) 
 	if err != nil || config == nil {
 		t.Fatalf("enabled config = %v, %v", config, err)
 	}
-	if config.MinVersion != tls.VersionTLS12 || !slices.Equal(config.NextProtos, []string{"http/1.1"}) {
+	if config.MinVersion != tls.VersionTLS12 || !slices.Equal(config.NextProtos, []string{"h2", "http/1.1"}) {
 		t.Fatalf("unexpected TLS protocol settings: %#v", config)
 	}
 	leaf := config.Certificates[0].Leaf

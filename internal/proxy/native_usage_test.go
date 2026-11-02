@@ -178,6 +178,40 @@ func TestNativeUsageNumericDestinationUsesTLSServiceName(t *testing.T) {
 	}
 }
 
+func TestNativeUsageRefreshSharesStreamingConnection(t *testing.T) {
+	f := newNativeUsageTestFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/stream" {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: ready\n\n")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+			return
+		}
+		_, _ = io.WriteString(w, nativeUsageTestBody)
+	}))
+	transport := &http.Transport{TLSClientConfig: f.client, DialContext: f.dial,
+		ForceAttemptHTTP2: true, MaxConnsPerHost: 1}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
+	stream, err := client.Get("https://chatgpt.com/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	response, err := client.Get("https://chatgpt.com/backend-api/wham/usage")
+	if err != nil {
+		t.Fatalf("usage refresh stalled behind active stream: %v", err)
+	}
+	defer response.Body.Close()
+	if response.ProtoMajor != 2 {
+		t.Fatalf("browser connection lost HTTP/2: %s", response.Proto)
+	}
+	data, err := cqhttp.ReadBody(response.Body)
+	if err != nil || !bytes.Contains(data, []byte(`"balance":"1"`)) {
+		t.Fatalf("multiplexed usage response = %s, %v", data, err)
+	}
+}
+
 func TestNativeUsageNamedDestinationPreservesOtherTLSService(t *testing.T) {
 	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS.ServerName != "example.com" {

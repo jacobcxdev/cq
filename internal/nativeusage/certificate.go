@@ -132,7 +132,7 @@ func LoadTLS(root string, fsys fsutil.FileSystem) (*tls.Config, error) {
 	if state.FingerprintSHA256 != info(root, certificate).FingerprintSHA256 {
 		return nil, errors.New("usage certificate differs from enabled settings")
 	}
-	return &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12, NextProtos: []string{"http/1.1"}}, nil
+	return &tls.Config{Certificates: []tls.Certificate{pair}, MinVersion: tls.VersionTLS12, NextProtos: []string{"h2", "http/1.1"}}, nil
 }
 
 func readState(root string, fsys fsutil.FileSystem) (enabledState, bool, error) {

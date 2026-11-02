@@ -201,9 +201,18 @@ func (d *nativeUsageDialer) serve(ctx context.Context, raw net.Conn, target stri
 			if !d.enabled() {
 				return nil
 			}
+			if nativeUsageRequest(response.Request) {
+				encoding := "identity"
+				if value := response.Header.Get("Content-Encoding"); value != "" && !strings.EqualFold(value, "identity") {
+					encoding = "encoded"
+				}
+				d.note("HTTP usage response: " + strconv.Itoa(response.StatusCode) + " " + encoding)
+			}
 			changed, err := nativeUsageResponse(response)
 			if changed {
 				d.note("HTTP usage adapted")
+			} else if nativeUsageRequest(response.Request) {
+				d.note("HTTP usage retained")
 			}
 			return err
 		},
