@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -81,6 +82,31 @@ func (d *nativeUsageDialer) note(kind string) {
 	fmt.Fprintf(os.Stderr, "cq native usage: %s\n", kind)
 }
 
+// Classify failures without exposing request URLs, headers or peer-supplied data.
+func nativeUsageFailure(err error) string {
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+		return "connection closed"
+	}
+	var timeout net.Error
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return "timeout"
+	}
+	var certificate *tls.CertificateVerificationError
+	var authority x509.UnknownAuthorityError
+	if errors.As(err, &certificate) || errors.As(err, &authority) {
+		return "upstream certificate rejected"
+	}
+	for _, code := range []tls.AlertError{42, 43, 44, 45, 46, 48, 49} {
+		if err.Error() == "remote error: "+code.Error() {
+			return "client certificate rejected"
+		}
+	}
+	if strings.Contains(err.Error(), "tls: client requested unsupported application protocols") {
+		return "application protocol mismatch"
+	}
+	return "other"
+}
+
 func (d *nativeUsageDialer) upstreamTLS() *tls.Config {
 	if d.publicTLS != nil {
 		return d.publicTLS.Clone()
@@ -104,7 +130,7 @@ func (d *nativeUsageDialer) serve(ctx context.Context, raw net.Conn, target stri
 	err := conn.HandshakeContext(handshake)
 	cancel()
 	if err != nil {
-		d.note("HTTPS connection failed")
+		d.note("HTTPS connection failed: " + nativeUsageFailure(err))
 		return
 	}
 	transport := &http.Transport{
@@ -135,8 +161,8 @@ func (d *nativeUsageDialer) serve(ctx context.Context, raw net.Conn, target stri
 			}
 			return err
 		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
-			d.note("HTTP upstream unavailable")
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			d.note("HTTP upstream unavailable: " + nativeUsageFailure(err))
 			http.Error(w, "usage service unavailable", http.StatusBadGateway)
 		},
 	}
@@ -285,6 +311,7 @@ func (d *nativeUsageDialer) websocket(w http.ResponseWriter, r *http.Request, ta
 	if err != nil {
 		return
 	}
+	d.note("live usage connected")
 	defer client.Close()
 	closeBoth := func() { _ = client.Close(); _ = upstream.Close() }
 	stop := context.AfterFunc(r.Context(), closeBoth)

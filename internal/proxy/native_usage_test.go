@@ -31,6 +31,29 @@ import (
 
 const nativeUsageTestBody = `{"credits":{"balance":"0","has_credits":false},"unknown":{"sequence":9007199254740993}}`
 
+func TestNativeUsageFailureOmitsPrivateDetails(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"closed", io.EOF, "connection closed"},
+		{"cancelled", fmt.Errorf("private detail: %w", context.Canceled), "connection closed"},
+		{"timeout", context.DeadlineExceeded, "timeout"},
+		{"upstream trust", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, "upstream certificate rejected"},
+		{"peer trust", errors.New("remote error: tls: unknown certificate authority"), "client certificate rejected"},
+		{"peer certificate", errors.New("remote error: tls: bad certificate"), "client certificate rejected"},
+		{"protocol", errors.New(`tls: client requested unsupported application protocols (["private-value"])`), "application protocol mismatch"},
+		{"unknown", errors.New("request https://private.invalid/?token=private-value failed"), "other"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := nativeUsageFailure(test.err); got != test.want {
+				t.Fatalf("classification = %q; want %q", got, test.want)
+			}
+		})
+	}
+}
+
 type nativeUsageTestRoute struct {
 	EgressDialer
 	ready bool
