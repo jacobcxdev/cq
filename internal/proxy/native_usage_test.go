@@ -37,8 +37,10 @@ func TestNativeUsageFailureOmitsPrivateDetails(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"closed", io.EOF, "connection closed"},
-		{"cancelled", fmt.Errorf("private detail: %w", context.Canceled), "connection closed"},
+		{"closed", net.ErrClosed, "connection closed"},
+		{"EOF", io.EOF, "peer EOF"},
+		{"incomplete", io.ErrUnexpectedEOF, "incomplete TLS message"},
+		{"cancelled", fmt.Errorf("private detail: %w", context.Canceled), "request cancelled"},
 		{"timeout", context.DeadlineExceeded, "timeout"},
 		{"upstream trust", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}, "upstream certificate rejected"},
 		{"peer trust", errors.New("remote error: tls: unknown certificate authority"), "client certificate rejected"},
@@ -98,7 +100,7 @@ func newNativeUsageTestFixture(t *testing.T, handler http.Handler) *nativeUsageT
 	origin.StartTLS()
 	t.Cleanup(origin.Close)
 	base := nativeUsageTestRoute{ready: true, EgressDialer: egressBrokerTestDialer(func(ctx context.Context, network, target string) (net.Conn, error) {
-		if network != "tcp" || target != "chatgpt.com:443" && target != "ws.chatgpt.com:443" {
+		if network != "tcp" || target != "chatgpt.com:443" && target != "ws.chatgpt.com:443" && target != "8.8.8.8:443" {
 			return nil, fmt.Errorf("unexpected native route: %s %s", network, target)
 		}
 		f.dials.Add(1)
@@ -143,6 +145,78 @@ type nativeUsageTestBufferedConn struct {
 }
 
 func (c *nativeUsageTestBufferedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
+
+func TestNativeUsageNumericDestinationUsesTLSServiceName(t *testing.T) {
+	f := newNativeUsageTestFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, nativeUsageTestBody)
+	}))
+	transport := &http.Transport{TLSClientConfig: f.client, DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return f.dial(ctx, network, "8.8.8.8:443")
+	}}
+	t.Cleanup(transport.CloseIdleConnections)
+	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
+	response, err := client.Get("https://chatgpt.com/backend-api/wham/usage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	data, err := cqhttp.ReadBody(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value struct {
+		Credits struct {
+			Balance string `json:"balance"`
+			Has     bool   `json:"has_credits"`
+		} `json:"credits"`
+	}
+	if err := json.Unmarshal(data, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value.Credits.Balance != "1" || !value.Credits.Has {
+		t.Fatalf("numeric native destination bypassed usage handling: %+v", value.Credits)
+	}
+}
+
+func TestNativeUsageNamedDestinationPreservesOtherTLSService(t *testing.T) {
+	origin := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS.ServerName != "example.com" {
+			t.Error("original TLS service name changed")
+		}
+		_, _ = io.WriteString(w, "original response")
+	}))
+	defer origin.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(origin.Certificate())
+	root := filepath.Join(t.TempDir(), "usage")
+	fs := fsutil.OSFileSystem{}
+	if _, err := nativeusage.Prepare(root, fs); err != nil {
+		t.Fatal(err)
+	}
+	if err := nativeusage.SetEnabled(root, fs, true); err != nil {
+		t.Fatal(err)
+	}
+	base := egressBrokerTestDialer(func(ctx context.Context, network, target string) (net.Conn, error) {
+		if target != "chatgpt.com:443" {
+			t.Error("original native destination changed")
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, origin.Listener.Addr().String())
+	})
+	adapter := NewNativeUsageDialer(base, root, fs)
+	transport := &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots}, DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return adapter.DialContext(ctx, network, "chatgpt.com:443")
+	}}
+	defer transport.CloseIdleConnections()
+	response, err := (&http.Client{Transport: transport, Timeout: 5 * time.Second}).Get("https://example.com/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	data, err := cqhttp.ReadBody(response.Body)
+	if err != nil || string(data) != "original response" {
+		t.Fatalf("unrelated TLS service changed: %q, %v", data, err)
+	}
+}
 
 func TestNativeUsageHTTPSOverAuthenticatedConnect(t *testing.T) {
 	var identityEncoding atomic.Int32
@@ -420,7 +494,9 @@ func TestNativeUsageWebSocketPreservedTrafficAndDisable(t *testing.T) {
 		}
 	}))
 	t.Cleanup(func() { close(frames) })
-	dialer := websocket.Dialer{NetDialContext: f.dial, TLSClientConfig: f.client, Subprotocols: []string{"usage.v1"}, HandshakeTimeout: 5 * time.Second}
+	dialer := websocket.Dialer{NetDialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return f.dial(ctx, network, "8.8.8.8:443")
+	}, TLSClientConfig: f.client, Subprotocols: []string{"usage.v1"}, HandshakeTimeout: 5 * time.Second}
 	conn, response, err := dialer.DialContext(context.Background(), "wss://ws.chatgpt.com/usage?ticket=synthetic", http.Header{"Origin": {"https://chatgpt.com"}})
 	if err != nil {
 		t.Fatal(err)
@@ -446,12 +522,14 @@ func TestNativeUsageWebSocketPreservedTrafficAndDisable(t *testing.T) {
 	}
 	usage := `{"type":"message","topic_id":"codex-work-usage-push-v1","payload":{"type":"usage.snapshot","payload":{"sequence":9007199254740993,"usage_by_client":{"electron":` + nativeUsageTestBody + `,"browser":` + nativeUsageTestBody + `}}}}`
 	unrelated := ` {"type":"message","topic_id":"other","payload":{"value":9007199254740993}} `
+	catchup := `[{"id":1,"reply":{"type":"subscribe","topic_id":"codex-work-usage-push-v1","recovered":true,"catchups":[` + usage + `]}}]`
 	for _, test := range []struct {
 		name, body, want string
 		disable          bool
 	}{
 		{"unrelated", unrelated, unrelated, false},
 		{"usage batch", "[" + unrelated + "," + usage + "]", "[" + unrelated + "," + strings.Replace(usage, `"balance":"0","has_credits":false`, `"balance":"1","has_credits":true`, 1) + "]", false},
+		{"subscription catchup", catchup, strings.Replace(catchup, `"balance":"0","has_credits":false`, `"balance":"1","has_credits":true`, 1), false},
 		{"disabled existing connection", usage, usage, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -593,7 +671,7 @@ func TestNativeUsageDialerOptInAndScope(t *testing.T) {
 	if err := nativeusage.SetEnabled(root, fs, true); err != nil {
 		t.Fatal(err)
 	}
-	for _, test := range []struct{ network, target string }{{"tcp", "assets.example:443"}, {"tcp", "chatgpt.com:80"}, {"udp", "chatgpt.com:443"}, {"tcp", "chatgpt.com.example:443"}, {"tcp", "1.1.1.1:443"}} {
+	for _, test := range []struct{ network, target string }{{"tcp", "assets.example:443"}, {"tcp", "chatgpt.com:80"}, {"udp", "chatgpt.com:443"}, {"tcp", "chatgpt.com.example:443"}} {
 		conn, err := adapter.DialContext(context.Background(), test.network, test.target)
 		if err != nil || conn != left {
 			t.Fatalf("unrelated native route changed: %s %s", test.network, test.target)

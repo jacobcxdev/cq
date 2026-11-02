@@ -670,6 +670,8 @@ cq codex network usage status
 If CQ uses another state directory, use the certificate path from `prepare`.
 This adapter handles TCP HTTPS and WebSocket connections. HTTP/3 traffic remains
 unchanged. Existing connections acquire response handling after they reconnect.
+TLS service names identify usage connections when native flows provide numeric
+destinations. The same handling applies to every account.
 
 Disable stops response changes on existing connections too. Remove certificate
 trust separately when you no longer need it:

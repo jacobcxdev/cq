@@ -80,8 +80,8 @@ func FloorCreditEvent(frame map[string]any) bool {
 	return usage != nil && FloorCredits(usage)
 }
 
-// FloorCreditMessage adapts a single usage event or a batch of events. It keeps
-// exact JSON numbers and returns the original bytes when no event changes.
+// FloorCreditMessage adapts usage events and recovered subscription catchups,
+// preserving exact JSON numbers and original bytes when no event changes.
 func FloorCreditMessage(data []byte) []byte {
 	value, err := decode(data)
 	if err != nil {
@@ -90,10 +90,10 @@ func FloorCreditMessage(data []byte) []byte {
 	changed := false
 	switch frames := value.(type) {
 	case map[string]any:
-		changed = FloorCreditEvent(frames)
+		changed = floorCreditWireFrame(frames)
 	case []any:
 		for _, value := range frames {
-			if frame, ok := value.(map[string]any); ok && FloorCreditEvent(frame) {
+			if frame, ok := value.(map[string]any); ok && floorCreditWireFrame(frame) {
 				changed = true
 			}
 		}
@@ -106,6 +106,24 @@ func FloorCreditMessage(data []byte) []byte {
 		return data
 	}
 	return projected
+}
+
+func floorCreditWireFrame(frame map[string]any) bool {
+	if _, typed := frame["type"]; typed {
+		return FloorCreditEvent(frame)
+	}
+	reply, _ := frame["reply"].(map[string]any)
+	if reply["type"] != "subscribe" || reply["topic_id"] != "codex-work-usage-push-v1" || reply["recovered"] != true {
+		return false
+	}
+	catchups, _ := reply["catchups"].([]any)
+	changed := false
+	for _, value := range catchups {
+		if event, ok := value.(map[string]any); ok && FloorCreditEvent(event) {
+			changed = true
+		}
+	}
+	return changed
 }
 
 func decode(data []byte) (any, error) {

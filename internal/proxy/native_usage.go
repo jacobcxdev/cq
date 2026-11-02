@@ -51,7 +51,7 @@ func (d *nativeUsageDialer) DialContext(ctx context.Context, network, target str
 		return nil, errors.New("native usage route unavailable")
 	}
 	host, port, err := net.SplitHostPort(target)
-	if err != nil || network != "tcp" || port != "443" || !nativeusage.IsHost(host) {
+	if err != nil || network != "tcp" || port != "443" || !nativeusage.IsHost(host) && net.ParseIP(host) == nil {
 		return d.upstream.DialContext(ctx, network, target)
 	}
 	config, err := nativeusage.LoadTLS(d.root, d.fs)
@@ -64,13 +64,41 @@ func (d *nativeUsageDialer) DialContext(ctx context.Context, network, target str
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	client, server := net.Pipe()
-	go func() {
-		defer server.Close()
-		defer func() { _ = recover() }()
-		d.serve(ctx, server, target, config)
-	}()
-	return client, nil
+	if nativeusage.IsHost(host) {
+		client, server := net.Pipe()
+		go func() {
+			defer server.Close()
+			defer func() { _ = recover() }()
+			stop := context.AfterFunc(ctx, func() { _ = server.Close() })
+			defer stop()
+			hello := inspectNativeUsageHello(ctx, server)
+			if ctx.Err() != nil || len(hello.prefix) == 0 {
+				return
+			}
+			if nativeusage.IsHost(hello.host) {
+				d.serve(ctx, &nativeUsageReplayConn{Conn: server, reader: io.MultiReader(bytes.NewReader(hello.prefix), server)}, net.JoinHostPort(hello.host, "443"), config)
+				return
+			}
+			original, err := d.upstream.DialContext(ctx, network, target)
+			if err != nil || original == nil {
+				return
+			}
+			defer original.Close()
+			forwardNativeUsageOriginal(server, original, &hello, &nativeUsageFirstRead{}, nil, nil)
+		}()
+		return client, nil
+	}
+	original, err := d.upstream.DialContext(ctx, network, target)
+	if err != nil {
+		return nil, err
+	}
+	if original == nil {
+		return nil, errors.New("native usage route unavailable")
+	}
+	return routeNativeUsage(ctx, original, config, func(ctx context.Context, conn net.Conn, service string, config *tls.Config) {
+		d.note("HTTPS usage service selected: numeric destination")
+		d.serve(ctx, conn, service, config)
+	}), nil
 }
 
 func (d *nativeUsageDialer) note(kind string) {
@@ -84,7 +112,16 @@ func (d *nativeUsageDialer) note(kind string) {
 
 // Classify failures without exposing request URLs, headers or peer-supplied data.
 func nativeUsageFailure(err error) string {
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+	if errors.Is(err, context.Canceled) {
+		return "request cancelled"
+	}
+	if errors.Is(err, io.EOF) {
+		return "peer EOF"
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return "incomplete TLS message"
+	}
+	if errors.Is(err, net.ErrClosed) {
 		return "connection closed"
 	}
 	var timeout net.Error
@@ -124,13 +161,22 @@ func (d *nativeUsageDialer) serve(ctx context.Context, raw net.Conn, target stri
 	defer tracked.Close()
 	stop := context.AfterFunc(ctx, func() { _ = tracked.Close() })
 	defer stop()
+	config = config.Clone()
+	helloScope := "no client hello"
+	config.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+		helloScope = "other hostname"
+		if nativeusage.IsHost(hello.ServerName) {
+			helloScope = "usage hostname"
+		}
+		return nil, nil
+	}
 	conn := tls.Server(tracked, config)
 	defer conn.Close()
 	handshake, cancel := context.WithTimeout(ctx, 15*time.Second)
 	err := conn.HandshakeContext(handshake)
 	cancel()
 	if err != nil {
-		d.note("HTTPS connection failed: " + nativeUsageFailure(err))
+		d.note("HTTPS connection failed: " + nativeUsageFailure(err) + " (" + helloScope + ")")
 		return
 	}
 	transport := &http.Transport{
@@ -178,6 +224,13 @@ func (d *nativeUsageDialer) serve(ctx context.Context, raw net.Conn, target stri
 			if host == "ws.chatgpt.com" && websocket.IsWebSocketUpgrade(r) {
 				d.websocket(w, r, target)
 				return
+			}
+			if host == "chatgpt.com" && r.Method == http.MethodGet && r.URL.EscapedPath() == "/backend-api/wham/usage" {
+				kind := "other client"
+				if r.Header.Get("OAI-App-Brand") == "chatgpt" || strings.Contains(r.UserAgent(), "Chrome/") {
+					kind = "browser client"
+				}
+				d.note("HTTP usage requested: " + kind)
 			}
 			forward.ServeHTTP(w, r)
 		}),

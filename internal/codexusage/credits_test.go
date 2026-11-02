@@ -54,6 +54,25 @@ func TestFloorCreditMessageMixedBatch(t *testing.T) {
 	assertJSON(t, FloorCreditMessage([]byte(input)), []byte(want))
 }
 
+func TestFloorCreditMessageSubscriptionCatchups(t *testing.T) {
+	usage := usageEvent("codex-work-usage-push-v1", "message", "usage.snapshot", `{"balance":"0","has_credits":false}`)
+	other := usageEvent("other-topic", "message", "usage.snapshot", `{"balance":"0","has_credits":false}`)
+	input := `{"id":1,"reply":{"type":"subscribe","topic_id":"codex-work-usage-push-v1","recovered":true,"catchups":[` + other + `,` + usage + `]}}`
+	want := strings.Replace(input, usage, strings.Replace(usage, `"balance":"0","has_credits":false`, `"balance":"1","has_credits":true`, 1), 1)
+	assertJSON(t, FloorCreditMessage([]byte(input)), []byte(want))
+	assertJSON(t, FloorCreditMessage([]byte("["+input+"]")), []byte("["+want+"]"))
+	for _, unchanged := range []string{
+		strings.Replace(input, `"type":"subscribe"`, `"type":"other"`, 1),
+		strings.Replace(input, `"topic_id":"codex-work-usage-push-v1"`, `"topic_id":"other-topic"`, 1),
+		strings.Replace(input, `"recovered":true`, `"recovered":false`, 1),
+		strings.Replace(input, usage, other, 1),
+	} {
+		if got := FloorCreditMessage([]byte(unchanged)); string(got) != unchanged {
+			t.Fatal("unrelated subscription changed")
+		}
+	}
+}
+
 func TestFloorCreditMessagePreservesUnsupportedAndUnchangedInputs(t *testing.T) {
 	valid := usageEvent("codex-work-usage-push-v1", "message", "usage.snapshot", `{"balance":"0","has_credits":false}`)
 	for _, input := range []string{
