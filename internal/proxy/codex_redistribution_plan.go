@@ -23,7 +23,7 @@ func (factory *CodexHTTPRequestPlanFactory) redistributionInventory(ctx context.
 	if factory.SessionPolicy != nil {
 		var decision SessionPolicyDecision
 		var err error
-		if factory.CyberEligibility != nil && protocol.CyberAccessProgram != "" {
+		if factory.CyberEligibility != nil && protocol.CyberEnabled() {
 			decision, err = enforceSessionCyberPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, "", now)
 		} else {
 			decision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, "", now)
@@ -34,7 +34,7 @@ func (factory *CodexHTTPRequestPlanFactory) redistributionInventory(ctx context.
 		allowed = decision.Allowed
 	}
 	inventory = filterCodexHTTPRequestInventory(inventory, allowed)
-	if factory.CyberEligibility != nil && protocol.CyberAccessProgram != "" {
+	if factory.CyberEligibility != nil && protocol.CyberEnabled() {
 		inventory, _ = filterCodexCyberInventory(factory.CyberEligibility, inventory, protocol)
 	}
 	candidates, err := ProjectCodexRoutePolicyCandidates(inventory, factory.Capacity, codexHTTPRequestPlanRequirements(protocol), nil, now)

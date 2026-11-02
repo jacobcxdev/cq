@@ -1917,7 +1917,7 @@ func codexWSCyberAccessUnavailable(wrapped CodexWrappedError) bool {
 
 func (broker *codexTerminatingWSBroker) shouldResetCyberPlanFailure(err error, pending *codexWSPendingFrame, active *codexWSActiveUpstream) bool {
 	if broker == nil || broker.config.CyberEligibility == nil || pending == nil || pending.portable ||
-		pending.request.CyberAccessProgram == "" || active == nil || active.account == "" {
+		!pending.request.CyberEnabled() || active == nil || active.account == "" {
 		return false
 	}
 	var planErr *CodexHTTPRequestPlanError
@@ -1936,7 +1936,7 @@ func (broker *codexTerminatingWSBroker) shouldResetCyberPlanFailure(err error, p
 }
 
 func (broker *codexTerminatingWSBroker) markCyberIneligible(account codex.AccountKey, request CodexProtocolRequest) {
-	if broker == nil || broker.config.CyberEligibility == nil || request.Model == "" || request.CyberAccessProgram == "" {
+	if broker == nil || broker.config.CyberEligibility == nil || request.Model == "" || !request.CyberEnabled() {
 		return
 	}
 	broker.config.CyberEligibility.MarkIneligible(account, request.Model, request.CyberAccessProgram)
