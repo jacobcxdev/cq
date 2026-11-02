@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +14,37 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
+
+// The exercise bearer represents native OAuth for catalogue discovery, while
+// inference retains its existing proxy-token fixture. Keep those configurations
+// separate and exercise the production models handler against loopback only.
+func newCodexInstalledModelsHandler(nativeToken string) (http.Handler, func(), error) {
+	if !validCodexInstalledHTTPValidationToken(nativeToken) {
+		return nil, nil, errCodexInstalledListenerAcceptance
+	}
+	listener, upstream, _, err := startCodexAcceptanceHTTP(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/models" ||
+			request.Header.Get("Authorization") != "Bearer "+nativeToken ||
+			request.Header.Get("ChatGPT-Account-ID") != "acceptance-bootstrap" {
+			http.Error(writer, "native catalogue authority rejected", http.StatusUnauthorized)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"models":[],"cq_validation_native_auth":true}`)
+	}))
+	if err != nil {
+		return nil, nil, errCodexInstalledListenerAcceptance
+	}
+	transport := &http.Transport{Proxy: nil}
+	server := &Server{
+		Config:               &Config{CodexUpstream: "http://" + listener.Addr().String()},
+		CodexModelsTransport: transport,
+	}
+	return http.HandlerFunc(server.handleCodexNativeModels), func() {
+		transport.CloseIdleConnections()
+		shutdownCodexAcceptanceServer(upstream)
+	}, nil
+}
 
 func newCodexInstalledHTTPValidationToken() (string, error) {
 	var raw [32]byte
@@ -194,6 +226,12 @@ func runCodexInstalledHTTPValidationListenerOn(
 	if err != nil {
 		return codexInstalledHTTPValidationStageError("route audit")
 	}
+	modelsHandler, closeModels, err := newCodexInstalledModelsHandler(localToken)
+	if err != nil {
+		return codexInstalledHTTPValidationStageError("catalogue setup")
+	}
+	defer closeModels()
+	routes.modelsHandler = modelsHandler
 	protectedPaths, err := defaultCodexInstalledHTTPProtectedPaths(markerDir)
 	if err != nil {
 		return codexInstalledHTTPValidationStageError("protected authority")

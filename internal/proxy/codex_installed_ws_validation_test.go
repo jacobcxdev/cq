@@ -42,6 +42,9 @@ func TestRunCodexInstalledWebSocketValidationUsesIsolatedCandidate(t *testing.T)
 		if err := requestCodexAcceptanceUserSettings(command, auth.Tokens.AccessToken); err != nil {
 			return nil, err
 		}
+		if err := requestCodexInstalledFixtureModels(command, auth.Tokens.AccessToken); err != nil {
+			return nil, err
+		}
 		header := make(http.Header)
 		header.Set("Authorization", "Bearer "+auth.Tokens.AccessToken)
 		address := "ws" + strings.TrimPrefix(command.endpoint, "http")
@@ -129,6 +132,9 @@ func TestRunCodexInstalledWebSocketAcceptanceRejectsClientWithoutPrewarm(t *test
 		if err := requestCodexAcceptanceUserSettings(command, auth.Tokens.AccessToken); err != nil {
 			return nil, err
 		}
+		if err := requestCodexInstalledFixtureModels(command, auth.Tokens.AccessToken); err != nil {
+			return nil, err
+		}
 		header := make(http.Header)
 		header.Set("Authorization", "Bearer "+auth.Tokens.AccessToken)
 		address := "ws" + strings.TrimPrefix(command.endpoint, "http")
@@ -157,6 +163,28 @@ func TestRunCodexInstalledWebSocketAcceptanceRejectsClientWithoutPrewarm(t *test
 	if !errors.Is(err, errCodexInstalledListenerAcceptance) {
 		t.Fatalf("acceptance error = %v, want listener acceptance failure", err)
 	}
+}
+
+func requestCodexInstalledFixtureModels(command codexAcceptanceCommand, nativeToken string) error {
+	modelsURL := strings.TrimSuffix(command.endpoint, legacyCodexResponsesPath) + "/models?client_version=0.146.0"
+	request, err := http.NewRequest(http.MethodGet, modelsURL, nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+nativeToken)
+	request.Header.Set("ChatGPT-Account-ID", "acceptance-bootstrap")
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	var catalogue struct {
+		Native bool `json:"cq_validation_native_auth"`
+	}
+	if response.StatusCode != http.StatusOK || json.NewDecoder(response.Body).Decode(&catalogue) != nil || !catalogue.Native {
+		return errors.New("installed fixture did not discover native catalogue")
+	}
+	return nil
 }
 
 func TestRunCodexInstalledWebSocketValidationLeavesMarkerAbsentOnFailure(t *testing.T) {

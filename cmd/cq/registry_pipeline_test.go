@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -106,6 +105,48 @@ func TestRegistryPipelinePublishConcurrency(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestRegistryPipelinePublishKeepsNativeCacheAndProviderIdentity(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	const nativePath = "/home/test/.codex/models_cache.json"
+	const native = `{"identity":"signed-in","fetched_at":"2026-01-01T00:00:00Z","client_version":"native-version","models":[{"slug":"signed-in-model","available_access_programs":{"cyber":["daybreak_blue"]}}]}`
+	if err := fsys.WriteFile(nativePath, []byte(native), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pipeline, err := newRegistryPipeline(registryPipelineOptions{
+		FS: fsys, HomeDir: "/home/test", Roots: testCQRoots(), HTTPClient: http.DefaultClient,
+		ClaudeToken: func() (string, error) { return "claude", nil },
+		CodexToken:  func() (string, error) { return "pooled", nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline.Catalog.Replace(modelregistry.Snapshot{Entries: []modelregistry.Entry{
+		{Provider: modelregistry.ProviderCodex, ID: "pool-model", Source: modelregistry.SourceNative},
+		{Provider: modelregistry.ProviderZAI, ID: "glm", Source: modelregistry.SourceNative},
+	}})
+	pipeline.Publish()
+	data, err := fsys.ReadFile(nativePath)
+	if err != nil || string(data) != native {
+		t.Fatalf("native entitlement cache overwritten: %s, %v", data, err)
+	}
+	// Native Codex writes do not retain CQ-only provenance fields.
+	_ = fsys.WriteFile(nativePath, []byte(`{"identity":"signed-in","models":[{"slug":"glm"},{"slug":"obsolete-alias"}]}`), 0o600)
+	deps := modelsDeps{FS: fsys, Roots: testCQRoots(), HomeDir: "/home/test", Env: func(string) string { return "" }}
+	entries, err := loadCachedNativeEntries(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].ID != "pool-model" || entries[1].Provider != modelregistry.ProviderZAI {
+		t.Fatalf("native rewrite lost CQ provider identity: %+v", entries)
+	}
+	pipeline.Catalog.Replace(modelregistry.Snapshot{})
+	pipeline.Publish()
+	entries, err = loadCachedNativeEntries(deps)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("removed models reintroduced from native cache: %+v, %v", entries, err)
+	}
 }
 
 // TestNewRegistryPipelineToleratesCrossProviderDuplicateInSeed verifies that
@@ -324,20 +365,8 @@ func TestRegistryBackgroundRefreshDiscoversUpgradeAndStops(t *testing.T) {
 	for {
 		select {
 		case <-published:
-			data, err := fsys.ReadFile("/home/test/.codex/models_cache.json")
-			if err != nil {
-				t.Fatal(err)
-			}
-			var cache struct {
-				ClientVersion string `json:"client_version"`
-				Models        []struct {
-					Slug string `json:"slug"`
-				} `json:"models"`
-			}
-			if err := json.Unmarshal(data, &cache); err != nil {
-				t.Fatal(err)
-			}
-			if cache.ClientVersion != "0.159.0" || len(cache.Models) != 1 || cache.Models[0].Slug != "gpt-6.1-sol" {
+			snapshot := pipeline.Catalog.Snapshot()
+			if snapshot.CodexClientVersion != "0.159.0" || len(snapshot.Entries) != 1 || snapshot.Entries[0].ID != "gpt-6.1-sol" {
 				continue
 			}
 		case <-deadline:

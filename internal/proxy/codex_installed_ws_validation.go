@@ -107,6 +107,7 @@ func codexInstalledWebSocketValidationStageError(stage string) error {
 }
 
 type codexInstalledWebSocketTraffic struct {
+	modelRequests         atomic.Uint64
 	downstreamConnections atomic.Uint64
 	webSocketRequests     atomic.Uint64
 	upstreamDials         atomic.Uint64
@@ -133,6 +134,11 @@ func runCodexInstalledWebSocketAcceptance(
 	if err != nil {
 		return evidence, err
 	}
+	modelsHandler, closeModels, err := newCodexInstalledModelsHandler(localToken)
+	if err != nil {
+		return evidence, err
+	}
+	defer closeModels()
 	traffic := &codexInstalledWebSocketTraffic{}
 	upstreamListener, upstreamServer, upstreamErrors, err := startCodexAcceptanceHTTP(http.HandlerFunc(traffic.serveUpstream))
 	if err != nil {
@@ -178,9 +184,19 @@ func runCodexInstalledWebSocketAcceptance(
 		return evidence, errCodexInstalledListenerAcceptance
 	}
 	candidateHandler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && request.URL.Path == "/models" {
+			recorded := &diagnosticsResponseWriter{ResponseWriter: writer}
+			modelsHandler.ServeHTTP(recorded, request)
+			if recorded.statusCode() == http.StatusOK {
+				traffic.modelRequests.Add(1)
+			} else {
+				traffic.unexpectedRoutes.Add(1)
+			}
+			return
+		}
 		if request.URL.Path == legacyCodexResponsesPath && websocket.IsWebSocketUpgrade(request) {
 			traffic.downstreamConnections.Add(1)
-		} else if !(request.Method == http.MethodGet && request.URL.Path == "/models") {
+		} else {
 			traffic.unexpectedRoutes.Add(1)
 		}
 		handler.ServeHTTP(writer, request)
@@ -214,7 +230,7 @@ func runCodexInstalledWebSocketAcceptance(
 		EgressAttempts:        outcome.egressAttempts.Load(),
 		PongVerified:          outcome.exactPong.Load(),
 	}
-	if !traffic.completedPrewarm.Load() || acceptance.WebSocketRequests < 2 || acceptance.UpstreamDials != 1 {
+	if traffic.modelRequests.Load() == 0 || !traffic.completedPrewarm.Load() || acceptance.WebSocketRequests < 2 || acceptance.UpstreamDials != 1 {
 		return evidence, errCodexInstalledListenerAcceptance
 	}
 	return CodexWebSocketReadinessEvidence{

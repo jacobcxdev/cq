@@ -15,6 +15,7 @@ var codexInstalledHTTPClientBuildPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+\.
 // header, body, model, account, request, response, or credential material.
 type codexInstalledHTTPRouteAudit struct {
 	localToken       string
+	modelsHandler    http.Handler
 	modelRequests    atomic.Uint64
 	unexpectedRoutes atomic.Uint64
 }
@@ -51,7 +52,18 @@ func (audit *codexInstalledHTTPRouteAudit) guard(next http.Handler) http.Handler
 		// metadata and has changed between Codex releases, so it must not become a
 		// second, brittle identity authority. Token, method, and path remain exact.
 		case request.Method == http.MethodGet && request.URL.Path == "/models":
-			audit.modelRequests.Add(1)
+			catalogue := next
+			if audit.modelsHandler != nil {
+				catalogue = audit.modelsHandler
+			}
+			recorded := &diagnosticsResponseWriter{ResponseWriter: writer}
+			catalogue.ServeHTTP(recorded, request)
+			if recorded.statusCode() == http.StatusOK {
+				audit.modelRequests.Add(1)
+			} else {
+				audit.unexpectedRoutes.Add(1)
+			}
+			return
 		case request.Method == http.MethodPost && request.URL.RawQuery == "" &&
 			(request.URL.Path == codexResponsesPath ||
 				request.URL.Path == legacyCodexResponsesPath ||

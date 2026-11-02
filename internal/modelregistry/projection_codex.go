@@ -3,10 +3,6 @@ package modelregistry
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
-	"time"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 // codexModelsResponseOut is the shape written to models_cache.json and
@@ -52,6 +48,52 @@ func CodexModelsResponse(snap Snapshot) codexModelsResponseOut {
 		models = append(models, raw)
 	}
 	return codexModelsResponseOut{Models: models}
+}
+
+// AugmentCodexModels adds CQ overlays and other providers to an account's own
+// response. Pooled native entries and raw metadata never supply entitlements.
+// Unknown upstream fields survive, and native model IDs take precedence.
+func AugmentCodexModels(body []byte, snap Snapshot) ([]byte, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return nil, fmt.Errorf("parse Codex models envelope: %w", err)
+	}
+	var models []json.RawMessage
+	if err := json.Unmarshal(envelope["models"], &models); err != nil || models == nil {
+		return nil, fmt.Errorf("invalid Codex models list")
+	}
+
+	rawByID := make(map[string]json.RawMessage, len(models))
+	for _, raw := range models {
+		var info codexModelInfo
+		if err := json.Unmarshal(raw, &info); err != nil || info.Slug == "" {
+			return nil, fmt.Errorf("invalid Codex model")
+		}
+		if _, exists := rawByID[info.Slug]; exists {
+			return nil, fmt.Errorf("duplicate Codex model")
+		}
+		rawByID[info.Slug] = raw
+	}
+	added := make(map[string]bool)
+	for _, e := range snap.Entries {
+		if e.Provider != ProviderZAI && (e.Provider != ProviderCodex || e.Source != SourceOverlay) {
+			continue
+		}
+		if _, exists := rawByID[e.ID]; exists {
+			continue
+		}
+		if added[e.ID] {
+			continue
+		}
+		models = append(models, codexEntryRaw(e, rawByID))
+		added[e.ID] = true
+	}
+	encodedModels, err := json.Marshal(models)
+	if err != nil {
+		return nil, err
+	}
+	envelope["models"] = encodedModels
+	return json.Marshal(envelope)
 }
 
 // codexEntryRaw returns the JSON bytes for a single Codex entry.
@@ -170,59 +212,4 @@ func synthesiseCodexEntry(e Entry) json.RawMessage {
 
 	result, _ := json.Marshal(obj)
 	return json.RawMessage(result)
-}
-
-// PublishCodexCache writes the Codex models_cache.json envelope to path
-// using an atomic tmp+rename write. Parent directories are created with
-// 0o700; the file is written with 0o600.
-//
-// Existing envelope fields (etag, client_version) are preserved when the
-// caller passes an empty clientVersion string. fetched_at is always updated
-// to now. clientVersion, when non-empty, replaces the stored value.
-func PublishCodexCache(fsys fsutil.FileSystem, path string, snap Snapshot, now time.Time, clientVersion string) error {
-	// Read existing envelope to preserve etag and other fields.
-	var existing codexCacheEnvelope
-	if data, err := fsys.ReadFile(path); err == nil {
-		_ = json.Unmarshal(data, &existing) // best-effort; ignore parse errors
-	}
-
-	// Update envelope fields.
-	existing.FetchedAt = now.UTC().Format(time.RFC3339)
-	if clientVersion != "" {
-		existing.ClientVersion = clientVersion
-	}
-
-	// Build the models list from the snapshot.
-	resp := CodexModelsResponse(snap)
-	existing.Models = resp.Models
-	existing.CQProviders = nil
-	for _, entry := range snap.Entries {
-		if entry.Provider == ProviderZAI {
-			if existing.CQProviders == nil {
-				existing.CQProviders = make(map[string]Provider)
-			}
-			existing.CQProviders[entry.ID] = entry.Provider
-		}
-	}
-
-	data, err := json.MarshalIndent(existing, "", "  ")
-	if err != nil {
-		return fmt.Errorf("publish codex cache: marshal: %w", err)
-	}
-
-	dir := filepath.Dir(path)
-	if err := fsys.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("publish codex cache: mkdir %s: %w", dir, err)
-	}
-
-	tmp := path + ".tmp"
-	if err := fsys.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("publish codex cache: write tmp: %w", err)
-	}
-	if err := fsys.Rename(tmp, path); err != nil {
-		_ = fsys.Remove(tmp)
-		return fmt.Errorf("publish codex cache: rename: %w", err)
-	}
-
-	return nil
 }

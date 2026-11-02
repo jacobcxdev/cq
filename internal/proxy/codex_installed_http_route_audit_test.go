@@ -3,10 +3,30 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
 const testCodexInstalledLocalToken = "Qx9m0c9Yx6L-1wH2fBzE3pV8uN5kT7rS4aD6jG0lM2o"
+
+func TestCodexInstalledHTTPRouteAuditRejectsFailedCatalogueEvidence(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusServiceUnavailable} {
+		audit, err := newCodexInstalledHTTPRouteAudit("0.146.0", testCodexInstalledLocalToken)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handler := audit.guard(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+			writer.WriteHeader(status)
+		}))
+		request := httptest.NewRequest(http.MethodGet, "/models", nil)
+		request.Header.Set("Authorization", "Bearer "+testCodexInstalledLocalToken)
+		handler.ServeHTTP(httptest.NewRecorder(), request)
+		models, unexpected := audit.snapshot()
+		if models != 0 || unexpected != 1 {
+			t.Fatalf("status %d audit = models %d unexpected %d, want 0/1", status, models, unexpected)
+		}
+	}
+}
 
 func TestCodexInstalledHTTPRouteAuditCountsAuthorisedInstalledClientCatalogueRoutes(t *testing.T) {
 	t.Parallel()
@@ -15,7 +35,7 @@ func TestCodexInstalledHTTPRouteAuditCountsAuthorisedInstalledClientCatalogueRou
 		t.Fatal(err)
 	}
 	next := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-		writer.WriteHeader(http.StatusNoContent)
+		writer.WriteHeader(http.StatusOK)
 	})
 	handler := audit.guard(next)
 
@@ -31,7 +51,7 @@ func TestCodexInstalledHTTPRouteAuditCountsAuthorisedInstalledClientCatalogueRou
 		request.Header.Set("Authorization", "Bearer "+testCodexInstalledLocalToken)
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, request)
-		if recorder.Code != http.StatusNoContent {
+		if recorder.Code != http.StatusOK {
 			t.Fatalf("%s %s status = %d", request.Method, request.URL.String(), recorder.Code)
 		}
 	}
@@ -91,8 +111,14 @@ func TestServerHandlerInstallsCodexInstalledHTTPRouteAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	modelsHandler, closeModels, err := newCodexInstalledModelsHandler(testCodexInstalledLocalToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeModels()
+	audit.modelsHandler = modelsHandler
 	server := &Server{
-		Config:                       &Config{ClaudeUpstream: "http://127.0.0.1:1"},
+		Config:                       &Config{ClaudeUpstream: "http://127.0.0.1:1", LocalToken: testCodexInstalledLocalToken},
 		codexInstalledHTTPRouteAudit: audit,
 	}
 	handler, err := server.handler()
@@ -101,11 +127,37 @@ func TestServerHandlerInstallsCodexInstalledHTTPRouteAudit(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodGet, "/models?client_version=0.146.0", nil)
 	request.Header.Set("Authorization", "Bearer "+testCodexInstalledLocalToken)
-	handler.ServeHTTP(httptest.NewRecorder(), request)
+	request.Header.Set("ChatGPT-Account-ID", "acceptance-bootstrap")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"cq_validation_native_auth":true`) {
+		t.Fatalf("catalogue response = %d %s", recorder.Code, recorder.Body.String())
+	}
 
 	models, unexpected := audit.snapshot()
 	if models != 1 || unexpected != 0 {
 		t.Fatalf("server route audit = models %d unexpected %d, want 1/0", models, unexpected)
+	}
+}
+
+func TestCodexInstalledModelsHandlerRejectsWrongNativeIdentity(t *testing.T) {
+	handler, closeModels, err := newCodexInstalledModelsHandler(testCodexInstalledLocalToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeModels()
+	for _, test := range []struct{ token, account string }{
+		{"wrong-native-token", "acceptance-bootstrap"},
+		{testCodexInstalledLocalToken, "wrong-account"},
+	} {
+		request := httptest.NewRequest(http.MethodGet, "/models", nil)
+		request.Header.Set("Authorization", "Bearer "+test.token)
+		request.Header.Set("ChatGPT-Account-ID", test.account)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("wrong native identity status = %d", recorder.Code)
+		}
 	}
 }
 

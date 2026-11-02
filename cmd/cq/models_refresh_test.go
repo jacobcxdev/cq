@@ -278,8 +278,11 @@ func TestNewRegistryPipelineWiresAnthropicCodexOverlayAndPublisher(t *testing.T)
 	if _, err := fsys.ReadFile("/home/test/.claude/cache/model-capabilities.json"); err != nil {
 		t.Fatalf("Claude capabilities were not published: %v", err)
 	}
-	if _, err := fsys.ReadFile("/home/test/.codex/models_cache.json"); err != nil {
-		t.Fatalf("Codex cache was not published: %v", err)
+	if _, err := fsys.ReadFile(modelregistry.CodexRegistryCachePath(testCQRoots())); err != nil {
+		t.Fatalf("CQ model cache was not published: %v", err)
+	}
+	if _, err := fsys.ReadFile("/home/test/.codex/models_cache.json"); err == nil {
+		t.Fatal("published an unscoped native Codex cache")
 	}
 }
 
