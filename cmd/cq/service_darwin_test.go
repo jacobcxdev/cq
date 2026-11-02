@@ -677,3 +677,55 @@ func TestDarwinServiceRestoreWaitsForUnloadingJob(t *testing.T) {
 		t.Fatal("previous job not restored")
 	}
 }
+
+func TestDarwinServiceRestoreStartsJobOnce(t *testing.T) {
+	for _, runAtLoad := range []bool{true, false} {
+		t.Run(fmt.Sprintf("runAtLoad=%t", runAtLoad), func(t *testing.T) {
+			platform, runner := newDarwinServiceHarness(t)
+			if err := platform.InstallRefresh(context.Background(), platform.executable); err != nil {
+				t.Fatal(err)
+			}
+			path := platform.plistPath(agentLabel)
+			definition := readDarwinDefinition(t, path)
+			definition.RunAtLoad = runAtLoad
+			data, err := renderDarwinLaunchAgent(definition)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.runs[agentLabel] = 0
+			if err := platform.restore(context.Background(), agentLabel, path, data, true, true); err != nil {
+				t.Fatal(err)
+			}
+			if got := runner.runs[agentLabel]; got != 1 {
+				t.Fatalf("restored job starts = %d, want one bootstrap or explicit start", got)
+			}
+			status, err := platform.inspectRefreshComponent(context.Background())
+			if err != nil || !status.Healthy {
+				t.Fatalf("restored refresh status = %+v, error = %v", status, err)
+			}
+		})
+	}
+}
+
+func TestDarwinServiceRestoreRejectsInvalidDefinitionBeforeMutation(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	if err := platform.InstallRefresh(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	path := platform.plistPath(agentLabel)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.calls = nil
+	if err := platform.restore(context.Background(), agentLabel, path, []byte("invalid plist"), true, true); err == nil || !strings.Contains(err.Error(), "previous definition") {
+		t.Fatalf("restore error = %v, want invalid previous definition", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 0 || !runner.loaded[agentLabel] || string(after) != string(before) {
+		t.Fatal("invalid saved definition changed the current job")
+	}
+}
