@@ -391,8 +391,12 @@ func (platform *darwinServicePlatform) reconcile(ctx context.Context, definition
 	if _, err := platform.run(ctx, "bootstrap", platform.domain(), path); err != nil {
 		return errors.Join(fmt.Errorf("bootstrap %s: %w", definition.Label, err), platform.restore(ctx, definition.Label, path, oldData, oldExists, oldLoaded))
 	}
-	if err := platform.kickstart(ctx, definition.Label); err != nil {
-		return errors.Join(err, platform.restore(ctx, definition.Label, path, oldData, oldExists, oldLoaded))
+	// Bootstrap already starts RunAtLoad jobs. Restarting them immediately can
+	// kill that first run and trigger launchd's respawn throttle.
+	if !definition.RunAtLoad {
+		if err := platform.kickstart(ctx, definition.Label); err != nil {
+			return errors.Join(err, platform.restore(ctx, definition.Label, path, oldData, oldExists, oldLoaded))
+		}
 	}
 	return nil
 }
