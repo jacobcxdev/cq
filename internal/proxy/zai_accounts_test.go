@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -24,6 +26,244 @@ import (
 
 func zaiTestAccounts() ([]zaiprov.Account, error) {
 	return []zaiprov.Account{{ID: "first", APIKey: "first-key"}, {ID: "second", APIKey: "second-key"}}, nil
+}
+
+func TestZAIMultiAccountInitialSSERejectionFailover(t *testing.T) {
+	for _, transport := range []string{"http", "websocket"} {
+		for _, rejection := range []string{
+			`{"type":"response.failed","response":{"status":"failed","output":[],"error":{"code":"rate_limit_exceeded","message":"private quota details"}}}`,
+			`{"type":"error","code":"insufficient_quota","message":"private quota details"}`,
+		} {
+			t.Run(transport+"/"+rejection[9:14], func(t *testing.T) {
+				var attempts atomic.Int32
+				var rejectedClosed atomic.Int32
+				s := &Server{Config: &Config{ClaudeUpstream: "https://claude.test"}, Catalog: zaiTestCatalog(), ZAIAccounts: zaiTestAccounts, ZAITransport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					body := "data: " + rejection + "\n\ndata: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\"}\n\n"
+					attempt := attempts.Add(1)
+					if attempt == 2 {
+						body = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"second-response\",\"output\":[]}}\n\n"
+					}
+					var reader io.ReadCloser = io.NopCloser(strings.NewReader(body))
+					if attempt == 1 {
+						reader = &zaiClosedBody{Reader: strings.NewReader(body), closed: &rejectedClosed}
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, Body: reader}, nil
+				})}
+				if transport == "http" {
+					w := httptest.NewRecorder()
+					s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"model":"glm-5.3-flash","stream":true,"input":[]}`)))
+					if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "second-response") || strings.Contains(w.Body.String(), "private") {
+						t.Fatalf("status=%d response=%s", w.Code, w.Body)
+					}
+				} else {
+					c := openZAITestWebSocket(t, s, nil)
+					_ = c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"glm-5.3-flash","input":[]}`))
+					if got := readZAITestCompletion(t, c); got.Response.ID != "second-response" {
+						t.Fatalf("response ID=%q", got.Response.ID)
+					}
+				}
+				if attempts.Load() != 2 || rejectedClosed.Load() != 1 {
+					t.Fatalf("attempts=%d rejected_closed=%d, want2/1", attempts.Load(), rejectedClosed.Load())
+				}
+			})
+		}
+	}
+}
+
+func TestZAIInitialSSERejectionClassificationAndReplay(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		data string
+		want bool
+	}{
+		{"observed nested failure", `{"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded"}}}`, true},
+		{"top-level quota", `{"type":"error","code":"insufficient_quota"}`, true},
+		{"nested numeric balance", `{"type":"error","error":{"code":"1113"}}`, true},
+		{"numeric rate", `{"type":"error","code":1302}`, true},
+		{"numeric auth", `{"type":"error","code":"1003"}`, true},
+		{"numeric period quota", `{"type":"error","code":"1317"}`, true},
+		{"unknown error", `{"type":"error","code":"future_error"}`, false},
+		{"overload not account rejection", `{"type":"error","code":"1305"}`, false},
+		{"policy not quota", `{"type":"error","code":"1313"}`, false},
+		{"failure already has output", `{"type":"response.failed","response":{"status":"failed","output":[{"type":"message"}],"error":{"code":"rate_limit_exceeded"}}}`, false},
+		{"wrong response status", `{"type":"response.failed","response":{"status":"in_progress","error":{"code":"rate_limit_exceeded"}}}`, false},
+		{"created then quota", "{\"type\":\"response.created\",\"response\":{\"id\":\"accepted\"}}\n\ndata: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\"}", false},
+		{"output first", `{"type":"response.output_text.delta","delta":"text"}`, false},
+		{"malformed", `{"type":"error","code":"rate_limit_exceeded",`, false},
+		{"unknown first event", `{"type":"future.acceptance","code":"rate_limit_exceeded"}`, false},
+		{"done first", `[DONE]`, false},
+		{"duplicate type", `{"type":"response.created","type":"error","code":"rate_limit_exceeded"}`, false},
+		{"duplicate code", `{"type":"error","code":"future_error","code":"rate_limit_exceeded"}`, false},
+		{"duplicate error", `{"type":"error","error":{"code":"future_error"},"error":{"code":"rate_limit_exceeded"}}`, false},
+		{"duplicate response", `{"type":"response.failed","response":{"status":"in_progress","output":[{}]},"response":{"status":"failed","error":{"code":"rate_limit_exceeded"}}}`, false},
+		{"duplicate status", `{"type":"response.failed","response":{"status":"in_progress","status":"failed","error":{"code":"rate_limit_exceeded"}}}`, false},
+		{"duplicate output", `{"type":"response.failed","response":{"status":"failed","output":[{}],"output":[],"error":{"code":"rate_limit_exceeded"}}}`, false},
+		{"duplicate nested code", `{"type":"response.failed","response":{"status":"failed","error":{"code":"future_error","code":"rate_limit_exceeded"}}}`, false},
+		{"case-folded duplicate type", `{"type":"response.created","TYPE":"error","code":"rate_limit_exceeded"}`, false},
+		{"escaped duplicate type", `{"type":"response.created","ty\u0070e":"error","code":"rate_limit_exceeded"}`, false},
+		{"non-ASCII status authority", `{"type":"response.failed","response":{"status":"in_progress","ſtatus":"failed","error":{"code":"rate_limit_exceeded"}}}`, false},
+		{"numeric code cannot hide malformed error", `{"type":"error","error":{"code":1302,"message":42}}`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := "event: response\r\ndata: " + test.data + "\n\n: retained tail\n\n"
+			response := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(iotest.OneByteReader(strings.NewReader(payload)))}
+			if got := zaiInitialSSERejection(response); got != test.want {
+				t.Fatalf("rejected=%t, want=%t", got, test.want)
+			}
+			if !test.want {
+				got, err := httputil.ReadBody(response.Body)
+				if err != nil || string(got) != payload {
+					t.Fatal("peek changed accepted or unknown response bytes")
+				}
+			}
+		})
+	}
+}
+
+func TestZAIInitialSSEHeartbeatDoesNotWaitForLaterEvent(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		chunks []string
+	}{
+		{"blank-line terminated", []string{": heartbeat\r\n\r\n"}},
+		{"single newline", []string{": heartbeat\n"}},
+		{"fragmented CRLF", []string{": heartbeat\r", "\n"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			gate := make(chan struct{})
+			secondRead := make(chan struct{})
+			done := make(chan bool, 1)
+			body := &zaiGatedHeartbeatBody{gate: gate, secondRead: secondRead, chunks: test.chunks}
+			response := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: body}
+			finished := false
+			defer func() {
+				close(gate)
+				if !finished {
+					select {
+					case <-done:
+					case <-time.After(time.Second):
+						t.Error("heartbeat inspector did not finish after gate release")
+					}
+				}
+			}()
+			go func() {
+				defer func() {
+					if recover() != nil {
+						done <- true
+					}
+				}()
+				done <- zaiInitialSSERejection(response)
+			}()
+			select {
+			case rejected := <-done:
+				finished = true
+				if rejected {
+					t.Fatal("comment heartbeat triggered retry")
+				}
+			case <-secondRead:
+				t.Fatal("comment heartbeat was held while waiting for later upstream data")
+			case <-time.After(time.Second):
+				t.Fatal("comment heartbeat was not released promptly")
+			}
+			buffer := make([]byte, 128)
+			n, err := response.Body.Read(buffer)
+			if err != nil || string(buffer[:n]) != strings.Join(test.chunks, "") {
+				t.Fatal("heartbeat bytes were not replayed")
+			}
+		})
+	}
+}
+
+type zaiGatedHeartbeatBody struct {
+	gate       <-chan struct{}
+	secondRead chan struct{}
+	reads      int
+	chunks     []string
+}
+
+func (body *zaiGatedHeartbeatBody) Read(buffer []byte) (int, error) {
+	body.reads++
+	if body.reads <= len(body.chunks) {
+		return copy(buffer, body.chunks[body.reads-1]), nil
+	}
+	if body.reads == len(body.chunks)+1 {
+		close(body.secondRead)
+		<-body.gate
+	}
+	return 0, io.EOF
+}
+
+func (body *zaiGatedHeartbeatBody) Close() error { return nil }
+
+func TestZAIInitialSSEHeartbeatAndFailureInSameReadCanRetry(t *testing.T) {
+	response := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(": heartbeat\n\ndata: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\"}\n\n"))}
+	if !zaiInitialSSERejection(response) {
+		t.Fatal("explicit failure already present beside heartbeat was not classified")
+	}
+}
+
+func TestZAIInitialSSERejectionBoundAndReadErrors(t *testing.T) {
+	const failure = "data: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\"}\n\n"
+	oversized := ": " + strings.Repeat("x", 65<<10) + "\n\n" + failure
+	for _, test := range []struct {
+		name, payload string
+		terminal      error
+	}{
+		{"cap", oversized, nil},
+		{"truncated", strings.TrimSuffix(failure, "\n\n"), nil},
+		{"read error before boundary", strings.TrimSuffix(failure, "\n\n"), io.ErrUnexpectedEOF},
+		{"read error alongside event", failure, io.ErrUnexpectedEOF},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := &zaiPreludeTestBody{data: []byte(test.payload), terminal: test.terminal}
+			response := &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: body}
+			if zaiInitialSSERejection(response) {
+				t.Fatal("ambiguous or oversized prelude triggered failover")
+			}
+			if body.read > 64<<10 {
+				t.Fatalf("peek read%d bytes, exceeded64KiB", body.read)
+			}
+			var got bytes.Buffer
+			_, err := io.Copy(&got, response.Body)
+			if !errors.Is(err, test.terminal) || got.String() != test.payload {
+				t.Fatalf("peek did not preserve body/read error (bytes=%d want=%d error=%v)", got.Len(), len(test.payload), err)
+			}
+		})
+	}
+}
+
+type zaiPreludeTestBody struct {
+	data     []byte
+	terminal error
+	read     int
+}
+
+func (body *zaiPreludeTestBody) Read(buffer []byte) (int, error) {
+	if len(body.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(buffer, body.data)
+	body.data = body.data[n:]
+	body.read += n
+	if len(body.data) == 0 {
+		return n, body.terminal
+	}
+	return n, nil
+}
+
+func (body *zaiPreludeTestBody) Close() error { return nil }
+
+func TestZAIMultiAccountOpaqueHTTPIDDoesNotRetrySSERejection(t *testing.T) {
+	var attempts atomic.Int32
+	s := &Server{Config: &Config{}, Catalog: zaiTestCatalog(), ZAIAccounts: zaiTestAccounts, ZAITransport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader("data: {\"type\":\"error\",\"code\":\"rate_limit_exceeded\"}\n\n"))}, nil
+	})}
+	w := httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"model":"glm-5.3-flash","previous_response_id":"opaque","input":[]}`)))
+	if attempts.Load() != 1 || !strings.Contains(w.Body.String(), "rate_limit_exceeded") {
+		t.Fatalf("opaque continuation attempts=%d", attempts.Load())
+	}
 }
 
 func TestPrioritiseZAIAccountsQuotaWindows(t *testing.T) {

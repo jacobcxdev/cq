@@ -413,9 +413,70 @@ func TestZAILiveFailoverObservationRequiresRejectedThenAccepted(t *testing.T) {
 			observer := &zaiLiveTransport{forcedFirst: "first", statuses: make(map[string][]int)}
 			for _, attempt := range test.attempts {
 				observer.observeStatus(attempt.id, attempt.status)
+				if attempt.status >= 200 && attempt.status < 300 {
+					observer.observeInitialEvent(attempt.id, attempt.status, []byte(`{"type":"response.created"}`))
+				}
 			}
 			if observer.failoverAccepted != test.wantAccepted || observer.unmatchedAccount != test.wantUnmatched {
 				t.Fatalf("accepted=%t unmatched=%t", observer.failoverAccepted, observer.unmatchedAccount)
+			}
+		})
+	}
+}
+
+func TestZAILiveSSEFailoverObservation(t *testing.T) {
+	const failed = `{"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded"}}}`
+	const topError = `{"type":"error","code":"insufficient_quota"}`
+	const created = `{"type":"response.created","response":{"id":"accepted"}}`
+	for _, test := range []struct {
+		name                       string
+		first                      []string
+		second                     []string
+		secondBefore               bool
+		wantRejected, wantAccepted bool
+	}{
+		{"initial failed then accepted", []string{failed}, []string{created}, false, true, true},
+		{"initial top-level error then completed", []string{topError}, []string{`{"type":"response.completed","response":{"id":"completed"}}`}, false, true, true},
+		{"accepted before rejection", []string{failed}, []string{created}, true, true, false},
+		{"late failure after acceptance", []string{created, failed}, []string{created}, false, false, false},
+		{"unknown event before failure", []string{`{"type":"future.event"}`, failed}, []string{created}, false, false, false},
+		{"malformed event before failure", []string{`{"type":`, failed}, []string{created}, false, false, false},
+		{"unknown failure code", []string{`{"type":"error","code":"future_error"}`}, []string{created}, false, false, false},
+		{"failed response already has output", []string{`{"type":"response.failed","response":{"status":"failed","output":[{}],"error":{"code":"rate_limit_exceeded"}}}`}, []string{created}, false, false, false},
+		{"both failed with HTTP200", []string{failed}, []string{failed}, false, true, false},
+		{"duplicate type cannot prove rejection", []string{`{"type":"response.created","type":"error","code":"rate_limit_exceeded"}`}, []string{created}, false, false, false},
+		{"duplicate code cannot prove rejection", []string{`{"type":"error","code":"future_error","code":"rate_limit_exceeded"}`}, []string{created}, false, false, false},
+		{"duplicate error cannot prove rejection", []string{`{"type":"error","error":{"code":"future_error"},"error":{"code":"rate_limit_exceeded"}}`}, []string{created}, false, false, false},
+		{"duplicate response cannot prove rejection", []string{`{"type":"response.failed","response":{"status":"in_progress","output":[{}]},"response":{"status":"failed","error":{"code":"rate_limit_exceeded"}}}`}, []string{created}, false, false, false},
+		{"duplicate status cannot prove rejection", []string{`{"type":"response.failed","response":{"status":"in_progress","status":"failed","error":{"code":"rate_limit_exceeded"}}}`}, []string{created}, false, false, false},
+		{"duplicate output cannot prove rejection", []string{`{"type":"response.failed","response":{"status":"failed","output":[{}],"output":[],"error":{"code":"rate_limit_exceeded"}}}`}, []string{created}, false, false, false},
+		{"duplicate acceptance type cannot prove failover", []string{failed}, []string{`{"type":"error","type":"response.created","response":{"id":"ambiguous"}}`}, false, true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			transport := &zaiLiveTransport{forcedFirst: "first", statuses: make(map[string][]int)}
+			readResponse := func(id string, events []string) {
+				transport.observeStatus(id, http.StatusOK)
+				var data strings.Builder
+				for _, event := range events {
+					data.WriteString("data: " + event + "\n\n")
+				}
+				response := &zaiLiveResponseObserver{body: io.NopCloser(strings.NewReader(data.String())), parser: NewCodexSSEParser(1 << 20), transport: transport, accountID: id, status: http.StatusOK}
+				if _, err := io.Copy(io.Discard, response); err != nil {
+					t.Fatal("synthetic observer body read failed")
+				}
+			}
+			if test.secondBefore {
+				readResponse("second", test.second)
+				readResponse("first", test.first)
+			} else {
+				readResponse("first", test.first)
+				readResponse("second", test.second)
+			}
+			if transport.firstRejected != test.wantRejected || transport.failoverAccepted != test.wantAccepted {
+				t.Fatalf("rejected=%t accepted=%t, want=%t/%t", transport.firstRejected, transport.failoverAccepted, test.wantRejected, test.wantAccepted)
+			}
+			if (transport.streamRejections["first"] > 0) != test.wantRejected {
+				t.Fatal("HTTP200 rejection metadata not distinguished from status")
 			}
 		})
 	}
@@ -434,6 +495,7 @@ type zaiLiveTransport struct {
 	accounts         []zaiprov.Account
 	forcedFirst      string
 	statuses         map[string][]int
+	streamRejections map[string]int
 	firstRejected    bool
 	failoverAccepted bool
 	unmatchedAccount bool
@@ -447,8 +509,8 @@ func (transport *zaiLiveTransport) RoundTrip(request *http.Request) (*http.Respo
 	if err != nil {
 		return nil, errors.New("live Z.ai upstream transport failed")
 	}
+	id := ""
 	if transport.forcedFirst != "" {
-		id := ""
 		for _, account := range transport.accounts {
 			if request.Header.Get("Authorization") == "Bearer "+account.APIKey {
 				id = account.ID
@@ -457,7 +519,7 @@ func (transport *zaiLiveTransport) RoundTrip(request *http.Request) (*http.Respo
 		}
 		transport.observeStatus(id, response.StatusCode)
 	}
-	response.Body = &zaiLiveResponseObserver{body: response.Body, parser: NewCodexSSEParser(1 << 20), transport: transport}
+	response.Body = &zaiLiveResponseObserver{body: response.Body, parser: NewCodexSSEParser(1 << 20), transport: transport, accountID: id, status: response.StatusCode}
 	return response, nil
 }
 
@@ -472,8 +534,57 @@ func (transport *zaiLiveTransport) observeStatus(id string, status int) {
 	if id == transport.forcedFirst && (status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusTooManyRequests) {
 		transport.firstRejected = true
 	}
-	if id != transport.forcedFirst && status >= 200 && status < 300 && transport.firstRejected {
-		transport.failoverAccepted = true
+}
+
+// Qualification observes the first upstream event independently of the proxy's
+// retry classifier. A successful HTTP status alone does not prove acceptance.
+func (transport *zaiLiveTransport) observeInitialEvent(id string, status int, data []byte) {
+	if id == "" || status < 200 || status >= 300 {
+		return
+	}
+	var event struct {
+		Type  string `json:"type"`
+		Code  string `json:"code"`
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+		Response struct {
+			Status string `json:"status"`
+			Error  struct {
+				Code string `json:"code"`
+			} `json:"error"`
+			Output []json.RawMessage `json:"output"`
+		} `json:"response"`
+	}
+	if validateZAIRejectionAuthority(data) != nil || validateCodexLifecycleAuthority(data) != nil || json.Unmarshal(data, &event) != nil {
+		return
+	}
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	code := ""
+	if event.Type == "response.failed" && event.Response.Status == "failed" && len(event.Response.Output) == 0 {
+		code = event.Response.Error.Code
+	} else if event.Type == "error" {
+		code = event.Code
+		if code == "" {
+			code = event.Error.Code
+		}
+	}
+	if code == "rate_limit_exceeded" || code == "insufficient_quota" {
+		if transport.streamRejections == nil {
+			transport.streamRejections = make(map[string]int)
+		}
+		transport.streamRejections[id]++
+		if id == transport.forcedFirst {
+			transport.firstRejected = true
+		}
+		return
+	}
+	switch event.Type {
+	case "response.created", "response.in_progress", "response.completed", "response.output_item.added", "response.output_text.delta":
+		if id != transport.forcedFirst && transport.firstRejected {
+			transport.failoverAccepted = true
+		}
 	}
 }
 
@@ -491,19 +602,28 @@ func (transport *zaiLiveTransport) logAccountStatuses(t *testing.T) {
 	t.Helper()
 	transport.mu.Lock()
 	defer transport.mu.Unlock()
-	t.Logf("native Z.ai HTTP statuses by opaque account ID: %v", transport.statuses)
+	t.Logf("native Z.ai HTTP statuses by opaque account ID: %v; initial SSE rejections: %v", transport.statuses, transport.streamRejections)
 }
 
 type zaiLiveResponseObserver struct {
-	body      io.ReadCloser
-	parser    *CodexSSEParser
-	transport *zaiLiveTransport
+	body           io.ReadCloser
+	parser         *CodexSSEParser
+	transport      *zaiLiveTransport
+	accountID      string
+	status         int
+	firstEventSeen bool
 }
 
 func (observer *zaiLiveResponseObserver) Read(buffer []byte) (int, error) {
 	n, readErr := observer.body.Read(buffer)
 	events, parseErr := observer.parser.Feed(buffer[:n])
 	for _, event := range events {
+		if !observer.firstEventSeen {
+			observer.firstEventSeen = true
+			if observer.transport.forcedFirst != "" && event.ParseError == nil {
+				observer.transport.observeInitialEvent(observer.accountID, observer.status, event.Data)
+			}
+		}
 		observer.transport.observe(event.Data)
 	}
 	if readErr == io.EOF && parseErr == nil {

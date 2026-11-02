@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"mime"
 	"net/http"
 	"os"
 	"strings"
@@ -119,6 +121,9 @@ func (s *Server) doZAIRequest(ctx context.Context, target string, header http.He
 			return nil, err
 		}
 		rejected := response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusTooManyRequests
+		if !rejected && i < len(accounts)-1 {
+			rejected = zaiInitialSSERejection(response)
+		}
 		if !rejected || i == len(accounts)-1 {
 			return response, nil
 		}
@@ -129,3 +134,169 @@ func (s *Server) doZAIRequest(ctx context.Context, target string, header http.He
 	}
 	return nil, fmt.Errorf("Z.ai API key unavailable")
 }
+
+const zaiSSEPreludeLimit = 64 << 10
+
+// Z.ai may reject a request with HTTP 200 and an initial failure event. Inspect
+// only that first data event, before anything reaches the client. Every byte
+// and read error remains available when the stream cannot be safely retried.
+func zaiInitialSSERejection(response *http.Response) bool {
+	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if response.StatusCode < 200 || response.StatusCode >= 300 || mediaType != "text/event-stream" {
+		return false
+	}
+	body := response.Body
+	var prefix []byte
+	var readErr error
+	defer func() {
+		response.Body = &zaiSSEPreludeBody{body: body, prefix: prefix, readErr: readErr}
+	}()
+	parser := NewCodexSSEParser(zaiSSEPreludeLimit)
+	buffer := make([]byte, 4<<10)
+	lineStart := 0
+	commentOnly := true
+	for len(prefix) < zaiSSEPreludeLimit {
+		n, err := body.Read(buffer[:min(len(buffer), zaiSSEPreludeLimit-len(prefix))])
+		readErr = err
+		prefix = append(prefix, buffer[:n]...)
+		events, parseErr := parser.Feed(buffer[:n])
+		if parseErr != nil || err != nil && err != io.EOF {
+			return false
+		}
+		if len(events) != 0 {
+			return zaiRejectedInitialEvent(events[0])
+		}
+		// A complete heartbeat line must reach the client now, rather than waiting
+		// indefinitely for a later model event. An event in this same read was
+		// already handled above; otherwise inspect only complete prelude lines.
+		for lineStart < len(prefix) {
+			end := bytes.IndexByte(prefix[lineStart:], '\n')
+			if end < 0 {
+				break
+			}
+			end += lineStart
+			line := bytes.TrimSuffix(prefix[lineStart:end], []byte{'\r'})
+			lineStart = end + 1
+			if len(line) == 0 {
+				commentOnly = true
+			} else if line[0] == ':' {
+				if commentOnly {
+					return false
+				}
+			} else {
+				commentOnly = false
+			}
+		}
+		if err != nil || n == 0 {
+			return false
+		}
+	}
+	return false
+}
+
+func zaiRejectedInitialEvent(observation CodexSSEObservation) bool {
+	data := observation.Data
+	if validateZAIRejectionAuthority(data) != nil || validateCodexLifecycleAuthority(data) != nil {
+		return false
+	}
+	type rejection struct {
+		Code    json.RawMessage `json:"code"`
+		Type    *string         `json:"type"`
+		Message *string         `json:"message"`
+		Param   *string         `json:"param"`
+	}
+	var event struct {
+		Type       string            `json:"type"`
+		Code       json.RawMessage   `json:"code"`
+		Error      rejection         `json:"error"`
+		Status     *int              `json:"status"`
+		StatusCode *int              `json:"status_code"`
+		Output     []json.RawMessage `json:"output"`
+		Response   struct {
+			Status string            `json:"status"`
+			Error  rejection         `json:"error"`
+			Output []json.RawMessage `json:"output"`
+		} `json:"response"`
+	}
+	if json.Unmarshal(data, &event) != nil || len(event.Output) != 0 {
+		return false
+	}
+	var raw json.RawMessage
+	switch event.Type {
+	case "response.failed":
+		if event.Response.Status != "failed" || len(event.Response.Output) != 0 {
+			return false
+		}
+		raw = event.Response.Error.Code
+	case "error":
+		raw = event.Code
+		if len(raw) == 0 {
+			raw = event.Error.Code
+		}
+	default:
+		return false
+	}
+	// The Codex grammar requires string error codes. Z.ai also uses numeric
+	// codes, so only that typed, unambiguous vendor difference may override a
+	// generic observation parse error.
+	if observation.ParseError != nil && (len(raw) == 0 || raw[0] == '"') {
+		return false
+	}
+	// Numeric authentication and quota meanings are documented at
+	// https://docs.z.ai/api-reference/api-code. Unknown and global service
+	// failures deliberately remain on the original account.
+	switch strings.Trim(string(raw), `"`) {
+	case "rate_limit_exceeded", "insufficient_quota",
+		"1000", "1001", "1003", "1005", "1113", "1302", "1308", "1310",
+		"1316", "1317", "1318", "1319", "1320", "1321":
+		return true
+	}
+	return false
+}
+
+func validateZAIRejectionAuthority(data []byte) error {
+	return validateCodexJSONAuthority(data, "Z.ai initial event", func(path []string, name string) bool {
+		fields := ""
+		switch {
+		case len(path) == 0:
+			fields = " type code error response status status_code output "
+		case len(path) == 1 && path[0] == "response":
+			fields = " status error output "
+		case len(path) == 1 && path[0] == "error", len(path) == 2 && path[0] == "response" && path[1] == "error":
+			fields = " type code message param "
+		}
+		for _, field := range strings.Fields(fields) {
+			if codexJSONNameEqual(name, field) {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+type zaiSSEPreludeBody struct {
+	body    io.ReadCloser
+	prefix  []byte
+	readErr error
+}
+
+func (body *zaiSSEPreludeBody) Read(buffer []byte) (int, error) {
+	if len(body.prefix) != 0 {
+		n := copy(buffer, body.prefix)
+		body.prefix = body.prefix[n:]
+		if len(body.prefix) != 0 {
+			return n, nil
+		}
+		err := body.readErr
+		body.readErr = nil
+		return n, err
+	}
+	if body.readErr != nil {
+		err := body.readErr
+		body.readErr = nil
+		return 0, err
+	}
+	return body.body.Read(buffer)
+}
+
+func (body *zaiSSEPreludeBody) Close() error { return body.body.Close() }
