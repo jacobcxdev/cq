@@ -12,4 +12,4 @@ while [[ $# -gt 0 ]]; do
 done
 [[ $(uname -s) == Darwin && -x "$candidate" && -x "$predecessor" && "$output" == /* ]] || { echo "requires macOS, executable inputs and absolute output directory" >&2; exit 64; }
 mkdir -p "$output"
-CQ_RUN_NATIVE_HOMEBREW_UPGRADE=1 CQ_UPGRADE_CANDIDATE="$candidate" CQ_UPGRADE_PREDECESSOR="$predecessor" CQ_UPGRADE_OUTPUT="$output" go test -race -count=1 -timeout=20m ./cmd/cq -run '^TestNativeHomebrewUpgradeAcceptance$'
+CQ_RUN_NATIVE_HOMEBREW_UPGRADE=1 CQ_UPGRADE_CANDIDATE="$candidate" CQ_UPGRADE_PREDECESSOR="$predecessor" CQ_UPGRADE_OUTPUT="$output" go test -race -count=1 -timeout=20m ./cmd/cq -run '^TestNativeHomebrew(UpgradeAcceptance|ReinstallRejectionPreservesPackage)$'

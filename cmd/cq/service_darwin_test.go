@@ -71,10 +71,8 @@ func TestDarwinServiceInstallsExactProxyAndRefreshLaunchAgents(t *testing.T) {
 		{"print", "gui/501/" + proxyAgentLabel},
 		{"bootout", "gui/501/" + proxyAgentLabel},
 		{"bootstrap", "gui/501", platform.plistPath(proxyAgentLabel)},
-		{"kickstart", "-k", "gui/501/" + proxyAgentLabel},
 		{"bootout", "gui/501/" + agentLabel},
 		{"bootstrap", "gui/501", platform.plistPath(agentLabel)},
-		{"kickstart", "-k", "gui/501/" + agentLabel},
 	}
 	if !reflect.DeepEqual(runner.calls, wantCalls) {
 		t.Fatalf("launchctl calls = %#v\nwant = %#v", runner.calls, wantCalls)
@@ -105,6 +103,34 @@ func TestDarwinLaunchAgentProcessPolicy(t *testing.T) {
 				t.Errorf("%s must use %s process policy", test.label, test.want)
 			}
 		})
+	}
+}
+
+func TestDarwinServiceReconcileStartsJobOnce(t *testing.T) {
+	for _, runAtLoad := range []bool{true, false} {
+		for _, alreadyLoaded := range []bool{true, false} {
+			t.Run(fmt.Sprintf("runAtLoad=%t/loaded=%t", runAtLoad, alreadyLoaded), func(t *testing.T) {
+				platform, runner := newDarwinServiceHarness(t)
+				runner.loaded[agentLabel] = alreadyLoaded
+				definition := darwinLaunchAgentDefinition{
+					Label:             agentLabel,
+					ProgramArguments:  []string{platform.executable, "refresh"},
+					RunAtLoad:         runAtLoad,
+					StartInterval:     darwinRefreshInterval,
+					StandardErrorPath: filepath.Join(platform.roots.Logs, "refresh.log"),
+				}
+				if err := platform.reconcile(context.Background(), definition); err != nil {
+					t.Fatal(err)
+				}
+				if got := runner.runs[agentLabel]; got != 1 {
+					t.Fatalf("job starts = %d, want one bootstrap or explicit start", got)
+				}
+				status, err := platform.inspectRefreshComponent(context.Background())
+				if err != nil || !status.Healthy {
+					t.Fatalf("reconciled refresh status = %+v, error = %v", status, err)
+				}
+			})
+		}
 	}
 }
 
@@ -181,7 +207,6 @@ func TestDarwinServiceRestartReloadsLegacyProxyPolicy(t *testing.T) {
 				{"print", "gui/501/" + proxyAgentLabel},
 				{"bootout", "gui/501/" + proxyAgentLabel},
 				{"bootstrap", "gui/501", path},
-				{"kickstart", "-k", "gui/501/" + proxyAgentLabel},
 			}
 			if !reflect.DeepEqual(runner.calls, want) {
 				t.Fatalf("policy migration did not reload launchd: %v", runner.calls)
@@ -378,7 +403,6 @@ func TestDarwinServiceRestartsAndRemovesBothJobs(t *testing.T) {
 		{"print", "gui/501/" + proxyAgentLabel},
 		{"bootout", "gui/501/" + proxyAgentLabel},
 		{"bootstrap", "gui/501", platform.plistPath(proxyAgentLabel)},
-		{"kickstart", "-k", "gui/501/" + proxyAgentLabel},
 		{"bootout", "gui/501/" + agentLabel},
 	}
 	for range 10 {
@@ -563,7 +587,18 @@ func (runner *fakeDarwinLaunchctl) Run(_ context.Context, args ...string) ([]byt
 		if runner.rejectPendingBootstrap && runner.pendingBootout[label] > 0 {
 			return nil, errors.New("job still unloading")
 		}
+		data, err := os.ReadFile(args[2])
+		if err != nil {
+			return nil, err
+		}
+		definition, err := parseDarwinLaunchAgent(data)
+		if err != nil {
+			return nil, err
+		}
 		runner.loaded[label] = true
+		if definition.RunAtLoad {
+			runner.runs[label]++
+		}
 		return nil, nil
 	case "kickstart":
 		label := filepath.Base(args[2])
@@ -640,5 +675,57 @@ func TestDarwinServiceRestoreWaitsForUnloadingJob(t *testing.T) {
 	}
 	if !runner.loaded[proxyAgentLabel] {
 		t.Fatal("previous job not restored")
+	}
+}
+
+func TestDarwinServiceRestoreStartsJobOnce(t *testing.T) {
+	for _, runAtLoad := range []bool{true, false} {
+		t.Run(fmt.Sprintf("runAtLoad=%t", runAtLoad), func(t *testing.T) {
+			platform, runner := newDarwinServiceHarness(t)
+			if err := platform.InstallRefresh(context.Background(), platform.executable); err != nil {
+				t.Fatal(err)
+			}
+			path := platform.plistPath(agentLabel)
+			definition := readDarwinDefinition(t, path)
+			definition.RunAtLoad = runAtLoad
+			data, err := renderDarwinLaunchAgent(definition)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.runs[agentLabel] = 0
+			if err := platform.restore(context.Background(), agentLabel, path, data, true, true); err != nil {
+				t.Fatal(err)
+			}
+			if got := runner.runs[agentLabel]; got != 1 {
+				t.Fatalf("restored job starts = %d, want one bootstrap or explicit start", got)
+			}
+			status, err := platform.inspectRefreshComponent(context.Background())
+			if err != nil || !status.Healthy {
+				t.Fatalf("restored refresh status = %+v, error = %v", status, err)
+			}
+		})
+	}
+}
+
+func TestDarwinServiceRestoreRejectsInvalidDefinitionBeforeMutation(t *testing.T) {
+	platform, runner := newDarwinServiceHarness(t)
+	if err := platform.InstallRefresh(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	path := platform.plistPath(agentLabel)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.calls = nil
+	if err := platform.restore(context.Background(), agentLabel, path, []byte("invalid plist"), true, true); err == nil || !strings.Contains(err.Error(), "previous definition") {
+		t.Fatalf("restore error = %v, want invalid previous definition", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.calls) != 0 || !runner.loaded[agentLabel] || string(after) != string(before) {
+		t.Fatal("invalid saved definition changed the current job")
 	}
 }

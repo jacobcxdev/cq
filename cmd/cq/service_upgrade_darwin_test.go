@@ -474,6 +474,83 @@ func TestDarwinRetainedInspectionAndValidationAfterUpgrade(t *testing.T) {
 	}
 }
 
+func TestDarwinRuntimeUpgradeRejectionExplainsTrafficMode(t *testing.T) {
+	for _, mode := range []string{"rescue", "rescue_exit_draining"} {
+		t.Run(mode, func(t *testing.T) {
+			request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:29280"+proxy.RuntimeUpgradePath, strings.NewReader("submission"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Header.Set("Authorization", "Bearer fixture-local-token")
+			request.Header.Set("Content-Type", "application/json")
+			calls := 0
+			client := testDoer(func(current *http.Request) (*http.Response, error) {
+				calls++
+				if calls == 1 {
+					return &http.Response{StatusCode: http.StatusConflict, Body: io.NopCloser(strings.NewReader("runtime upgrade unavailable\n"))}, nil
+				}
+				deadline, bounded := current.Context().Deadline()
+				if calls != 2 || current.Method != http.MethodGet || current.URL.Path != proxy.RuntimeRescueStatusPath || current.Header.Get("Authorization") != request.Header.Get("Authorization") || current.Body != nil || current.Header.Get("Content-Type") != "" || !current.Close || !bounded || time.Until(deadline) > time.Second {
+					t.Fatal("traffic mode probe lost local authentication or timeout boundary")
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"mode":"` + mode + `"}`))}, nil
+			})
+			_, err = submitDarwinServiceRuntimeUpgrade(context.Background(), proxy.RuntimeUpgradeStore{}, installer.RuntimeArtifact{}, "rejected", proxy.RuntimeUpgradeReceiptV1{}, request, client)
+			if !errors.Is(err, ErrServiceUpgradeDeferred) || !strings.Contains(err.Error(), mode) || !strings.Contains(err.Error(), "HTTP 409") || calls != 2 {
+				t.Fatalf("mode-aware rejection = %v, calls=%d", err, calls)
+			}
+		})
+	}
+}
+
+func TestDarwinRuntimeUpgradeRejectionPreservesSafeFallback(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		rejection  string
+		status     int
+		body       string
+		probeError error
+	}{
+		{name: "transport", probeError: errors.New("private transport detail")},
+		{name: "non-200", status: http.StatusUnauthorized, body: "private response detail"},
+		{name: "malformed", status: http.StatusOK, body: "private response detail"},
+		{name: "normal", status: http.StatusOK, body: `{"mode":"normal"}`},
+		{name: "unknown", status: http.StatusOK, body: `{"mode":"private response detail"}`},
+		{name: "unsupported", rejection: "runtime upgrade unsupported"},
+		{name: "unknown rejection", rejection: "private response detail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:29280"+proxy.RuntimeUpgradePath, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls := 0
+			client := testDoer(func(*http.Request) (*http.Response, error) {
+				calls++
+				if calls == 1 {
+					rejection := tc.rejection
+					if rejection == "" {
+						rejection = "runtime upgrade unavailable"
+					}
+					return &http.Response{StatusCode: http.StatusConflict, Body: io.NopCloser(strings.NewReader(rejection))}, nil
+				}
+				if tc.probeError != nil {
+					return nil, tc.probeError
+				}
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+			})
+			_, err = submitDarwinServiceRuntimeUpgrade(context.Background(), proxy.RuntimeUpgradeStore{}, installer.RuntimeArtifact{}, "rejected", proxy.RuntimeUpgradeReceiptV1{}, request, client)
+			wantCalls := 2
+			if tc.rejection != "" {
+				wantCalls = 1
+			}
+			if err == nil || !strings.Contains(err.Error(), "HTTP 409") || strings.Contains(err.Error(), "private") || calls != wantCalls || errors.Is(err, ErrServiceUpgradeDeferred) || errors.Is(err, ErrServiceUpgradeMaintenance) != (tc.name == "unsupported") {
+				t.Fatalf("unsafe rejection fallback = %v, calls=%d", err, calls)
+			}
+		})
+	}
+}
+
 func TestDarwinRuntimeUpgradeStatusProbe(t *testing.T) {
 	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
 	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}

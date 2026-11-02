@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -112,6 +113,109 @@ func upgradeArtifactStore(t *testing.T) RuntimeArtifactStore {
 	t.Helper()
 	return RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: userdirs.Roots{State: filepath.Join(t.TempDir(), "state")}}
 }
+
+func TestRuntimeArtifactStageChecksOnceAndRejectsStorageTampering(t *testing.T) {
+	source := buildRuntimeArtifactProbe(t)
+	for _, mode := range []string{"none", "contents", "mode", "symlink"} {
+		t.Run("tamper_"+mode, func(t *testing.T) {
+			if runtime.GOOS == "windows" && mode != "none" {
+				t.Skip("Windows does not allow replacing a running executable")
+			}
+			checks := filepath.Join(t.TempDir(), "checks")
+			t.Setenv("CQ_RUNTIME_ARTIFACT_TEST_CHECKS", checks)
+			t.Setenv("CQ_RUNTIME_ARTIFACT_TEST_TAMPER", mode)
+			store := upgradeArtifactStore(t)
+			artifact, err := store.Stage(context.Background(), source)
+			if mode == "none" {
+				if err != nil || artifact.Version != "0.34.0" {
+					t.Fatalf("valid runtime was not staged: %+v %v", artifact, err)
+				}
+			} else if err == nil {
+				t.Fatalf("runtime storage %s changed during its check was accepted", mode)
+			}
+			data, readErr := os.ReadFile(checks)
+			if readErr != nil || string(data) != "check\n" {
+				t.Fatalf("runtime checks = %q, want exactly one completed check: %v", data, readErr)
+			}
+		})
+	}
+}
+
+func buildRuntimeArtifactProbe(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	mainDirectory := filepath.Join(root, "cmd", "cq")
+	if err := os.MkdirAll(mainDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module github.com/jacobcxdev/cq\n\ngo 1.21\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code := `package main
+
+import (
+    "encoding/json"
+    "os"
+    "runtime"
+)
+
+func main() {
+    if len(os.Args) != 4 || os.Args[1] != "proxy" || os.Args[2] != "runtime-check" || os.Args[3] != "--json" {
+        panic("unexpected probe command")
+    }
+    executable, err := os.Executable()
+    if err != nil {
+        panic(err)
+    }
+    switch os.Getenv("CQ_RUNTIME_ARTIFACT_TEST_TAMPER") {
+    case "contents", "symlink":
+        original := executable + ".original"
+        if err := os.Rename(executable, original); err != nil {
+            panic(err)
+        }
+        if os.Getenv("CQ_RUNTIME_ARTIFACT_TEST_TAMPER") == "symlink" {
+            if err := os.Symlink(original, executable); err != nil {
+                panic(err)
+            }
+        } else if err := os.WriteFile(executable, []byte("tampered"), 0500); err != nil {
+            panic(err)
+        }
+    case "mode":
+        if err := os.Chmod(executable, 0700); err != nil {
+            panic(err)
+        }
+    }
+    file, err := os.OpenFile(os.Getenv("CQ_RUNTIME_ARTIFACT_TEST_CHECKS"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0600)
+    if err != nil {
+        panic(err)
+    }
+    if _, err := file.WriteString("check\n"); err != nil {
+        panic(err)
+    }
+    if err := file.Close(); err != nil {
+        panic(err)
+    }
+    result := map[string]any{
+        "schema_version": 1, "version": "0.34.0", "protocol_version": 1,
+        "goos": runtime.GOOS, "goarch": runtime.GOARCH,
+    }
+    if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+        panic(err)
+    }
+}
+`
+	if err := os.WriteFile(filepath.Join(mainDirectory, "main.go"), []byte(code), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "cq")
+	command := exec.Command("go", "build", "-o", path, "./cmd/cq")
+	command.Dir = root
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("build runtime probe: %v\n%s", err, output)
+	}
+	return path
+}
+
 func TestRuntimeArtifactSurvivesCaskRenameAndPurge(t *testing.T) {
 	source := buildUpgradeArtifact(t, "0.34.0")
 	store := upgradeArtifactStore(t)

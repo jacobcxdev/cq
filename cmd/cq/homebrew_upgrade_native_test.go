@@ -170,6 +170,81 @@ func TestNativeHomebrewUpgradeAcceptance(t *testing.T) {
 	}
 }
 
+func TestNativeHomebrewReinstallRejectionPreservesPackage(t *testing.T) {
+	if os.Getenv("CQ_RUN_NATIVE_HOMEBREW_UPGRADE") != "1" {
+		t.Skip("opt-in isolated native acceptance")
+	}
+	productionHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	productionRoots, err := userdirs.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	productionPaths := []string{proxy.PathsForRoots(productionRoots).ConfigFile, filepath.Join(productionRoots.Config, "config.toml"), filepath.Join(productionHome, "Library/LaunchAgents/dev.jacobcx.cq.proxy.plist"), filepath.Join(productionHome, "Library/LaunchAgents/dev.jacobcx.cq.refresh.plist")}
+	production := nativeProductionSnapshot(t, productionPaths)
+	if output := os.Getenv("CQ_UPGRADE_OUTPUT"); filepath.IsAbs(output) {
+		t.Setenv("CQ_UPGRADE_OUTPUT", filepath.Join(output, "reinstall-rejection"))
+	}
+	fixture := newNativeUpgradeFixture(t)
+	defer func() {
+		fixture.evidence.ProductionUnchanged = nativeProductionSnapshot(t, productionPaths) == production
+		if !fixture.evidence.ProductionUnchanged {
+			t.Error("production service or config changed during isolated test")
+		}
+		fixture.saveEvidence()
+	}()
+	fixture.build()
+	fixture.packageOperation("install", "0.34.0", "", false)
+	started := time.Now()
+	fixture.packageOperation("upgrade", "0.34.1", "0.34.0", false)
+	t.Logf("idle package upgrade elapsed: %s", time.Since(started))
+	fixture.packageOperation("reinstall", "0.34.1", "0.34.1", false)
+	fixture.traffic("before-reinstall-rejection")
+	ownershipPath := filepath.Join(fixture.roots.State, "install.json")
+	before, err := os.ReadFile(ownershipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(fixture.binaries["0.34.1"], "proxy", "rescue", "enter")
+	if out, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("enter isolated rescue: %v %s", err, out)
+	}
+	// Real `brew reinstall` purges its predecessor through uninstall_existing_cask;
+	// it does not use start_upgrade's backup and revert_upgrade path.
+	fixture.packageOperation("reinstall", "0.34.0", "0.34.1", true)
+	log, err := os.ReadFile(filepath.Join(fixture.output, "reinstall-0.34.0.log"))
+	if err != nil || !bytes.Contains(log, []byte("HTTP 409")) {
+		t.Fatalf("reinstall did not reach rescue upgrade rejection: %v %s", err, log)
+	}
+	canonical := filepath.Join(fixture.root, "prefix/bin/cq")
+	if out, err := exec.Command(canonical, "--version").CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "0.34.1" {
+		t.Errorf("failed reinstall lost previous canonical CLI: %v %s", err, out)
+	}
+	metadata := filepath.Join(fixture.root, "caskroom/cq/.metadata/0.34.1")
+	if _, err := os.Stat(metadata); err != nil {
+		t.Errorf("failed reinstall lost previous Homebrew metadata: %v", err)
+	}
+	after, err := os.ReadFile(ownershipPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Errorf("failed reinstall changed previous service ownership: %v", err)
+	}
+	if t.Failed() {
+		return
+	}
+	if out, err := exec.Command(canonical, "proxy", "rescue", "exit").CombinedOutput(); err != nil {
+		t.Fatalf("exit isolated rescue: %v %s", err, out)
+	}
+	fixture.traffic("after-reinstall-rollback")
+	fixture.packageOperation("uninstall", "0.34.1", "", false)
+	for _, path := range []string{canonical, metadata, ownershipPath} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("true uninstall retained package state %s: %v", path, err)
+		}
+	}
+}
+
 func newNativeUpgradeFixture(t *testing.T) *nativeUpgradeFixture {
 	t.Helper()
 	output := os.Getenv("CQ_UPGRADE_OUTPUT")
@@ -978,6 +1053,17 @@ def installer(cask,**kwargs);Cask::Installer.new(cask,command:CQFixtureCommand,*
 action=CQFixtureInputs.fetch("CQ_FIXTURE_ACTION")
 if action=="uninstall"
  old=installed(version);installer(old).uninstall
+elsif action=="reinstall"
+ replacement=installer(new_cask,reinstall:true)
+ # Only download/staging boundaries are synthetic. Homebrew owns the complete
+ # reinstall lifecycle, including uninstall_existing_cask and failure cleanup.
+ replacement.define_singleton_method(:fetch){}
+ replacement.define_singleton_method(:stage) do
+  FileUtils.mkdir_p(cask.staged_path)
+  FileUtils.cp(CQFixtureInputs.fetch("CQ_FIXTURE_BINARY"),cask.staged_path/"cq")
+  save_caskfile
+ end
+ replacement.install
 else
  old=nil
  if action!="install"

@@ -147,7 +147,9 @@ func (store RuntimeArtifactStore) Stage(ctx context.Context, source string) (Run
 		return RuntimeArtifact{}, err
 	}
 	artifact.Version = check.Version
-	if err := store.Verify(ctx, artifact); err != nil {
+	// The probe already checked runtime identity. Retain the post-execution
+	// filesystem validation without launching that same probe again.
+	if err := store.verifyStored(ctx, artifact); err != nil {
 		return RuntimeArtifact{}, err
 	}
 	return artifact, nil

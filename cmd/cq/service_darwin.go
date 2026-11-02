@@ -391,8 +391,12 @@ func (platform *darwinServicePlatform) reconcile(ctx context.Context, definition
 	if _, err := platform.run(ctx, "bootstrap", platform.domain(), path); err != nil {
 		return errors.Join(fmt.Errorf("bootstrap %s: %w", definition.Label, err), platform.restore(ctx, definition.Label, path, oldData, oldExists, oldLoaded))
 	}
-	if err := platform.kickstart(ctx, definition.Label); err != nil {
-		return errors.Join(err, platform.restore(ctx, definition.Label, path, oldData, oldExists, oldLoaded))
+	// Bootstrap already starts RunAtLoad jobs. Restarting them immediately can
+	// kill that first run and trigger launchd's respawn throttle.
+	if !definition.RunAtLoad {
+		if err := platform.kickstart(ctx, definition.Label); err != nil {
+			return errors.Join(err, platform.restore(ctx, definition.Label, path, oldData, oldExists, oldLoaded))
+		}
 	}
 	return nil
 }
@@ -420,6 +424,14 @@ func waitDarwinProcessExit(ctx context.Context, pid int) error {
 }
 
 func (platform *darwinServicePlatform) restore(ctx context.Context, label, path string, data []byte, exists, loaded bool) error {
+	var definition darwinLaunchAgentDefinition
+	if exists {
+		var err error
+		definition, err = parseDarwinLaunchAgent(data)
+		if err != nil {
+			return fmt.Errorf("parse previous definition for %s: %w", label, err)
+		}
+	}
 	var restoreErr error
 	if _, err := platform.run(ctx, "bootout", platform.target(label)); err != nil && !isDarwinLaunchctlNotLoaded(err) {
 		restoreErr = errors.Join(restoreErr, fmt.Errorf("boot out failed candidate: %w", err))
@@ -437,8 +449,10 @@ func (platform *darwinServicePlatform) restore(ctx context.Context, label, path 
 	if loaded && exists {
 		if _, err := platform.run(ctx, "bootstrap", platform.domain(), path); err != nil {
 			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore previous job: %w", err))
-		} else if err := platform.kickstart(ctx, label); err != nil {
-			restoreErr = errors.Join(restoreErr, fmt.Errorf("restart previous job: %w", err))
+		} else if !definition.RunAtLoad {
+			if err := platform.kickstart(ctx, label); err != nil {
+				restoreErr = errors.Join(restoreErr, fmt.Errorf("restart previous job: %w", err))
+			}
 		}
 	}
 	return restoreErr
