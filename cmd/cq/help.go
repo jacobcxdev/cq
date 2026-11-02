@@ -59,6 +59,7 @@ Commands:
   network enable    Install the user broker and request macOS network approval
   network status    Show extension and authenticated broker readiness
   network disable   Disable CQ's manager and remove its user broker
+  network usage     Manage normal-launch ChatGPT usage response handling
 `,
 	"codex network enable": `Usage: cq codex network enable
 
@@ -76,6 +77,39 @@ the registered user broker, and its authenticated CQ connection to be ready.
 
 Disable CQ's transparent proxy manager and remove only its per-user LaunchAgent.
 The installed network extension and ChatGPT application are left in place.
+`,
+	"codex network usage": `Usage: cq codex network usage <command>
+
+Manage usage response handling for normal ChatGPT launches on macOS.
+Dots continue to use the CQ launcher. Certificate trust is approved separately.
+
+Commands:
+  usage prepare   Prepare a private certificate and show its public identity
+  usage enable    Check certificate trust and enable handling for new connections
+  usage status    Show certificate and response-handling settings without changes
+  usage disable   Disable response handling while preserving certificate trust
+`,
+	"codex network usage prepare": `Usage: cq codex network usage prepare
+
+Prepare a private certificate for chatgpt.com and ws.chatgpt.com, then show its
+path, SHA-256 fingerprint and expiry. Existing material is reused. This command
+does not approve certificate trust or enable response handling.
+`,
+	"codex network usage enable": `Usage: cq codex network usage enable
+
+Require a prepared certificate and verify macOS SSL trust for both service hosts.
+Then enable usage response handling for new connections. Certificate trust must
+be approved separately; this command does not install certificates or restart ChatGPT.
+`,
+	"codex network usage status": `Usage: cq codex network usage status
+
+Show the prepared certificate identity and whether usage response handling is
+enabled. This command does not create files, approve trust or change settings.
+`,
+	"codex network usage disable": `Usage: cq codex network usage disable
+
+Disable usage response handling. Preserve the certificate
+so its macOS trust setting can be removed separately when no longer needed.
 `,
 	"codex resets": `Usage: cq codex resets <command>
 
