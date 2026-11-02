@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +26,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
+	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
 )
 
 func TestZAILiveNativeSubagentsAndFollowup(t *testing.T) {
@@ -38,18 +41,25 @@ func TestZAILiveNativeSubagentsAndFollowup(t *testing.T) {
 	if err != nil {
 		t.Fatal("open live Z.ai credential file")
 	}
-	var credential struct {
-		APIKey string `json:"api_key"`
-	}
-	err = json.NewDecoder(io.LimitReader(file, 64<<10)).Decode(&credential)
+	forcedFirst := os.Getenv("CQ_ZAI_LIVE_FAILOVER_FIRST_ID")
+	accounts, err := readZAILiveAccounts(file, forcedFirst)
 	_ = file.Close()
-	if err != nil || strings.TrimSpace(credential.APIKey) == "" {
+	if err != nil {
 		t.Fatal("read live Z.ai credential file")
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	source := modelregistry.ZAISource{
 		Client: &http.Client{Timeout: 25 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
-		Token:  func(context.Context) (string, error) { return credential.APIKey, nil },
+		Token:  func(context.Context) (string, error) { return accounts[0].APIKey, nil },
+	}
+	if forcedFirst != "" {
+		source.Tokens = func(context.Context) ([]string, error) {
+			keys := make([]string, len(accounts))
+			for i, account := range accounts {
+				keys[i] = account.APIKey
+			}
+			return keys, nil
+		}
 	}
 	models, err := source.Fetch(ctx)
 	cancel()
@@ -88,12 +98,18 @@ func TestZAILiveNativeSubagentsAndFollowup(t *testing.T) {
 				}
 			}
 			localToken := "cq-zai-live-" + rand.Text()
-			observer := &zaiLiveTransport{calls: make(map[string]zaiLiveCall)}
+			observer := &zaiLiveTransport{calls: make(map[string]zaiLiveCall), accounts: accounts, forcedFirst: forcedFirst, statuses: make(map[string][]int)}
+			if forcedFirst != "" {
+				defer observer.logAccountStatuses(t)
+			}
 			server := &Server{
 				Config: &Config{LocalToken: localToken}, Catalog: modelregistry.NewCatalog(snapshot),
-				ZAIAPIKey: func() (string, error) { return credential.APIKey, nil }, ZAITransport: observer,
+				ZAIAPIKey: func() (string, error) { return accounts[0].APIKey, nil }, ZAITransport: observer,
 				CodexNativeHTTP: zaiForbiddenCodexHTTP{t},
 				CodexRouting:    &CodexRoutingRuntime{WebSocket: CodexModeStatus{Configured: CodexRoutingEnforce, Effective: CodexRoutingEnforce}},
+			}
+			if forcedFirst != "" {
+				server.ZAIAccounts = func() ([]zaiprov.Account, error) { return accounts, nil }
 			}
 			var handler http.Handler
 			var worker runtimeDrainHandler
@@ -259,9 +275,147 @@ func TestZAILiveNativeSubagentsAndFollowup(t *testing.T) {
 			if !useWebSocket && (httpRequests.Load() == 0 || webSockets.Load() != 0) {
 				t.Fatalf("native HTTP transport evidence incomplete (http=%d, websockets=%d)", httpRequests.Load(), webSockets.Load())
 			}
+			if forcedFirst != "" {
+				observer.assertFailover(t)
+			}
 			t.Logf("native GLM child spawn, fixture reads and same-child follow-up passed (http=%d, websockets=%d)", httpRequests.Load(), webSockets.Load())
 			if test.drain {
 				t.Log("native GLM continued after isolated upgrade drain with original prompt and spawn-call history replayed")
+			}
+		})
+	}
+}
+
+func readZAILiveAccounts(reader io.Reader, forcedFirst string) ([]zaiprov.Account, error) {
+	var credential struct {
+		APIKey   string `json:"api_key"`
+		Accounts []struct {
+			ID     string `json:"id"`
+			APIKey string `json:"api_key"`
+		} `json:"accounts"`
+	}
+	if json.NewDecoder(io.LimitReader(reader, 64<<10)).Decode(&credential) != nil {
+		return nil, errors.New("invalid live Z.ai credential file")
+	}
+	accountID := func(key string) string {
+		digest := sha256.Sum256([]byte(key))
+		return "zai_" + hex.EncodeToString(digest[:8])
+	}
+	if forcedFirst == "" {
+		if strings.TrimSpace(credential.APIKey) == "" {
+			return nil, errors.New("missing live Z.ai credential")
+		}
+		return []zaiprov.Account{{ID: accountID(credential.APIKey), APIKey: credential.APIKey}}, nil
+	}
+	accounts := make([]zaiprov.Account, 0, len(credential.Accounts))
+	seen := make(map[string]bool)
+	first := -1
+	for _, stored := range credential.Accounts {
+		key := strings.TrimSpace(stored.APIKey)
+		if key == "" || stored.ID != accountID(key) || seen[stored.ID] {
+			return nil, errors.New("invalid live Z.ai multi-account credentials")
+		}
+		seen[stored.ID] = true
+		if stored.ID == forcedFirst {
+			first = len(accounts)
+		}
+		accounts = append(accounts, zaiprov.Account{ID: stored.ID, APIKey: key})
+	}
+	if first < 0 || len(accounts) < 2 {
+		return nil, errors.New("live Z.ai failover requires matching first ID and two accounts")
+	}
+	ordered := make([]zaiprov.Account, 0, len(accounts))
+	ordered = append(ordered, accounts[first])
+	ordered = append(ordered, accounts[:first]...)
+	ordered = append(ordered, accounts[first+1:]...)
+	return ordered, nil
+}
+
+func TestZAILiveAccountFixtureSelection(t *testing.T) {
+	const first = `{"id":"zai_d2e6ac1e0f809e83","api_key":"first-fixture-key"}`
+	const second = `{"id":"zai_982de655b82e05c8","api_key":"second-fixture-key"}`
+	const third = `{"id":"zai_011ec432244130a9","api_key":"third-fixture-key"}`
+	for _, test := range []struct {
+		name, body, forced string
+		wantIDs            []string
+		wantErr            bool
+	}{
+		{name: "legacy", body: `{"api_key":"first-fixture-key"}`, wantIDs: []string{"zai_d2e6ac1e0f809e83"}},
+		{name: "legacy ignores accounts without opt-in", body: `{"api_key":"first-fixture-key","accounts":[` + second + `]}`, wantIDs: []string{"zai_d2e6ac1e0f809e83"}},
+		{name: "forced first preserves other order", body: `{"accounts":[` + first + `,` + second + `,` + third + `]}`, forced: "zai_982de655b82e05c8", wantIDs: []string{"zai_982de655b82e05c8", "zai_d2e6ac1e0f809e83", "zai_011ec432244130a9"}},
+		{name: "force missing ID", body: `{"accounts":[` + first + `,` + second + `]}`, forced: "private-unknown-id", wantErr: true},
+		{name: "force needs two accounts", body: `{"accounts":[` + first + `]}`, forced: "zai_d2e6ac1e0f809e83", wantErr: true},
+		{name: "duplicate accounts", body: `{"accounts":[` + first + `,` + first + `]}`, forced: "zai_d2e6ac1e0f809e83", wantErr: true},
+		{name: "invalid opaque ID", body: `{"accounts":[{"id":"private-key-id","api_key":"first-fixture-key"},` + second + `]}`, forced: "private-key-id", wantErr: true},
+		{name: "empty legacy", body: `{}`, wantErr: true},
+		{name: "invalid JSON", body: `{"api_key":"first-fixture-key",`, wantErr: true},
+		{name: "bounded JSON", body: `{"api_key":"` + strings.Repeat("x", 65<<10) + `"}`, wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			accounts, err := readZAILiveAccounts(strings.NewReader(test.body), test.forced)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("fixture error present=%t, want=%t", err != nil, test.wantErr)
+			}
+			if err != nil {
+				if strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "fixture-key") {
+					t.Fatal("fixture credentials leaked through error")
+				}
+				return
+			}
+			if len(accounts) != len(test.wantIDs) {
+				t.Fatalf("account count=%d, want=%d", len(accounts), len(test.wantIDs))
+			}
+			for i, account := range accounts {
+				if account.ID != test.wantIDs[i] || account.APIKey == "" {
+					t.Fatal("fixture account ordering or credential missing")
+				}
+			}
+		})
+	}
+}
+
+func TestZAILiveFailoverObservationRequiresRejectedThenAccepted(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		attempts []struct {
+			id     string
+			status int
+		}
+		wantAccepted  bool
+		wantUnmatched bool
+	}{
+		{name: "quota then accepted", attempts: []struct {
+			id     string
+			status int
+		}{{"first", 429}, {"second", 200}}, wantAccepted: true},
+		{name: "auth then accepted", attempts: []struct {
+			id     string
+			status int
+		}{{"first", 401}, {"second", 201}}, wantAccepted: true},
+		{name: "accepted before rejection", attempts: []struct {
+			id     string
+			status int
+		}{{"second", 200}, {"first", 429}}},
+		{name: "server error not rejection", attempts: []struct {
+			id     string
+			status int
+		}{{"first", 500}, {"second", 200}}},
+		{name: "same account accepted", attempts: []struct {
+			id     string
+			status int
+		}{{"first", 429}, {"first", 200}}},
+		{name: "unmatched credential", attempts: []struct {
+			id     string
+			status int
+		}{{"", 200}}, wantUnmatched: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			observer := &zaiLiveTransport{forcedFirst: "first", statuses: make(map[string][]int)}
+			for _, attempt := range test.attempts {
+				observer.observeStatus(attempt.id, attempt.status)
+			}
+			if observer.failoverAccepted != test.wantAccepted || observer.unmatchedAccount != test.wantUnmatched {
+				t.Fatalf("accepted=%t unmatched=%t", observer.failoverAccepted, observer.unmatchedAccount)
 			}
 		})
 	}
@@ -272,11 +426,17 @@ type zaiLiveCall struct {
 }
 
 type zaiLiveTransport struct {
-	mu            sync.Mutex
-	calls         map[string]zaiLiveCall
-	parseFailed   bool
-	beforeRequest func(*http.Request)
-	onCompleted   func()
+	mu               sync.Mutex
+	calls            map[string]zaiLiveCall
+	parseFailed      bool
+	beforeRequest    func(*http.Request)
+	onCompleted      func()
+	accounts         []zaiprov.Account
+	forcedFirst      string
+	statuses         map[string][]int
+	firstRejected    bool
+	failoverAccepted bool
+	unmatchedAccount bool
 }
 
 func (transport *zaiLiveTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -287,8 +447,51 @@ func (transport *zaiLiveTransport) RoundTrip(request *http.Request) (*http.Respo
 	if err != nil {
 		return nil, errors.New("live Z.ai upstream transport failed")
 	}
+	if transport.forcedFirst != "" {
+		id := ""
+		for _, account := range transport.accounts {
+			if request.Header.Get("Authorization") == "Bearer "+account.APIKey {
+				id = account.ID
+				break
+			}
+		}
+		transport.observeStatus(id, response.StatusCode)
+	}
 	response.Body = &zaiLiveResponseObserver{body: response.Body, parser: NewCodexSSEParser(1 << 20), transport: transport}
 	return response, nil
+}
+
+func (transport *zaiLiveTransport) observeStatus(id string, status int) {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	if id == "" {
+		transport.unmatchedAccount = true
+		return
+	}
+	transport.statuses[id] = append(transport.statuses[id], status)
+	if id == transport.forcedFirst && (status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusTooManyRequests) {
+		transport.firstRejected = true
+	}
+	if id != transport.forcedFirst && status >= 200 && status < 300 && transport.firstRejected {
+		transport.failoverAccepted = true
+	}
+}
+
+func (transport *zaiLiveTransport) assertFailover(t *testing.T) {
+	t.Helper()
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	if !transport.firstRejected || !transport.failoverAccepted || transport.unmatchedAccount {
+		t.Fatalf("native Z.ai failover evidence incomplete (first_rejected=%t, other_accepted=%t, unmatched=%t)", transport.firstRejected, transport.failoverAccepted, transport.unmatchedAccount)
+	}
+	t.Log("native Z.ai forced-first rejection and different-account acceptance passed")
+}
+
+func (transport *zaiLiveTransport) logAccountStatuses(t *testing.T) {
+	t.Helper()
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	t.Logf("native Z.ai HTTP statuses by opaque account ID: %v", transport.statuses)
 }
 
 type zaiLiveResponseObserver struct {
