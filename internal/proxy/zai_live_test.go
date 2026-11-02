@@ -61,12 +61,12 @@ func TestZAILiveNativeSubagentsAndFollowup(t *testing.T) {
 	if err != nil {
 		t.Fatal("encode private live Z.ai catalogue")
 	}
-	for _, useWebSocket := range []bool{false, true} {
-		name := "http"
-		if useWebSocket {
-			name = "websocket"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		useWebSocket, drain bool
+	}{{name: "http"}, {name: "websocket", useWebSocket: true}, {name: "websocket-drain", useWebSocket: true, drain: true}} {
+		t.Run(test.name, func(t *testing.T) {
+			useWebSocket := test.useWebSocket
 			root := t.TempDir()
 			work := filepath.Join(root, "work")
 			home := filepath.Join(root, "home")
@@ -95,7 +95,19 @@ func TestZAILiveNativeSubagentsAndFollowup(t *testing.T) {
 				CodexNativeHTTP: zaiForbiddenCodexHTTP{t},
 				CodexRouting:    &CodexRoutingRuntime{WebSocket: CodexModeStatus{Configured: CodexRoutingEnforce, Effective: CodexRoutingEnforce}},
 			}
-			handler, err := server.handler()
+			var handler http.Handler
+			var worker runtimeDrainHandler
+			var err error
+			if test.drain {
+				handler, err = server.RuntimeHandler()
+				if err == nil {
+					worker = handler.(runtimeDrainHandler)
+					handler = RuntimeUpgradeHTTPHandler(handler, worker.RuntimeUpgradeAdmission())
+					defer worker.ResumeUpgrade(context.Background())
+				}
+			} else {
+				handler, err = server.handler()
+			}
 			if err != nil {
 				t.Fatal("create isolated CQ listener")
 			}
@@ -126,6 +138,80 @@ func TestZAILiveNativeSubagentsAndFollowup(t *testing.T) {
 				"Spawn exactly one child with task_name fixture_reader and fork_turns none. Tell that child to read only fixture-a.txt in the current directory using its shell tool and reply with exactly the file contents. Wait for its final reply. " +
 				"Then call followup_task on the SAME child /root/fixture_reader. Tell it to read only fixture-b.txt using its shell tool and reply with exactly those file contents. Wait for that final reply. " +
 				"Do not spawn another child or close the child. Do not override the child's model or reasoning effort. Your final reply must be exactly the first file contents, then |, then the second file contents, without spaces, explanation or formatting."
+			var drained, replayed atomic.Bool
+			drainDone := make(chan error, 1)
+			if test.drain {
+				var once sync.Once
+				originalSpawnID := ""
+				observer.onCompleted = func() {
+					observer.mu.Lock()
+					spawnID := ""
+					for id, call := range observer.calls {
+						if strings.HasSuffix(call.name, "spawn_agent") && call.taskName == "fixture_reader" {
+							spawnID = id
+						}
+					}
+					observer.mu.Unlock()
+					if spawnID == "" {
+						return
+					}
+					once.Do(func() {
+						originalSpawnID = spawnID
+						if err := worker.PrepareUpgrade(context.Background()); err != nil {
+							drainDone <- errors.New("pause isolated runtime")
+							return
+						}
+						go func() {
+							var drainErr error
+							defer func() {
+								if recover() != nil {
+									drainErr = errors.New("isolated runtime drain observer panicked")
+								}
+								if drainErr == nil {
+									drained.Store(true)
+								}
+								if err := worker.ResumeUpgrade(context.Background()); drainErr == nil && err != nil {
+									drainErr = errors.New("resume isolated runtime")
+								}
+								drainDone <- drainErr
+							}()
+							wait, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+							defer cancel()
+							drainErr = worker.AwaitUpgradeQuiescence(wait)
+						}()
+					})
+				}
+				observer.beforeRequest = func(request *http.Request) {
+					if !drained.Load() || request.GetBody == nil {
+						return
+					}
+					body, err := request.GetBody()
+					if err != nil {
+						return
+					}
+					defer body.Close()
+					var submitted struct {
+						Input []json.RawMessage `json:"input"`
+					}
+					if json.NewDecoder(io.LimitReader(body, maxRequestBody+1)).Decode(&submitted) != nil {
+						return
+					}
+					retainedPrompt, retainedCall := false, false
+					for _, raw := range submitted.Input {
+						retainedPrompt = retainedPrompt || bytes.Contains(raw, []byte(prompt))
+						var item struct {
+							Type   string `json:"type"`
+							CallID string `json:"call_id"`
+						}
+						if json.Unmarshal(raw, &item) == nil && item.Type == "function_call" && originalSpawnID != "" && item.CallID == originalSpawnID {
+							retainedCall = true
+						}
+					}
+					if retainedPrompt && retainedCall {
+						replayed.Store(true)
+					}
+				}
+			}
 			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Minute)
 			defer cancel()
 			command := exec.CommandContext(ctx, client, arguments...)
@@ -133,7 +219,20 @@ func TestZAILiveNativeSubagentsAndFollowup(t *testing.T) {
 			stdout, stderr := &codexAcceptanceDiagnosticBuffer{}, &codexAcceptanceDiagnosticBuffer{}
 			command.Stdout, command.Stderr, command.WaitDelay = stdout, stderr, 2*time.Second
 			if err := command.Run(); err != nil {
-				t.Fatalf("native GLM subagent run failed (timeout=%t, stdout_bytes=%d, stderr_bytes=%d, upstream_calls=%d)", ctx.Err() != nil, len(stdout.data), len(stderr.data), observer.count())
+				t.Fatalf("native GLM subagent run failed (timeout=%t, stdout_bytes=%d, stderr_bytes=%d, upstream_calls=%d, drained=%t, replayed=%t, websockets=%d, http=%d, restart_1012=%t, history_rejected=%t, fallback=%t)", ctx.Err() != nil, len(stdout.data), len(stderr.data), observer.count(), drained.Load(), replayed.Load(), webSockets.Load(), httpRequests.Load(), bytes.Contains(stderr.data, []byte("1012")), bytes.Contains(stderr.data, []byte("previous response unavailable")), codexAcceptanceWebSocketTransportFailed(stderr.data))
+			}
+			if test.drain {
+				select {
+				case err := <-drainDone:
+					if err != nil {
+						t.Fatalf("isolated native GLM drain failed: %v", err)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("isolated native GLM drain did not finish")
+				}
+				if !drained.Load() || !replayed.Load() || webSockets.Load() < 3 {
+					t.Fatalf("native GLM reconnect history evidence incomplete (drained=%t, replayed=%t, websockets=%d)", drained.Load(), replayed.Load(), webSockets.Load())
+				}
 			}
 			for _, line := range bytes.Split(stdout.data, []byte("\n")) {
 				var event struct {
@@ -161,6 +260,9 @@ func TestZAILiveNativeSubagentsAndFollowup(t *testing.T) {
 				t.Fatalf("native HTTP transport evidence incomplete (http=%d, websockets=%d)", httpRequests.Load(), webSockets.Load())
 			}
 			t.Logf("native GLM child spawn, fixture reads and same-child follow-up passed (http=%d, websockets=%d)", httpRequests.Load(), webSockets.Load())
+			if test.drain {
+				t.Log("native GLM continued after isolated upgrade drain with original prompt and spawn-call history replayed")
+			}
 		})
 	}
 }
@@ -170,12 +272,17 @@ type zaiLiveCall struct {
 }
 
 type zaiLiveTransport struct {
-	mu          sync.Mutex
-	calls       map[string]zaiLiveCall
-	parseFailed bool
+	mu            sync.Mutex
+	calls         map[string]zaiLiveCall
+	parseFailed   bool
+	beforeRequest func(*http.Request)
+	onCompleted   func()
 }
 
 func (transport *zaiLiveTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if transport.beforeRequest != nil {
+		transport.beforeRequest(request)
+	}
 	response, err := http.DefaultTransport.RoundTrip(request)
 	if err != nil {
 		return nil, errors.New("live Z.ai upstream transport failed")
@@ -213,6 +320,7 @@ func (observer *zaiLiveResponseObserver) Close() error {
 
 func (transport *zaiLiveTransport) observe(data []byte) {
 	var event struct {
+		Type     string          `json:"type"`
 		Item     json.RawMessage `json:"item"`
 		Response struct {
 			Output []json.RawMessage `json:"output"`
@@ -240,6 +348,9 @@ func (transport *zaiLiveTransport) observe(data []byte) {
 		transport.mu.Lock()
 		transport.calls[item.CallID] = zaiLiveCall{item.Name, arguments.TaskName, arguments.ForkTurns, arguments.Target}
 		transport.mu.Unlock()
+	}
+	if event.Type == "response.completed" && transport.onCompleted != nil {
+		transport.onCompleted()
 	}
 }
 
