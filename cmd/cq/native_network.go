@@ -20,9 +20,10 @@ const (
 
 // CodexNetworkCmd manages the opt-in native app network extension.
 type CodexNetworkCmd struct {
-	Enable  struct{} `cmd:"" help:"Route native ChatGPT traffic through configured WireGuard"`
-	Status  struct{} `cmd:"" help:"Show native ChatGPT network readiness"`
-	Disable struct{} `cmd:"" help:"Disable CQ native ChatGPT network routing"`
+	Enable  struct{}             `cmd:"" help:"Route native ChatGPT traffic through configured WireGuard"`
+	Status  struct{}             `cmd:"" help:"Show native ChatGPT network readiness"`
+	Disable struct{}             `cmd:"" help:"Disable CQ native ChatGPT network routing"`
+	Usage   CodexNetworkUsageCmd `cmd:"" help:"Manage normal-launch ChatGPT usage response handling"`
 }
 
 type nativeNetworkStatus struct {

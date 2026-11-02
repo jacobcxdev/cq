@@ -169,6 +169,9 @@ func startRuntimeEgress(ctx context.Context, cfg *Config, fs fsutil.FileSystem, 
 	}); ok {
 		nativeDialer = nativeRuntimeDialer{native.DialNativeContext, native.NativeReady}
 	}
+	if nativeDialer != nil {
+		nativeDialer = NewNativeUsageDialer(nativeDialer, filepath.Join(dir, "native-usage"), fs)
+	}
 	nativeHandler := NewNativeEgressBroker(nativeDialer, nativeToken)
 	server := &http.Server{ReadHeaderTimeout: 10 * time.Second, MaxHeaderBytes: 32 * 1024, BaseContext: func(net.Listener) context.Context { return life }, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tracked.mu.Lock()

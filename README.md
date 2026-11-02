@@ -643,6 +643,42 @@ multi-account Dots; use the Dots launcher for that separate integration.
 Local UDP forwarding requires numeric destinations and uses translated ephemeral
 source ports; multicast discovery is not guaranteed.
 
+CQ can also adapt the app's usage display on normal launches. It changes credit
+availability in the usage HTTP response and Electron live updates. Provider
+balances and account routing remain unchanged. Multi-account Dots use the
+existing CQ launcher.
+
+This option needs a dedicated local TLS certificate for `chatgpt.com` and
+`ws.chatgpt.com`. The certificate has no CA capability and remains separate from
+Dots certificates. Prepare it without changing traffic:
+
+```sh
+cq codex network usage prepare
+```
+
+Review the printed certificate fingerprint, hosts and expiry. After you approve
+the certificate, add SSL trust to your login Keychain. Then enable response handling:
+
+```sh
+security add-trusted-cert -r trustRoot -p ssl \
+  -k "$HOME/Library/Keychains/login.keychain-db" \
+  "$HOME/.config/cq/state/native-usage/usage-cert.pem"
+cq codex network usage enable
+cq codex network usage status
+```
+
+If CQ uses another state directory, use the certificate path from `prepare`.
+This adapter handles TCP HTTPS and WebSocket connections. HTTP/3 traffic remains
+unchanged. Existing connections acquire response handling after they reconnect.
+
+Disable stops response changes on existing connections too. Remove certificate
+trust separately when you no longer need it:
+
+```sh
+cq codex network usage disable
+security remove-trusted-cert "$HOME/.config/cq/state/native-usage/usage-cert.pem"
+```
+
 LAN DNS resolvers with globally allocated addresses stay on their active local
 interface. CQ checks the interface subnet and binds the DNS socket's local
 address; other DNS destinations retain WireGuard routing. DNS transport traces
@@ -798,6 +834,11 @@ cq codex network
 cq codex network disable
 cq codex network enable
 cq codex network status
+cq codex network usage
+cq codex network usage disable
+cq codex network usage enable
+cq codex network usage prepare
+cq codex network usage status
 cq codex remove
 cq codex resets
 cq codex resets list

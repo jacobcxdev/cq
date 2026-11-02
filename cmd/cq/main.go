@@ -438,6 +438,9 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 	if strings.HasPrefix(ctx.Command(), "codex dots ") {
 		return defaultDotsRunner().execute(context.Background(), &cli.Codex.Dots, strings.TrimPrefix(ctx.Command(), "codex dots "), cli.JSON, os.Stdout, os.Stderr)
 	}
+	if strings.HasPrefix(ctx.Command(), "codex network usage ") {
+		return defaultNativeUsageRunner().execute(context.Background(), strings.TrimPrefix(ctx.Command(), "codex network usage "), cli.JSON, os.Stdout)
+	}
 	if strings.HasPrefix(ctx.Command(), "codex network ") {
 		return defaultNativeNetworkRunner().execute(context.Background(), strings.TrimPrefix(ctx.Command(), "codex network "), cli.JSON, os.Stdout)
 	}
