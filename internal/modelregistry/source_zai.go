@@ -61,6 +61,16 @@ func (s *ZAISource) Fetch(ctx context.Context) (result SourceResult, err error) 
 			result.MalformedEntries++
 			continue
 		}
+		displayName := info.DisplayName
+		switch info.Slug {
+		case "glm-5.3":
+			info.DisplayName = "GLM-5.3"
+		case "glm-5.3-flash":
+			info.DisplayName = "GLM-5.3-Flash"
+		}
+		if info.DisplayName != displayName {
+			raw = cloneRawWithOverrides(raw, Entry{ID: info.Slug, DisplayName: info.DisplayName})
+		}
 		result.Entries = append(result.Entries, Entry{
 			Provider: ProviderZAI, ID: info.Slug, DisplayName: info.DisplayName,
 			Description: info.Description, ContextWindow: info.ContextWindow,

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -67,6 +68,51 @@ func TestZAISourcePreservesNativeCodexMetadata(t *testing.T) {
 	}
 	if compact.String() != raw {
 		t.Fatalf("cache lost native metadata: %s", roundTrip.Models[0])
+	}
+}
+
+func TestZAISourceDisplayNamesPreserveCodexMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		id, displayName, want string
+	}{
+		{"glm-5.3", "glm-5.3", "GLM-5.3"},
+		{"glm-5.3-flash", "glm-5.3-flash", "GLM-5.3-Flash"},
+		{"glm-future", "Future model", "Future model"},
+	} {
+		t.Run(tc.id, func(t *testing.T) {
+			metadata := map[string]any{
+				"slug": tc.id, "display_name": tc.displayName,
+				"context_window": float64(1048576), "input_modalities": []any{"text", "image"},
+				"supported_reasoning_levels": []any{map[string]any{"effort": "max", "description": "Deep reasoning"}},
+				"future_capability":          map[string]any{"enabled": true},
+			}
+			raw, err := json.Marshal(metadata)
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := &ZAISource{
+				Token: func(context.Context) (string, error) { return "fake-key", nil },
+				Client: zaiModelsDoer(func(*http.Request) (*http.Response, error) {
+					return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"models":[` + string(raw) + `]}`))}, nil
+				}),
+			}
+			result, err := src.Fetch(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(result.Entries) != 1 || result.Entries[0].ID != tc.id || result.Entries[0].DisplayName != tc.want {
+				t.Fatalf("unexpected model identity or display name: %+v", result.Entries)
+			}
+			projected := CodexModelsResponse(Snapshot{Entries: result.Entries, CodexRawByID: result.CodexRawByID})
+			var got map[string]any
+			if err := json.Unmarshal(projected.Models[0], &got); err != nil {
+				t.Fatal(err)
+			}
+			metadata["display_name"] = tc.want
+			if !reflect.DeepEqual(got, metadata) {
+				t.Fatalf("display name change altered native metadata: got %v, want %v", got, metadata)
+			}
+		})
 	}
 }
 
