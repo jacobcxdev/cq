@@ -60,6 +60,28 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 - **Branch naming:** `{kind}/{slug}` (e.g. `feat/gemini-provider`, `fix/oauth-callback`).
 - **Commit messages:** `type: description` (imperative). Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`.
 
+### Releases
+
+- Release tags must identify the current, fetched `origin/main` tip after PR
+  review and merge. Never release from feature branches, PR heads or pre-merge
+  candidates. The release workflow enforces this before packaging.
+- Publish stable versions sequentially and in order. Increment exactly one
+  semver component by one, resetting lower components. Inspect published
+  releases, tags and drafts first; stop on conflicts or unexplained gaps rather
+  than skipping versions or publishing an older version later.
+- Review the entire diff from the latest published release to `origin/main`.
+  Include every merged fix and retain previously shipped changes. Passing tests
+  on a stale branch does not establish a complete release.
+- Changed `native/macos-network` sources require a new signed, notarised native
+  companion and reviewed `.github/native-network-release.json` pin. A newer Go
+  version must not ship an older companion which omits merged native fixes.
+- Follow `CONTRIBUTING.md` and `docs/native-network-releases.md`. Verify published
+  Casks, installed companion/provider versions and real affected traffic before
+  claiming delivery. A merge, tag, draft or Go executable upgrade is insufficient.
+- Keep one active release attempt per stream. Account for failed or superseded
+  drafts. Preserve published tags and assets; correct omissions in the next
+  complete release and annotate affected historical release notes.
+
 ## Coding Standards
 
 - Go 1.21+ (uses built-in `min`, `max`)
