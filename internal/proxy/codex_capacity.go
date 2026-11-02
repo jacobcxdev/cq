@@ -388,11 +388,11 @@ func (l *CodexCapacityLedger) Capacity(account codex.AccountKey, bucket Capacity
 	return CapacityView{State: CapacityUnknown, Exact: bucket == CapacityBucketBase}
 }
 
-// IncludedCapacity excludes authenticated depleted windows when selecting a
-// redistribution target; ordinary capacity may still admit extra-credit work.
+// IncludedCapacity distinguishes authenticated depleted included windows from
+// ordinary capacity, which may still admit extra-credit work.
 func (l *CodexCapacityLedger) IncludedCapacity(account codex.AccountKey, bucket CapacityBucket) CapacityView {
 	view := l.Capacity(account, bucket)
-	if l == nil || view.State != CapacityPositive {
+	if l == nil || view.State == CapacityZero {
 		return view
 	}
 	if bucket == "" {
@@ -406,7 +406,7 @@ func (l *CodexCapacityLedger) IncludedCapacity(account codex.AccountKey, bucket 
 		if scoped := quota.WindowBucket(name); scoped != "" {
 			windowBucket = CapacityBucket(capacityBucketModelPrefix + strings.ToLower(ParseModel(scoped)))
 		}
-		if windowBucket != bucket && !(windowBucket == CapacityBucketBase && !view.Exact) {
+		if windowBucket != bucket && !(windowBucket == CapacityBucketBase && !view.Exact && view.State == CapacityPositive) {
 			continue
 		}
 		if entry.fact.ObservedAt.After(now) || now.Sub(entry.fact.ObservedAt) >= l.maxAge || entry.window.ResetAtUnix <= now.Unix() {

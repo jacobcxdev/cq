@@ -416,7 +416,7 @@ func (factory *CodexHTTPRequestPlanFactory) CyberEligibilityStore() *CyberEligib
 // the turn with full history before planning the new route.
 func (factory *CodexHTTPRequestPlanFactory) ShouldResetCyberOff(ctx context.Context, protocol CodexProtocolRequest, active codex.AccountKey) bool {
 	if factory == nil || factory.CyberEligibility == nil || factory.SessionPolicy == nil ||
-		factory.PinnedAccountKey != "" || protocol.CyberAccessProgram != "" ||
+		factory.PinnedAccountKey != "" || protocol.CyberEnabled() ||
 		!containsCodexHTTPRequestAccountKey(factory.CyberEligibility.Members(), active) {
 		return false
 	}
@@ -614,7 +614,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	caller, callerOK := runtimeCallerAuthority(ctx)
 	policyDecision := SessionPolicyDecision{Allowed: sortedAccountKeys(accounts), AccountValues: map[codex.AccountKey]PoolValue{}, Status: PolicyDecisionUnbound}
 	if factory.SessionPolicy != nil {
-		if factory.CyberEligibility != nil && protocol.CyberAccessProgram != "" {
+		if factory.CyberEligibility != nil && protocol.CyberEnabled() {
 			policyDecision, err = enforceSessionCyberPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, snapshot.BoundAccountKey, now)
 		} else {
 			policyDecision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, snapshot.BoundAccountKey, now)
@@ -627,7 +627,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 			inventory = filterCodexHTTPRequestInventory(inventory, policyDecision.Allowed)
 		}
 	}
-	cyberActive := factory.CyberEligibility != nil && protocol.CyberAccessProgram != ""
+	cyberActive := factory.CyberEligibility != nil && protocol.CyberEnabled()
 	if cyberActive {
 		var eligible []codex.AccountKey
 		inventory, eligible = filterCodexCyberInventory(factory.CyberEligibility, inventory, protocol)
@@ -1185,7 +1185,7 @@ func (factory *CodexHTTPRequestPlanFactory) planWebSocketPrewarm(ctx context.Con
 	}
 	accounts := codexHTTPRequestPlanAccountKeys(inventory)
 	caller, _ := runtimeCallerAuthority(ctx)
-	cyberActive := factory.CyberEligibility != nil && protocol.CyberAccessProgram != ""
+	cyberActive := factory.CyberEligibility != nil && protocol.CyberEnabled()
 	var decision SessionPolicyDecision
 	var policyErr error
 	if cyberActive {
@@ -1323,7 +1323,7 @@ func (factory *CodexHTTPRequestPlanFactory) adoptWebSocketPrewarm(ctx context.Co
 		now = factory.Now()
 	}
 	caller, _ := runtimeCallerAuthority(ctx)
-	cyberActive := factory.CyberEligibility != nil && protocol.CyberAccessProgram != ""
+	cyberActive := factory.CyberEligibility != nil && protocol.CyberEnabled()
 	var decision SessionPolicyDecision
 	if cyberActive {
 		decision, err = enforceSessionCyberPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, reservation.AccountKey, now)

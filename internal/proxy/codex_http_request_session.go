@@ -659,7 +659,7 @@ accountsLoop:
 			authRejected := failure == CodexPinnedAuthFailure
 			hardRejected := failure == CodexPinnedHardLimit
 			cyberRejected := failure == CodexPinnedCyberUnavailable
-			if cyberRejected && session.CyberEligibility != nil {
+			if cyberRejected && session.CyberEligibility != nil && protocol.CyberEnabled() {
 				session.CyberEligibility.MarkIneligible(choice.AccountKey, protocol.Model, protocol.CyberAccessProgram)
 			}
 			rejectReason := "upstream_rejected"

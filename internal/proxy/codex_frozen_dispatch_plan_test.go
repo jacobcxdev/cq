@@ -10,6 +10,7 @@ import (
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 func TestBuildCodexFrozenDispatchPlanMaterialisesPolicyChoices(t *testing.T) {
@@ -169,6 +170,78 @@ func TestBuildCodexFrozenDispatchPlanPreservesSystemAccount(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("account order = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestBuildCodexFrozenDispatchPlanPrefersIncludedQuota(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name            string
+		includedValue   PoolValue
+		creditAffinity  bool
+		includedSystem  bool
+		includedZero    bool
+		boundCredit     bool
+		zeroOnly        bool
+		unknownIncluded bool
+		want            []codex.AccountKey
+	}{
+		{name: "included quota before lower value credit account", includedValue: 10, want: []codex.AccountKey{"included", "credit"}},
+		{name: "included quota before soft credit affinity", creditAffinity: true, want: []codex.AccountKey{"included", "credit"}},
+		{name: "system included quota before secondary credit spend", includedSystem: true, want: []codex.AccountKey{"included", "credit"}},
+		{name: "all included quota depleted preserves system last", includedSystem: true, includedZero: true, want: []codex.AccountKey{"credit", "included"}},
+		{name: "hard credit continuation stays bound", boundCredit: true, want: []codex.AccountKey{"credit"}},
+		{name: "authenticated zero without earlier allowance stays fallback", includedValue: 10, zeroOnly: true, want: []codex.AccountKey{"included", "credit"}},
+		{name: "unknown included quota retains ordinary selection", includedValue: 10, unknownIncluded: true, want: []codex.AccountKey{"credit", "included"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(1_800_000_000, 0)
+			ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+			included := frozenDispatchTestLogicalAccount("included",
+				frozenDispatchCandidate("included", "candidate-included", "revision", codex.SourceManaged, false, now.Add(time.Hour)))
+			included.Active = test.includedSystem
+			credit := frozenDispatchTestLogicalAccount("credit",
+				frozenDispatchCandidate("credit", "candidate-credit", "revision", codex.SourceManaged, false, now.Add(time.Hour)))
+			ledger.ObserveLivePositiveQuotaSnapshot(ledger.NewObservationStream(), included.Key, resetTestSnapshot(now, quota.Window7Day, 75))
+			if !test.unknownIncluded && !test.zeroOnly {
+				ledger.ObserveLivePositiveQuotaSnapshot(ledger.NewObservationStream(), credit.Key, resetTestSnapshot(now, quota.Window7Day, 90))
+			}
+			now = now.Add(time.Second)
+			if !test.unknownIncluded {
+				ledger.ObserveLivePositiveQuotaSnapshot(ledger.NewObservationStream(), credit.Key, resetTestSnapshot(now, quota.Window7Day, 0))
+			}
+			if test.includedZero {
+				ledger.ObserveLivePositiveQuotaSnapshot(ledger.NewObservationStream(), included.Key, resetTestSnapshot(now, quota.Window7Day, 0))
+			}
+			input := CodexFrozenDispatchInput{
+				Inventory:         codex.Inventory{Accounts: []codex.LogicalAccount{credit, included}},
+				Capacity:          ledger,
+				Requirements:      CodexRouteRequirements{RequestedModel: "gpt-5"},
+				AccountValues:     map[codex.AccountKey]PoolValue{included.Key: test.includedValue},
+				DefaultAccountKey: included.Key,
+				Now:               now,
+			}
+			if test.creditAffinity {
+				input.AffinityAccountKey = credit.Key
+			}
+			if test.boundCredit {
+				input.BoundAccountKey = credit.Key
+			}
+			plan, err := BuildCodexFrozenDispatchPlan(context.Background(), input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []codex.AccountKey
+			for _, account := range plan.Accounts() {
+				got = append(got, account.Choice().AccountKey)
+			}
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("account order = %v, want %v", got, test.want)
+			}
+			if view := ledger.Capacity(credit.Key, CapacityBucketBase); !test.unknownIncluded && !test.zeroOnly && view.State != CapacityPositive {
+				t.Fatalf("credit fallback capacity changed: %+v", view)
 			}
 		})
 	}

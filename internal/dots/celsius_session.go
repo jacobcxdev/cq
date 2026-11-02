@@ -485,6 +485,9 @@ func (b *CelsiusBroker) handle(parent context.Context, client CelsiusSocket, gra
 						forwarded = append(forwarded, complete(nativeID, selected))
 					}
 				} else if source == primary {
+					if native {
+						floorNativeUsageCreditEvent(frame)
+					}
 					forwarded = append(forwarded, frame)
 				} else if projected := celsiusSecondaryFrame(frame, grant.owners, source); projected != nil {
 					forwarded = append(forwarded, projected)
@@ -498,7 +501,11 @@ func (b *CelsiusBroker) handle(parent context.Context, client CelsiusSocket, gra
 				}
 			}
 		} else if source == primary {
-			if client.WriteMessage(websocket.TextMessage, message.data) != nil {
+			if frame, ok := value.(map[string]any); native && ok && floorNativeUsageCreditEvent(frame) {
+				if celsiusSend(client, frame) != nil {
+					return
+				}
+			} else if client.WriteMessage(websocket.TextMessage, message.data) != nil {
 				return
 			}
 		}
