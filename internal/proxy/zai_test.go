@@ -570,19 +570,15 @@ func TestZAIWebSocketDisconnectCancelsHTTP(t *testing.T) {
 	}
 }
 
-func TestZAIWebSocketRuntimeUpgradeWaitsForSocketClose(t *testing.T) {
-	server := &Server{
-		Config:    &Config{ClaudeUpstream: "https://claude.test"},
-		Catalog:   zaiTestCatalog(),
-		ZAIAPIKey: func() (string, error) { return "zai-test-key", nil },
-	}
+func openZAIRuntimeUpgradeWebSocket(t *testing.T, server *Server) (*websocket.Conn, runtimeDrainHandler) {
+	t.Helper()
 	handler, err := server.RuntimeHandler()
 	if err != nil {
 		t.Fatal(err)
 	}
 	worker := handler.(runtimeDrainHandler)
 	proxy := httptest.NewServer(RuntimeUpgradeHTTPHandler(handler, worker.RuntimeUpgradeAdmission()))
-	defer proxy.Close()
+	t.Cleanup(proxy.Close)
 	connection, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(proxy.URL, "http")+legacyCodexResponsesPath, nil)
 	if response != nil && response.Body != nil {
 		response.Body.Close()
@@ -590,8 +586,35 @@ func TestZAIWebSocketRuntimeUpgradeWaitsForSocketClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer connection.Close()
+	t.Cleanup(func() { _ = connection.Close() })
 	_ = connection.SetReadDeadline(time.Now().Add(2 * time.Second))
+	return connection, worker
+}
+
+func assertZAIUpgradeQuiescent(t *testing.T, connection *websocket.Conn, worker runtimeDrainHandler) {
+	t.Helper()
+	_, _, err := connection.ReadMessage()
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) || closeErr.Code != websocket.CloseServiceRestart {
+		t.Fatalf("upgrade close = %v, want 1012", err)
+	}
+	wait, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := worker.AwaitUpgradeQuiescence(wait); err != nil {
+		t.Fatalf("Z.ai upgrade quiescence = %v", err)
+	}
+	if err := worker.ResumeUpgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestZAIWebSocketRuntimeUpgradeClosesIdleSocket(t *testing.T) {
+	server := &Server{
+		Config:    &Config{ClaudeUpstream: "https://claude.test"},
+		Catalog:   zaiTestCatalog(),
+		ZAIAPIKey: func() (string, error) { return "zai-test-key", nil },
+	}
+	connection, worker := openZAIRuntimeUpgradeWebSocket(t, server)
 	if err := connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"glm-5.3-flash","generate":false,"input":[]}`)); err != nil {
 		t.Fatal(err)
 	}
@@ -599,18 +622,117 @@ func TestZAIWebSocketRuntimeUpgradeWaitsForSocketClose(t *testing.T) {
 	if err := worker.PrepareUpgrade(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	assertZAIUpgradeQuiescent(t, connection, worker)
+}
+
+func TestZAIWebSocketRuntimeUpgradeClosesBeforeFirstFrame(t *testing.T) {
+	server := &Server{
+		Config:    &Config{ClaudeUpstream: "https://claude.test"},
+		Catalog:   zaiTestCatalog(),
+		ZAIAPIKey: func() (string, error) { return "zai-test-key", nil },
+	}
+	connection, worker := openZAIRuntimeUpgradeWebSocket(t, server)
+	if err := worker.PrepareUpgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	assertZAIUpgradeQuiescent(t, connection, worker)
+}
+
+func TestZAIWebSocketRuntimeUpgradeFinishesActiveResponse(t *testing.T) {
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	cancelled := make(chan struct{}, 1)
+	var requests atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if requests.Add(1) != 1 {
+			writeZAITestSSE(w, "unexpected-response", nil)
+			return
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"held-response\"}}\n\n")
+		w.(http.Flusher).Flush()
+		close(started)
+		select {
+		case <-finish:
+			_, _ = io.WriteString(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"stream-finished\"}\n\n")
+			writeZAITestSSE(w, "held-response", nil)
+		case <-r.Context().Done():
+			cancelled <- struct{}{}
+		}
+	}))
+	defer upstream.Close()
+	defer func() {
+		select {
+		case <-finish:
+		default:
+			close(finish)
+		}
+	}()
+	server := &Server{
+		Config:      &Config{ClaudeUpstream: upstream.URL},
+		Catalog:     zaiTestCatalog(),
+		ZAIAPIKey:   func() (string, error) { return "zai-test-key", nil },
+		ZAIUpstream: upstream.URL,
+	}
+	connection, worker := openZAIRuntimeUpgradeWebSocket(t, server)
+	if err := connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"glm-5.3-flash","input":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream response not started")
+	}
+	if err := worker.PrepareUpgrade(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	short, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	if err := worker.AwaitUpgradeQuiescence(short); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("active Z.ai socket quiescence = %v", err)
+		t.Fatalf("active Z.ai response quiescence = %v", err)
 	}
-	connection.Close()
-	wait, cancelWait := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancelWait()
-	if err := worker.AwaitUpgradeQuiescence(wait); err != nil {
-		t.Fatalf("closed Z.ai socket quiescence = %v", err)
+	select {
+	case <-cancelled:
+		t.Fatal("upgrade cancelled active Z.ai response")
+	default:
 	}
-	if err := worker.ResumeUpgrade(context.Background()); err != nil {
+	if err := connection.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"glm-5.3-flash","input":[]}`)); err != nil {
 		t.Fatal(err)
+	}
+	close(finish)
+	var eventTypes []string
+	var text string
+	for {
+		_, data, err := connection.ReadMessage()
+		if err != nil {
+			t.Fatalf("active response interrupted: %v", err)
+		}
+		var event struct {
+			Type     string `json:"type"`
+			Delta    string `json:"delta"`
+			Response struct {
+				ID string `json:"id"`
+			} `json:"response"`
+		}
+		if err := json.Unmarshal(data, &event); err != nil {
+			t.Fatal(err)
+		}
+		eventTypes = append(eventTypes, event.Type)
+		text += event.Delta
+		if event.Type == "response.completed" {
+			if event.Response.ID != "held-response" {
+				t.Fatalf("completed response = %q", event.Response.ID)
+			}
+			break
+		}
+	}
+	if got := strings.Join(eventTypes, ","); got != "response.created,response.output_text.delta,response.completed" || text != "stream-finished" {
+		t.Fatalf("active response events = %q, text = %q", got, text)
+	}
+	assertZAIUpgradeQuiescent(t, connection, worker)
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("upstream requests = %d, want 1", got)
 	}
 }
