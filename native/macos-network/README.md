@@ -6,7 +6,13 @@ Extension. It does not install, activate or configure an extension by itself.
 `TransparentFlowAdmission` checks the flow's OS audit token with
 Security.framework. A selected source must have an OpenAI Developer ID signature,
 an allowed stable signing identifier, and an executable inside the configured,
-independently validated ChatGPT bundle. Display names, build numbers and CDHashes
+independently validated ChatGPT bundle. The standalone `codex` signing identifier
+also permits an independently signed Homebrew CLI outside that bundle. The
+provider has read-only sandbox access to `/opt/homebrew/Caskroom/codex/` and
+`/usr/local/Caskroom/codex/` so Security.framework can validate the executable.
+Certificate, identifier and team requirements remain identical for both
+locations. Other locations fail closed if the sandbox prevents validation.
+Display names, build numbers and CDHashes
 are not used as identity. These checks inspect public code signatures and do not
 query Keychain or request permissions.
 
@@ -24,6 +30,9 @@ Metadata-only debug events in subsystem `dev.jacobcx.cq.network`, category
 `admission`, distinguish flow-capacity and verification-capacity refusals and
 report verification wait time. Broker readiness alone does not establish that
 new flows are passing admission.
+
+The `source-verification` category records failed Security.framework stages and
+numeric status codes. It does not record credentials or executable paths.
 
 The provider must interpret admission decisions as follows:
 
