@@ -56,9 +56,7 @@ func (s *Server) zaiResponsesURL() (string, error) {
 // tryHandleZAI inspects native Responses before any Codex account admission.
 // Non-Z.ai requests retain their exact encoded request bytes for Codex.
 func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, string) {
-	if s.ZAIAPIKey == nil && s.ZAIAccounts == nil && !s.hasZAICatalog() {
-		return false, ""
-	}
+	zaiEnabled := s.ZAIAPIKey != nil || s.ZAIAccounts != nil || s.hasZAICatalog()
 	if r.Body == nil {
 		return false, ""
 	}
@@ -80,9 +78,33 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 		}
 		decodedBody = decoded.Decoded()
 	}
+	decodedBody, restored, err := normaliseCQCompactionInput(decodedBody, s.cqCompactionToken())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return true, ""
+	}
+	if restored {
+		body = decodedBody
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		r.Header.Del("Content-Encoding")
+	}
+	if !zaiEnabled {
+		return false, ""
+	}
 	model := extractModel(decodedBody)
 	if RouteModelWithCatalog(model, s.Catalog) != ProviderZAI {
 		return false, ""
+	}
+	compact, err := zaiCompactionRequested(decodedBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return true, model
+	}
+	if compact {
+		fmt.Fprintf(os.Stderr, "cq: route POST %s model=%q provider=zai (native compaction)\n", r.URL.Path, model)
+		s.handleZAICompaction(w, r, decodedBody)
+		return true, model
 	}
 	if strings.HasSuffix(r.URL.Path, "/responses/compact") {
 		writeError(w, http.StatusNotImplemented, "not_implemented", "Z.ai does not support Responses compaction")
@@ -278,7 +300,12 @@ func (s *Server) serveZAIWebSocket(ctx context.Context, downstream *websocket.Co
 					return err
 				}
 				previousID = id
-				history = append(input, output...)
+				compact, _ := zaiCompactionRequested(body)
+				if compact {
+					history = output
+				} else {
+					history = append(input, output...)
+				}
 			}
 			return nil
 		}()
@@ -313,7 +340,29 @@ func zaiResponseInput(raw json.RawMessage) ([]json.RawMessage, error) {
 }
 
 func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *websocket.Conn, header http.Header, body []byte) (string, []json.RawMessage, error) {
-	body, err := normaliseZAIRequest(body)
+	body, _, err := normaliseCQCompactionInput(body, s.cqCompactionToken())
+	if err != nil {
+		return "", nil, err
+	}
+	compact, err := zaiCompactionRequested(body)
+	if err != nil {
+		return "", nil, err
+	}
+	if compact {
+		fmt.Fprintln(os.Stderr, "cq: Z.ai native WebSocket compaction")
+		response, err := s.compactZAI(ctx, header, body)
+		if err != nil {
+			return "", nil, err
+		}
+		for _, event := range zaiCompactionEvents(response) {
+			data, _ := json.Marshal(event)
+			if err := downstream.WriteMessage(websocket.TextMessage, data); err != nil {
+				return "", nil, err
+			}
+		}
+		return response.ID, response.Output, nil
+	}
+	body, err = normaliseZAIRequest(body)
 	if err != nil {
 		data, _ := json.Marshal(map[string]any{"type": "error", "status": http.StatusBadRequest, "error": map[string]string{"type": "invalid_request_error", "code": "zai_invalid_request", "message": err.Error()}})
 		_ = downstream.WriteMessage(websocket.TextMessage, data)
@@ -423,6 +472,7 @@ type initialCodexWebSocketRoutingHandler interface {
 type providerBoundWebSocketConn struct {
 	websocketRelayConn
 	acceptsModel func(string) bool
+	normalise    func([]byte) ([]byte, error)
 }
 
 func (c *providerBoundWebSocketConn) ReadMessage() (int, []byte, error) {
@@ -431,8 +481,14 @@ func (c *providerBoundWebSocketConn) ReadMessage() (int, []byte, error) {
 		return kind, payload, err
 	}
 	if kind == websocket.TextMessage {
+		if c.normalise != nil {
+			payload, err = c.normalise(payload)
+			if err != nil {
+				return 0, nil, err
+			}
+		}
 		model := extractCodexWebSocketFrameModel(payload)
-		if model != "" && !c.acceptsModel(model) {
+		if model != "" && c.acceptsModel != nil && !c.acceptsModel(model) {
 			_ = c.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "model provider changed; reconnect"), time.Now().Add(time.Second))
 			_ = c.Close()
 			return 0, nil, errors.New("model provider changed; reconnect WebSocket")

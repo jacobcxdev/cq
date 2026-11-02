@@ -1349,6 +1349,12 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
+		if firstKind == websocket.TextMessage {
+			firstFrame, _, err = normaliseCQCompactionInput(firstFrame, s.cqCompactionToken())
+			if err != nil {
+				return
+			}
+		}
 		if firstKind == websocket.TextMessage && RouteModelWithCatalog(extractCodexWebSocketFrameModel(firstFrame), s.Catalog) == ProviderZAI {
 			diagnosticsProvider = "zai"
 			routeKind = "zai_native_websocket"
@@ -1367,6 +1373,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		brokerContext := withCodexWSFrameObservationSink(r.Context(), func(diagnostics *routeDiagnostics) {
 			s.emitCodexWebSocketFrameObservation(diagnostics)
 		})
+		brokerContext = context.WithValue(brokerContext, cqCompactionTokenContextKey{}, s.cqCompactionToken())
 		var brokerErr error
 		if firstFrame != nil {
 			if broker, ok := s.CodexWebSocketBroker.(initialCodexWebSocketRoutingHandler); ok {
@@ -1419,6 +1426,10 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	requestedModel := ""
 	if messageType == websocket.TextMessage {
+		message, _, err = normaliseCQCompactionInput(message, s.cqCompactionToken())
+		if err != nil {
+			return
+		}
 		requestedModel = extractCodexWebSocketFrameModel(message)
 	}
 	s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, "downstream_request", messageType, message, 1)
@@ -1466,9 +1477,14 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	downstreamFrameIndex.Store(1)
 	var upstreamFrameIndex atomic.Int64
 	downstreamRelay := websocketRelayConn(clientConn)
+	boundRelay := &providerBoundWebSocketConn{websocketRelayConn: clientConn, normalise: func(body []byte) ([]byte, error) {
+		restored, _, err := normaliseCQCompactionInput(body, s.cqCompactionToken())
+		return restored, err
+	}}
 	if zaiEnabled {
-		downstreamRelay = &providerBoundWebSocketConn{websocketRelayConn: clientConn, acceptsModel: func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) != ProviderZAI }}
+		boundRelay.acceptsModel = func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) != ProviderZAI }
 	}
+	downstreamRelay = boundRelay
 	relayErr := relayWebSocketPairGuarded(r.Context(), downstreamRelay, upstreamConn, func(fromClient bool, messageType int, message []byte) {
 		direction := "upstream_response"
 		frameIndex := int(upstreamFrameIndex.Add(1))
