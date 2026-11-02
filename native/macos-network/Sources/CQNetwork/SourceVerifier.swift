@@ -4,6 +4,8 @@ import Security
 /// Security.framework validates existing public code signatures; no Keychain API
 /// or signing identity lookup is used here.
 final class SourceVerifier {
+    enum SourceLocation: Equatable { case application, standaloneCLI }
+
     static let teamIdentifier = "2DC432GLL2"
     static let signingIdentifiers: Set<String> = [
         "com.openai.codex", "com.openai.codex.helper",
@@ -36,10 +38,10 @@ final class SourceVerifier {
               let executable = information[kSecCodeInfoMainExecutable] as? URL else {
             return .verificationFailed
         }
-        let path = executable.resolvingSymlinksInPath().standardizedFileURL.path
-        guard path.hasPrefix(applicationURL.appendingPathComponent("Contents").path + "/") else {
+        guard let location = sourceLocation(executable: executable, signingIdentifier: signingIdentifierHint) else {
             return .verificationFailed
         }
+        if location == .standaloneCLI { return .verified }
         // Reject a copied OpenAI helper placed in an unsigned/replaced app bundle.
         var application: SecStaticCode?
         guard SecStaticCodeCreateWithPath(applicationURL as CFURL, [], &application) == errSecSuccess,
@@ -49,6 +51,16 @@ final class SourceVerifier {
             return .verificationFailed
         }
         return .verified
+    }
+
+    func sourceLocation(executable: URL, signingIdentifier: String) -> SourceLocation? {
+        let path = executable.resolvingSymlinksInPath().standardizedFileURL.path
+        if path.hasPrefix(applicationURL.appendingPathComponent("Contents").path + "/") {
+            return .application
+        }
+        // Standalone Codex has its own OpenAI signature, checked before this
+        // location policy. Application helpers still require the signed bundle.
+        return signingIdentifier == "codex" ? .standaloneCLI : nil
     }
 
     private static func requirement(identifier: String) -> SecRequirement? {
