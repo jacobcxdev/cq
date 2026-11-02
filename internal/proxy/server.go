@@ -95,6 +95,7 @@ type Server struct {
 	// public work to the selected private worker instead of running normal
 	// proxy semantics in the supervisor process.
 	RuntimeNormalHandler http.Handler
+	runtimeUpgrade       *RuntimeUpgradeAdmission
 	// RuntimeCallerCredentials remain worker-local. The runtime handler uses
 	// safe caller subject IDs to restore only the credential authorised by the
 	// supervisor's consumed admission.
@@ -441,6 +442,7 @@ func (s *Server) RuntimeHandler() (http.Handler, error) {
 		return nil, err
 	}
 	gate := NewRuntimeUpgradeAdmission()
+	s.runtimeUpgrade = gate
 	// Passthrough WebSockets retain their HTTP admission until the socket closes.
 	// A nonnil broker must explicitly support reversible turn admission.
 	compatible := s.CodexWebSocketBroker == nil
@@ -1308,14 +1310,36 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	var firstKind int
 	var firstFrame []byte
 	if zaiEnabled {
-		stopCancelClose := context.AfterFunc(r.Context(), func() { _ = clientConn.Close() })
-		firstKind, firstFrame, err = clientConn.ReadMessage()
-		stopCancelClose()
+		var upgrade <-chan struct{}
+		if s.runtimeUpgrade != nil {
+			upgrade = s.runtimeUpgrade.PauseSignal()
+		}
+		readCtx, cancelRead := context.WithCancel(r.Context())
+		firstRead := make(chan codexWSUpstreamRead, 1)
+		go func() {
+			defer func() {
+				if recover() != nil {
+					firstRead <- codexWSUpstreamRead{err: errors.New("WebSocket initial frame read failed")}
+				}
+			}()
+			kind, payload, readErr := readCodexWSMessage(readCtx, clientConn)
+			firstRead <- codexWSUpstreamRead{messageType: kind, payload: payload, err: readErr}
+		}()
+		select {
+		case frame := <-firstRead:
+			firstKind, firstFrame, err = frame.messageType, frame.payload, frame.err
+		case <-upgrade:
+			_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
+			cancelRead()
+			frame := <-firstRead
+			clearBytes(frame.payload)
+			return
+		}
+		cancelRead()
 		if err != nil {
 			return
 		}
 		if firstKind == websocket.TextMessage && RouteModelWithCatalog(extractCodexWebSocketFrameModel(firstFrame), s.Catalog) == ProviderZAI {
-			// Keep the runtime request admission until this provider's socket closes.
 			diagnosticsProvider = "zai"
 			routeKind = "zai_native_websocket"
 			fmt.Fprintf(os.Stderr, "cq: route %s /responses model=%q provider=zai (native websocket)\n", r.Method, extractCodexWebSocketFrameModel(firstFrame))
