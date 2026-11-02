@@ -724,7 +724,8 @@ func (p *Probe) forward(w http.ResponseWriter, r *http.Request, owner *Account) 
 		req.Header = OwnerHeaders(req.Header, *owner)
 	}
 	observe := r.Method == "GET" && r.URL.Path == "/backend-api/tbo/primary"
-	if observe {
+	usage := p.settings.IntegrationMode == "native" && owner == nil && r.Method == "GET" && r.URL.EscapedPath() == "/backend-api/wham/usage"
+	if observe || usage {
 		req.Header.Set("Accept-Encoding", "identity")
 	}
 	response, err := p.options.HTTP.Do(req)
@@ -735,11 +736,22 @@ func (p *Probe) forward(w http.ResponseWriter, r *http.Request, owner *Account) 
 	}
 	defer response.Body.Close()
 	summary["status"] = response.StatusCode
-	if observe && response.StatusCode == 200 {
+	if (observe || usage) && response.StatusCode == 200 {
 		data, err := probeReadPrefix(response.Body, 1<<20)
 		if err == nil && len(data) <= 1<<20 {
-			if err := p.observePrimary(r.Context(), r.Header, data); err != nil {
-				p.event(map[string]any{"native_primary_observation_failed": true})
+			if observe {
+				if err := p.observePrimary(r.Context(), r.Header, data); err != nil {
+					p.event(map[string]any{"native_primary_observation_failed": true})
+				}
+			}
+			if usage && (response.Header.Get("Content-Encoding") == "" || strings.EqualFold(response.Header.Get("Content-Encoding"), "identity")) {
+				projected := floorNativeUsageCreditResponse(data)
+				if !bytes.Equal(projected, data) {
+					data = projected
+					response.ContentLength = int64(len(data))
+					response.Header.Set("Content-Length", strconv.Itoa(len(data)))
+					response.Header.Del("ETag")
+				}
 			}
 		} else if err != nil {
 			w.WriteHeader(502)

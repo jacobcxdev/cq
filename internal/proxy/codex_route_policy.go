@@ -13,6 +13,8 @@ type CodexRoutePolicyCandidate struct {
 	Choice        RouteChoice
 	Value         PoolValue
 	SystemAccount bool
+	// IncludedQuotaExhausted preserves ordinary admission as a paid fallback.
+	IncludedQuotaExhausted bool
 	// RequiredCapacity aligns one-to-one with Choice.RequiredBuckets.
 	RequiredCapacity  []CapacityView
 	Compatible        bool
@@ -365,6 +367,9 @@ func codexRoutePolicyChoiceForAccount(frozen RouteChoice, accountKey codex.Accou
 }
 
 func codexRoutePolicyCandidateLess(left, right CodexRoutePolicyCandidate, affinity codex.AccountKey, affinityModel string) bool {
+	if left.IncludedQuotaExhausted != right.IncludedQuotaExhausted {
+		return !left.IncludedQuotaExhausted
+	}
 	// Preserve the system account for clients and hosts outside CQ, regardless
 	// of pool value or soft affinity. Hard continuation binding is handled first.
 	if left.SystemAccount != right.SystemAccount || left.Value != right.Value {

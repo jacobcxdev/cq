@@ -304,6 +304,42 @@ func TestCodexIncludedCapacityRejectsNewestAuthenticatedZero(t *testing.T) {
 	}
 }
 
+func TestCodexIncludedCapacityRecognisesZeroWithoutOrdinaryObservation(t *testing.T) {
+	t.Parallel()
+	for _, scenario := range []string{"fresh zero", "stale zero", "expired zero", "unknown", "unknown scoped quota"} {
+		t.Run(scenario, func(t *testing.T) {
+			now := time.Unix(1_800_000_000, 0)
+			ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Minute)
+			bucket := CapacityBucketBase
+			if scenario == "unknown scoped quota" {
+				bucket = CapacityBucketForModel(codexSparkModel)
+			}
+			zero := resetTestSnapshot(now, quota.Window7Day, 0)
+			if scenario == "stale zero" {
+				zero.FetchedAt = now.Add(-time.Minute)
+			}
+			if scenario == "expired zero" {
+				window := zero.Result.Windows[quota.Window7Day]
+				window.ResetAtUnix = now.Unix()
+				zero.Result.Windows[quota.Window7Day] = window
+			}
+			if scenario != "unknown" {
+				ledger.ObserveLivePositiveQuotaSnapshot(ledger.NewObservationStream(), "account", zero)
+			}
+			if ordinary := ledger.Capacity("account", bucket); ordinary.State != CapacityUnknown {
+				t.Fatalf("ordinary admission changed: %+v", ordinary)
+			}
+			want := CapacityUnknown
+			if scenario == "fresh zero" {
+				want = CapacityZero
+			}
+			if included := ledger.IncludedCapacity("account", bucket); included.State != want {
+				t.Fatalf("included capacity = %+v, want state %v", included, want)
+			}
+		})
+	}
+}
+
 func TestCodexIncludedCapacityPreservesIndependentScopedQuota(t *testing.T) {
 	for _, exactScoped := range []bool{false, true} {
 		t.Run(fmt.Sprint(exactScoped), func(t *testing.T) {

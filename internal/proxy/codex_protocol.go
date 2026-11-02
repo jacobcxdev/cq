@@ -29,6 +29,11 @@ type CodexProtocolRequest struct {
 	HasEncryptedState             bool
 }
 
+// CyberEnabled excludes the explicit standard programme used when Cyber is off.
+func (request CodexProtocolRequest) CyberEnabled() bool {
+	return request.CyberAccessProgram != "" && request.CyberAccessProgram != "standard"
+}
+
 func ParseCodexProtocolRequest(body []byte, directMetadata string, handshake *CodexTurnMetadata) (CodexProtocolRequest, error) {
 	return parseCodexProtocolRequest(body, directMetadata, handshake, codexHTTPRequestMaxBytes)
 }

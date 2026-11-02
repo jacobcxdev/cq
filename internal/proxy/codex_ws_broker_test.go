@@ -2422,26 +2422,32 @@ func TestCodexTerminatingWSBrokerResetsKnownIneligibleCyberDeltaAfterPlannerReje
 		name       string
 		planError  error
 		ineligible bool
+		programme  string
 		wantReset  bool
 	}{
 		{name: "continuity conflict", planError: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrSessionPolicyContinuity), ineligible: true, wantReset: true},
 		{name: "authority mismatch", planError: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseAuthorityMismatch), ineligible: true, wantReset: true},
 		{name: "prior account filtered", planError: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, &CodexRoutePolicyError{Status: CodexRoutePlanBoundUnresolved}), ineligible: true, wantReset: true},
 		{name: "unknown access", planError: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrSessionPolicyContinuity)},
+		{name: "standard access stays ordinary", planError: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrSessionPolicyContinuity), ineligible: true, programme: "standard"},
 		{name: "unrelated failure", planError: newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCodexLeaseWriterUnavailable), ineligible: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			cyber := NewCyberEligibilityStore(nil)
+			programme := test.programme
+			if programme == "" {
+				programme = "daybreak_blue"
+			}
 			if test.ineligible {
-				cyber.MarkIneligible("account-a", "gpt-5.6-sol", "daybreak_blue")
+				cyber.MarkIneligible("account-a", "gpt-5.6-sol", programme)
 			}
 			planner := &codexWSBrokerFailingPlanner{err: test.planError}
 			broker, err := newCodexTerminatingWSBroker(codexTerminatingWSBrokerConfig{Plans: planner, Upstream: &codexWSBrokerDialerStub{}, CyberEligibility: cyber, UpstreamURL: "wss://example.invalid/responses", DownstreamGeneration: 41})
 			if err != nil {
 				t.Fatal(err)
 			}
-			request := codexTerminatingWSFrame("turn-a", `,"previous_response_id":"response-a","access_programs":{"cyber":"daybreak_blue"}`)
+			request := codexTerminatingWSFrame("turn-a", `,"previous_response_id":"response-a","access_programs":{"cyber":"`+programme+`"}`)
 			pending, err := newCodexWSPendingFrame(websocket.TextMessage, request)
 			if err != nil {
 				t.Fatal(err)

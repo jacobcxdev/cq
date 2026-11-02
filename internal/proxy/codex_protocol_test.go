@@ -18,6 +18,34 @@ func TestCodexProtocolRequest(t *testing.T) {
 	}
 }
 
+func TestCodexProtocolRequestCyberProgrammes(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name    string
+		body    string
+		want    string
+		enabled bool
+	}{
+		{name: "absent", body: `{}`},
+		{name: "empty", body: `{"access_programs":{"cyber":""}}`},
+		{name: "root standard", body: `{"access_programs":{"cyber":"standard"}}`, want: "standard"},
+		{name: "params standard", body: `{"params":{"access_programs":{"cyber":"standard"}}}`, want: "standard"},
+		{name: "blue", body: `{"access_programs":{"cyber":"daybreak_blue"}}`, want: "daybreak_blue", enabled: true},
+		{name: "red", body: `{"params":{"access_programs":{"cyber":"daybreak_red"}}}`, want: "daybreak_red", enabled: true},
+		{name: "unknown stays gated", body: `{"access_programs":{"cyber":"future_programme"}}`, want: "future_programme", enabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request, err := ParseCodexProtocolRequest([]byte(test.body), "", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if request.CyberAccessProgram != test.want || request.CyberEnabled() != test.enabled {
+				t.Fatalf("programme/enabled = %q/%t, want %q/%t", request.CyberAccessProgram, request.CyberEnabled(), test.want, test.enabled)
+			}
+		})
+	}
+}
+
 func TestParseCodexProtocolRequestReasoningEffort(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

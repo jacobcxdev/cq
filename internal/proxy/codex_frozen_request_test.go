@@ -315,6 +315,9 @@ func TestInspectCodexNativeRequestCapturesCyberProgramme(t *testing.T) {
 	}{
 		{name: "root", body: `{"access_programs":{"cyber":"daybreak_blue"}}`, want: "daybreak_blue"},
 		{name: "params", body: `{"params":{"access_programs":{"cyber":"daybreak_red"}}}`, want: "daybreak_red"},
+		{name: "root standard", body: `{"access_programs":{"cyber":"standard"}}`, want: "standard"},
+		{name: "params standard", body: `{"params":{"access_programs":{"cyber":"standard"}}}`, want: "standard"},
+		{name: "unknown", body: `{"access_programs":{"cyber":"future_programme"}}`, want: "future_programme"},
 		{name: "root wins", body: `{"access_programs":{"cyber":"daybreak_blue"},"params":{"access_programs":{"cyber":"daybreak_red"}}}`, want: "daybreak_blue"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -327,6 +330,9 @@ func TestInspectCodexNativeRequestCapturesCyberProgramme(t *testing.T) {
 			protocol, err := inspection.Protocol()
 			if err != nil || protocol.CyberAccessProgram != test.want {
 				t.Fatalf("programme = %q, error %v, want %q", protocol.CyberAccessProgram, err, test.want)
+			}
+			if protocol.CyberEnabled() != (test.want != "standard") {
+				t.Fatalf("programme %q enabled = %t", test.want, protocol.CyberEnabled())
 			}
 		})
 	}
