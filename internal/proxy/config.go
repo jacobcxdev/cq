@@ -23,6 +23,10 @@ type CodexWindowPrimingConfig struct {
 	ModelOverrides map[string]string `json:"model_overrides,omitempty"`
 }
 
+type ZAIWindowPrimingConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
 const (
 	// DefaultPort is the default proxy listen port.
 	DefaultPort = 19280
@@ -112,6 +116,7 @@ type Config struct {
 	CodexContinuityStateDir       string                   `json:"codex_continuity_state_dir,omitempty"`
 	ProxyResilienceStateDir       string                   `json:"proxy_resilience_state_dir,omitempty"`
 	CodexWindowPriming            CodexWindowPrimingConfig `json:"codex_window_priming,omitempty"`
+	ZAIWindowPriming              ZAIWindowPrimingConfig   `json:"zai_window_priming,omitempty"`
 
 	unknownFields map[string]json.RawMessage
 }
@@ -131,6 +136,7 @@ var configKnownFields = map[string]bool{
 	"codex_continuity_state_dir":        true,
 	"proxy_resilience_state_dir":        true,
 	"codex_window_priming":              true,
+	"zai_window_priming":                true,
 }
 
 // UnmarshalJSON retains fields unknown to this build for N/N-1 safe writes.

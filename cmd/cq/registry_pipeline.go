@@ -213,14 +213,22 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		opts.RefreshInterval = 5 * time.Minute
 	}
 	seedEntries := cachedRegistryEntries(opts)
-	zaiToken := func(context.Context) (string, error) {
-		return zaiprov.ReadAPIKey(opts.FS, opts.Env, opts.Roots.Config)
+	zaiTokens := func(context.Context) ([]string, error) {
+		accounts, err := zaiprov.ReadAccounts(opts.FS, opts.Env, opts.Roots.Config)
+		if err != nil {
+			return nil, err
+		}
+		keys := make([]string, 0, len(accounts))
+		for _, account := range accounts {
+			keys = append(keys, account.APIKey)
+		}
+		return keys, nil
 	}
-	zaiKey, zaiKeyErr := zaiToken(context.Background())
+	zaiKeys, zaiKeyErr := zaiTokens(context.Background())
 	if zaiKeyErr != nil {
 		fmt.Fprintln(opts.Stderr, "cq: registry: Z.ai credentials unavailable")
 	}
-	if zaiKeyErr != nil || zaiKey == "" {
+	if zaiKeyErr != nil || len(zaiKeys) == 0 {
 		filtered := seedEntries[:0]
 		for _, entry := range seedEntries {
 			if entry.Provider != modelregistry.ProviderZAI {
@@ -260,8 +268,8 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		},
 	}
 
-	if zaiKeyErr == nil && zaiKey != "" {
-		refresher.ZAI = &modelregistry.ZAISource{Client: opts.HTTPClient, Token: zaiToken}
+	if zaiKeyErr == nil && len(zaiKeys) > 0 {
+		refresher.ZAI = &modelregistry.ZAISource{Client: opts.HTTPClient, Tokens: zaiTokens}
 	}
 
 	p := &registryPipeline{

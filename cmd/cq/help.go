@@ -27,6 +27,7 @@ Commands:
   claude      Manage Claude accounts
   codex       Manage Codex accounts and validation
   gemini      Show Gemini account
+  zai         Manage Z.ai Coding Plan accounts
   refresh     Refresh stored OAuth tokens
   agent       Manage the background refresh agent
   service     Manage complete background service lifecycle

@@ -215,3 +215,92 @@ func TestZAIRegistrySurvivesPartialRefresh(t *testing.T) {
 		t.Fatalf("models lost after partial refresh: %s", projected.Models)
 	}
 }
+
+type zaiModelsClosedBody struct {
+	io.Reader
+	closed *int
+}
+
+func (b zaiModelsClosedBody) Close() error { *b.closed++; return nil }
+
+func TestZAISourceAccountFallback(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		firstCode  int
+		lastCode   int
+		wantCalls  int
+		requestErr bool
+		wantErr    bool
+	}{
+		{"unauthorised", 401, 200, 2, false, false},
+		{"forbidden", 403, 200, 2, false, false},
+		{"rate limited", 429, 200, 2, false, false},
+		{"all rejected", 429, 429, 2, false, true},
+		{"bad request", 400, 200, 1, false, true},
+		{"server error", 500, 200, 1, false, true},
+		{"transport error", 0, 200, 1, true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls, closed := 0, 0
+			source := &ZAISource{
+				Tokens: func(context.Context) ([]string, error) {
+					return []string{"", "rejected-key", "rejected-key", "working-key"}, nil
+				},
+				Token: func(context.Context) (string, error) {
+					t.Fatal("ordered account reader fell back to legacy token")
+					return "", nil
+				},
+				Client: zaiModelsDoer(func(r *http.Request) (*http.Response, error) {
+					calls++
+					if test.requestErr {
+						return nil, errors.New("private-key")
+					}
+					status, key := test.firstCode, "Bearer rejected-key"
+					if calls == 2 {
+						status, key = test.lastCode, "Bearer working-key"
+					}
+					if r.Header.Get("Authorization") != key {
+						t.Error("unexpected model credential order")
+					}
+					return &http.Response{StatusCode: status, Body: zaiModelsClosedBody{Reader: strings.NewReader(`{"models":[{"slug":"glm-5.3"}]}`), closed: &closed}}, nil
+				}),
+			}
+			result, err := source.Fetch(t.Context())
+			if (err != nil) != test.wantErr || calls != test.wantCalls {
+				t.Fatalf("calls=%d err=%v", calls, err)
+			}
+			if err != nil && strings.Contains(err.Error(), "private-key") {
+				t.Fatal("model discovery exposed credential details")
+			}
+			if !test.requestErr && closed != calls {
+				t.Fatalf("unclosed model responses: calls=%d closed=%d", calls, closed)
+			}
+			if !test.wantErr && (len(result.Entries) != 1 || result.Entries[0].ID != "glm-5.3") {
+				t.Fatal("fallback did not return model catalogue")
+			}
+		})
+	}
+}
+
+func TestZAISourceOrderedReaderFailureDoesNotUseLegacyToken(t *testing.T) {
+	for _, read := range []func(context.Context) ([]string, error){
+		func(context.Context) ([]string, error) { return nil, errors.New("private-key") },
+		func(context.Context) ([]string, error) { return []string{"", " "}, nil },
+	} {
+		source := &ZAISource{
+			Tokens: read,
+			Token: func(context.Context) (string, error) {
+				t.Fatal("failed ordered reader used legacy token")
+				return "", nil
+			},
+			Client: zaiModelsDoer(func(*http.Request) (*http.Response, error) {
+				t.Fatal("unavailable credentials reached upstream")
+				return nil, nil
+			}),
+		}
+		_, err := source.Fetch(t.Context())
+		if err == nil || strings.Contains(err.Error(), "private-key") {
+			t.Fatal("ordered credential failure missing or unsafe")
+		}
+	}
+}

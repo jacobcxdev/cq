@@ -3,6 +3,7 @@ package zai
 import (
 	"context"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
@@ -15,15 +16,26 @@ const ResponsesBaseURL = "https://api.z.ai/api/v1"
 const quotaURL = "https://api.z.ai/api/monitor/usage/quota/limit"
 const accountID = "zai-coding-plan"
 
-// Provider retrieves quota for one Z.ai Coding Plan subscription.
+// Provider retrieves quota for Z.ai Coding Plan subscriptions.
 type Provider struct {
-	client httputil.Doer
-	apiKey func() (string, error)
+	client   httputil.Doer
+	accounts func() ([]Account, error)
 }
 
 // New creates a quota provider with an injected HTTP client and credential reader.
 func New(client httputil.Doer, apiKey func() (string, error)) *Provider {
-	return &Provider{client: client, apiKey: apiKey}
+	return NewAccounts(client, func() ([]Account, error) {
+		key, err := apiKey()
+		if err != nil || key == "" {
+			return nil, err
+		}
+		return []Account{{ID: accountID, APIKey: key}}, nil
+	})
+}
+
+// NewAccounts creates a provider with an ordered subscription credential reader.
+func NewAccounts(client httputil.Doer, accounts func() ([]Account, error)) *Provider {
+	return &Provider{client: client, accounts: accounts}
 }
 
 // Fetch retrieves subscription quota without modifying credentials.
@@ -34,16 +46,45 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) (results []quota.Resu
 			err = nil
 		}
 	}()
-	key, err := p.apiKey()
+	accounts, err := p.accounts()
 	if err != nil {
 		return singleError("fetch_error", "read Z.ai credentials", 0), nil
 	}
-	if key == "" {
-		return singleError("not_configured", "set ZAI_API_KEY or configure CQ's zai.json", 0), nil
+	if len(accounts) == 0 {
+		return singleError("not_configured", "run cq zai login or set ZAI_API_KEY", 0), nil
+	}
+	results = make([]quota.Result, len(accounts))
+	var group sync.WaitGroup
+	for i, account := range accounts {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			results[i] = p.fetchAccount(ctx, account, i == 0)
+		}()
+	}
+	group.Wait()
+	return results, nil
+}
+
+func (p *Provider) fetchAccount(ctx context.Context, account Account, active bool) (result quota.Result) {
+	defer func() {
+		if recover() != nil {
+			result = quota.ErrorResult("fetch_panic", "Z.ai provider failed", 0)
+		}
+		result.AccountID = account.ID
+		result.Email = account.Label
+		if result.Email == "" {
+			result.Email = account.ID
+		}
+		result.Active = active
+	}()
+	key, err := validateAPIKey(account.APIKey)
+	if err != nil || key == "" {
+		return quota.ErrorResult("fetch_error", "invalid Z.ai credentials", 0)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, quotaURL, nil)
 	if err != nil {
-		return singleError("fetch_error", "create Z.ai quota request", 0), nil
+		return quota.ErrorResult("fetch_error", "create Z.ai quota request", 0)
 	}
 	// Z.ai's monitor API requires the full key without a Bearer prefix.
 	req.Header.Set("Authorization", key)
@@ -51,24 +92,24 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) (results []quota.Resu
 	req.Header.Set("Accept-Language", "en-US,en")
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return singleError("fetch_error", "Z.ai quota request failed", 0), nil
+		return quota.ErrorResult("fetch_error", "Z.ai quota request failed", 0)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return singleError("auth_expired", "Z.ai API key rejected", resp.StatusCode), nil
+		return quota.ErrorResult("auth_expired", "Z.ai API key rejected", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return singleError("api_error", "Z.ai quota API error", resp.StatusCode), nil
+		return quota.ErrorResult("api_error", "Z.ai quota API error", resp.StatusCode)
 	}
 	body, err := httputil.ReadBody(resp.Body)
 	if err != nil {
-		return singleError("fetch_error", "read Z.ai quota response", 0), nil
+		return quota.ErrorResult("fetch_error", "read Z.ai quota response", 0)
 	}
 	result, code := parseQuota(body)
 	if code != "" {
-		return singleError(code, "invalid or unsuccessful Z.ai quota response", resp.StatusCode), nil
+		return quota.ErrorResult(code, "invalid or unsuccessful Z.ai quota response", resp.StatusCode)
 	}
-	return []quota.Result{result}, nil
+	return result
 }
 
 func singleError(code, message string, status int) []quota.Result {
