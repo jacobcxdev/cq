@@ -299,7 +299,7 @@ func setServiceOwner(command *serviceCommand, value string) error {
 
 func writeServiceStatus(output io.Writer, status serviceStatus) error {
 	overall := "degraded"
-	if status.Proxy.Healthy && status.Refresh.Healthy {
+	if status.Proxy.Healthy && status.Refresh.Healthy && status.Conflict == "" {
 		overall = "healthy"
 	}
 	_, err := fmt.Fprintf(
@@ -313,6 +313,21 @@ func writeServiceStatus(output io.Writer, status serviceStatus) error {
 	)
 	if err != nil {
 		return err
+	}
+	if status.Conflict != "" {
+		if _, err = fmt.Fprintf(output, "Installation: %s\n", status.Conflict); err != nil {
+			return err
+		}
+	}
+	if status.Proxy.Error != "" {
+		if _, err = fmt.Fprintf(output, "Proxy error: %s\n", status.Proxy.Error); err != nil {
+			return err
+		}
+	}
+	if status.Refresh.Error != "" {
+		if _, err = fmt.Fprintf(output, "Refresh error: %s\n", status.Refresh.Error); err != nil {
+			return err
+		}
 	}
 	if status.ActiveRuntimeVersion != "" {
 		if _, err = fmt.Fprintf(output, "Active runtime: %s\n", status.ActiveRuntimeVersion); err != nil {

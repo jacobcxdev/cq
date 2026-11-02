@@ -410,7 +410,6 @@ func (f *nativeUpgradeFixture) isolateSource(source string) {
 	fixtureSource := fmt.Sprintf(`package main
 import("os";"net/http";"fmt";"strings")
 var nativeFixtureFailure string
-func nativeFixtureUpgradeWaitSeconds() int { if _,err:=os.Stat(%q);err==nil{return 1};return 0 }
 func init(){
  os.Setenv("HOME",%q);os.Setenv("XDG_CONFIG_HOME","");os.Setenv("XDG_CACHE_HOME","");os.Setenv("CODEX_HOME",%q);os.Setenv("TMPDIR",%q)
  http.DefaultTransport= &http.Transport{Proxy:func(r *http.Request)(*url.URL,error){if r.URL.Hostname()!="127.0.0.1"&&r.URL.Hostname()!="localhost" {return nil,fmt.Errorf("fixture blocked non-loopback request")};return nil,nil}}
@@ -418,7 +417,7 @@ func init(){
  if nativeFixtureFailure=="boot"&&strings.Contains(strings.Join(os.Args," "),"--runtime-role worker"){os.Exit(74)}
  if nativeFixtureFailure=="refresh"&&len(os.Args)>1&&os.Args[1]=="refresh"{os.Exit(75)}
 }
-`, filepath.Join(f.roots.State, "native-bounded-drain"), f.home, filepath.Join(f.home, ".codex"), filepath.Join(f.root, "tmp"))
+`, f.home, filepath.Join(f.home, ".codex"), filepath.Join(f.root, "tmp"))
 	fixtureSource = strings.Replace(fixtureSource, `"strings"`, `"strings";"net/url"`, 1)
 	if err := os.WriteFile(filepath.Join(source, "cmd/cq/native_upgrade_fixture.go"), []byte(fixtureSource), 0o600); err != nil {
 		f.t.Fatal(err)
@@ -435,19 +434,6 @@ func init(){
 		}
 		data = bytes.Replace(data, []byte(marker), []byte(marker+`
  if nativeFixtureFailure=="setup" && resume!=nil && !resume.Recovery { return fmt.Errorf("fixture setup failed") }`), 1)
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			f.t.Fatal(err)
-		}
-		path = filepath.Join(source, "cmd/cq/service_upgrade_darwin.go")
-		data, err = os.ReadFile(path)
-		if err != nil {
-			f.t.Fatal(err)
-		}
-		requestMarker := "WaitTimeoutSeconds: int(waitTimeout / time.Second)"
-		if bytes.Count(data, []byte(requestMarker)) != 1 {
-			f.t.Fatal("bounded fixture drain injection boundary missing")
-		}
-		data = bytes.Replace(data, []byte(requestMarker), []byte("WaitTimeoutSeconds: nativeFixtureUpgradeWaitSeconds()"), 1)
 		if err := os.WriteFile(path, data, 0o600); err != nil {
 			f.t.Fatal(err)
 		}
@@ -977,6 +963,9 @@ class CQFixtureCommand < SystemCommand
  end
 end
 block=File.read(CQFixtureInputs.fetch("CQ_FIXTURE_RELEASER")).split("    custom_block: |\n",2).last.lines.take_while{|line|line.strip.empty?||line.start_with?("      ")}.map{|line|line.sub(/^      /,"")}.join
+# The signed native companion has a separate release gate. Keep this runtime
+# fixture inside its temporary Caskroom, without loading the production tap.
+block=block.lines.reject{|line|line.strip=='depends_on cask: "jacobcxdev/tap/cq-network"'}.join
 version=CQFixtureInputs.fetch("CQ_FIXTURE_VERSION")
 source="cask \"cq\" do\n version #{version.inspect}\n sha256 :no_check\n url \"https://example.invalid/cq.zip\"\n binary \"cq\"\n"+block.gsub("{{ .Version }}",version)+"\nend\n"
 new_cask=Cask::CaskLoader::FromContentLoader.new(source).load(config:nil)
@@ -1153,13 +1142,7 @@ func (f *nativeUpgradeFixture) assertRetainedRuntimes() {
 	}
 }
 func (f *nativeUpgradeFixture) deadlineDeferral() {
-	// Only this case exercises the explicit bounded drain override. Normal
-	// upgrades keep the production default and wait for existing turns to finish.
-	marker := filepath.Join(f.roots.State, "native-bounded-drain")
-	if err := os.WriteFile(marker, []byte("1\n"), 0o600); err != nil {
-		f.t.Fatal(err)
-	}
-	defer os.Remove(marker)
+	// Exercise the ordinary package deadline without changing its request.
 	f.mu.Lock()
 	f.hold = make(chan struct{})
 	f.mu.Unlock()
@@ -1212,6 +1195,13 @@ admitted:
 	}
 	if err := <-held; err != nil {
 		f.t.Fatal(err)
+	}
+	receipt, err := (proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: f.roots}).Load()
+	if err != nil || receipt.Phase != "deferred" || receipt.ErrorCode != "quiet_deadline" {
+		f.t.Fatalf("package drain receipt: %+v %v", receipt, err)
+	}
+	if pause := time.Duration(receipt.AdmissionPauseNanos); pause <= 0 || pause > 25*time.Second {
+		f.t.Fatalf("package admission pause = %s, want bounded drainage", pause)
 	}
 	f.assertPreviousRuntime()
 	f.traffic("deferred-after")
