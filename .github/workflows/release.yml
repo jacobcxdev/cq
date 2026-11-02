@@ -12,7 +12,20 @@ permissions:
   statuses: read
 
 jobs:
+  release-source:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Require the current reviewed main commit
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/validate-release-source.sh
+
   native-network:
+    needs: [release-source]
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -34,6 +47,7 @@ jobs:
           retention-days: 7
 
   validate-codex:
+    needs: [release-source]
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -693,6 +707,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@v5
+
       - uses: actions/download-artifact@v5
         with:
           name: winget-manifests
@@ -745,3 +761,9 @@ jobs:
             --head "jacobcxdev:$branch" \
             --title "New version: jacobcxdev.cq version $version" \
             --body "Published CQ $version MSI installers for x64 and ARM64."
+
+      - name: Close superseded CQ WinGet candidates
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: bash .github/scripts/close-superseded-winget-prs.sh

@@ -74,12 +74,21 @@ To release a new version:
    ```
    This runs normal WebSocket, repeated HTTP, compaction, and rescue traffic through isolated proxy listeners. It leaves any production listener unchanged and publishes the commit-bound `cq/live-normal-routing` status required by the tag workflow.
    Live checks discover the installed client's recommended model through `model/list`, log its concrete ID, and keep that selection fixed across direct and proxied traffic for the run. Model discovery uses an isolated profile and fails explicitly if no unambiguous visible default is available. Synthetic checks keep their reviewed fixture model and do not require live model access.
-3. Tag the commit: `git tag v0.x.y`
+3. Tag the final reviewed `main` commit: `git tag -s v0.x.y`. The release
+   preflight rejects branch candidates and tags which omit newer merged changes.
 4. Push the tag: `git push origin v0.x.y`
 5. Run the `Release` workflow against that tag. It builds and validates release
    artifacts, publishes the GitHub release, and publishes the generated
    Homebrew Cask to [`jacobcxdev/homebrew-tap`](https://github.com/jacobcxdev/homebrew-tap).
 6. Verify the published package channels and installed transport validation.
+
+Stable versions must follow the highest published stable release with the next
+patch, minor or major version, resetting lower components. The release preflight
+rejects gaps, older versions and tags outside current `origin/main`. Review the
+complete diff from the previous release before tagging, including native
+companion changes. Do not publish a feature branch because its tests passed.
+The WinGet publication job closes older CQ candidates only after the current
+candidate or published manifest exists.
 
 macOS packages also require the reviewed native companion pin. See
 [Native network releases](docs/native-network-releases.md) for the separate
