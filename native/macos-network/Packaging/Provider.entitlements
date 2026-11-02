@@ -9,5 +9,10 @@
     <array><string>K2648T24P4.dev.jacobcx.cq.network</string></array>
     <key>com.apple.security.network.client</key><true/>
     <key>com.apple.security.network.server</key><true/>
+    <key>com.apple.security.temporary-exception.files.absolute-path.read-only</key>
+    <array>
+        <string>/opt/homebrew/Caskroom/codex/</string>
+        <string>/usr/local/Caskroom/codex/</string>
+    </array>
 </dict>
 </plist>

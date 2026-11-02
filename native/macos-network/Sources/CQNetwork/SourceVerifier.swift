@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import Security
 
 /// Security.framework validates existing public code signatures; no Keychain API
@@ -12,6 +13,7 @@ final class SourceVerifier {
         "com.openai.codex.helper.renderer", "codex",
     ]
     private let applicationURL: URL
+    private static let logger = Logger(subsystem: "dev.jacobcx.cq.network", category: "source-verification")
 
     init(applicationURL: URL) {
         self.applicationURL = applicationURL.resolvingSymlinksInPath().standardizedFileURL
@@ -23,23 +25,27 @@ final class SourceVerifier {
         guard let auditToken, auditToken.count == 32 else { return .verificationFailed }
         var code: SecCode?
         let attributes = [kSecGuestAttributeAudit: auditToken] as CFDictionary
-        guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess,
-              let code,
-              let requirement = Self.requirement(identifier: signingIdentifierHint),
-              SecCodeCheckValidity(code, [], requirement) == errSecSuccess else {
-            return .verificationFailed
+        let guestStatus = SecCodeCopyGuestWithAttributes(nil, attributes, [], &code)
+        guard guestStatus == errSecSuccess, let code,
+              let requirement = Self.requirement(identifier: signingIdentifierHint) else {
+            return Self.failed(stage: "guest", status: guestStatus)
+        }
+        let validityStatus = SecCodeCheckValidity(code, [], requirement)
+        guard validityStatus == errSecSuccess else {
+            return Self.failed(stage: "dynamic_validity", status: validityStatus)
         }
         var staticCode: SecStaticCode?
-        guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess,
+        let staticStatus = SecCodeCopyStaticCode(code, [], &staticCode)
+        guard staticStatus == errSecSuccess,
               let staticCode,
               let information = Self.signingInformation(staticCode),
               information[kSecCodeInfoIdentifier] as? String == signingIdentifierHint,
               information[kSecCodeInfoTeamIdentifier] as? String == Self.teamIdentifier,
               let executable = information[kSecCodeInfoMainExecutable] as? URL else {
-            return .verificationFailed
+            return Self.failed(stage: "static_metadata", status: staticStatus)
         }
         guard let location = sourceLocation(executable: executable, signingIdentifier: signingIdentifierHint) else {
-            return .verificationFailed
+            return Self.failed(stage: "source_location", status: 0)
         }
         if location == .standaloneCLI { return .verified }
         // Reject a copied OpenAI helper placed in an unsigned/replaced app bundle.
@@ -75,9 +81,16 @@ final class SourceVerifier {
 
     private static func signingInformation(_ code: SecStaticCode) -> NSDictionary? {
         var information: CFDictionary?
-        guard SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess else {
+        let status = SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information)
+        guard status == errSecSuccess else {
+            _ = failed(stage: "signing_information", status: status)
             return nil
         }
         return information as NSDictionary?
+    }
+
+    private static func failed(stage: String, status: OSStatus) -> SourceVerdict {
+        logger.debug("source_check_failed stage=\(stage, privacy: .public) status=\(status, privacy: .public)")
+        return .verificationFailed
     }
 }
