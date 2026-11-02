@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -226,6 +227,86 @@ func TestRuntimeUpgradeDefersWithoutStoppingOldWorker(t *testing.T) {
 		t.Fatal("deferral did not restore admissions")
 	} else {
 		next()
+	}
+}
+
+func TestRuntimeUpgradeBoundedDrainResumesQueuedRequest(t *testing.T) {
+	controller, supervisor, worker, request := upgradeControllerFixture(t)
+	controller.quietTimeout = 0
+	request.WaitTimeoutSeconds = 1
+	listener := supervisor.upgradeListener
+	connections := supervisor.upgradeConnections
+	listener.SetConnectionTracker(connections)
+	server := &http.Server{
+		Handler:   http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }),
+		ConnState: connections.ConnState,
+	}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	defer func() { server.Close(); <-done }()
+
+	blocked, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocked.Close()
+	if _, err := fmt.Fprint(blocked, "GET /blocked HTTP/1.1\r\nHost:"); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for connections.Admission.quiescent() {
+		if time.Now().After(deadline) {
+			t.Fatal("slow accepted connection was not tracked")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := controller.Begin(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-worker.gate.PauseSignal():
+	case <-time.After(time.Second):
+		t.Fatal("upgrade did not pause new admissions")
+	}
+	queued, err := net.DialTimeout("tcp", listener.Addr().String(), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer queued.Close()
+	if err := queued.SetDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprint(queued, "GET /queued HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(queued), nil)
+	if err != nil {
+		t.Fatalf("bounded drain did not resume queued request: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("queued request returned HTTP %d", response.StatusCode)
+	}
+	receipt := upgradeWaitTerminal(t, controller, request.TransactionID)
+	worker.mu.Lock()
+	stopped := worker.stopped
+	worker.mu.Unlock()
+	if receipt.Phase != "deferred" || receipt.ErrorCode != "quiet_deadline" || stopped != 0 || supervisor.worker != worker || worker.owners.maximum != 1 {
+		t.Fatalf("bounded drain changed active runtime: %+v stopped=%d", receipt, stopped)
+	}
+	if err := blocked.SetDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprint(blocked, " localhost\r\nConnection: close\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	response, err = http.ReadResponse(bufio.NewReader(blocked), nil)
+	if err != nil {
+		t.Fatalf("bounded drain interrupted original connection: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("original connection returned HTTP %d", response.StatusCode)
 	}
 }
 
