@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,172 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
+
+func TestZAIHTTPAgentTaskCompatibility(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					Input []json.RawMessage `json:"input"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Error(err)
+					http.Error(w, "invalid test request", http.StatusBadRequest)
+					return
+				}
+				if len(request.Input) == 0 {
+					t.Error("missing input")
+					http.Error(w, "missing input", http.StatusBadRequest)
+					return
+				}
+				assertZAIPlainAgentTask(t, request.Input[0])
+				call := json.RawMessage(`{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"task-call","arguments":"{\"message\":\"read the fixture\"}"}`)
+				if stream {
+					writeZAITestSSE(w, "agent-response", []json.RawMessage{call})
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(map[string]any{"id": "agent-response", "output": []json.RawMessage{call}})
+				}
+			}))
+			defer upstream.Close()
+			s := &Server{Config: &Config{}, Catalog: zaiTestCatalog(), ZAIAPIKey: func() (string, error) { return "test-key", nil }, ZAIUpstream: upstream.URL, CodexNativeHTTP: zaiForbiddenCodexHTTP{t}}
+			body := fmt.Sprintf(`{"model":"glm-5.3-flash","stream":%t,"input":[%s]}`, stream, zaiPlainAgentTask)
+			w := httptest.NewRecorder()
+			s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(body)))
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+			}
+			data := w.Body.Bytes()
+			if stream {
+				events, err := NewCodexSSEParser(1 << 20).Feed(data)
+				if err != nil || len(events) != 1 {
+					t.Fatalf("SSE events = %d, error = %v", len(events), err)
+				}
+				data = events[0].Data
+			}
+			assertZAIPlaintextCollaboration(t, data)
+		})
+	}
+}
+
+const zaiPlainAgentTask = `{"type":"agent_message","author":"/root","recipient":"/root/fixture","content":[{"type":"input_text","text":"Task from parent:"},{"type":"input_text","text":"Read fixture.txt and report its marker."}]}`
+
+func assertZAIPlaintextCollaboration(t *testing.T, data []byte) {
+	t.Helper()
+	var response struct {
+		Response json.RawMessage `json:"response"`
+		Output   []struct {
+			EncryptedArgs []json.RawMessage `json:"encrypted_function_args"`
+		} `json:"output"`
+	}
+	if err := json.Unmarshal(data, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Response != nil {
+		if err := json.Unmarshal(response.Response, &response); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(response.Output) != 1 || response.Output[0].EncryptedArgs == nil || len(response.Output[0].EncryptedArgs) != 0 {
+		t.Fatalf("missing plaintext collaboration marker: %s", data)
+	}
+}
+
+func assertZAIPlainAgentTask(t *testing.T, raw json.RawMessage) {
+	t.Helper()
+	var item struct {
+		Type    string `json:"type"`
+		Role    string `json:"role"`
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(raw, &item); err != nil {
+		t.Fatal(err)
+	}
+	if item.Type != "message" || item.Role != "user" || len(item.Content) != 2 || item.Content[0].Text != "Task from parent:" || item.Content[1].Type != "input_text" || item.Content[1].Text != "Read fixture.txt and report its marker." {
+		t.Errorf("agent assignment was not preserved as readable input: %s", raw)
+	}
+}
+
+func TestZAIWebSocketAgentTaskAndContinuationCompatibility(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Input []json.RawMessage `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+			http.Error(w, "invalid test request", http.StatusBadRequest)
+			return
+		}
+		if len(request.Input) == 0 {
+			t.Error("missing input")
+			return
+		}
+		assertZAIPlainAgentTask(t, request.Input[0])
+		if calls.Add(1) == 1 {
+			writeZAITestSSE(w, "agent-response", []json.RawMessage{json.RawMessage(`{"type":"function_call","namespace":"collaboration","name":"followup_task","call_id":"task-call","arguments":"{}"}`)})
+		} else {
+			if len(request.Input) != 3 || !bytes.Contains(request.Input[2], []byte(`"function_call_output"`)) {
+				t.Errorf("task/tool continuation lost: %s", request.Input)
+			}
+			writeZAITestSSE(w, "agent-followup", nil)
+		}
+	}))
+	defer upstream.Close()
+	s := &Server{Config: &Config{ClaudeUpstream: upstream.URL}, Catalog: zaiTestCatalog(), ZAIAPIKey: func() (string, error) { return "test-key", nil }, ZAIUpstream: upstream.URL}
+	c := openZAITestWebSocket(t, s, nil)
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"glm-5.3-flash","input":[`+zaiPlainAgentTask+`]}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, response, err := c.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertZAIPlaintextCollaboration(t, response)
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"glm-5.3-flash","previous_response_id":"agent-response","input":[{"type":"function_call_output","call_id":"task-call","output":"marker"}]}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readZAITestCompletion(t, c); got.Response.ID != "agent-followup" {
+		t.Fatalf("followup response = %q", got.Response.ID)
+	}
+}
+
+func TestZAIEncryptedAgentTaskFailsBeforeUpstream(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		writeZAITestSSE(w, "should-not-run", nil)
+	}))
+	defer upstream.Close()
+	s := &Server{Config: &Config{ClaudeUpstream: upstream.URL}, Catalog: zaiTestCatalog(), ZAIAPIKey: func() (string, error) { return "test-key", nil }, ZAIUpstream: upstream.URL, CodexNativeHTTP: zaiForbiddenCodexHTTP{t}}
+	const input = `[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"opaque-task"}]}]`
+	w := httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"model":"glm-5.3-flash","input":`+input+`}`)))
+	if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "opaque-task") {
+		t.Errorf("HTTP encrypted task response = %d %s", w.Code, w.Body.String())
+	}
+	c := openZAITestWebSocket(t, s, nil)
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"glm-5.3-flash","input":`+input+`}`)); err != nil {
+		t.Fatal(err)
+	}
+	_, response, err := c.ReadMessage()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event struct {
+		Type   string `json:"type"`
+		Status int    `json:"status"`
+	}
+	if json.Unmarshal(response, &event) != nil || event.Type != "error" || event.Status != http.StatusBadRequest || bytes.Contains(response, []byte("opaque-task")) {
+		t.Errorf("WebSocket encrypted task response = %s", response)
+	}
+	if got := calls.Load(); got != 0 {
+		t.Fatalf("encrypted tasks reached upstream %d times", got)
+	}
+}
 
 type zaiForbiddenCodexHTTP struct{ t *testing.T }
 

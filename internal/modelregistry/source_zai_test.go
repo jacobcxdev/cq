@@ -77,7 +77,14 @@ func TestZAISourceDisplayNamesPreserveCodexMetadata(t *testing.T) {
 	}{
 		{"glm-5.3", "glm-5.3", "GLM-5.3"},
 		{"glm-5.3-flash", "glm-5.3-flash", "GLM-5.3-Flash"},
+		{"glm-5-turbo", "glm-5-turbo", "GLM-5-Turbo"},
+		{"glm-6.1-flash-lite", "glm-6.1-flash-lite", "GLM-6.1-Flash-Lite"},
+		{"glm-7-preview", "", "GLM-7-Preview"},
+		{"glm-5.3", "Z.ai Flagship", "Z.ai Flagship"},
+		{"glm-5-turbo", "GLM-5-Turbo", "GLM-5-Turbo"},
+		{"glm-6-vl", "GLM-6-VL", "GLM-6-VL"},
 		{"glm-future", "Future model", "Future model"},
+		{"embedding-3", "embedding-3", "embedding-3"},
 	} {
 		t.Run(tc.id, func(t *testing.T) {
 			metadata := map[string]any{

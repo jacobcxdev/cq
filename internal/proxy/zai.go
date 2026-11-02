@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
 
@@ -90,6 +92,15 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "Z.ai request body exceeds 10 MiB")
 		return true, model
 	}
+	decodedBody, err = normaliseZAIRequest(decodedBody)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return true, model
+	}
+	if len(decodedBody) > maxRequestBody {
+		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "Z.ai request body exceeds 10 MiB")
+		return true, model
+	}
 	key, err := s.zaiKey()
 	if err != nil || key == "" {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "Z.ai API key unavailable")
@@ -118,13 +129,37 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 		return true, model
 	}
 	defer response.Body.Close()
+	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	success := response.StatusCode >= 200 && response.StatusCode < 300
+	var responseBody io.Reader = response.Body
+	if success && mediaType == "application/json" {
+		data, readErr := httputil.ReadBody(response.Body)
+		if readErr != nil {
+			writeError(w, http.StatusBadGateway, "api_error", "failed to read Z.ai response")
+			return true, model
+		}
+		if json.Valid(data) {
+			data, err = normaliseZAIResponse(data)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "api_error", "invalid Z.ai response")
+				return true, model
+			}
+		}
+		responseBody = bytes.NewReader(data)
+	}
 	for _, name := range []string{"Content-Type", "Cache-Control", "Retry-After", "X-Request-Id"} {
 		if value := response.Header.Get(name); value != "" {
 			w.Header().Set(name, value)
 		}
 	}
 	w.WriteHeader(response.StatusCode)
-	_, _ = io.Copy(zaiFlushWriter{w}, response.Body)
+	if success && mediaType == "text/event-stream" {
+		if err := copyZAIResponseSSE(zaiFlushWriter{w}, responseBody); err != nil {
+			fmt.Fprintln(os.Stderr, "cq: Z.ai HTTP response stream failed")
+		}
+	} else {
+		_, _ = io.Copy(zaiFlushWriter{w}, responseBody)
+	}
 	return true, model
 }
 
@@ -250,6 +285,18 @@ func zaiResponseInput(raw json.RawMessage) ([]json.RawMessage, error) {
 }
 
 func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *websocket.Conn, header http.Header, body []byte) (string, []json.RawMessage, error) {
+	body, err := normaliseZAIRequest(body)
+	if err != nil {
+		data, _ := json.Marshal(map[string]any{"type": "error", "status": http.StatusBadRequest, "error": map[string]string{"type": "invalid_request_error", "code": "zai_invalid_request", "message": err.Error()}})
+		_ = downstream.WriteMessage(websocket.TextMessage, data)
+		return "", nil, err
+	}
+	if len(body) > maxRequestBody {
+		const message = "Z.ai request body exceeds 10 MiB"
+		data, _ := json.Marshal(map[string]any{"type": "error", "status": http.StatusRequestEntityTooLarge, "error": map[string]string{"type": "invalid_request_error", "code": "zai_request_too_large", "message": message}})
+		_ = downstream.WriteMessage(websocket.TextMessage, data)
+		return "", nil, errors.New(message)
+	}
 	key, err := s.zaiKey()
 	if err != nil || key == "" {
 		return "", nil, errors.New("Z.ai API key unavailable")
@@ -295,7 +342,11 @@ func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *web
 				if !json.Valid(event.Data) {
 					return "", nil, errors.New("invalid Z.ai SSE event")
 				}
-				if err := downstream.WriteMessage(websocket.TextMessage, event.Data); err != nil {
+				data, err := normaliseZAIResponse(event.Data)
+				if err != nil {
+					return "", nil, errors.New("invalid Z.ai SSE event")
+				}
+				if err := downstream.WriteMessage(websocket.TextMessage, data); err != nil {
 					return "", nil, err
 				}
 				if event.Type == "response.completed" {
@@ -305,7 +356,7 @@ func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *web
 							Output []json.RawMessage `json:"output"`
 						} `json:"response"`
 					}
-					if err := json.Unmarshal(event.Data, &completed); err != nil || completed.Response.ID == "" {
+					if err := json.Unmarshal(data, &completed); err != nil || completed.Response.ID == "" {
 						return "", nil, errors.New("invalid Z.ai completed response")
 					}
 					return completed.Response.ID, completed.Response.Output, nil
