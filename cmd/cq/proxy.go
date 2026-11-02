@@ -1338,6 +1338,12 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		}
 	}
 
+	// Create the private cache tree before a cache reader can create it with
+	// platform-default permissions, which Windows rejects for reset state.
+	resetService, resetServiceErr := newCodexResetService(fsys, credentialControl, codexHTTPClient, roots)
+	if resetServiceErr != nil {
+		return fmt.Errorf("Codex reset scheduler: %w", resetServiceErr)
+	}
 	zaiQuotaCache, zaiQuotaCacheErr := cache.New(fsys, roots.Cache, 5*time.Minute)
 	if zaiQuotaCacheErr != nil {
 		fmt.Fprintln(os.Stderr, "cq: Z.ai routing quota cache unavailable; using account fallback")
@@ -1396,10 +1402,6 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			}
 			return nil
 		},
-	}
-	resetService, resetServiceErr := newCodexResetService(fsys, credentialControl, codexHTTPClient, roots)
-	if resetServiceErr != nil {
-		return fmt.Errorf("Codex reset scheduler: %w", resetServiceErr)
 	}
 	resetService.AfterReset = func(ctx context.Context, account codexprov.AccountKey, eventID string) error {
 		if err := srv.CodexResetCapacityRefresh(ctx, account); err != nil {
