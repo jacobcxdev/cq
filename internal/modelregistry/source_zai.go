@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
 )
@@ -62,11 +64,22 @@ func (s *ZAISource) Fetch(ctx context.Context) (result SourceResult, err error) 
 			continue
 		}
 		displayName := info.DisplayName
-		switch info.Slug {
-		case "glm-5.3":
-			info.DisplayName = "GLM-5.3"
-		case "glm-5.3-flash":
-			info.DisplayName = "GLM-5.3-Flash"
+		if strings.HasPrefix(strings.ToLower(info.Slug), "glm-") &&
+			(info.DisplayName == "" || strings.EqualFold(info.DisplayName, info.Slug)) {
+			name := info.DisplayName
+			if name == "" {
+				name = info.Slug
+			}
+			parts := strings.Split(name, "-")
+			parts[0] = "GLM"
+			for i := 1; i < len(parts); i++ {
+				part := []rune(parts[i])
+				if len(part) > 0 {
+					part[0] = unicode.ToUpper(part[0])
+					parts[i] = string(part)
+				}
+			}
+			info.DisplayName = strings.Join(parts, "-")
 		}
 		if info.DisplayName != displayName {
 			raw = cloneRawWithOverrides(raw, Entry{ID: info.Slug, DisplayName: info.DisplayName})
