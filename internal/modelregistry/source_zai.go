@@ -17,6 +17,8 @@ import (
 type ZAISource struct {
 	Client httputil.Doer
 	Token  func(context.Context) (string, error)
+	// Tokens returns preferred-account order and takes precedence over Token.
+	Tokens func(context.Context) ([]string, error)
 }
 
 func (s *ZAISource) Fetch(ctx context.Context) (result SourceResult, err error) {
@@ -27,18 +29,48 @@ func (s *ZAISource) Fetch(ctx context.Context) (result SourceResult, err error) 
 		}
 	}()
 
-	token, err := s.Token(ctx)
-	if err != nil || token == "" {
+	var tokens []string
+	if s.Tokens != nil {
+		tokens, err = s.Tokens(ctx)
+	} else if s.Token != nil {
+		var token string
+		token, err = s.Token(ctx)
+		tokens = []string{token}
+	}
+	if err != nil {
 		return SourceResult{}, errors.New("zai source: API key unavailable")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.z.ai/api/v1/models", nil)
-	if err != nil {
-		return SourceResult{}, errors.New("zai source: build request failed")
+	keys := make([]string, 0, len(tokens))
+	seen := make(map[string]bool, len(tokens))
+	for _, token := range tokens {
+		token = strings.TrimSpace(token)
+		if token != "" && !seen[token] {
+			keys = append(keys, token)
+			seen[token] = true
+		}
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	resp, err := s.Client.Do(req)
-	if err != nil {
-		return SourceResult{}, errors.New("zai source: model request failed")
+	if len(keys) == 0 {
+		return SourceResult{}, errors.New("zai source: API key unavailable")
+	}
+	var resp *http.Response
+	for i, key := range keys {
+		if ctx.Err() != nil {
+			return SourceResult{}, errors.New("zai source: model request cancelled")
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.z.ai/api/v1/models", nil)
+		if err != nil {
+			return SourceResult{}, errors.New("zai source: build request failed")
+		}
+		req.Header.Set("Authorization", "Bearer "+key)
+		resp, err = s.Client.Do(req)
+		if err != nil {
+			return SourceResult{}, errors.New("zai source: model request failed")
+		}
+		rejected := resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests
+		if !rejected || i == len(keys)-1 {
+			break
+		}
+		_ = resp.Body.Close()
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

@@ -121,3 +121,59 @@ func TestQuotaPercentageEdges(t *testing.T) {
 		})
 	}
 }
+
+func TestFetchAccountsKeepsIndependentQuotaAndFailures(t *testing.T) {
+	accounts := []Account{
+		{ID: "first", Label: "First subscription", APIKey: "first-key"},
+		{ID: "bad", APIKey: "bad-key"},
+		{ID: "panic", APIKey: "panic-key"},
+		{ID: "last", APIKey: "last-key"},
+	}
+	p := NewAccounts(doerFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.Header.Get("Authorization") {
+		case "first-key":
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"level":"max","limits":[{"type":"TOKENS_LIMIT","unit":3,"percentage":100}]}}`))}, nil
+		case "bad-key":
+			return &http.Response{StatusCode: 401, Body: io.NopCloser(strings.NewReader("secret"))}, nil
+		case "panic-key":
+			panic("secret")
+		default:
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"level":"pro","limits":[{"type":"TOKENS_LIMIT","unit":3,"percentage":25}]}}`))}, nil
+		}
+	}), func() ([]Account, error) { return accounts, nil })
+	results, err := p.Fetch(context.Background(), time.Now())
+	if err != nil || len(results) != 4 {
+		t.Fatalf("results=%d err=%v", len(results), err)
+	}
+	for i, result := range results {
+		if result.AccountID != accounts[i].ID || result.Active != (i == 0) {
+			t.Fatalf("account %d metadata mismatch: %#v", i, result)
+		}
+		if result.Error != nil && strings.Contains(result.Error.Message, "secret") {
+			t.Fatal("provider panic or response leaked credential")
+		}
+	}
+	if results[0].Status != quota.StatusExhausted || results[0].Email != accounts[0].Label || results[1].Error == nil || results[1].Error.Code != "auth_expired" || results[2].Error == nil || results[2].Error.Code != "fetch_panic" || results[3].MinRemainingPct() != 75 || results[3].Email != "last" {
+		t.Fatalf("unexpected account quota results: %#v", results)
+	}
+}
+
+func TestFetchAccountsReaderFailureAndMissing(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		read func() ([]Account, error)
+		code string
+	}{
+		{"missing", func() ([]Account, error) { return nil, nil }, "not_configured"},
+		{"error", func() ([]Account, error) { return nil, errors.New("secret") }, "fetch_error"},
+		{"panic", func() ([]Account, error) { panic("secret") }, "fetch_panic"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p := NewAccounts(doerFunc(func(*http.Request) (*http.Response, error) { t.Fatal("unexpected request"); return nil, nil }), test.read)
+			results, err := p.Fetch(context.Background(), time.Now())
+			if err != nil || len(results) != 1 || results[0].Error == nil || results[0].Error.Code != test.code || strings.Contains(results[0].Error.Message, "secret") {
+				t.Fatalf("unexpected safe failure: %#v %v", results, err)
+			}
+		})
+	}
+}

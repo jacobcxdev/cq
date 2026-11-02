@@ -34,11 +34,11 @@ func (s *Server) hasZAICatalog() bool {
 }
 
 func (s *Server) zaiKey() (string, error) {
-	if s.ZAIAPIKey == nil {
-		return "", nil
+	accounts, err := s.zaiAccounts()
+	if err != nil || len(accounts) == 0 {
+		return "", err
 	}
-	key, err := s.ZAIAPIKey()
-	return strings.TrimSpace(key), err
+	return accounts[0].APIKey, nil
 }
 
 func (s *Server) zaiResponsesURL() (string, error) {
@@ -56,7 +56,7 @@ func (s *Server) zaiResponsesURL() (string, error) {
 // tryHandleZAI inspects native Responses before any Codex account admission.
 // Non-Z.ai requests retain their exact encoded request bytes for Codex.
 func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, string) {
-	if s.ZAIAPIKey == nil && !s.hasZAICatalog() {
+	if s.ZAIAPIKey == nil && s.ZAIAccounts == nil && !s.hasZAICatalog() {
 		return false, ""
 	}
 	if r.Body == nil {
@@ -101,8 +101,8 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "Z.ai request body exceeds 10 MiB")
 		return true, model
 	}
-	key, err := s.zaiKey()
-	if err != nil || key == "" {
+	accounts, err := s.zaiAccounts()
+	if err != nil || len(accounts) == 0 {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "Z.ai API key unavailable")
 		return true, model
 	}
@@ -111,19 +111,8 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 		writeError(w, http.StatusInternalServerError, "api_error", "invalid Z.ai upstream")
 		return true, model
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstream, bytes.NewReader(decodedBody))
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "api_error", "failed to create Z.ai request")
-		return true, model
-	}
 	fmt.Fprintf(os.Stderr, "cq: route POST %s model=%q provider=zai (native)\n", r.URL.Path, model)
-	setZAIHeaders(req.Header, r.Header, key)
-	transport := s.ZAITransport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Do(req)
+	response, err := s.doZAIRequest(r.Context(), upstream, r.Header, decodedBody, accounts)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "api_error", "Z.ai upstream request failed")
 		return true, model
@@ -336,26 +325,20 @@ func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *web
 		_ = downstream.WriteMessage(websocket.TextMessage, data)
 		return "", nil, errors.New(message)
 	}
-	key, err := s.zaiKey()
-	if err != nil || key == "" {
+	accounts, err := s.zaiAccounts()
+	if err != nil || len(accounts) == 0 {
 		return "", nil, errors.New("Z.ai API key unavailable")
 	}
 	target, err := s.zaiResponsesURL()
 	if err != nil {
 		return "", nil, err
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
-	if err != nil {
-		return "", nil, errors.New("invalid Z.ai request")
+	header = header.Clone()
+	if header == nil {
+		header = make(http.Header)
 	}
-	setZAIHeaders(request.Header, header, key)
-	request.Header.Set("Accept", "text/event-stream")
-	transport := s.ZAITransport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	response, err := client.Do(request)
+	header.Set("Accept", "text/event-stream")
+	response, err := s.doZAIRequest(ctx, target, header, body, accounts)
 	if err != nil {
 		return "", nil, errors.New("Z.ai HTTP stream request failed")
 	}

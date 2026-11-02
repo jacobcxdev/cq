@@ -21,6 +21,8 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 const maxRequestBody = 10 << 20 // 10 MiB
@@ -89,6 +91,8 @@ type Server struct {
 	Transport http.RoundTripper
 	// Z.ai uses separate credentials and transport from Codex accounts.
 	ZAIAPIKey    func() (string, error)
+	ZAIAccounts  func() ([]zaiprov.Account, error)
+	ZAIQuota     func() []quota.Result
 	ZAIUpstream  string
 	ZAITransport http.RoundTripper
 	// RuntimeNormalHandler is set only by the socket supervisor. It forwards
@@ -155,7 +159,9 @@ type Server struct {
 	// CodexHTTPEnforcer owns readiness-gated turns and retained authority fences.
 	CodexHTTPEnforcer *CodexHTTPEnforcer
 	// CodexPrimer is non-nil only in credential-coordinator owner process.
-	CodexPrimer *CodexPrimer
+	CodexPrimer       *CodexPrimer
+	ZAIPrimer         *ZAIPrimer
+	ZAIResetScheduler *ZAIResetScheduler
 	// HeadroomMode is the resolved compression mode. Only meaningful when
 	// Headroom is non-nil. Reported in the /health response.
 	HeadroomMode HeadroomMode
@@ -1008,6 +1014,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	primerConfigured := s.Config != nil && s.Config.CodexWindowPriming.Enabled
 	resp["codex_window_priming"] = s.CodexPrimer.Health(primerConfigured)
+	resp["zai_window_priming"] = s.ZAIPrimer.Health(s.Config != nil && s.Config.ZAIWindowPriming.Enabled)
+	if s.ZAIResetScheduler != nil {
+		resp["zai_reset_schedule"] = s.ZAIResetScheduler.Health()
+	}
 	if s.Headroom != nil {
 		switch s.HeadroomMode {
 		case HeadroomModeCache:
@@ -1260,7 +1270,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	zaiEnabled := s.hasZAICatalog()
-	if !zaiEnabled && s.ZAIAPIKey != nil {
+	if !zaiEnabled && (s.ZAIAPIKey != nil || s.ZAIAccounts != nil) {
 		key, keyErr := s.zaiKey()
 		zaiEnabled = keyErr == nil && key != ""
 	}

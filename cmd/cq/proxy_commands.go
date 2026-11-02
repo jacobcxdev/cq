@@ -1028,6 +1028,9 @@ func classifyOrdinaryAuthority(argv []string) (OrdinaryCommandAuthorityV1, error
 		}
 		return checkAuthority(providers, jsonOutput, refresh), nil
 	}
+	if clean[0] == "zai" {
+		return classifyZAIAuthority(clean[1:]), nil
+	}
 	if clean[0] == "claude" || clean[0] == "codex" {
 		if len(clean) < 2 {
 			return terminatingOrdinary("ordinary_usage_error"), nil

@@ -145,7 +145,7 @@ cq operation --help
 - **Claude** discovers stored accounts, fetches profile and usage data in parallel, refreshes eligible tokens, and reports each account.
 - **Codex** discovers system, CQ-managed, and declared external accounts. Ordinary checks do not activate, remove, refresh, or rewrite system credentials. Eligible CQ-owned credentials refresh only through CQ's coordinator.
 - **Gemini** reads Antigravity Keychain credential and cached project ID concurrently, calls Antigravity OAuth and quota HTTP APIs directly, and never invokes `agy`. Credential/project stores remain read-only; refreshed tokens live only in process memory.
-- **Z.ai** reads a Coding Plan API key and reports 5-hour and weekly subscription quota. Monthly MCP usage appears separately when supplied by the API. Reset times remain unknown when Z.ai omits them.
+- **Z.ai** reads saved Coding Plan API keys and reports 5-hour and weekly quota for each subscription. Monthly MCP usage appears separately when supplied by the API. Reset times remain unknown when Z.ai omits them.
 
 ### Cache and history
 
@@ -263,17 +263,61 @@ Gemini authentication and project selection remain owned by Antigravity. cq read
 
 ### Z.ai Coding Plan
 
-Set `ZAI_API_KEY`, or save a JSON object with an `api_key` field in `$XDG_CONFIG_HOME/cq/zai.json` (default `~/.config/cq/zai.json`). Keep the credential file at mode `0600` and its directory at `0700`. Environment credentials take precedence. A saved file also works for the background proxy service.
+Run `cq zai login` and paste a Personal Coding Plan API key into the hidden prompt. Repeat for each subscription. Create the key under **API Keys → Personal Coding Plan**; Standard API Keys use separate billing. CQ validates quota access before saving the key in `$XDG_CONFIG_HOME/cq/zai.json` (default `~/.config/cq/zai.json`), using mode `0600` in a private directory. Quota access alone does not prove inference access; `cq zai prime now` checks whether an eligible dormant window can be started. Existing single-key files remain supported. Saved accounts also work for the background proxy service; new accounts and preferred-account changes apply on the next request without restarting CQ.
+
+`ZAI_API_KEY` remains an exclusive override: when set in a process's environment, that process uses only that key. Remove the override to use the saved account pool. For scripts, `cq zai login --api-key-stdin` reads the key from standard input without putting it in command arguments.
 
 CQ supports individual Coding Plan subscriptions through Z.ai's global endpoint. Group plans and regional endpoints are not configured separately.
 
 ```bash
+cq zai login --label primary
+cq zai login --label secondary
+cq zai accounts
+cq zai switch secondary            # Prefer this subscription
+cq zai remove ACCOUNT_ID          # Remove one saved account
 cq --refresh check zai
 cq models refresh
 cq models list --provider zai
 ```
 
 Registry refresh fetches Z.ai's native Codex model catalogue from `https://api.z.ai/api/v1/models` and includes its models in the existing Codex picker. Native Responses HTTP requests use the Z.ai key through CQ's proxy. CQ bridges Codex WebSocket requests to Z.ai's HTTP event stream and keeps tool continuation history for that connection. Codex account credentials remain scoped to Codex upstream requests. GLM models require native Responses; CQ does not translate Anthropic Messages requests for them. Z.ai currently does not support Responses compaction; CQ returns `501` for those requests.
+
+Routing tries the preferred subscription first, then the remaining saved subscriptions if Z.ai returns `401`, `403`, or `429` before a response starts. Each key is tried at most once per request. CQ does not replay a request after a transport error or a started response. WebSocket continuations retain full history across account fallback. HTTP requests containing an opaque `previous_response_id` use only the preferred account, because that upstream state cannot safely move between subscriptions.
+
+Fresh quota data moves exhausted subscriptions behind available accounts. Route diagnostics include a redacted account hint and whether a rejected request fell back to another account. Stale or missing quota data keeps normal bounded fallback available.
+
+Start dormant 5-hour windows with a minimal request, or enable automatic priming:
+
+```sh
+cq zai prime now
+cq zai prime enable
+cq zai prime status
+cq zai prime disable
+```
+
+Automatic priming starts with the next CQ runtime launch. It checks each saved account independently, skips active or exhausted windows, and records dispatch before sending so a crash or uncertain result cannot repeat quota consumption within five hours. Weekly windows start with the subscription and do not need priming. Model selection uses Z.ai's current native catalogue and prefers a Flash model. Priming never consumes reset cards.
+
+Inspect reset cards and use an exact card with default-No confirmation:
+
+```sh
+cq zai resets list
+cq zai resets use ACCOUNT_ID --window 5h --credit CARD_ID
+```
+
+Weekly cards restore both weekly and 5-hour quota. A successful reset restarts the corresponding reset timer. CQ checks availability again after confirmation, saves intent before dispatch, and retains the same request ID if an operator explicitly retries an uncertain result. It never substitutes another card for an unresolved attempt.
+
+Fixed-date schedules remain disabled until explicitly enabled:
+
+```sh
+cq zai resets schedule add ACCOUNT_ID --at RFC3339 --window 5h --credit CARD_ID
+cq zai resets schedule status
+cq zai resets schedule enable
+cq zai resets schedule disable
+cq zai resets schedule remove ENTRY_ID
+cq zai resets schedule cancel
+```
+
+Replace `RFC3339` with a future timestamp including its timezone, before the selected card expires. Enabling prompts before accepting automatic card consumption; `--yes` supplies explicit non-interactive consent. Enabled schedules pick up changes without restarting CQ. Each entry binds one exact account and card. Interrupted or uncertain execution remains visible and is not automatically repeated. Schedule dates remain fixed; CQ does not infer adaptive reset dates for Z.ai.
 
 See [Z.ai's Codex setup](https://docs.z.ai/devpack/tool/codex) for the supported Responses endpoint and model capabilities.
 
@@ -946,6 +990,22 @@ cq service upgrade
 cq service restart
 cq service status
 cq service uninstall
+cq zai accounts
+cq zai login
+cq zai prime disable
+cq zai prime enable
+cq zai prime now
+cq zai prime status
+cq zai remove
+cq zai resets list
+cq zai resets schedule add
+cq zai resets schedule cancel
+cq zai resets schedule disable
+cq zai resets schedule enable
+cq zai resets schedule remove
+cq zai resets schedule status
+cq zai resets use
+cq zai switch
 ```
 <!-- public-command-index:end -->
 

@@ -39,6 +39,7 @@ type CLI struct {
 	Claude    ClaudeCmd  `cmd:"" help:"Manage Claude accounts"`
 	Codex     CodexCmd   `cmd:"" help:"Manage Codex accounts"`
 	Gemini    GeminiCmd  `cmd:"" help:"Show Gemini account configuration"`
+	ZAI       ZAICmd     `cmd:"" help:"Manage Z.ai Coding Plan accounts"`
 	RefreshFn RefreshCmd `cmd:"" name:"refresh" help:"Refresh stored OAuth tokens"`
 	Agent     AgentCmd   `cmd:"" help:"Manage background quota refresh agent"`
 	Proxy     ProxyCmd   `cmd:"" help:"Run and configure local API proxy"`
@@ -444,6 +445,15 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 	if strings.HasPrefix(ctx.Command(), "codex network ") {
 		return defaultNativeNetworkRunner().execute(context.Background(), strings.TrimPrefix(ctx.Command(), "codex network "), cli.JSON, os.Stdout)
 	}
+	if strings.HasPrefix(ctx.Command(), "zai prime ") {
+		return runZAIPrimeCommand(context.Background(), strings.TrimPrefix(ctx.Command(), "zai prime "), cli.JSON, defaultZAIPrimeDependencies())
+	}
+	if strings.HasPrefix(ctx.Command(), "zai resets schedule ") {
+		return runZAIResetScheduleCommand(context.Background(), strings.TrimPrefix(ctx.Command(), "zai resets schedule "), cli.ZAI.Resets.Schedule, cli.JSON, defaultZAIResetScheduleDependencies())
+	}
+	if strings.HasPrefix(ctx.Command(), "zai resets ") {
+		return runZAIResetsCommand(context.Background(), strings.TrimPrefix(ctx.Command(), "zai resets "), cli.ZAI.Resets, cli.JSON, defaultZAIResetsDependencies())
+	}
 	switch ctx.Command() {
 	case "check", "check <providers>":
 		return runCheck(cli)
@@ -512,6 +522,8 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 
 	case "gemini accounts":
 		return app.RunAccounts(provider.Gemini, cli.JSON)
+	case "zai login", "zai accounts", "zai switch <reference>", "zai remove <reference>":
+		return runZAICommand(context.Background(), strings.TrimPrefix(ctx.Command(), "zai "), cli.ZAI, cli.JSON, defaultZAICommandDependencies())
 	default:
 		return fmt.Errorf("unknown command: %s", ctx.Command())
 	}
@@ -562,8 +574,8 @@ func runCheck(cli *CLI) (returnErr error) {
 		provider.Claude: {Usage: claudeprov.New(httpClient)},
 		provider.Codex:  {Usage: codexProvider},
 		provider.Gemini: {Usage: geminiprov.New(httpClient, geminiOAuthClientSecret)},
-		provider.ZAI: {Usage: zaiprov.New(httpClient, func() (string, error) {
-			return zaiprov.ReadAPIKey(fsutil.OSFileSystem{}, os.Getenv, roots.Config)
+		provider.ZAI: {Usage: zaiprov.NewAccounts(httpClient, func() ([]zaiprov.Account, error) {
+			return zaiprov.ReadAccounts(fsutil.OSFileSystem{}, os.Getenv, roots.Config)
 		})},
 	}
 

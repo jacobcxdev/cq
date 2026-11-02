@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
+	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
@@ -27,6 +28,7 @@ import (
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/quota"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
@@ -1164,6 +1166,47 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		}()
 		fmt.Fprintln(os.Stderr, "cq: Codex window priming enabled")
 	}
+	zaiPrimer, err := buildZAIPrimer(cfg, roots, fsys, zaiHTTPClient(30*time.Second), catalog)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cq: Z.ai window primer unavailable; automatic priming disabled")
+		zaiPrimer = nil
+	}
+	if zaiPrimer != nil {
+		zaiPrimer.OnError = func(error) { fmt.Fprintln(os.Stderr, "cq: Z.ai window priming failed; inspect cq zai prime status") }
+		zaiPrimerDone := make(chan struct{})
+		go func() {
+			defer close(zaiPrimerDone)
+			defer func() {
+				if recover() != nil {
+					fmt.Fprintln(os.Stderr, "cq: Z.ai window primer panic")
+				}
+			}()
+			_ = zaiPrimer.Run(proxyCtx)
+		}()
+		defer func() { proxyCancel(); <-zaiPrimerDone }()
+	}
+	zaiResetDeps := defaultZAIResetsDependencies()
+	zaiResetScheduler, err := proxy.NewZAIResetScheduler(fsys, roots.State, zaiResetDeps.Accounts, zaiprov.ResetExecutor{
+		Client: zaiResetDeps.Client, FS: fsys, StateDir: filepath.Join(roots.State, "zai-reset-attempts"), Now: time.Now, RequestID: zaiResetDeps.RequestID,
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cq: Z.ai reset schedule unavailable; scheduled resets disabled")
+		zaiResetScheduler = nil
+	}
+	if zaiResetScheduler != nil {
+		zaiResetScheduler.Invalidate = zaiResetDeps.Invalidate
+		zaiResetDone := make(chan struct{})
+		go func() {
+			defer close(zaiResetDone)
+			defer func() {
+				if recover() != nil {
+					fmt.Fprintln(os.Stderr, "cq: Z.ai reset scheduler panic")
+				}
+			}()
+			_ = zaiResetScheduler.Run(proxyCtx)
+		}()
+		defer func() { proxyCancel(); <-zaiResetDone }()
+	}
 
 	// Start headroom compression bridge if configured.
 	// HeadroomEnabled() returns true when either the legacy headroom bool is set
@@ -1295,14 +1338,30 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		}
 	}
 
+	zaiQuotaCache, zaiQuotaCacheErr := cache.New(fsys, roots.Cache, 5*time.Minute)
+	if zaiQuotaCacheErr != nil {
+		fmt.Fprintln(os.Stderr, "cq: Z.ai routing quota cache unavailable; using account fallback")
+	}
 	srv := &proxy.Server{
 		Config:    cfg,
 		Selector:  selector,
 		Discover:  discover,
 		Transport: transport,
-		ZAIAPIKey: func() (string, error) {
-			return zaiprov.ReadAPIKey(fsys, os.Getenv, roots.Config)
+		ZAIAccounts: func() ([]zaiprov.Account, error) {
+			return zaiprov.ReadAccounts(fsys, os.Getenv, roots.Config)
 		},
+		ZAIQuota: func() []quota.Result {
+			if zaiQuotaCache == nil {
+				return nil
+			}
+			results, fresh, err := zaiQuotaCache.Get(context.Background(), "zai")
+			if err != nil || !fresh {
+				return nil
+			}
+			return results
+		},
+		ZAIPrimer:         zaiPrimer,
+		ZAIResetScheduler: zaiResetScheduler,
 		CodexHealth: func() proxy.CodexHealth {
 			return codexHealthTracker.Health(context.Background())
 		},
