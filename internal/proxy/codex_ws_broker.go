@@ -219,7 +219,15 @@ func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, down
 	if downstream == nil {
 		return ErrCodexLeaseWriterUnavailable
 	}
-	return handler.serve(ctx, downstream, header)
+	token := ""
+	if ctx != nil {
+		token, _ = ctx.Value(cqCompactionTokenContextKey{}).(string)
+	}
+	bound := &providerBoundWebSocketConn{websocketRelayConn: downstream, normalise: func(body []byte) ([]byte, error) {
+		restored, _, err := normaliseCQCompactionInput(body, token)
+		return restored, err
+	}}
+	return handler.serve(ctx, bound, header)
 }
 
 func (handler *codexTerminatingWebSocketHandler) ServeInitial(ctx context.Context, downstream *websocket.Conn, header http.Header, kind int, payload []byte, acceptsModel func(string) bool) error {
@@ -227,6 +235,14 @@ func (handler *codexTerminatingWebSocketHandler) ServeInitial(ctx context.Contex
 		return ErrCodexLeaseWriterUnavailable
 	}
 	bound := &providerBoundWebSocketConn{websocketRelayConn: downstream, acceptsModel: acceptsModel}
+	token := ""
+	if ctx != nil {
+		token, _ = ctx.Value(cqCompactionTokenContextKey{}).(string)
+	}
+	bound.normalise = func(body []byte) ([]byte, error) {
+		restored, _, err := normaliseCQCompactionInput(body, token)
+		return restored, err
+	}
 	return handler.serve(ctx, &prefetchedWebSocketConn{websocketRelayConn: bound, kind: kind, payload: payload, pending: true}, header)
 }
 

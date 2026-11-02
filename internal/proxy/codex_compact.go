@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 
 // handleCodexCompactResponsesRoute handles POST /v1/responses/compact.
 func (s *Server) handleCodexCompactResponsesRoute(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(context.WithValue(r.Context(), cqCompactionTokenContextKey{}, s.cqCompactionToken()))
 	if isWebSocketUpgrade(r) {
 		rejectCodexCompactWebSocket(w, codexCompactResponsesPath)
 		return
@@ -28,6 +30,7 @@ func (s *Server) handleCodexCompactResponsesGetRoute(w http.ResponseWriter, r *h
 
 // handleLegacyCodexCompactResponsesRoute handles POST /responses/compact.
 func (s *Server) handleLegacyCodexCompactResponsesRoute(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(context.WithValue(r.Context(), cqCompactionTokenContextKey{}, s.cqCompactionToken()))
 	if isWebSocketUpgrade(r) {
 		rejectCodexCompactWebSocket(w, legacyCodexCompactResponsesPath)
 		return
