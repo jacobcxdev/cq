@@ -57,6 +57,9 @@ func (s *Server) zaiResponsesURL() (string, error) {
 // Non-Z.ai requests retain their exact encoded request bytes for Codex.
 func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, string) {
 	zaiEnabled := s.ZAIAPIKey != nil || s.ZAIAccounts != nil || s.hasZAICatalog()
+	if !zaiEnabled {
+		return false, ""
+	}
 	if r.Body == nil {
 		return false, ""
 	}
@@ -77,20 +80,6 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 			return false, ""
 		}
 		decodedBody = decoded.Decoded()
-	}
-	decodedBody, restored, err := normaliseCQCompactionInput(decodedBody, s.cqCompactionToken())
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
-		return true, ""
-	}
-	if restored {
-		body = decodedBody
-		r.Body = io.NopCloser(bytes.NewReader(body))
-		r.ContentLength = int64(len(body))
-		r.Header.Del("Content-Encoding")
-	}
-	if !zaiEnabled {
-		return false, ""
 	}
 	model := extractModel(decodedBody)
 	if RouteModelWithCatalog(model, s.Catalog) != ProviderZAI {

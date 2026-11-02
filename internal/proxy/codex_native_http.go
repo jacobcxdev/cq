@@ -418,5 +418,8 @@ func readCodexNativeHTTPRequest(request *http.Request) ([]byte, error) {
 		clearBytes(body)
 		return nil, errors.New("read Codex native HTTP request")
 	}
+	if token, ok := request.Context().Value(cqCompactionTokenContextKey{}).(string); ok {
+		return restoreCQCompactionHTTPBody(request, body, token)
+	}
 	return body, nil
 }

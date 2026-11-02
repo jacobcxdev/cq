@@ -19,7 +19,7 @@ func TestCQCompactionRestoredBeforeCodexHTTPWithoutZAI(t *testing.T) {
 	}
 	for _, compressed := range []bool{false, true} {
 		t.Run(fmt.Sprintf("compressed=%t", compressed), func(t *testing.T) {
-			capture := &zaiCapturingCodexHTTP{}
+			capture := &cqCompactionCapturingHTTP{}
 			s := &Server{Config: &Config{LocalToken: "owner-token"}, CodexNativeHTTP: capture}
 			body := []byte(`{"model":"gpt-test","input":[` + string(item) + `]}`)
 			if compressed {
@@ -36,6 +36,19 @@ func TestCQCompactionRestoredBeforeCodexHTTPWithoutZAI(t *testing.T) {
 			}
 		})
 	}
+}
+
+type cqCompactionCapturingHTTP struct{ body, encoding string }
+
+func (capture *cqCompactionCapturingHTTP) TryServe(w http.ResponseWriter, r *http.Request, _ bool) (bool, string) {
+	body, err := readCodexNativeHTTPRequest(r)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return true, ""
+	}
+	capture.body, capture.encoding = string(body), r.Header.Get("Content-Encoding")
+	w.WriteHeader(http.StatusNoContent)
+	return true, "gpt-test"
 }
 
 func TestZAICompactionRejectsUnfinishedSummary(t *testing.T) {

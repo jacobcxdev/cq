@@ -698,6 +698,7 @@ func isWebSocketUpgrade(r *http.Request) bool {
 }
 
 func (s *Server) handleCodexResponsesRoute(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(context.WithValue(r.Context(), cqCompactionTokenContextKey{}, s.cqCompactionToken()))
 	if isWebSocketUpgrade(r) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("websocket transport is not supported on %s; use %s", codexResponsesPath, legacyCodexResponsesPath))
 		return
@@ -714,6 +715,7 @@ func (s *Server) handleCodexResponsesRoute(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleLegacyCodexResponsesRoute(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(context.WithValue(r.Context(), cqCompactionTokenContextKey{}, s.cqCompactionToken()))
 	if isWebSocketUpgrade(r) {
 		s.proxyCodexUpgrade(w, r)
 		return

@@ -33,7 +33,8 @@ func TestZAICompactionLiveSummaryAndReplay(t *testing.T) {
 	marker := "CQ-COMPACT-" + rand.Text()
 	initial, _ := json.Marshal(map[string]any{"model": "glm-5.3-flash", "input": []any{
 		map[string]string{"role": "user", "content": "Preserve the assistant's recorded marker for the next turn."},
-		map[string]string{"role": "assistant", "content": "Recorded marker: " + marker},
+		map[string]string{"type": "function_call", "id": "call-marker", "call_id": "call-marker", "name": "read_marker", "arguments": "{}"},
+		map[string]string{"type": "function_call_output", "call_id": "call-marker", "output": "Recorded marker: " + marker},
 		map[string]string{"type": "compaction_trigger"},
 	}})
 	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
@@ -50,7 +51,7 @@ func TestZAICompactionLiveSummaryAndReplay(t *testing.T) {
 	}})
 	replay, changed, err := normaliseCQCompactionInput(replay, s.Config.LocalToken)
 	if err != nil || !changed || !strings.Contains(string(replay), marker) {
-		t.Fatal("live summary did not retain the assistant-only marker")
+		t.Fatal("live summary did not retain the tool-only marker")
 	}
 	target, _ := s.zaiResponsesURL()
 	response, err := s.doZAIRequest(ctx, target, http.Header{}, replay, accounts)
@@ -82,7 +83,7 @@ func TestZAICompactionLiveSummaryAndReplay(t *testing.T) {
 		}
 	}
 	if strings.TrimSpace(text.String()) != marker {
-		t.Fatal("live compacted continuation lost the assistant-only marker")
+		t.Fatal("live compacted continuation lost the tool-only marker")
 	}
-	t.Log("Real GLM summary and encrypted-state replay retained an assistant-only marker")
+	t.Log("Real GLM summary and encrypted-state replay retained a tool-only marker")
 }

@@ -27,6 +27,34 @@ func (s *Server) cqCompactionToken() string {
 	return s.Config.LocalToken
 }
 
+// Run only after the native reader owns admission and has read the body.
+func restoreCQCompactionHTTPBody(request *http.Request, body []byte, token string) ([]byte, error) {
+	decoded := body
+	encoding, err := parseCodexContentEncoding(request.Header)
+	if err != nil {
+		return body, nil
+	}
+	if encoding == "zstd" || (encoding == "" && codexZstdFrame(body)) {
+		envelope, err := DecodeCodexRequest(body, encoding, codexHTTPZstdLimits())
+		if err != nil {
+			return body, nil
+		}
+		decoded = envelope.Decoded()
+	}
+	updated, changed, err := normaliseCQCompactionInput(decoded, token)
+	if err != nil {
+		return nil, err
+	}
+	if !changed {
+		return body, nil
+	}
+	request.Header = request.Header.Clone()
+	request.Header.Del("Content-Encoding")
+	request.Header.Del("Content-Length")
+	request.ContentLength = int64(len(updated))
+	return updated, nil
+}
+
 type zaiCompactResponse struct {
 	ID        string            `json:"id"`
 	Object    string            `json:"object"`
