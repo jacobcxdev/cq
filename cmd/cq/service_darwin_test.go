@@ -473,6 +473,51 @@ func TestDarwinServiceInspectCombinesDefinitionsAndRuntime(t *testing.T) {
 	}
 }
 
+func TestDarwinRefreshInspectionReportsNeverExited(t *testing.T) {
+	for _, tc := range []struct {
+		name, state, exit string
+		running, healthy  bool
+		result            string
+		invalid           bool
+	}{
+		{"running first invocation", "running", "(never exited)", true, false, "", false},
+		{"waiting first invocation", "waiting", "(never exited)", false, false, "", false},
+		{"completed success", "exited", "0", false, true, "success", false},
+		{"completed failure", "exited", "1", false, false, "failed", false},
+		{"running after previous failure", "running", "1", true, false, "failed", false},
+		{"malformed sentinel", "running", "(never exit)", false, false, "", true},
+		{"negative code", "running", "-1", false, false, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			platform, runner := newDarwinServiceHarness(t)
+			if err := platform.InstallRefresh(context.Background(), platform.executable); err != nil {
+				t.Fatal(err)
+			}
+			platform.run = func(ctx context.Context, args ...string) ([]byte, error) {
+				if args[0] == "print" {
+					runs := 1
+					if tc.name == "running after previous failure" {
+						runs = 2
+					}
+					return []byte(fmt.Sprintf("gui/501/cq.refresh = {\n\tstate = %s\n\truns = %d\n\tpid = 4212\n\tlast exit code = %s\n\tresource coalition = {\n\t\tstate = active\n\t}\n\tjetsam coalition = {\n\t\tstate = active\n\t}\n}\n", tc.state, runs, tc.exit)), nil
+				}
+				return runner.Run(ctx, args...)
+			}
+			status, err := platform.inspectRefreshComponent(context.Background())
+			if err != nil || status.Running != tc.running || status.Healthy != tc.healthy || status.LastResult != tc.result || (status.Error != "") != tc.invalid {
+				t.Fatalf("refresh status=%+v err=%v", status, err)
+			}
+		})
+	}
+	if _, _, _, err := parseDarwinLaunchctlStatus([]byte("state = running\nruns = 1\n")); err == nil {
+		t.Fatal("missing exit field was accepted")
+	}
+	state, _, _, err := parseDarwinLaunchctlStatus([]byte("\t\tstate = active\n\tstate = running\n\truns = 1\n\tlast exit code = 0\n\t\tstate = active\n"))
+	if err != nil || state != "running" {
+		t.Fatalf("nested state order replaced outer state: state=%s err=%v", state, err)
+	}
+}
+
 func TestServiceStatusHealthyForAcceptsSymlinkedExecutable(t *testing.T) {
 	directory := t.TempDir()
 	target := filepath.Join(directory, "cq")

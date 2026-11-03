@@ -70,7 +70,16 @@ func (store RuntimeUpgradeStore) Load() (RuntimeUpgradeReceiptV1, error) {
 	if store.FS == nil || !filepath.IsAbs(store.Roots.State) {
 		return RuntimeUpgradeReceiptV1{}, ErrRuntimeUpgradeReceipt
 	}
-	data, err := fsutil.ReadSecureFile(store.FS, store.Path(), 64<<10)
+	var data []byte
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		// Atomic publication can unlink an already-open previous receipt.
+		// Reopen and repeat every strict check; never accept the stale handle.
+		data, err = fsutil.ReadSecureFile(store.FS, store.Path(), 64<<10)
+		if !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
+			break
+		}
+	}
 	if err != nil {
 		return RuntimeUpgradeReceiptV1{}, err
 	}

@@ -341,7 +341,7 @@ func (platform *darwinServicePlatform) inspectRefreshComponent(ctx context.Conte
 	if runs > 0 && lastExit == 0 {
 		status.Healthy = true
 		status.LastResult = "success"
-	} else if runs > 0 {
+	} else if runs > 0 && lastExit >= 0 {
 		status.LastResult = "failed"
 	}
 	return status, nil
@@ -830,6 +830,8 @@ func isDarwinLaunchctlNotLoaded(err error) bool {
 
 func parseDarwinLaunchctlStatus(output []byte) (state string, runs int, lastExit int, returnErr error) {
 	lastExit = -1
+	lastExitPresent := false
+	stateIndent := -1
 	for _, line := range strings.Split(string(output), "\n") {
 		parts := strings.SplitN(strings.TrimSpace(line), " = ", 2)
 		if len(parts) != 2 {
@@ -837,20 +839,29 @@ func parseDarwinLaunchctlStatus(output []byte) (state string, runs int, lastExit
 		}
 		switch parts[0] {
 		case "state":
-			state = parts[1]
+			// launchctl also prints state inside nested resource coalitions.
+			indent := len(line) - len(strings.TrimLeft(line, "\t "))
+			if stateIndent < 0 || indent < stateIndent {
+				state, stateIndent = parts[1], indent
+			}
 		case "runs":
 			runs, returnErr = strconv.Atoi(parts[1])
 			if returnErr != nil {
 				return "", 0, -1, fmt.Errorf("invalid launchd runs")
 			}
 		case "last exit code":
+			lastExitPresent = true
+			if parts[1] == "(never exited)" {
+				lastExit = -1
+				continue
+			}
 			lastExit, returnErr = strconv.Atoi(parts[1])
-			if returnErr != nil {
+			if returnErr != nil || lastExit < 0 {
 				return "", 0, -1, fmt.Errorf("invalid launchd exit code")
 			}
 		}
 	}
-	if state == "" || lastExit < 0 {
+	if state == "" || !lastExitPresent {
 		return "", 0, -1, fmt.Errorf("incomplete launchd status")
 	}
 	return state, runs, lastExit, nil

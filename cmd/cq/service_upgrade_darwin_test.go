@@ -400,6 +400,119 @@ type upgradeReceiptReadFailureFS struct {
 	err      error
 }
 
+type darwinReceiptReplaceFS struct {
+	fsutil.OSFileSystem
+	opens    int
+	replaced bool
+	oldLinks uint64
+	replace  func() error
+}
+
+func (fsys *darwinReceiptReplaceFS) OpenSecureDirectory(path string) (fsutil.SecureDirectory, error) {
+	fsys.opens++
+	directory, err := fsys.OSFileSystem.OpenSecureDirectory(path)
+	if err != nil {
+		return nil, err
+	}
+	return darwinReceiptReplaceDirectory{SecureDirectory: directory, fsys: fsys}, nil
+}
+
+type darwinReceiptReplaceDirectory struct {
+	fsutil.SecureDirectory
+	fsys *darwinReceiptReplaceFS
+}
+
+func (directory darwinReceiptReplaceDirectory) OpenNoFollow(name string) (fsutil.SecureReadFile, error) {
+	file, err := directory.SecureDirectory.OpenNoFollow(name)
+	if err != nil {
+		return nil, err
+	}
+	return darwinReceiptReplaceFile{SecureReadFile: file, fsys: directory.fsys}, nil
+}
+
+type darwinReceiptReplaceFile struct {
+	fsutil.SecureReadFile
+	fsys *darwinReceiptReplaceFS
+}
+
+func (file darwinReceiptReplaceFile) Read(data []byte) (int, error) {
+	// The first complete Load must publish waiting to the await loop. Replace
+	// only during the second Load, after its descriptor passed the first Stat.
+	if file.fsys.opens == 2 && !file.fsys.replaced {
+		file.fsys.replaced = true
+		if err := file.fsys.replace(); err != nil {
+			return 0, err
+		}
+		info, err := file.SecureReadFile.Stat()
+		if err != nil {
+			return 0, err
+		}
+		identity, _ := file.fsys.FileIdentity(info)
+		file.fsys.oldLinks = identity.Links
+	}
+	return file.SecureReadFile.Read(data)
+}
+
+func TestDarwinRuntimeUpgradeSurvivesReceiptReplacementAfterWaiting(t *testing.T) {
+	for _, replacement := range []string{"deferred", "conflicting transaction", "conflicting candidate"} {
+		t.Run(replacement, func(t *testing.T) {
+			store := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: userdirs.Roots{State: filepath.Join(t.TempDir(), "state")}}
+			previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
+			candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "observed-waiting", Generation: 1, Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
+			for _, phase := range []string{"prepared", "waiting"} {
+				receipt.Phase = phase
+				if err := store.Save(receipt); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fsys := &darwinReceiptReplaceFS{replace: func() error {
+				receipt.Phase, receipt.ErrorCode = "deferred", "quiet_deadline"
+				if err := store.Save(receipt); err != nil {
+					return err
+				}
+				if replacement == "conflicting transaction" {
+					receipt.TransactionID, receipt.Generation, receipt.Phase = "another-transaction", 2, "prepared"
+					return store.Save(receipt)
+				}
+				if replacement == "conflicting candidate" {
+					// A fresh structurally valid receipt must still match the
+					// caller's exact candidate, even after a safe read succeeds.
+					receipt.Candidate.Version = "0.34.2"
+					data, err := json.Marshal(receipt)
+					if err != nil {
+						return err
+					}
+					return fsutil.SecureAtomicWrite(store.FS, store.Path(), data)
+				}
+				return nil
+			}}
+			reader := store
+			reader.FS = fsys
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			settled, err := awaitDarwinServiceRuntimeUpgrade(ctx, reader, candidate, receipt.TransactionID, proxy.RuntimeUpgradeReceiptV1{}, proxy.RuntimeUpgradeReceiptV1{}, nil, nil)
+			switch replacement {
+			case "deferred":
+				if err != nil || settled.Phase != "deferred" {
+					t.Fatalf("receipt race stopped pending upgrade: phase=%s err=%v", settled.Phase, err)
+				}
+			case "conflicting transaction":
+				if !errors.Is(err, proxy.ErrRuntimeUpgradeGeneration) {
+					t.Fatalf("conflicting transaction accepted: %v", err)
+				}
+			case "conflicting candidate":
+				if !errors.Is(err, proxy.ErrRuntimeUpgradeReceipt) {
+					t.Fatalf("conflicting candidate accepted: %v", err)
+				}
+			}
+			if !fsys.replaced || fsys.oldLinks != 0 || fsys.opens != 3 {
+				t.Fatalf("missing real descriptor replacement: replaced=%t old_links=%d opens=%d", fsys.replaced, fsys.oldLinks, fsys.opens)
+			}
+		})
+	}
+}
+
 func (fsys *upgradeReceiptReadFailureFS) OpenSecureDirectory(path string) (fsutil.SecureDirectory, error) {
 	if fsys.reads.Add(1) > 1 && !fsys.recovery.Load() {
 		return nil, fsys.err
