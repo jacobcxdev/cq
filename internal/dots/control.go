@@ -287,7 +287,11 @@ func (c Controller) Sync(ctx context.Context, preserveWatcher bool) (map[string]
 		return nil, err
 	}
 	var result map[string]any
-	if s.IntegrationMode == "native" && app && (changed || c.restartRequired(s)) {
+	if preserveWatcher && s.IntegrationMode == "native" && !app {
+		// Background discovery must respect a closed app. Only an explicit
+		// user launch may start it again, including after a discovery retry.
+		result = map[string]any{"started": false, "system_app_modified": false}
+	} else if s.IntegrationMode == "native" && app && (changed || c.restartRequired(s)) {
 		result, err = c.pending(ctx, s)
 	} else if changed {
 		if running {
