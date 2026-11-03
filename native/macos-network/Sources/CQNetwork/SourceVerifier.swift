@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import OSLog
 import Security
@@ -22,41 +23,65 @@ final class SourceVerifier {
     func verify(auditToken: Data?, signingIdentifierHint: String) -> SourceVerdict {
         // This OS-provided hint only limits signature checks. It never admits a flow.
         guard Self.signingIdentifiers.contains(signingIdentifierHint) else { return .unrelated }
-        guard let auditToken, auditToken.count == 32 else { return .verificationFailed }
+        guard let process = Self.sourceProcess(auditToken: auditToken), let auditToken else {
+            return Self.failed(stage: "audit_token", status: errSecParam, process: nil,
+                               signingIdentifier: signingIdentifierHint)
+        }
         var code: SecCode?
         let attributes = [kSecGuestAttributeAudit: auditToken] as CFDictionary
         let guestStatus = SecCodeCopyGuestWithAttributes(nil, attributes, [], &code)
         guard guestStatus == errSecSuccess, let code,
               let requirement = Self.requirement(identifier: signingIdentifierHint) else {
-            return Self.failed(stage: "guest", status: guestStatus)
+            return Self.failed(stage: "guest", status: guestStatus, process: process,
+                               signingIdentifier: signingIdentifierHint)
         }
         let validityStatus = SecCodeCheckValidity(code, [], requirement)
         guard validityStatus == errSecSuccess else {
-            return Self.failed(stage: "dynamic_validity", status: validityStatus)
+            return Self.failed(stage: "dynamic_validity", status: validityStatus, process: process,
+                               signingIdentifier: signingIdentifierHint)
         }
         var staticCode: SecStaticCode?
         let staticStatus = SecCodeCopyStaticCode(code, [], &staticCode)
         guard staticStatus == errSecSuccess,
               let staticCode,
-              let information = Self.signingInformation(staticCode),
+              let information = Self.signingInformation(staticCode, process: process,
+                                                        signingIdentifier: signingIdentifierHint),
               information[kSecCodeInfoIdentifier] as? String == signingIdentifierHint,
               information[kSecCodeInfoTeamIdentifier] as? String == Self.teamIdentifier,
               let executable = information[kSecCodeInfoMainExecutable] as? URL else {
-            return Self.failed(stage: "static_metadata", status: staticStatus)
+            return Self.failed(stage: "static_metadata", status: staticStatus, process: process,
+                               signingIdentifier: signingIdentifierHint)
         }
         guard let location = sourceLocation(executable: executable, signingIdentifier: signingIdentifierHint) else {
-            return Self.failed(stage: "source_location", status: 0)
+            return Self.failed(stage: "source_location", status: 0, process: process,
+                               signingIdentifier: signingIdentifierHint)
         }
-        if location == .standaloneCLI { return .verified }
-        // Reject a copied OpenAI helper placed in an unsigned/replaced app bundle.
-        var application: SecStaticCode?
-        guard SecStaticCodeCreateWithPath(applicationURL as CFURL, [], &application) == errSecSuccess,
-              let application,
-              let mainRequirement = Self.requirement(identifier: "com.openai.codex"),
-              SecStaticCodeCheckValidity(application, SecCSFlags(rawValue: kSecCSStrictValidate), mainRequirement) == errSecSuccess else {
-            return .verificationFailed
+        if location == .application {
+            // Reject a copied OpenAI helper placed in an unsigned/replaced app bundle.
+            var application: SecStaticCode?
+            let applicationStatus = SecStaticCodeCreateWithPath(applicationURL as CFURL, [], &application)
+            guard applicationStatus == errSecSuccess, let application,
+                  let mainRequirement = Self.requirement(identifier: "com.openai.codex") else {
+                return Self.failed(stage: "application_code", status: applicationStatus, process: process,
+                                   signingIdentifier: signingIdentifierHint)
+            }
+            let applicationValidity = SecStaticCodeCheckValidity(application, SecCSFlags(rawValue: kSecCSStrictValidate), mainRequirement)
+            guard applicationValidity == errSecSuccess else {
+                return Self.failed(stage: "application_validity", status: applicationValidity, process: process,
+                                   signingIdentifier: signingIdentifierHint)
+            }
         }
+        Self.logger.debug("source_check_verified source_pid=\(process.pid, privacy: .public) source_pidversion=\(process.version, privacy: .public) signing_identifier=\(signingIdentifierHint, privacy: .public)")
         return .verified
+    }
+
+    static func sourceProcess(auditToken: Data?) -> (pid: pid_t, version: UInt32)? {
+        guard let auditToken, auditToken.count == MemoryLayout<audit_token_t>.size else { return nil }
+        var token = audit_token_t()
+        _ = withUnsafeMutableBytes(of: &token) { auditToken.copyBytes(to: $0) }
+        // Darwin's audit token carries the process ID and its reuse version.
+        // These fields identify diagnostics only; Security validates the complete token.
+        return (pid_t(bitPattern: token.val.5), token.val.7)
     }
 
     func sourceLocation(executable: URL, signingIdentifier: String) -> SourceLocation? {
@@ -79,18 +104,21 @@ final class SourceVerifier {
         return requirement
     }
 
-    private static func signingInformation(_ code: SecStaticCode) -> NSDictionary? {
+    private static func signingInformation(_ code: SecStaticCode, process: (pid: pid_t, version: UInt32),
+                                           signingIdentifier: String) -> NSDictionary? {
         var information: CFDictionary?
         let status = SecCodeCopySigningInformation(code, SecCSFlags(rawValue: kSecCSSigningInformation), &information)
         guard status == errSecSuccess else {
-            _ = failed(stage: "signing_information", status: status)
+            _ = failed(stage: "signing_information", status: status, process: process,
+                       signingIdentifier: signingIdentifier)
             return nil
         }
         return information as NSDictionary?
     }
 
-    private static func failed(stage: String, status: OSStatus) -> SourceVerdict {
-        logger.debug("source_check_failed stage=\(stage, privacy: .public) status=\(status, privacy: .public)")
+    private static func failed(stage: String, status: OSStatus, process: (pid: pid_t, version: UInt32)?,
+                               signingIdentifier: String) -> SourceVerdict {
+        logger.debug("source_check_failed stage=\(stage, privacy: .public) status=\(status, privacy: .public) source_pid=\(process?.pid ?? -1, privacy: .public) source_pidversion=\(process?.version ?? 0, privacy: .public) signing_identifier=\(signingIdentifier, privacy: .public)")
         return .verificationFailed
     }
 }

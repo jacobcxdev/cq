@@ -10,8 +10,12 @@ independently validated ChatGPT bundle. The standalone `codex` signing identifie
 also permits an independently signed Homebrew CLI outside that bundle. The
 provider has read-only sandbox access to `/opt/homebrew/Caskroom/codex/` and
 `/usr/local/Caskroom/codex/` so Security.framework can validate the executable.
-Certificate, identifier and team requirements remain identical for both
-locations. Other locations fail closed if the sandbox prevents validation.
+A narrow read-only sandbox rule also permits the managed daemon executable at
+`/Users/<user>/.codex/packages/app-server-daemon/releases/<release>/bin/codex`.
+That rule grants no writes or access to authentication files, sibling paths,
+custom homes or custom Codex cache locations. Certificate, identifier and team
+requirements remain identical for all supported locations. Other locations fail
+closed if the sandbox prevents validation.
 Display names, build numbers and CDHashes
 are not used as identity. These checks inspect public code signatures and do not
 query Keychain or request permissions.
@@ -32,7 +36,12 @@ report verification wait time. Broker readiness alone does not establish that
 new flows are passing admission.
 
 The `source-verification` category records failed Security.framework stages and
-numeric status codes. It does not record credentials or executable paths.
+numeric status codes. Both `source_check_failed` and `source_check_verified`
+include `source_pid`, `source_pidversion` and the whitelisted `signing_identifier`,
+so a shared check can be correlated with one client process instance. Missing or
+malformed tokens fail closed and report PID `-1` and version `0`. These fields are
+diagnostic metadata, not an admission identity. Events do not record audit-token
+bytes, credentials or executable paths.
 
 The provider must interpret admission decisions as follows:
 
@@ -54,6 +63,11 @@ swift test --package-path native/macos-network --sanitize thread
 Building this package does not prove an installed Network Extension works.
 Deployment also needs the native transport, signed host and extension bundles,
 appropriate provisioning, macOS approval and live TCP/UDP routing qualification.
+For standalone Codex, qualify a normal `codex` launch without configuration
+overrides as well as the Homebrew executable. The CLI can select a managed
+app-server copy; `codex app-server daemon version` reports its executable path.
+A successful stdio `app-server` probe from Homebrew does not qualify that copied
+daemon. Keep routing enabled and verify that the normal launch reaches Ready.
 Transparent proxies retain macOS system DNS behaviour; this library does not
 claim app-only DNS isolation.
 

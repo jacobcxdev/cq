@@ -14,5 +14,9 @@
         <string>/opt/homebrew/Caskroom/codex/</string>
         <string>/usr/local/Caskroom/codex/</string>
     </array>
+    <key>com.apple.security.temporary-exception.sbpl</key>
+    <array>
+        <string>(allow file-read* (regex #"^/Users/[^/]+/[.]codex/packages/app-server-daemon/releases/[^/]+/bin/codex$"))</string>
+    </array>
 </dict>
 </plist>
