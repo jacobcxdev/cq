@@ -102,6 +102,15 @@ The Homebrew Cask owns CQ as one complete installation. Its installer artifacts 
 `cq service uninstall --owner=homebrew` before removal. Users should not run a
 manual post-install service command.
 
+An upgrade keeps the new package installed while admitted turns finish. If the
+runtime cannot switch immediately, the existing refresh service retries the
+retained candidate automatically. `cq --version` reports the installed package;
+`cq service status --json` distinguishes the active and pending runtime versions.
+Do not require users to repeat the upgrade or quit Codex. Runtime activation and
+background account discovery must preserve the running desktop app and respect
+an intentional quit. Verification and genuine activation failures still fail
+explicitly and retain the previous healthy runtime.
+
 - Install: `brew install --cask jacobcxdev/tap/cq`
 - Upgrade: `brew upgrade --cask cq`
 - Uninstall: `brew uninstall --cask cq`

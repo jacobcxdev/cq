@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 	"github.com/jacobcxdev/cq/internal/proxy"
@@ -119,11 +122,404 @@ func TestHomebrewInstallBoundsRuntimeDrain(t *testing.T) {
 	if err := lifecycle.Install(context.Background(), installstate.OwnerHomebrew); err != nil {
 		t.Fatal(err)
 	}
-	if len(waits) != 1 || waits[0] != 15*time.Second {
-		t.Fatalf("package install drain waits = %v, want [15s]", waits)
+	if len(waits) != 1 || waits[0] != time.Second {
+		t.Fatalf("package install drain waits = %v, want [1s]", waits)
 	}
 	if platform.live != candidate.Path || platform.refresh != candidate.Path {
 		t.Fatal("quiet package upgrade did not select the candidate")
+	}
+}
+
+func TestHomebrewInstallKeepsPendingPackageUntilAutomaticActivation(t *testing.T) {
+	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+	lifecycle.RuntimeArtifacts.(serviceUpgradeArtifacts)[lifecycle.Executable] = candidate
+	lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "pending-answer", Generation: 1, Phase: "deferred", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41, ErrorCode: "quiet_deadline"}
+	receipts := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: store.Roots}
+	for _, phase := range []string{"prepared", "waiting", "deferred"} {
+		receipt.Phase = phase
+		if err := receipts.Save(receipt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lifecycle.RuntimeReceipt = receipts.Load
+	active := true
+	apply := lifecycle.RuntimeApply
+	var attempts int
+	lifecycle.RuntimeApply = func(ctx context.Context, artifact installer.RuntimeArtifact, wait time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+		attempts++
+		if wait != time.Second {
+			t.Fatalf("automatic attempt paused admissions for %s, want 1s", wait)
+		}
+		if active {
+			if platform.live != previous.Path {
+				t.Fatal("active answer lost its runtime")
+			}
+			return receipt, nil
+		}
+		var err error
+		receipt, err = apply(ctx, artifact, wait)
+		if err == nil {
+			receipt.Generation = 2
+			for _, phase := range []string{"prepared", "waiting", "handoff", "verifying", "committed"} {
+				receipt.Phase = phase
+				if err = receipts.Save(receipt); err != nil {
+					break
+				}
+			}
+		}
+		return receipt, err
+	}
+	if err := lifecycle.Install(context.Background(), installstate.OwnerHomebrew); err != nil {
+		t.Fatalf("active answer rolled back package installation: %v", err)
+	}
+	record, err := store.Load()
+	if err != nil || record.BinaryDigest != previous.SHA256 || platform.live != previous.Path || platform.refresh != candidate.Path {
+		t.Fatalf("pending selection lost previous runtime or retry executable: %+v %v", record, err)
+	}
+	refreshRuns := platform.refreshRuns
+	// A new refresh process reconstructs the pending target from durable state;
+	// its first long-running invocation has no successful exit status yet.
+	restarted := *lifecycle
+	restarted.RuntimeReceipt = (proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: store.Roots}).Load
+	platform.refreshHealthy = false
+	restarted.Wait = func(ctx context.Context, _ time.Duration) error {
+		lock, err := lifecycle.MutationLocker.Acquire()
+		if err != nil {
+			t.Fatalf("retry retained installer lock during backoff: %v", err)
+		}
+		if err := lock.Close(); err != nil {
+			t.Fatal(err)
+		}
+		active = false // The answer reaches its terminal event without a restart.
+		return ctx.Err()
+	}
+	if err := restarted.reconcilePendingUpgrade(context.Background(), candidate, nil); err != nil {
+		t.Fatal(err)
+	}
+	record, err = store.Load()
+	if err != nil || record.BinaryDigest != candidate.SHA256 || platform.live != candidate.Path || receipt.Phase != "committed" || attempts != 3 {
+		t.Fatalf("pending activation did not retry through answer completion: receipt=%+v record=%+v attempts=%d err=%v", receipt, record, attempts, err)
+	}
+	if platform.refreshRuns != refreshRuns {
+		t.Fatal("retry replaced its own refresh job")
+	}
+	for _, call := range platform.calls {
+		if call == "restart-proxy" || call == "remove-proxy" || call == "install-proxy" || call == "restore" {
+			t.Fatalf("pending activation restarted a service: %v", platform.calls)
+		}
+	}
+}
+
+func TestPendingUpgradeStopsWhenInstallationChanges(t *testing.T) {
+	for _, change := range []string{"new candidate", "package changed", "uninstalled", "ownership changed"} {
+		t.Run(change, func(t *testing.T) {
+			lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "pending", Generation: 1, Phase: "deferred", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41, ErrorCode: "quiet_deadline"}
+			lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+			installedDigest := candidate.SHA256
+			lifecycle.DigestExecutable = func(string) (string, error) { return installedDigest, nil }
+			attempts := 0
+			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+				attempts++
+				return receipt, nil
+			}
+			lifecycle.Wait = func(context.Context, time.Duration) error {
+				switch change {
+				case "new candidate":
+					receipt.Candidate.SHA256 = strings.Repeat("c", 64)
+				case "package changed":
+					installedDigest = strings.Repeat("c", 64)
+				case "uninstalled":
+					if err := store.Remove(); err != nil {
+						t.Fatal(err)
+					}
+				case "ownership changed":
+					record, err := store.Load()
+					if err != nil {
+						t.Fatal(err)
+					}
+					record.Owner = installstate.OwnerManual
+					if err := store.Save(record); err != nil {
+						t.Fatal(err)
+					}
+				}
+				return nil
+			}
+			if err := lifecycle.reconcilePendingUpgrade(context.Background(), candidate, nil); err != nil {
+				t.Fatal(err)
+			}
+			if attempts != 1 || platform.live != previous.Path {
+				t.Fatalf("superseded retry still activated: attempts=%d live=%s", attempts, platform.live)
+			}
+		})
+	}
+}
+
+func TestPendingUpgradePreservesRefreshFailureAndCancellation(t *testing.T) {
+	for _, scenario := range []string{"refresh bootstrap failed", "cancelled"} {
+		t.Run(scenario, func(t *testing.T) {
+			lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "pending", Generation: 1, Phase: "deferred", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41, ErrorCode: "quiet_deadline"}
+			lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+			lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+				return receipt, nil
+			}
+			lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+			if scenario == "refresh bootstrap failed" {
+				failure := errors.New("refresh bootstrap failed")
+				platform.installRefreshErr = failure
+				if _, err := lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, candidate.Path); !errors.Is(err, failure) {
+					t.Fatalf("genuine bootstrap failure was treated as pending success: %v", err)
+				}
+			} else {
+				ctx, cancel := context.WithCancel(context.Background())
+				lifecycle.Wait = func(context.Context, time.Duration) error { cancel(); return ctx.Err() }
+				if err := lifecycle.reconcilePendingUpgrade(ctx, candidate, nil); !errors.Is(err, context.Canceled) {
+					t.Fatalf("cancelled invocation kept retrying: %v", err)
+				}
+			}
+			record, err := store.Load()
+			if err != nil || record.BinaryDigest != previous.SHA256 || platform.live != previous.Path {
+				t.Fatalf("failure discarded active runtime ownership: %+v %v", record, err)
+			}
+		})
+	}
+}
+
+func TestPendingUpgradeResumesOnlyRecoverableSupervisorRestart(t *testing.T) {
+	for _, code := range []string{"supervisor_restarted_before_handoff", "candidate_release_unproven", "recovery_release_unproven", "worker_not_quiescent"} {
+		t.Run(code, func(t *testing.T) {
+			lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+			receipts := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: store.Roots}
+			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "restart", Generation: 1, Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
+			for _, phase := range []string{"prepared", "waiting", "deferred"} {
+				receipt.Phase = phase
+				if phase == "deferred" {
+					receipt.ErrorCode = code
+				}
+				if err := receipts.Save(receipt); err != nil {
+					t.Fatal(err)
+				}
+			}
+			// Reconstruct the entry after the normal-start recovery has durably
+			// marked its interrupted pre-handoff transaction as deferred.
+			lifecycle.RuntimeReceipt = (proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: store.Roots}).Load
+			lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+			apply := lifecycle.RuntimeApply
+			attempts := 0
+			lifecycle.RuntimeApply = func(ctx context.Context, artifact installer.RuntimeArtifact, wait time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+				attempts++
+				return apply(ctx, artifact, wait)
+			}
+			err := lifecycle.reconcilePendingUpgrade(context.Background(), candidate, nil)
+			if code == "supervisor_restarted_before_handoff" {
+				if err != nil || attempts != 1 || platform.live != candidate.Path {
+					t.Fatalf("safe restart recovery was abandoned: attempts=%d err=%v", attempts, err)
+				}
+			} else if err == nil || attempts != 0 || platform.live != previous.Path {
+				t.Fatalf("genuine failure retried: attempts=%d live=%s err=%v", attempts, platform.live, err)
+			}
+		})
+	}
+}
+
+func TestPendingUpgradeWaitsForRecoveredProxyReadiness(t *testing.T) {
+	for _, scenario := range []string{"starting", "transport race", "healthy transport failure", "authentication failure", "superseded during race"} {
+		t.Run(scenario, func(t *testing.T) {
+			lifecycle, platform, _, previous, candidate := homebrewUpgradeServiceFixture(t)
+			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "restarted", Generation: 1, Phase: "deferred", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41, ErrorCode: "supervisor_restarted_before_handoff"}
+			lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+			lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+			platform.refresh = candidate.Path
+			if scenario == "starting" {
+				platform.proxyHealthy = false
+			}
+			apply := lifecycle.RuntimeApply
+			transportErr := &url.Error{Op: "Post", URL: "http://127.0.0.1:12345", Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("fixture connection refused")}}
+			authErr := errors.New("runtime upgrade request rejected: HTTP 401")
+			attempts, waits := 0, 0
+			lifecycle.RuntimeApply = func(ctx context.Context, artifact installer.RuntimeArtifact, timeout time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+				attempts++
+				if scenario == "starting" && !platform.proxyHealthy {
+					t.Fatal("submitted handoff before recovered proxy was ready")
+				}
+				if attempts == 1 {
+					switch scenario {
+					case "transport race", "superseded during race":
+						platform.proxyHealthy = false
+						if scenario == "superseded during race" {
+							receipt.Candidate.SHA256 = strings.Repeat("c", 64)
+						}
+						return proxy.RuntimeUpgradeReceiptV1{}, transportErr
+					case "healthy transport failure":
+						return proxy.RuntimeUpgradeReceiptV1{}, transportErr
+					case "authentication failure":
+						platform.proxyHealthy = false
+						return proxy.RuntimeUpgradeReceiptV1{}, authErr
+					}
+				}
+				return apply(ctx, artifact, timeout)
+			}
+			lifecycle.Wait = func(context.Context, time.Duration) error {
+				waits++
+				if waits > 1 {
+					t.Fatal("ready proxy remained pending")
+				}
+				lock, err := lifecycle.MutationLocker.Acquire()
+				if err != nil {
+					t.Fatalf("startup wait held installer lock: %v", err)
+				}
+				if err := lock.Close(); err != nil {
+					t.Fatal(err)
+				}
+				platform.proxyHealthy = true
+				return nil
+			}
+			err := lifecycle.reconcilePendingUpgrade(context.Background(), candidate, nil)
+			switch scenario {
+			case "starting", "transport race":
+				wantAttempts := 1
+				if scenario == "transport race" {
+					wantAttempts = 2
+				}
+				if err != nil || waits != 1 || attempts != wantAttempts || platform.live != candidate.Path {
+					t.Fatalf("recovered proxy did not activate automatically: attempts=%d waits=%d err=%v", attempts, waits, err)
+				}
+			case "superseded during race":
+				if err != nil || attempts != 1 || waits != 0 || platform.live != previous.Path {
+					t.Fatalf("superseded race retried: attempts=%d waits=%d err=%v", attempts, waits, err)
+				}
+			default:
+				if err == nil || attempts != 1 || waits != 0 || platform.live != previous.Path {
+					t.Fatalf("genuine RPC failure was hidden: attempts=%d waits=%d err=%v", attempts, waits, err)
+				}
+			}
+		})
+	}
+}
+
+func TestCommittedRefreshYieldsToForegroundInstaller(t *testing.T) {
+	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "foreground", Generation: 1, Phase: "committed", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
+	lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+	lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+	platform.live, platform.refresh = candidate.Path, candidate.Path
+	lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+		t.Fatal("foreground-owned commit submitted another handoff")
+		return receipt, nil
+	}
+	lock, err := lifecycle.MutationLocker.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lifecycle.Wait = func(context.Context, time.Duration) error {
+		return errors.New("foreground installer is waiting for refresh exit")
+	}
+	if err := lifecycle.reconcilePendingUpgrade(context.Background(), candidate, nil); err != nil {
+		t.Fatalf("committed refresh waited for installer that needs its successful exit: %v", err)
+	}
+	record, err := store.Load()
+	if err != nil || record.BinaryDigest != previous.SHA256 {
+		t.Fatalf("refresh stole foreground ownership reconciliation: %+v %v", record, err)
+	}
+}
+
+type foregroundUpgradeRefreshPlatform struct {
+	*retainedServicePlatform
+	refreshEntry func() error
+}
+
+func (platform foregroundUpgradeRefreshPlatform) InstallRefresh(ctx context.Context, path string) error {
+	if err := platform.retainedServicePlatform.InstallRefresh(ctx, path); err != nil {
+		return err
+	}
+	return platform.refreshEntry()
+}
+
+func TestHomebrewQuietUpgradeRefreshCompletesBeforeOwnershipSave(t *testing.T) {
+	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+	lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+	var receipt proxy.RuntimeUpgradeReceiptV1
+	lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+	apply := lifecycle.RuntimeApply
+	lifecycle.RuntimeApply = func(ctx context.Context, artifact installer.RuntimeArtifact, wait time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+		var err error
+		receipt, err = apply(ctx, artifact, wait)
+		return receipt, err
+	}
+	refreshExited := false
+	lifecycle.Platform = foregroundUpgradeRefreshPlatform{retainedServicePlatform: platform, refreshEntry: func() error {
+		record, err := store.Load()
+		if err != nil || record.BinaryDigest != previous.SHA256 || receipt.Phase != "committed" {
+			t.Fatalf("refresh fixture missed foreground commit window: %+v %+v %v", receipt, record, err)
+		}
+		refresh := *lifecycle
+		refresh.Wait = func(context.Context, time.Duration) error {
+			return errors.New("refresh deadlocked on foreground installer lock")
+		}
+		if err := refresh.reconcilePendingUpgrade(context.Background(), candidate, nil); err != nil {
+			return err
+		}
+		refreshExited = true
+		return nil
+	}}
+	if err := runServiceWithLifecycle([]string{"upgrade", "--owner=homebrew", "--candidate-executable=" + candidate.Path}, lifecycle, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Load()
+	if err != nil || !refreshExited || record.BinaryDigest != candidate.SHA256 || platform.live != candidate.Path {
+		t.Fatalf("quiet foreground upgrade did not settle: exited=%t record=%+v err=%v", refreshExited, record, err)
+	}
+}
+
+func TestCommittedRefreshReconcilesAbandonedOwnership(t *testing.T) {
+	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "abandoned", Generation: 1, Phase: "committed", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
+	lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+	lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+	platform.live, platform.refresh = candidate.Path, candidate.Path
+	lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+		t.Fatal("abandoned committed ownership submitted another handoff")
+		return receipt, nil
+	}
+	if err := lifecycle.reconcilePendingUpgrade(context.Background(), candidate, nil); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Load()
+	if err != nil || record.BinaryDigest != candidate.SHA256 {
+		t.Fatalf("abandoned committed ownership was not reconciled: %+v %v", record, err)
+	}
+}
+
+func TestDeferredRefreshKeepsTryingAfterInstallerLockRelease(t *testing.T) {
+	lifecycle, platform, _, previous, candidate := homebrewUpgradeServiceFixture(t)
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "deferred", Generation: 1, Phase: "deferred", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41, ErrorCode: "quiet_deadline"}
+	lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+	lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+	platform.refresh = candidate.Path
+	lock, err := lifecycle.MutationLocker.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	waits := 0
+	lifecycle.Wait = func(context.Context, time.Duration) error {
+		waits++
+		if waits != 1 {
+			t.Fatal("deferred retry did not resume after installer released lock")
+		}
+		if platform.live != previous.Path {
+			t.Fatal("held installer lock admitted a handoff")
+		}
+		return lock.Close()
+	}
+	if err := lifecycle.reconcilePendingUpgrade(context.Background(), candidate, nil); err != nil {
+		t.Fatal(err)
+	}
+	if waits != 1 || platform.live != candidate.Path {
+		t.Fatalf("deferred refresh stopped when installer held lock: waits=%d live=%s", waits, platform.live)
 	}
 }
 

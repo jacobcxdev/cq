@@ -201,6 +201,13 @@ func (b *CelsiusBroker) handle(parent context.Context, client CelsiusSocket, gra
 			object["recovered"] = false
 			object["catchups"] = []any{}
 			reply = object
+		} else if native && ok && state.command["type"] == "subscribe" && state.command["topic_id"] == "codex-work-usage-push-v1" && object["type"] == "subscribe" && object["recovered"] == true {
+			catchups, _ := object["catchups"].([]any)
+			for _, value := range catchups {
+				if frame, ok := value.(map[string]any); ok {
+					floorNativeUsageCreditEvent(frame)
+				}
+			}
 		}
 		var replyType any
 		if object, ok := reply.(map[string]any); ok {

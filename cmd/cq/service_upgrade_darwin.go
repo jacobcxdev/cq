@@ -27,6 +27,59 @@ import (
 
 type darwinServiceRuntimeArtifacts struct{ installer.RuntimeArtifactStore }
 
+func init() {
+	reconcileRefreshRuntimeFn = reconcileDarwinRefreshRuntime
+}
+
+func reconcileDarwinRefreshRuntime(ctx context.Context, refresh func() error) error {
+	roots, err := userdirs.Default()
+	if err != nil {
+		return err
+	}
+	receipt, err := (proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: roots}).Load()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	// Only the exact retained candidate refresh job owns retries. Manual CLI
+	// invocations and the predecessor refresh process continue their usual work.
+	if !sameServiceExecutable(executable, receipt.Candidate.Path) {
+		return nil
+	}
+	record, err := (installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}).Load()
+	if errors.Is(err, installstate.ErrNotInstalled) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if record.Owner != installstate.OwnerHomebrew {
+		return nil
+	}
+	artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: roots}
+	if err := artifacts.Verify(ctx, receipt.Candidate); err != nil {
+		return err
+	}
+	installed, err := installstate.DigestFile(record.Executable)
+	if err != nil {
+		return err
+	}
+	if installed != receipt.Candidate.SHA256 {
+		return nil
+	}
+	lifecycle, err := darwinServiceLifecycleForExecutable(record.Executable)
+	if err != nil {
+		return err
+	}
+	return lifecycle.reconcilePendingUpgrade(ctx, receipt.Candidate, refresh)
+}
+
 func (store darwinServiceRuntimeArtifacts) Stage(ctx context.Context, path string) (installer.RuntimeArtifact, error) {
 	source, err := filepath.EvalSymlinks(path)
 	if err != nil {

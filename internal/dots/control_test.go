@@ -4,14 +4,25 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("CQ_DOTS_CONTROL_PROCESS_FIXTURE") == "1" {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 func controllerFixture(t *testing.T) (Controller, *Settings) {
 	t.Helper()
@@ -255,5 +266,163 @@ func TestControllerRefreshRetainedKnownOwnerWithExpiredLocalCredential(t *testin
 	loaded, loadErr := c.settings()
 	if err != nil || loadErr != nil || changed || len(outcomes) != 2 || len(loaded.Dots) != 2 {
 		t.Fatalf("local unavailability lost stable profile: changed %v, outcomes %#v, error %v, load %v", changed, outcomes, err, loadErr)
+	}
+}
+
+func TestControllerWatcherSyncAfterQuitOnlyRefreshesDiscovery(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("native process enumeration")
+	}
+	for _, test := range []struct {
+		name      string
+		renamed   bool
+		retryable bool
+	}{
+		{name: "unchanged catalogue"},
+		{name: "changed catalogue", renamed: true},
+		{name: "discovery retry", retryable: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c, s := controllerFixture(t)
+			now := time.Unix(1_800_000_000, 0)
+			catalogueTestWrite(t, s.SystemAuth, catalogueTestDocument(s.SystemAccountID, now.Unix()+3600))
+			catalogueTestWrite(t, filepath.Join(s.CQAccounts, "secondary.auth.json"), catalogueTestDocument("fixture-secondary", now.Unix()+3600))
+			c.Catalogue = &CatalogueClient{Settings: s, Now: func() time.Time { return now }, HTTP: catalogueTestDoer(func(request *http.Request) (*http.Response, error) {
+				owner := request.Header.Get("ChatGPT-Account-Id")
+				if owner == "fixture-secondary" {
+					if test.retryable {
+						return catalogueTestResponse(http.StatusServiceUnavailable, map[string]any{"error": "unavailable"}), nil
+					}
+					name := "null"
+					if test.renamed {
+						name = "Renamed"
+					}
+					return catalogueTestResponse(http.StatusOK, catalogueTestPrimary(owner, name, "root-"+owner)), nil
+				}
+				return catalogueTestResponse(http.StatusOK, catalogueTestPrimary(owner, "Pingy", "root-"+owner)), nil
+			})}
+			// An idle watcher must not need an executable, stage workers or attach
+			// to the absent app. Explicit user startup still needs that executable.
+			if err := os.Remove(c.Executable); err != nil {
+				t.Fatal(err)
+			}
+			c.Native = nativeEvaluationFunc(func(context.Context, string) ([]any, error) {
+				t.Fatal("watcher attached to the absent app")
+				return nil, nil
+			})
+			result, err := c.Execute(context.Background(), Request{Operation: "sync", Watcher: true})
+			if err != nil {
+				t.Fatalf("watcher tried to start the app after quit: %v", err)
+			}
+			if result["started"] != false || result["catalogue_changed"] != test.renamed || result["discovery_complete"] != !test.retryable || result["discovery_retryable"] != test.retryable {
+				t.Fatalf("idle watcher lost discovery outcome: %#v", result)
+			}
+			if accounts, ok := result["accounts"].([]AccountOutcome); !ok || len(accounts) != 2 {
+				t.Fatalf("idle watcher skipped account discovery: %#v", result)
+			}
+			if _, err := os.Stat(filepath.Join(s.RuntimeRoot, "cq-dots-runtime")); !os.IsNotExist(err) {
+				t.Fatalf("idle watcher staged an executable: %v", err)
+			}
+			for _, operation := range []string{"sync", "start"} {
+				if _, err := c.Execute(context.Background(), Request{Operation: operation}); !os.IsNotExist(err) {
+					t.Fatalf("explicit %s no longer attempted startup: %v", operation, err)
+				}
+			}
+		})
+	}
+}
+
+func TestControllerWatcherSyncPreservesExistingNativeProcess(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("native process enumeration")
+	}
+	for _, appRunning := range []bool{false, true} {
+		t.Run(map[bool]string{false: "leftover worker after quit", true: "running app"}[appRunning], func(t *testing.T) {
+			c, s := controllerFixture(t)
+			now := time.Unix(1_800_000_000, 0)
+			catalogueTestWrite(t, s.SystemAuth, catalogueTestDocument(s.SystemAccountID, now.Unix()+3600))
+			catalogueTestWrite(t, filepath.Join(s.CQAccounts, "secondary.auth.json"), catalogueTestDocument("fixture-secondary", now.Unix()+3600))
+			c.Catalogue = &CatalogueClient{Settings: s, Now: func() time.Time { return now }, HTTP: catalogueTestDoer(func(request *http.Request) (*http.Response, error) {
+				owner := request.Header.Get("ChatGPT-Account-Id")
+				return catalogueTestResponse(http.StatusOK, catalogueTestPrimary(owner, "Renamed", "root-"+owner)), nil
+			})}
+			// A real, inert executable accepts the same process identity arguments.
+			// No app, worker implementation or network listener is started.
+			source, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			binary, err := os.ReadFile(source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			helper := filepath.Join(s.RuntimeRoot, "cq-dots-runtime")
+			if err := os.WriteFile(helper, binary, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			role := "probe"
+			if appRunning {
+				role = "account-watch"
+			} else if err := os.Remove(c.Executable); err != nil {
+				t.Fatal(err)
+			}
+			worker := exec.Command(helper, "__dots", role, c.Root)
+			worker.Dir = s.RuntimeRoot
+			input, keepAlive, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = input.Close(); _ = keepAlive.Close() })
+			worker.Stdin = input
+			worker.Env = append(os.Environ(), "CQ_DOTS_CONTROL_PROCESS_FIXTURE=1")
+			if err := worker.Start(); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = worker.Process.Kill(); _ = worker.Wait() })
+			process := worker.Process
+			if appRunning {
+				app := filepath.Join(s.AppPath, "Contents", "MacOS", "ChatGPT")
+				if err := os.MkdirAll(filepath.Dir(app), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(app, binary, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				command := exec.Command(app, "--", "--cq-dots-runtime="+s.RuntimeRoot, "--remote-debugging-pipe")
+				command.Stdin, command.Env = input, worker.Env
+				if err := command.Start(); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = command.Process.Kill(); _ = command.Wait() })
+				process = command.Process
+				if err := SaveJSON(filepath.Join(s.RuntimeRoot, nativeStateName), map[string]any{"app_pid": process.Pid}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c.Native = nativeEvaluationFunc(func(context.Context, string) ([]any, error) {
+				t.Fatal("catalogue change attached to or restarted the native app")
+				return nil, nil
+			})
+			result, err := c.Execute(context.Background(), Request{Operation: "sync", Watcher: true})
+			if err != nil || result["started"] != false || result["catalogue_changed"] != true || result["discovery_complete"] != true || result["discovery_retryable"] != false {
+				t.Fatalf("watcher sync result %#v, error %v", result, err)
+			}
+			if err := process.Signal(syscall.Signal(0)); err != nil {
+				t.Fatalf("watcher sync stopped existing PID %d: %v", process.Pid, err)
+			}
+			rows, err := RuntimeProcesses(context.Background(), s)
+			wantProcesses := 1
+			if appRunning {
+				wantProcesses++
+			}
+			if err != nil || len(rows) != wantProcesses {
+				t.Fatalf("watcher changed the native process set: %#v, %v", rows, err)
+			}
+			for _, row := range rows {
+				if row.PID != worker.Process.Pid && row.PID != process.Pid {
+					t.Fatalf("watcher replaced an existing PID: %#v", rows)
+				}
+			}
+		})
 	}
 }

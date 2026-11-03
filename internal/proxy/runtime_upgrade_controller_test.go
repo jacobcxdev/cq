@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -307,6 +308,76 @@ func TestRuntimeUpgradeBoundedDrainResumesQueuedRequest(t *testing.T) {
 	response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("original connection returned HTTP %d", response.StatusCode)
+	}
+}
+
+func TestRuntimeUpgradeOneSecondAttemptPreservesAnswerAndQueuedRequest(t *testing.T) {
+	controller, supervisor, worker, request := upgradeControllerFixture(t)
+	controller.quietTimeout = 0
+	request.WaitTimeoutSeconds = 1
+	listener, connections := supervisor.upgradeListener, supervisor.upgradeConnections
+	listener.SetConnectionTracker(connections)
+	answerStarted, answerTerminal := make(chan struct{}), make(chan struct{})
+	server := &http.Server{ConnState: connections.ConnState, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/answer" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		release, err := worker.gate.BeginTurn()
+		if err != nil {
+			t.Errorf("answer admission: %v", err)
+			return
+		}
+		defer release()
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: started\n\n")
+		w.(http.Flusher).Flush()
+		close(answerStarted)
+		<-answerTerminal
+		fmt.Fprint(w, "data: completed\n\n")
+	})}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(listener) }()
+	var terminalOnce sync.Once
+	defer func() { terminalOnce.Do(func() { close(answerTerminal) }); server.Close(); <-done }()
+	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+	answer, err := client.Get("http://" + listener.Addr().String() + "/answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer answer.Body.Close()
+	<-answerStarted
+	if _, err := controller.Begin(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-worker.gate.PauseSignal():
+	case <-time.After(time.Second):
+		t.Fatal("upgrade did not pause admissions")
+	}
+	started := time.Now()
+	fresh, err := client.Get("http://" + listener.Addr().String() + "/fresh")
+	if err != nil {
+		t.Fatalf("fresh request failed during active-answer retry: %v", err)
+	}
+	fresh.Body.Close()
+	if elapsed := time.Since(started); elapsed > 2*time.Second || fresh.StatusCode != http.StatusOK {
+		t.Fatalf("fresh request blocked beyond bounded automatic attempt: elapsed=%s status=%d", elapsed, fresh.StatusCode)
+	}
+	receipt := upgradeWaitTerminal(t, controller, request.TransactionID)
+	if receipt.Phase != "deferred" || receipt.ErrorCode != "quiet_deadline" {
+		t.Fatalf("active answer did not defer: %+v", receipt)
+	}
+	worker.mu.Lock()
+	stopped := worker.stopped
+	worker.mu.Unlock()
+	if stopped != 0 || supervisor.worker != worker {
+		t.Fatal("automatic retry stopped active answer worker")
+	}
+	terminalOnce.Do(func() { close(answerTerminal) })
+	data, err := io.ReadAll(answer.Body)
+	if err != nil || string(data) != "data: started\n\ndata: completed\n\n" {
+		t.Fatalf("answer lost its terminal: %q %v", data, err)
 	}
 }
 

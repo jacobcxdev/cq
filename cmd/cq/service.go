@@ -118,6 +118,7 @@ type serviceLifecycle struct {
 	RuntimeSnapshotCheck  func(context.Context, servicePlatformSnapshot) error
 	RuntimeReceipt        func() (proxy.RuntimeUpgradeReceiptV1, error)
 	RuntimeExecutable     string
+	refreshExecuting      bool
 }
 
 func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installstate.Owner) (returnErr error) {
@@ -132,7 +133,7 @@ func (lifecycle *serviceLifecycle) Install(ctx context.Context, owner installsta
 	if owner == installstate.OwnerHomebrew && lifecycle.RuntimeArtifacts != nil {
 		_, err := lifecycle.Store.Load()
 		if err == nil {
-			_, err = lifecycle.upgradeWithWaitTimeout(ctx, owner, lifecycle.Executable, 15*time.Second)
+			_, err = lifecycle.upgradeWithWaitTimeout(ctx, owner, lifecycle.Executable, time.Second)
 			return err
 		}
 		if !errors.Is(err, installstate.ErrNotInstalled) {

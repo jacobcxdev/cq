@@ -35,6 +35,7 @@ var (
 	activeClaudeEmailFn       = keyring.ActiveClaudeEmail
 	isStdinTerminalFn         = isStdinTerminal
 	resolveRefreshRootsFn     = userdirs.Default
+	reconcileRefreshRuntimeFn = func(context.Context, func() error) error { return nil }
 )
 
 func runRefreshCommand(args []string) error {
@@ -51,6 +52,11 @@ func runRefresh() error {
 	if _, err := resolveRefreshRootsFn(); err != nil {
 		return fmt.Errorf("resolve CQ directories: %w", err)
 	}
+	refreshErr := refreshAccounts()
+	return errors.Join(refreshErr, reconcileRefreshRuntimeFn(context.Background(), refreshAccounts))
+}
+
+func refreshAccounts() error {
 	accounts := discoverClaudeAccountsFn()
 	httpClient := newHTTPClientFn(10*time.Second, version)
 	ctx := context.Background()

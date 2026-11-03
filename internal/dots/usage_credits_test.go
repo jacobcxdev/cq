@@ -128,6 +128,51 @@ func TestNativeCelsiusUsageCreditFloor(t *testing.T) {
 	}
 }
 
+func TestNativeCelsiusRecoveredUsageCreditFloor(t *testing.T) {
+	for _, test := range []struct {
+		name, mode, command, topic, replyType, eventType, eventTopic, credits, want string
+		recovered                                                                   bool
+	}{
+		{"string balance", "native", "subscribe", "codex-work-usage-push-v1", "subscribe", "usage.snapshot", "codex-work-usage-push-v1", `{"balance":"0","has_credits":false}`, `{"balance":"1","has_credits":true}`, true},
+		{"number balance", "native", "subscribe", "codex-work-usage-push-v1", "subscribe", "usage.snapshot", "codex-work-usage-push-v1", `{"balance":0.5,"has_credits":false}`, `{"balance":1,"has_credits":true}`, true},
+		{"exact high number", "native", "subscribe", "codex-work-usage-push-v1", "subscribe", "usage.snapshot", "codex-work-usage-push-v1", `{"balance":9007199254740993,"has_credits":false}`, `{"balance":9007199254740993,"has_credits":true}`, true},
+		{"isolated", "isolated", "subscribe", "codex-work-usage-push-v1", "subscribe", "usage.snapshot", "codex-work-usage-push-v1", `{"balance":0}`, `{"balance":0}`, true},
+		{"other subscription", "native", "subscribe", "unrelated", "subscribe", "usage.snapshot", "codex-work-usage-push-v1", `{"balance":0}`, `{"balance":0}`, true},
+		{"other command", "native", "future/command", "codex-work-usage-push-v1", "subscribe", "usage.snapshot", "codex-work-usage-push-v1", `{"balance":0}`, `{"balance":0}`, true},
+		{"other reply", "native", "subscribe", "codex-work-usage-push-v1", "error", "usage.snapshot", "codex-work-usage-push-v1", `{"balance":0}`, `{"balance":0}`, true},
+		{"not recovered", "native", "subscribe", "codex-work-usage-push-v1", "subscribe", "usage.snapshot", "codex-work-usage-push-v1", `{"balance":0}`, `{"balance":0}`, false},
+		{"other event", "native", "subscribe", "codex-work-usage-push-v1", "subscribe", "future/event", "codex-work-usage-push-v1", `{"balance":0}`, `{"balance":0}`, true},
+		{"other event topic", "native", "subscribe", "codex-work-usage-push-v1", "subscribe", "usage.snapshot", "unrelated", `{"balance":0}`, `{"balance":0}`, true},
+		{"malformed credits", "native", "subscribe", "codex-work-usage-push-v1", "subscribe", "usage.snapshot", "codex-work-usage-push-v1", `[]`, `[]`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b := celsiusTestBroker()
+			b.Settings.IntegrationMode = test.mode
+			primary, worker, client := newCelsiusFakeSocket(), newCelsiusFakeSocket(), newCelsiusFakeSocket()
+			b.Dial = func(_ context.Context, endpoint string) (CelsiusSocket, error) {
+				if strings.HasSuffix(endpoint, "/primary") {
+					return primary, nil
+				}
+				return worker, nil
+			}
+			celsiusRunTest(t, b, client)
+			client.push([]any{celsiusCommand(99, test.command, test.topic)})
+			wire := celsiusReadBatch(t, primary)[0]
+			id, _ := celsiusID(wire["id"])
+			event := `{"type":"message","topic_id":"` + test.eventTopic + `","offset":"cursor","unknown":9007199254740993,"payload":{"type":"` + test.eventType + `","payload":{"version":1,"sequence":9007199254740993,"usage_by_client":{"electron":` + usageCreditFixture(test.credits) + `,"browser":` + usageCreditFixture(`{"balance":"0","has_credits":false}`) + `}}}}`
+			reply := `{"type":"` + test.replyType + `","recovered":` + strconv.FormatBool(test.recovered) + `,"offset":"reply-cursor","future":9007199254740993,"catchups":[null,"unknown",` + event + `]}`
+			primary.input <- []byte(`[{"id":` + strconv.FormatInt(id, 10) + `,"reply":` + reply + `}]`)
+			want := strings.Replace(reply, `"credits":`+test.credits, `"credits":`+test.want, 1)
+			select {
+			case data := <-client.writes:
+				assertUsageJSON(t, data, []byte(`[{"id":99,"reply":`+want+`}]`))
+			case <-time.After(2 * time.Second):
+				t.Fatal("recovered usage reply timed out")
+			}
+		})
+	}
+}
+
 func usageCreditFixture(credits string) string {
 	field := ""
 	if credits != "" {
