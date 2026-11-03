@@ -46,8 +46,15 @@ func TestZAISourcePreservesNativeCodexMetadata(t *testing.T) {
 		}
 	}
 	projected := CodexModelsResponse(Snapshot{Entries: result.Entries, CodexRawByID: result.CodexRawByID})
-	if len(projected.Models) != 2 || string(projected.Models[0]) != raw {
-		t.Fatalf("native metadata changed: %s", projected.Models)
+	if len(projected.Models) != 2 || string(result.CodexRawByID["glm-5.3"]) != raw {
+		t.Fatalf("native source metadata changed: %s", result.CodexRawByID["glm-5.3"])
+	}
+	var want, got map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(raw), &want)
+	_ = json.Unmarshal(projected.Models[0], &got)
+	want["auto_compact_token_limit"] = json.RawMessage("697302")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("projection changed fields beyond compaction policy: %s", projected.Models[0])
 	}
 
 	fsys := fsutil.NewMemFS()
@@ -66,7 +73,7 @@ func TestZAISourcePreservesNativeCodexMetadata(t *testing.T) {
 	if err := json.Compact(&compact, roundTrip.Models[0]); err != nil {
 		t.Fatal(err)
 	}
-	if compact.String() != raw {
+	if compact.String() != string(projected.Models[0]) {
 		t.Fatalf("cache lost native metadata: %s", roundTrip.Models[0])
 	}
 }
@@ -110,9 +117,8 @@ func TestZAISourceDisplayNamesPreserveCodexMetadata(t *testing.T) {
 			if len(result.Entries) != 1 || result.Entries[0].ID != tc.id || result.Entries[0].DisplayName != tc.want {
 				t.Fatalf("unexpected model identity or display name: %+v", result.Entries)
 			}
-			projected := CodexModelsResponse(Snapshot{Entries: result.Entries, CodexRawByID: result.CodexRawByID})
 			var got map[string]any
-			if err := json.Unmarshal(projected.Models[0], &got); err != nil {
+			if err := json.Unmarshal(result.Entries[0].Raw, &got); err != nil {
 				t.Fatal(err)
 			}
 			metadata["display_name"] = tc.want
