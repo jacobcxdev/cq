@@ -7,9 +7,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
+	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -18,6 +22,88 @@ import (
 
 func testManifest() manifest {
 	return manifest{1, "0.41.0", strings.Repeat("a", 40), 123, strings.Repeat("b", 64), "13.0"}
+}
+
+func TestNativeProviderDaemonReadScope(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "native", "macos-network", "Packaging", "Provider.entitlements"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	var rules []string
+	for {
+		token, err := decoder.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok || start.Name.Local != "key" {
+			continue
+		}
+		var key string
+		if err := decoder.DecodeElement(&key, &start); err != nil {
+			t.Fatal(err)
+		}
+		if key != "com.apple.security.temporary-exception.sbpl" {
+			continue
+		}
+		var value struct {
+			XMLName xml.Name `xml:"array"`
+			Rules   []string `xml:"string"`
+		}
+		if err := decoder.Decode(&value); err != nil {
+			t.Fatal(err)
+		}
+		rules = append(rules, value.Rules...)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("provider must contain one narrow daemon read rule, got %d", len(rules))
+	}
+	parts := regexp.MustCompile(`^\(allow file-read\* \(regex #"([^"]+)"\)\)$`).FindStringSubmatch(rules[0])
+	if len(parts) != 2 {
+		t.Fatalf("daemon exception must grant only file-read* for one regex: %q", rules[0])
+	}
+	scope, err := regexp.Compile(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		path string
+		want bool
+	}{
+		{"/Users/alice/.codex/packages/app-server-daemon/releases/0.160.1-aarch64-apple-darwin/bin/codex", true},
+		{"/Users/bob/.codex/packages/app-server-daemon/releases/0.166.0-x86_64-apple-darwin/bin/codex", true},
+		{"/Users/alice/.codex/packages/app-server-daemon/releases/v/bin/./codex", true},
+		{"/Users/alice/.codex/auth.json", false},
+		{"/Users/alice/.codex/packages/app-server-daemon/auth.json", false},
+		{"/Users/alice/.codex/packages/app-server-daemon/releases/v/bin/auth.json", false},
+		{"/Users/alice/.codex/packages/app-server-daemon/releases/v/bin/codex.sig", false},
+		{"/Users/alice/.codex/packages/app-server-daemon/releases/v/bin/codex/child", false},
+		{"/Users/alice/.codex/packages/app-server-daemon/releases/v/codex", false},
+		{"/Users/alice/.codex/packages/app-server-daemon/releases/v/nested/bin/codex", false},
+		{"/Users/alice/.codex/packages/app-server-daemon/releases-other/v/bin/codex", false},
+		{"/Users/alice/.codex/packages/other/releases/v/bin/codex", false},
+		{"/Users/alice/custom-codex/packages/app-server-daemon/releases/v/bin/codex", false},
+		{"/Volumes/Homes/alice/.codex/packages/app-server-daemon/releases/v/bin/codex", false},
+		{"/var/root/.codex/packages/app-server-daemon/releases/v/bin/codex", false},
+		{"/Users/nested/alice/.codex/packages/app-server-daemon/releases/v/bin/codex", false},
+		{"/prefix/Users/alice/.codex/packages/app-server-daemon/releases/v/bin/codex", false},
+		{"/Users/alice/.codex/packages/app-server-daemon/releases/v/bin/codex\n", false},
+		{"/Users/alice/.codex/packages/app-server-daemon/releases/../bin/codex", false},
+		{"/Users/alice/.codex/packages/app-server-daemon/releases/./bin/codex", false},
+		{"/Users/alice/.codex/packages/app-server-daemon/releases/v/bin/codex/../auth.json", false},
+		{"/Users/../.codex/packages/app-server-daemon/releases/v/bin/codex", false},
+	} {
+		t.Run(test.path, func(t *testing.T) {
+			// Sandbox path filters see canonical paths, not unresolved traversal.
+			if got := scope.MatchString(path.Clean(test.path)); got != test.want {
+				t.Fatalf("daemon read scope matched %q = %t, want %t", test.path, got, test.want)
+			}
+		})
+	}
 }
 
 func TestNativeManifestPinAndClosedSchema(t *testing.T) {

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import XCTest
 @testable import CQNetwork
@@ -24,6 +25,34 @@ final class SourceVerifierTests: XCTestCase {
         for token in [nil, Data([1]), Data(repeating: 0, count: 32)] as [Data?] {
             XCTAssertEqual(verifier.verify(auditToken: token, signingIdentifierHint: "codex"), .verificationFailed)
         }
+    }
+
+    func testSourceProcessRejectsMissingTruncatedAndOversizedTokens() {
+        for token in [nil, Data(), Data(repeating: 0, count: 31), Data(repeating: 0, count: 33),
+                      Data(repeating: 0, count: 64)] as [Data?] {
+            XCTAssertNil(SourceVerifier.sourceProcess(auditToken: token))
+            XCTAssertEqual(SourceVerifier(applicationURL: application).verify(auditToken: token,
+                                                                             signingIdentifierHint: "codex"), .verificationFailed)
+        }
+    }
+
+    func testSourceProcessCopiesUnalignedDarwinTokenAndPreservesPIDVersion() {
+        var token = audit_token_t(val: (101, 202, 303, 404, 505, 12_345, 707, UInt32.max))
+        let size = MemoryLayout<audit_token_t>.size
+        let storage = UnsafeMutableRawPointer.allocate(byteCount: size + 1, alignment: MemoryLayout<audit_token_t>.alignment)
+        defer { storage.deallocate() }
+        let unaligned = storage.advanced(by: 1)
+        withUnsafeBytes(of: &token) { unaligned.copyMemory(from: $0.baseAddress!, byteCount: size) }
+        let data = Data(bytesNoCopy: unaligned, count: size, deallocator: .none)
+        let first = SourceVerifier.sourceProcess(auditToken: data)
+        XCTAssertEqual(first?.pid, 12_345)
+        XCTAssertEqual(first?.version, UInt32.max)
+
+        token.val.7 = 17
+        let next = withUnsafeBytes(of: &token) { SourceVerifier.sourceProcess(auditToken: Data($0)) }
+        XCTAssertEqual(next?.pid, first?.pid)
+        XCTAssertEqual(next?.version, 17)
+        XCTAssertNotEqual(next?.version, first?.version)
     }
 
     func testApplicationHelpersOutsideBundleRemainRejected() {
