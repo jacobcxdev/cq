@@ -58,6 +58,11 @@ Go draft release before local installed-traffic qualification.
 
 After that qualification passes, publish the native prerelease without changing
 its asset. The final package-publication gate rejects a draft native asset.
+For standalone Codex, qualify a normal `codex` launch without configuration
+overrides as well as the Homebrew executable. The CLI can select a managed
+app-server copy; `codex app-server daemon version` reports its executable path.
+A successful stdio `app-server` probe from Homebrew does not qualify that copied
+daemon. Keep routing enabled and verify that the normal launch reaches Ready.
 Then the release workflow publishes the generated `cq-network.rb` before `cq.rb`.
 An unchanged pin produces unchanged companion Cask bytes on later Go releases.
 Fresh macOS packaging CI installs the verified companion dependency, then runs

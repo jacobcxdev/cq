@@ -63,6 +63,11 @@ swift test --package-path native/macos-network --sanitize thread
 Building this package does not prove an installed Network Extension works.
 Deployment also needs the native transport, signed host and extension bundles,
 appropriate provisioning, macOS approval and live TCP/UDP routing qualification.
+For standalone Codex, qualify a normal `codex` launch without configuration
+overrides as well as the Homebrew executable. The CLI can select a managed
+app-server copy; `codex app-server daemon version` reports its executable path.
+A successful stdio `app-server` probe from Homebrew does not qualify that copied
+daemon. Keep routing enabled and verify that the normal launch reaches Ready.
 Transparent proxies retain macOS system DNS behaviour; this library does not
 claim app-only DNS isolation.
 
