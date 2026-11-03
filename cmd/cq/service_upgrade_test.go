@@ -399,6 +399,130 @@ func TestPendingUpgradeWaitsForRecoveredProxyReadiness(t *testing.T) {
 	}
 }
 
+func TestCommittedRefreshYieldsToForegroundInstaller(t *testing.T) {
+	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "foreground", Generation: 1, Phase: "committed", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
+	lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+	lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+	platform.live, platform.refresh = candidate.Path, candidate.Path
+	lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+		t.Fatal("foreground-owned commit submitted another handoff")
+		return receipt, nil
+	}
+	lock, err := lifecycle.MutationLocker.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	lifecycle.Wait = func(context.Context, time.Duration) error {
+		return errors.New("foreground installer is waiting for refresh exit")
+	}
+	if err := lifecycle.reconcilePendingUpgrade(context.Background(), candidate, nil); err != nil {
+		t.Fatalf("committed refresh waited for installer that needs its successful exit: %v", err)
+	}
+	record, err := store.Load()
+	if err != nil || record.BinaryDigest != previous.SHA256 {
+		t.Fatalf("refresh stole foreground ownership reconciliation: %+v %v", record, err)
+	}
+}
+
+type foregroundUpgradeRefreshPlatform struct {
+	*retainedServicePlatform
+	refreshEntry func() error
+}
+
+func (platform foregroundUpgradeRefreshPlatform) InstallRefresh(ctx context.Context, path string) error {
+	if err := platform.retainedServicePlatform.InstallRefresh(ctx, path); err != nil {
+		return err
+	}
+	return platform.refreshEntry()
+}
+
+func TestHomebrewQuietUpgradeRefreshCompletesBeforeOwnershipSave(t *testing.T) {
+	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+	lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+	var receipt proxy.RuntimeUpgradeReceiptV1
+	lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+	apply := lifecycle.RuntimeApply
+	lifecycle.RuntimeApply = func(ctx context.Context, artifact installer.RuntimeArtifact, wait time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+		var err error
+		receipt, err = apply(ctx, artifact, wait)
+		return receipt, err
+	}
+	refreshExited := false
+	lifecycle.Platform = foregroundUpgradeRefreshPlatform{retainedServicePlatform: platform, refreshEntry: func() error {
+		record, err := store.Load()
+		if err != nil || record.BinaryDigest != previous.SHA256 || receipt.Phase != "committed" {
+			t.Fatalf("refresh fixture missed foreground commit window: %+v %+v %v", receipt, record, err)
+		}
+		refresh := *lifecycle
+		refresh.Wait = func(context.Context, time.Duration) error {
+			return errors.New("refresh deadlocked on foreground installer lock")
+		}
+		if err := refresh.reconcilePendingUpgrade(context.Background(), candidate, nil); err != nil {
+			return err
+		}
+		refreshExited = true
+		return nil
+	}}
+	if err := runServiceWithLifecycle([]string{"upgrade", "--owner=homebrew", "--candidate-executable=" + candidate.Path}, lifecycle, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Load()
+	if err != nil || !refreshExited || record.BinaryDigest != candidate.SHA256 || platform.live != candidate.Path {
+		t.Fatalf("quiet foreground upgrade did not settle: exited=%t record=%+v err=%v", refreshExited, record, err)
+	}
+}
+
+func TestCommittedRefreshReconcilesAbandonedOwnership(t *testing.T) {
+	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "abandoned", Generation: 1, Phase: "committed", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
+	lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+	lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+	platform.live, platform.refresh = candidate.Path, candidate.Path
+	lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+		t.Fatal("abandoned committed ownership submitted another handoff")
+		return receipt, nil
+	}
+	if err := lifecycle.reconcilePendingUpgrade(context.Background(), candidate, nil); err != nil {
+		t.Fatal(err)
+	}
+	record, err := store.Load()
+	if err != nil || record.BinaryDigest != candidate.SHA256 {
+		t.Fatalf("abandoned committed ownership was not reconciled: %+v %v", record, err)
+	}
+}
+
+func TestDeferredRefreshKeepsTryingAfterInstallerLockRelease(t *testing.T) {
+	lifecycle, platform, _, previous, candidate := homebrewUpgradeServiceFixture(t)
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "deferred", Generation: 1, Phase: "deferred", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41, ErrorCode: "quiet_deadline"}
+	lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+	lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+	platform.refresh = candidate.Path
+	lock, err := lifecycle.MutationLocker.Acquire()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	waits := 0
+	lifecycle.Wait = func(context.Context, time.Duration) error {
+		waits++
+		if waits != 1 {
+			t.Fatal("deferred retry did not resume after installer released lock")
+		}
+		if platform.live != previous.Path {
+			t.Fatal("held installer lock admitted a handoff")
+		}
+		return lock.Close()
+	}
+	if err := lifecycle.reconcilePendingUpgrade(context.Background(), candidate, nil); err != nil {
+		t.Fatal(err)
+	}
+	if waits != 1 || platform.live != candidate.Path {
+		t.Fatalf("deferred refresh stopped when installer held lock: waits=%d live=%s", waits, platform.live)
+	}
+}
+
 func TestServiceUpgradeAcceptsBoundedWaitTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		flags []string

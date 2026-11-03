@@ -37,6 +37,10 @@ func (lifecycle *serviceLifecycle) reconcilePendingUpgrade(ctx context.Context, 
 	if wait == nil {
 		wait = waitForServicePoll
 	}
+	digest := lifecycle.DigestExecutable
+	if digest == nil {
+		digest = installstate.DigestFile
+	}
 	nextRefresh := time.Now().Add(30 * time.Minute)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -45,6 +49,22 @@ func (lifecycle *serviceLifecycle) reconcilePendingUpgrade(ctx context.Context, 
 		done, err := func() (done bool, returnErr error) {
 			lock, err := lifecycle.MutationLocker.Acquire()
 			if errors.Is(err, installer.ErrInstallationInProgress) {
+				// A quiet foreground upgrade starts this refresh after runtime
+				// commit, then waits for its successful exit before ownership is
+				// saved. Do not wait for that same installer's lock in this phase.
+				retained, receiptErr := lifecycle.RuntimeReceipt()
+				if receiptErr == nil && retained.Validate() == nil && retained.Phase == "committed" && retained.Candidate == candidate {
+					record, stateErr := lifecycle.Store.Load()
+					if stateErr == nil && record.Owner == installstate.OwnerHomebrew && record.Executable == lifecycle.Executable && (record.BinaryDigest == retained.Previous.SHA256 || record.BinaryDigest == candidate.SHA256) {
+						installed, digestErr := digest(record.Executable)
+						if digestErr == nil && installed == candidate.SHA256 {
+							if verifyErr := lifecycle.RuntimeArtifacts.Verify(ctx, candidate); verifyErr != nil {
+								return true, verifyErr
+							}
+							return true, nil
+						}
+					}
+				}
 				return false, nil
 			}
 			if err != nil {
@@ -73,10 +93,6 @@ func (lifecycle *serviceLifecycle) reconcilePendingUpgrade(ctx context.Context, 
 			}
 			if receipt.Candidate != candidate {
 				return true, nil // A later installation superseded this invocation.
-			}
-			digest := lifecycle.DigestExecutable
-			if digest == nil {
-				digest = installstate.DigestFile
 			}
 			installed, err := digest(record.Executable)
 			if err != nil {
