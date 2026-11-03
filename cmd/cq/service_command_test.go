@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/installer"
@@ -187,6 +188,58 @@ func TestRunServiceMutationsShareInstallerLock(t *testing.T) {
 	}
 	if len(platform.calls) != 0 {
 		t.Fatalf("unverified installer lock marker mutated platform: %v", platform.calls)
+	}
+}
+
+type serviceCommandErrorLocker struct {
+	err      error
+	attempts int
+}
+
+func (locker *serviceCommandErrorLocker) Acquire() (installer.InstallLock, error) {
+	locker.attempts++
+	return nil, locker.err
+}
+
+func TestHomebrewInstallLockWaitIsBoundedAndSelective(t *testing.T) {
+	for _, scenario := range []string{"persistent contention", "permission error", "other owner", "no retained runtimes", "other action"} {
+		t.Run(scenario, func(t *testing.T) {
+			lifecycle, platform, _ := newServiceHarness(t)
+			locker := &serviceCommandErrorLocker{err: installer.ErrInstallationInProgress}
+			lifecycle.MutationLocker = locker
+			lifecycle.RuntimeArtifacts = serviceUpgradeArtifacts{}
+			args := []string{"install", "--owner=homebrew"}
+			switch scenario {
+			case "permission error":
+				locker.err = os.ErrPermission
+			case "other owner":
+				args = []string{"install", "--owner=go"}
+			case "no retained runtimes":
+				lifecycle.RuntimeArtifacts = nil
+			case "other action":
+				args = []string{"uninstall", "--owner=homebrew"}
+			}
+			waits := 0
+			lifecycle.Wait = func(ctx context.Context, interval time.Duration) error {
+				waits++
+				deadline, bounded := ctx.Deadline()
+				if !bounded || time.Until(deadline) > 30*time.Second || time.Until(deadline) <= 0 || interval != 100*time.Millisecond {
+					t.Fatalf("unexpected lock wait bound: deadline=%v interval=%s", deadline, interval)
+				}
+				return context.DeadlineExceeded
+			}
+			err := runServiceWithLifecycle(args, lifecycle, io.Discard)
+			wantWaits := 0
+			if scenario == "persistent contention" {
+				wantWaits = 1
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("persistent contention lacked deadline: %v", err)
+				}
+			}
+			if !errors.Is(err, locker.err) || waits != wantWaits || locker.attempts != 1 || len(platform.calls) != 0 {
+				t.Fatalf("lock failure changed semantics: waits=%d attempts=%d calls=%v err=%v", waits, locker.attempts, platform.calls, err)
+			}
+		})
 	}
 }
 

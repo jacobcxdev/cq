@@ -9,6 +9,8 @@ import (
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -520,6 +522,69 @@ func TestDeferredRefreshKeepsTryingAfterInstallerLockRelease(t *testing.T) {
 	}
 	if waits != 1 || platform.live != candidate.Path {
 		t.Fatalf("deferred refresh stopped when installer held lock: waits=%d live=%s", waits, platform.live)
+	}
+}
+
+func TestHomebrewInstallWaitsForOlderPendingRetry(t *testing.T) {
+	lifecycle, platform, store, previous, pending := homebrewUpgradeServiceFixture(t)
+	newer := installer.RuntimeArtifact{Path: filepath.Join(t.TempDir(), "retained-newer", "cq"), SHA256: strings.Repeat("c", 64), Version: "0.34.2", ProtocolVersion: 1}
+	artifacts := lifecycle.RuntimeArtifacts.(serviceUpgradeArtifacts)
+	artifacts[lifecycle.Executable], artifacts[newer.Path] = newer, newer
+	var installed atomic.Value
+	installed.Store(pending.SHA256)
+	lifecycle.DigestExecutable = func(string) (string, error) { return installed.Load().(string), nil }
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "older-pending", Generation: 1, Phase: "deferred", Previous: previous, Candidate: pending, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41, ErrorCode: "quiet_deadline"}
+	lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+	platform.refresh = pending.Path
+	background := *lifecycle
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	background.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+		close(entered) // The real shared installer lock and digest guard passed.
+		<-release
+		return receipt, nil
+	}
+	background.Wait = func(context.Context, time.Duration) error { return nil }
+	backgroundDone := make(chan error, 1)
+	go func() { backgroundDone <- background.reconcilePendingUpgrade(context.Background(), pending, nil) }()
+	drained := false
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		if !drained {
+			select {
+			case <-backgroundDone:
+			case <-time.After(time.Second):
+				t.Error("pending retry did not stop")
+			}
+		}
+	})
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("pending retry did not acquire lock")
+	}
+	installed.Store(newer.SHA256) // Homebrew publishes its newer package link.
+	waits := 0
+	lifecycle.Wait = func(ctx context.Context, interval time.Duration) error {
+		waits++
+		if waits != 1 || interval != 100*time.Millisecond {
+			t.Fatalf("foreground lock polling: waits=%d interval=%s", waits, interval)
+		}
+		releaseOnce.Do(func() { close(release) })
+		select {
+		case err := <-backgroundDone:
+			drained = true
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if err := runServiceWithLifecycle([]string{"install", "--owner=homebrew"}, lifecycle, io.Discard); err != nil {
+		t.Fatalf("newer package was rejected by older pending retry: %v", err)
+	}
+	record, err := store.Load()
+	if err != nil || waits != 1 || record.BinaryDigest != newer.SHA256 || platform.live != newer.Path {
+		t.Fatalf("newer package did not supersede pending runtime: waits=%d record=%+v err=%v", waits, record, err)
 	}
 }
 

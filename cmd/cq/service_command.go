@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/installer"
 	"github.com/jacobcxdev/cq/internal/installstate"
 )
 
@@ -77,6 +78,25 @@ func runServiceWithLifecycleInput(args []string, lifecycle *serviceLifecycle, ou
 	}
 	if command.Action != "status" && !command.InstallerLockHeld {
 		lock, err := lifecycle.MutationLocker.Acquire()
+		if command.Action == "install" && command.Owner == installstate.OwnerHomebrew && lifecycle.RuntimeArtifacts != nil && errors.Is(err, installer.ErrInstallationInProgress) {
+			// A previous candidate's bounded activation may hold this lock.
+			// Let it release before the newer package supersedes that candidate.
+			lockWait, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			wait := lifecycle.Wait
+			if wait == nil {
+				wait = waitForServicePoll
+			}
+			for errors.Is(err, installer.ErrInstallationInProgress) {
+				if waitErr := wait(lockWait, 100*time.Millisecond); waitErr != nil {
+					return errors.Join(err, waitErr)
+				}
+				if lockWait.Err() != nil {
+					return errors.Join(err, lockWait.Err())
+				}
+				lock, err = lifecycle.MutationLocker.Acquire()
+			}
+		}
 		if err != nil {
 			return err
 		}
