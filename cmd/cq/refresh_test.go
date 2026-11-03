@@ -61,6 +61,32 @@ func TestRunRefreshResolvesCQRootsBeforeCredentialDiscovery(t *testing.T) {
 	}
 }
 
+func TestRunRefreshReconcilesPendingRuntimeAfterCredentialFailure(t *testing.T) {
+	originalDiscover, originalCodex := discoverClaudeAccountsFn, refreshCodexAccountsFn
+	originalReconcile := reconcileRefreshRuntimeFn
+	t.Cleanup(func() {
+		discoverClaudeAccountsFn, refreshCodexAccountsFn = originalDiscover, originalCodex
+		reconcileRefreshRuntimeFn = originalReconcile
+	})
+	discoverClaudeAccountsFn = func() []keyring.ClaudeOAuth { return nil }
+	passes := 0
+	refreshCodexAccountsFn = func(context.Context, httputil.Doer, int64) (bool, error) {
+		passes++
+		return false, codexprov.ErrCredentialAuthorityUnavailable
+	}
+	reconciled := false
+	reconcileRefreshRuntimeFn = func(_ context.Context, refresh func() error) error {
+		reconciled = true
+		if passes != 1 {
+			t.Fatal("pending upgrade prevented the initial credential refresh")
+		}
+		return refresh()
+	}
+	if err := runRefresh(); !errors.Is(err, codexprov.ErrCredentialAuthorityUnavailable) || !reconciled || passes != 2 {
+		t.Fatalf("credential failure stopped pending reconciliation: passes=%d reconciled=%t err=%v", passes, reconciled, err)
+	}
+}
+
 func fakeRefreshCodexJWT(email, accountID, userID string, exp time.Time) string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256"}`))
 	payload := map[string]any{

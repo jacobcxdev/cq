@@ -24,6 +24,69 @@ import (
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
+func TestDarwinRetainedRefreshEntryAcceptsInstalledCopy(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "package-cq")
+	if output, err := exec.Command("go", "build", "-o", source, "-ldflags", "-X main.version=0.34.1", ".").CombinedOutput(); err != nil {
+		t.Fatalf("build retained refresh fixture: %v %s", err, output)
+	}
+	roots := userdirs.Roots{Config: filepath.Join(root, ".config", "cq"), State: filepath.Join(root, ".config", "cq", "state")}
+	artifacts := installer.RuntimeArtifactStore{FS: fsutil.OSFileSystem{}, Roots: roots}
+	candidate, err := artifacts.Stage(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packageInfo, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainedInfo, err := os.Stat(candidate.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(packageInfo, retainedInfo) {
+		t.Fatal("fixture did not retain an independent executable copy")
+	}
+	ownership := installstate.Store{FS: fsutil.OSFileSystem{}, Roots: roots}
+	if err := ownership.Save(installstate.Record{SchemaVersion: 1, Owner: installstate.OwnerHomebrew, Version: candidate.Version, Executable: source, BinaryDigest: candidate.SHA256, Services: []string{proxyAgentLabel, agentLabel}}); err != nil {
+		t.Fatal(err)
+	}
+	receipts := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: roots}
+	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "refresh-entry", Generation: 1, Previous: candidate, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
+	for _, phase := range []string{"prepared", "waiting", "handoff", "verifying", "committed"} {
+		receipt.Phase = phase
+		if err := receipts.Save(receipt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bin := filepath.Join(root, "bin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Empty fixture Keychain; the child cannot access the user's credentials.
+	if err := os.WriteFile(filepath.Join(bin, "security"), []byte("#!/bin/sh\nexit 44\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	env := append(os.Environ(), "HOME="+root, "XDG_CONFIG_HOME="+filepath.Join(root, ".config"), "XDG_CACHE_HOME="+filepath.Join(root, ".cache"), "CODEX_HOME="+filepath.Join(root, ".codex"), "CLAUDE_CONFIG_DIR="+filepath.Join(root, ".claude"), "PATH="+bin)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	strict := exec.CommandContext(ctx, candidate.Path, "service", "install", "--owner=homebrew", "--service-executable="+source)
+	strict.Env = env
+	if output, err := strict.CombinedOutput(); err == nil || !strings.Contains(string(output), "stable executable differs from current process") {
+		t.Fatalf("service CLI no longer enforces inode identity: %v %s", err, output)
+	}
+	command := exec.CommandContext(ctx, candidate.Path, "refresh")
+	command.Env = env
+	if output, err := command.CombinedOutput(); err == nil || strings.TrimSpace(string(output)) != "cq: credential authority unavailable" {
+		// The isolated fixture has no credential broker. That existing error
+		// remains truthful; reconciliation must add no inode-identity failure.
+		t.Fatalf("actual retained refresh entry rejected installed package copy: %v %s", err, output)
+	}
+}
+
 func TestDarwinRuntimeStageUsesStablePackageLink(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "package-cq")

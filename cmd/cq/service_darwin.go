@@ -55,6 +55,17 @@ func init() {
 }
 
 func defaultDarwinServiceLifecycle(stableExecutable string) (*serviceLifecycle, error) {
+	executable, err := resolveServiceExecutable(stableExecutable)
+	if err != nil {
+		return nil, fmt.Errorf("resolve executable: %w", err)
+	}
+	return darwinServiceLifecycleForExecutable(executable)
+}
+
+// Callers must establish executable identity before constructing an adapter.
+// Ordinary CLI hooks use resolveServiceExecutable; the retained refresh entry
+// verifies the receipt candidate and installed package digest independently.
+func darwinServiceLifecycleForExecutable(executable string) (*serviceLifecycle, error) {
 	roots, err := userdirs.Default()
 	if err != nil {
 		return nil, err
@@ -63,15 +74,9 @@ func defaultDarwinServiceLifecycle(stableExecutable string) (*serviceLifecycle, 
 	if err != nil {
 		return nil, fmt.Errorf("resolve home directory: %w", err)
 	}
-	executable, err := resolveServiceExecutable(stableExecutable)
-	if err != nil {
-		return nil, fmt.Errorf("resolve executable: %w", err)
+	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
+		return nil, fmt.Errorf("service executable must be a clean absolute path")
 	}
-	executable, err = filepath.Abs(executable)
-	if err != nil {
-		return nil, fmt.Errorf("resolve absolute executable: %w", err)
-	}
-	executable = filepath.Clean(executable)
 	platform := &darwinServicePlatform{
 		home:       home,
 		roots:      roots,
