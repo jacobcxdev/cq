@@ -293,7 +293,10 @@ func (lifecycle *serviceLifecycle) upgradeWithWaitTimeout(ctx context.Context, o
 					// A newly bootstrapped retry has not exited yet. Its successful
 					// bootstrap and exact definition establish the pending job;
 					// requiring a prior successful exit would reject its first run.
-					if err == nil && (!lifecycle.proxyHealthy(pending) || !pending.Refresh.Registered || !sameServiceExecutable(pending.Refresh.ConfiguredExecutable, candidate.Path)) {
+					// The executing retry must also survive a transient proxy
+					// recovery observation after the handoff was deferred.
+					proxyRecovering := lifecycle.refreshExecuting && pending.Proxy.Registered && (!pending.Proxy.Running || !pending.Proxy.Healthy)
+					if err == nil && ((!lifecycle.proxyHealthy(pending) && !proxyRecovering) || !pending.Refresh.Registered || !sameServiceExecutable(pending.Refresh.ConfiguredExecutable, candidate.Path)) {
 						err = ErrServiceUnhealthy
 					}
 				}
