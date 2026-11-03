@@ -31,8 +31,7 @@ const codexFallbackTruncationBytesLimit = 10000
 // CodexModelsResponse builds the models response payload from the snapshot.
 // Codex and Z.ai Responses entries are included.
 //
-// For native entries with raw JSON in CodexRawByID, the raw bytes are used
-// verbatim (round-trip guarantee).
+// Native fields are preserved, with a model-specific compaction cap for GLM-5.3.
 //
 // For overlay/non-native entries:
 //   - If CloneFrom refers to a native entry with raw JSON, the raw bytes are
@@ -99,7 +98,7 @@ func AugmentCodexModels(body []byte, snap Snapshot) ([]byte, error) {
 // codexEntryRaw returns the JSON bytes for a single Codex entry.
 func codexEntryRaw(e Entry, rawByID map[string]json.RawMessage) json.RawMessage {
 	if e.Provider == ProviderZAI && len(e.Raw) > 0 {
-		return e.Raw
+		return zaiCodexEntryRaw(e)
 	}
 	// Native entry: use the stored raw JSON verbatim.
 	if e.Source == SourceNative {
