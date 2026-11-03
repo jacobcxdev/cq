@@ -401,6 +401,91 @@ func TestPendingUpgradeWaitsForRecoveredProxyReadiness(t *testing.T) {
 	}
 }
 
+func TestPendingUpgradeKeepsExecutingRefreshAfterDeferredHealthRace(t *testing.T) {
+	for _, scenario := range []string{"proxy recovering", "proxy missing", "proxy changed", "refresh missing", "refresh changed", "foreground proxy recovering"} {
+		t.Run(scenario, func(t *testing.T) {
+			lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "deferred-health-race", Generation: 1, Phase: "deferred", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41, ErrorCode: "quiet_deadline"}
+			lifecycle.RuntimeReceipt = func() (proxy.RuntimeUpgradeReceiptV1, error) { return receipt, nil }
+			lifecycle.DigestExecutable = func(string) (string, error) { return candidate.SHA256, nil }
+			lifecycle.RuntimeExecutable = previous.Path
+			platform.refresh = candidate.Path
+			platform.refreshHealthy = scenario == "foreground proxy recovering" // An executing retry has not exited yet.
+			apply := lifecycle.RuntimeApply
+			attempts, waits, restores := 0, 0, 0
+			lifecycle.RuntimeApply = func(ctx context.Context, artifact installer.RuntimeArtifact, timeout time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+				attempts++
+				if attempts == 1 {
+					// Readiness passed before submission; the post-deferral
+					// observation is the first to see this state change.
+					switch scenario {
+					case "proxy recovering", "foreground proxy recovering":
+						platform.proxyRunning, platform.proxyHealthy = false, false
+					case "proxy missing":
+						platform.proxyRegistered = false
+					case "proxy changed":
+						platform.live = candidate.Path
+					case "refresh missing":
+						platform.refreshRegistered = false
+					case "refresh changed":
+						platform.refresh = previous.Path
+					}
+					return receipt, nil
+				}
+				var err error
+				receipt, err = apply(ctx, artifact, timeout)
+				return receipt, err
+			}
+			restore := lifecycle.RuntimeRestoreRefresh
+			lifecycle.RuntimeRestoreRefresh = func(ctx context.Context, snapshot servicePlatformSnapshot) error {
+				restores++
+				return restore(ctx, snapshot)
+			}
+			lifecycle.Wait = func(context.Context, time.Duration) error {
+				waits++
+				if waits > 1 {
+					t.Fatal("recovered proxy remained pending")
+				}
+				if restores != 0 || !platform.refreshRegistered || platform.refresh != candidate.Path {
+					t.Fatalf("retry removed its executing candidate refresh: restores=%d refresh=%s calls=%v", restores, platform.refresh, platform.calls)
+				}
+				record, err := store.Load()
+				if err != nil || record.BinaryDigest != previous.SHA256 {
+					t.Fatalf("deferred retry changed predecessor ownership: %+v %v", record, err)
+				}
+				lock, err := lifecycle.MutationLocker.Acquire()
+				if err != nil {
+					t.Fatalf("pending retry held installer lock during recovery: %v", err)
+				}
+				if err := lock.Close(); err != nil {
+					t.Fatal(err)
+				}
+				platform.proxyRunning, platform.proxyHealthy = true, true
+				return nil
+			}
+			var err error
+			if scenario == "foreground proxy recovering" {
+				_, err = lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, candidate.Path)
+			} else {
+				err = lifecycle.reconcilePendingUpgrade(context.Background(), candidate, nil)
+			}
+			if scenario != "proxy recovering" {
+				if !errors.Is(err, ErrServiceUnhealthy) || attempts != 1 || waits != 0 || restores != 1 {
+					t.Fatalf("invalid service job was accepted: attempts=%d waits=%d restores=%d err=%v", attempts, waits, restores, err)
+				}
+				return
+			}
+			if err != nil || attempts != 2 || waits != 1 || restores != 0 || platform.live != candidate.Path || platform.refresh != candidate.Path {
+				t.Fatalf("transient post-deferral readiness removed the executing refresh instead of retrying: attempts=%d waits=%d restores=%d live=%s refresh=%s err=%v calls=%v", attempts, waits, restores, platform.live, platform.refresh, err, platform.calls)
+			}
+			record, err := store.Load()
+			if err != nil || record.BinaryDigest != candidate.SHA256 {
+				t.Fatalf("recovered candidate ownership was not committed: %+v %v", record, err)
+			}
+		})
+	}
+}
+
 func TestCommittedRefreshYieldsToForegroundInstaller(t *testing.T) {
 	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
 	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "foreground", Generation: 1, Phase: "committed", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:12345", SupervisorPID: 41}
