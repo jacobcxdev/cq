@@ -14,7 +14,8 @@ gh pr list --repo microsoft/winget-pkgs --state open --author jacobcxdev \
   jq '[.[] | select(.author.login == "jacobcxdev" and .headRepositoryOwner.login == "jacobcxdev")
     | select((.headRefName // "") | test("^cq-[0-9]+\\.[0-9]+\\.[0-9]+$"))
     | . + {version:(.headRefName | ltrimstr("cq-"))}
-    | select(.title == ("New version: jacobcxdev.cq version " + .version))]' >"$pending"
+    | select(.title == ("New version: jacobcxdev.cq version " + .version)
+        or .title == ("Update: jacobcxdev.cq to " + .version))]' >"$pending"
 
 if ! jq -e --arg version "$version" 'any(.[]; .version == $version)' "$pending" >/dev/null &&
    ! gh api "repos/microsoft/winget-pkgs/contents/manifests/j/jacobcxdev/cq/$version" >/dev/null 2>&1; then
