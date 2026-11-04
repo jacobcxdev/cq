@@ -13,6 +13,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
@@ -46,9 +47,16 @@ func defaultZAIPrimeDependencies() zaiPrimeDependencies {
 			if err != nil {
 				return nil, errors.New("load Z.ai priming model catalogue")
 			}
-			return proxy.NewZAIPrimer(fsys, roots.State, zaiHTTPClient(30*time.Second), func() ([]zaiprov.Account, error) {
+			client := zaiHTTPClient(30 * time.Second)
+			primer, err := proxy.NewZAIPrimer(fsys, roots.State, client, func() ([]zaiprov.Account, error) {
 				return zaiprov.ReadAccounts(fsys, os.Getenv, roots.Config)
 			}, func() []modelregistry.Entry { return models })
+			if err != nil {
+				return nil, err
+			}
+			primer.ProjectTokens = &zcode.ProjectTokenClient{HTTP: client, Version: zcodeClientVersion}
+			primer.Gateway = &zcode.Gateway{HTTP: client, Signer: &zcode.Signer{HTTP: client, Version: zcodeClientVersion}, Version: zcodeClientVersion, Catalogue: &zcode.ModelCatalogue{HTTP: client, Version: zcodeClientVersion}}
+			return primer, nil
 		},
 	}
 }

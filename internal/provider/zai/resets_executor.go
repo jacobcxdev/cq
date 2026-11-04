@@ -2,12 +2,8 @@ package zai
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -65,24 +61,26 @@ func (e ResetExecutor) use(ctx context.Context, account Account, window, creditI
 	if e.FS == nil || e.StateDir == "" || e.Now == nil || e.RequestID == nil || confirm == nil || account.ID == "" {
 		return result, errors.New("Z.ai reset executor unavailable")
 	}
-	digest := sha256.Sum256([]byte(account.ID))
-	path := filepath.Join(e.StateDir, hex.EncodeToString(digest[:])+".json")
+	path := resetAttemptPath(e.StateDir, account.ID)
 	if err := fsutil.EnsureSecureDirectory(e.FS, e.StateDir); err != nil {
 		return result, errors.New("prepare Z.ai reset attempt directory")
 	}
-	lock, err := fsutil.AcquireExclusiveLock(e.FS, path+".lock")
+	lock, err := fsutil.AcquireExclusiveLock(e.FS, ResetAccountLockPath(e.StateDir, account.ID))
 	if err != nil {
 		return result, errors.New("Z.ai reset account is busy or attempt storage unavailable")
 	}
 	defer lock.Close()
-	var attempt resetAttempt
-	data, err := e.FS.ReadFile(path)
-	if err == nil {
-		if len(data) > 16<<10 || json.Unmarshal(data, &attempt) != nil || attempt.AccountID != account.ID || attempt.CreditID == "" || attempt.RequestID == "" || attempt.StartedAt.IsZero() || attempt.Window != "5h" && attempt.Window != "7d" || attempt.State != "pending" && attempt.State != "completed" && attempt.State != "rejected" && attempt.State != "unavailable" {
-			return result, errors.New("invalid Z.ai reset attempt record")
+	if err := checkZCodeResetUsePending(e.FS, e.StateDir, account.ID); err != nil {
+		if errors.Is(err, ErrResetPending) {
+			// An unresolved request through the other contract may have consumed a
+			// card. Scheduled callers must retain that uncertainty without retrying.
+			result.Dispatched = true
 		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return result, errors.New("read Z.ai reset attempt record")
+		return result, err
+	}
+	attempt, err := readResetAttempt(e.FS, path, account.ID)
+	if err != nil {
+		return result, err
 	}
 	if attempt.State == "pending" {
 		// A prior dispatch remains unresolved even when this call fails before a new POST.
@@ -95,7 +93,7 @@ func (e ResetExecutor) use(ctx context.Context, account Account, window, creditI
 		result.CreditID, result.Accepted, result.AlreadyAccepted = attempt.CreditID, true, true
 		return result, nil
 	}
-	inventory, err := e.Client.List(ctx, account.APIKey, e.Now())
+	inventory, err := e.Client.ListAccount(ctx, &account, e.Now())
 	if err != nil {
 		return result, err
 	}
@@ -129,7 +127,7 @@ func (e ResetExecutor) use(ctx context.Context, account Account, window, creditI
 		return result, errors.New("Z.ai reset cancelled; no card consumed")
 	}
 	// A card may expire or be consumed elsewhere during manual confirmation.
-	inventory, err = e.Client.List(ctx, account.APIKey, e.Now())
+	inventory, err = e.Client.ListAccount(ctx, &account, e.Now())
 	if err != nil {
 		return result, err
 	}
@@ -150,7 +148,7 @@ func (e ResetExecutor) use(ctx context.Context, account Account, window, creditI
 		return result, err
 	}
 	result.Dispatched = true
-	if err := e.Client.Use(ctx, account.APIKey, credit, attempt.RequestID, e.Now()); err != nil {
+	if err := e.Client.UseAccount(ctx, &account, credit, attempt.RequestID, e.Now()); err != nil {
 		var resetErr *ResetError
 		if errors.As(err, &resetErr) && !resetErr.Ambiguous {
 			attempt.State = "rejected"

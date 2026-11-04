@@ -27,6 +27,7 @@ import (
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/quota"
 	"github.com/jacobcxdev/cq/internal/userdirs"
@@ -1166,12 +1167,18 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		}()
 		fmt.Fprintln(os.Stderr, "cq: Codex window priming enabled")
 	}
+	zcodeHTTP := zaiHTTPClient(0)
+	zcodeDevice, _ := zcodeDeviceMid()
+	zcodeTokens := &zcode.ProjectTokenClient{HTTP: zcodeHTTP, Version: zcodeClientVersion}
+	zcodeGateway := &zcode.Gateway{HTTP: zcodeHTTP, Signer: &zcode.Signer{HTTP: zcodeHTTP, Version: zcodeClientVersion}, Version: zcodeClientVersion, DeviceMid: zcodeDevice, Catalogue: &zcode.ModelCatalogue{HTTP: zcodeHTTP, Version: zcodeClientVersion}}
 	zaiPrimer, err := buildZAIPrimer(cfg, roots, fsys, zaiHTTPClient(30*time.Second), catalog)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cq: Z.ai window primer unavailable; automatic priming disabled")
 		zaiPrimer = nil
 	}
 	if zaiPrimer != nil {
+		zaiPrimer.Gateway = zcodeGateway
+		zaiPrimer.ProjectTokens = zcodeTokens
 		zaiPrimer.OnError = func(error) { fmt.Fprintln(os.Stderr, "cq: Z.ai window priming failed; inspect cq zai prime status") }
 		zaiPrimerDone := make(chan struct{})
 		go func() {
@@ -1367,6 +1374,8 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			return results
 		},
 		ZAIPrimer:         zaiPrimer,
+		ZAIGateway:        zcodeGateway,
+		ZAIProjectTokens:  zcodeTokens,
 		ZAIResetScheduler: zaiResetScheduler,
 		CodexHealth: func() proxy.CodexHealth {
 			return codexHealthTracker.Health(context.Background())

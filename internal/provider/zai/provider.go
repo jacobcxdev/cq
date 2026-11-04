@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -20,6 +21,7 @@ const accountID = "zai-coding-plan"
 type Provider struct {
 	client   httputil.Doer
 	accounts func() ([]Account, error)
+	tokens   *zcode.ProjectTokenClient
 }
 
 // New creates a quota provider with an injected HTTP client and credential reader.
@@ -35,7 +37,7 @@ func New(client httputil.Doer, apiKey func() (string, error)) *Provider {
 
 // NewAccounts creates a provider with an ordered subscription credential reader.
 func NewAccounts(client httputil.Doer, accounts func() ([]Account, error)) *Provider {
-	return &Provider{client: client, accounts: accounts}
+	return &Provider{client: client, accounts: accounts, tokens: &zcode.ProjectTokenClient{HTTP: client, Version: zcode.ClientVersion}}
 }
 
 // Fetch retrieves subscription quota without modifying credentials.
@@ -78,7 +80,21 @@ func (p *Provider) fetchAccount(ctx context.Context, account Account, active boo
 		}
 		result.Active = active
 	}()
-	key, err := validateAPIKey(account.APIKey)
+	if account.Transport == "zcode-start" {
+		if account.OAuth == nil {
+			return quota.ErrorResult("auth_expired", "Start Plan requires ZCode browser login", 0)
+		}
+		balance, err := (zcode.Client{HTTP: p.client, Version: zcode.ClientVersion, DeviceMid: account.OAuth.DeviceMid}).Balance(ctx, account.OAuth.AsSession())
+		if err != nil {
+			return quota.ErrorResult("fetch_error", "read ZCode token-plan balance", 0)
+		}
+		parsed, err := startPlanResult(balance)
+		if err != nil {
+			return quota.ErrorResult("parse_error", "ZCode token-plan quota unavailable", 0)
+		}
+		return parsed
+	}
+	key, err := account.Credential(ctx, p.tokens)
 	if err != nil || key == "" {
 		return quota.ErrorResult("fetch_error", "invalid Z.ai credentials", 0)
 	}

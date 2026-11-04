@@ -263,6 +263,8 @@ Gemini authentication and project selection remain owned by Antigravity. cq read
 
 ### Z.ai Coding Plan
 
+Run `cq zai login --zcode --activate` to sign in through ZCode's browser OAuth flow. Repeat with `--label` for another account. CQ uses the inspected ZCode client identity and authentication protocol, exchanges the provider OAuth credential for its business identity, and obtains short-lived project access tokens for paid Coding Plan requests. OAuth sessions are encrypted in the private CQ configuration directory; `zai.json` contains account references rather than OAuth tokens. Each saved login retains its device identity. A fresh installation can register a stable local device UUID without installing ZCode.
+
 Run `cq zai login` and paste a Personal Coding Plan API key into the hidden prompt. Repeat for each subscription. Create the key under **API Keys → Personal Coding Plan**; Standard API Keys use separate billing. CQ validates quota access before saving the key in `$XDG_CONFIG_HOME/cq/zai.json` (default `~/.config/cq/zai.json`), using mode `0600` in a private directory. Quota access alone does not prove inference access; `cq zai prime now` checks whether an eligible dormant window can be started. Existing single-key files remain supported. Saved accounts also work for the background proxy service; new accounts and preferred-account changes apply on the next request without restarting CQ.
 
 `ZAI_API_KEY` remains an exclusive override: when set in a process's environment, that process uses only that key. Remove the override to use the saved account pool. For scripts, `cq zai login --api-key-stdin` reads the key from standard input without putting it in command arguments.
@@ -280,7 +282,26 @@ cq models refresh
 cq models list --provider zai
 ```
 
-Registry refresh fetches Z.ai's native Codex model catalogue from `https://api.z.ai/api/v1/models` and includes its models in the existing Codex picker. Native Responses HTTP requests use the Z.ai key through CQ's proxy. CQ bridges Codex WebSocket requests to Z.ai's HTTP event stream and keeps tool continuation history for that connection. Codex account credentials remain scoped to Codex upstream requests. GLM models require native Responses; CQ does not translate Anthropic Messages requests for them. CQ handles native Codex v2 compaction triggers by asking GLM for a continuation summary and returning authenticated CQ-owned compact state. On later HTTP or WebSocket requests, CQ restores that summary before forwarding to either provider, including after model or account changes. Original chat history remains with Codex. The older `/responses/compact` endpoint remains unsupported for Z.ai (`501`).
+Choose a saved account's billing route explicitly. `zcode` uses the paid Coding Plan gateway; `zcode-start` uses that OAuth account's separate Start Plan token pool. Start Plan access never silently falls back to paid quota. `responses` retains the original API-key route.
+
+```sh
+cq zai route ACCOUNT_ID zcode
+cq zai route ACCOUNT_ID zcode-start
+cq zai route API_KEY_ACCOUNT_ID responses
+cq zai zcode status ACCOUNT_ID --json
+cq zai zcode resets issue ACCOUNT_ID
+cq zai zcode resets use ACCOUNT_ID --window=5h
+cq zai zcode claims list ACCOUNT_ID
+cq zai zcode claims claim ACCOUNT_ID PLAN_ID
+```
+
+ZCode reset-card issuance is an explicit eligibility request. Using a card asks for confirmation; a weekly card restores both weekly and five-hour quotas. Durable request identities prevent a repeated accepted action from consuming another card. An unresolved retry uses the same request identity; `--new` confirms a separate action only after the previous one has resolved. Token claims require a currently offered plan, confirmation and the provider's browser verification. Status and offer listing never issue cards or claim plans. No ZCode issuance, card-use or claim schedule is enabled automatically. ZCode's advertised charging coefficient and promotional eligibility are applied by its server; CQ does not multiply displayed quota to simulate them.
+
+The existing `cq zai resets list`, `use` and `schedule` commands also accept saved OAuth accounts. They use the account's business identity to read and select exact returned card IDs. Scheduling remains disabled until explicitly enabled; OAuth does not require an API key or a project access token for these reset operations.
+
+Registry refresh fetches Z.ai's native Codex model catalogue from `https://api.z.ai/api/v1/models` and includes its models in the existing Codex picker. The native Responses route uses the saved Z.ai key through CQ's proxy. ZCode routes translate Codex Responses into the gateway's Messages protocol, including streamed output and tool continuations. CQ bridges Codex WebSocket requests over HTTP and keeps continuation history for that connection. Codex account credentials remain scoped to Codex upstream requests. CQ handles native Codex v2 compaction triggers by asking GLM for a continuation summary and returning authenticated CQ-owned compact state. On later HTTP or WebSocket requests, CQ restores that summary before forwarding to either provider, including after model or account changes. Original chat history remains with Codex. The older `/responses/compact` endpoint remains unsupported for Z.ai (`501`).
+
+When the preferred account uses `zcode-start`, discovery uses ZCode's public model configuration and that account's current model entitlements, without requesting a paid project token. Context, output limits and reasoning choices come from this source; CQ supplies its validated Codex harness defaults. A source advertising 1,000,000 context tokens retains that value. Future models appear when both the catalogue and current entitlement advertise them. OpenAI-hosted web search is unavailable through ZCode Messages; Codex's local function/custom tools and connected tools remain available. See [ZCode protocol and qualification](docs/zcode-routing.md) for the observed billing result and remaining live checks.
 
 CQ-owned compact state uses the existing private proxy token as its key source. Retain the existing CQ proxy configuration across reinstalls or host migrations; changing that token makes previously generated CQ compact state unreadable. Provider account switching does not change this key.
 
@@ -1009,7 +1030,13 @@ cq zai resets schedule enable
 cq zai resets schedule remove
 cq zai resets schedule status
 cq zai resets use
+cq zai route
 cq zai switch
+cq zai zcode claims claim
+cq zai zcode claims list
+cq zai zcode resets issue
+cq zai zcode resets use
+cq zai zcode status
 ```
 <!-- public-command-index:end -->
 

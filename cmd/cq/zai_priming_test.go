@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -47,5 +49,20 @@ func TestBuildZAIPrimerRequiresEnabledConfiguration(t *testing.T) {
 	cfg := &proxy.Config{ZAIWindowPriming: proxy.ZAIWindowPrimingConfig{Enabled: true}}
 	if _, err := buildZAIPrimer(cfg, userdirs.Roots{}, fsutil.NewMemFS(), nil, modelregistry.NewCatalog(modelregistry.Snapshot{})); err == nil {
 		t.Fatal("enabled priming accepted missing dependencies")
+	}
+}
+
+func TestDefaultZAIPrimeCommandWiredZCodeWithoutCreatingState(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"CONFIG", "CACHE", "STATE", "DATA"} {
+		t.Setenv("XDG_"+name+"_HOME", filepath.Join(root, name))
+	}
+	primer, err := defaultZAIPrimeDependencies().primer()
+	if err != nil || primer == nil || primer.Gateway == nil || primer.Gateway.Signer == nil || primer.ProjectTokens == nil || primer.Gateway.Catalogue == nil {
+		t.Fatalf("manual priming lacks ZCode authentication: %v", err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil || len(entries) != 0 {
+		t.Fatal("reading prime status created configuration or dispatch state")
 	}
 }

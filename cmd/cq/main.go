@@ -445,6 +445,9 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 	if strings.HasPrefix(ctx.Command(), "codex network ") {
 		return defaultNativeNetworkRunner().execute(context.Background(), strings.TrimPrefix(ctx.Command(), "codex network "), cli.JSON, os.Stdout)
 	}
+	if strings.HasPrefix(ctx.Command(), "zai zcode ") {
+		return runZAIZCodeCommand(context.Background(), strings.TrimPrefix(ctx.Command(), "zai zcode "), cli.ZAI.ZCode, cli.JSON, defaultZCodeCommandDependencies())
+	}
 	if strings.HasPrefix(ctx.Command(), "zai prime ") {
 		return runZAIPrimeCommand(context.Background(), strings.TrimPrefix(ctx.Command(), "zai prime "), cli.JSON, defaultZAIPrimeDependencies())
 	}
@@ -522,7 +525,7 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 
 	case "gemini accounts":
 		return app.RunAccounts(provider.Gemini, cli.JSON)
-	case "zai login", "zai accounts", "zai switch <reference>", "zai remove <reference>":
+	case "zai login", "zai accounts", "zai switch <reference>", "zai remove <reference>", "zai route <reference> <transport>":
 		return runZAICommand(context.Background(), strings.TrimPrefix(ctx.Command(), "zai "), cli.ZAI, cli.JSON, defaultZAICommandDependencies())
 	default:
 		return fmt.Errorf("unknown command: %s", ctx.Command())

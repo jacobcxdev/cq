@@ -11,6 +11,7 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
@@ -55,6 +56,30 @@ func TestZAIResetScheduleCLIAddedExactCardDisabled(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "private-key") {
 		t.Fatal("schedule output exposed credentials")
+	}
+}
+
+func TestZAIResetScheduleCLIBoundOAuthExactCardWithoutEnabling(t *testing.T) {
+	deps, scheduler, out := zaiScheduleCommandFixture(t)
+	deps.Accounts = func() ([]zaiprov.Account, error) {
+		return []zaiprov.Account{{ID: "zai_abcdef0123456789", Label: "browser", OAuth: &zcode.LoginSession{UserID: "stable-user", BusinessJWT: "private-business", ZCodeJWT: "private-zcode", RawOAuth: "private-oauth"}}}, nil
+	}
+	requests := 0
+	deps.Client.HTTP = zaiScheduleCommandHTTP(func(r *http.Request) (*http.Response, error) {
+		requests++
+		if r.Method != http.MethodGet || r.Header.Get("Authorization") != "private-business" || r.Header.Get("User-Agent") != "ZCode/"+zcode.ClientVersion {
+			t.Fatal("OAuth scheduling crossed identity or mutation boundary")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(zaiResetCLIInventory))}, nil
+	})
+	var cmd ZAIResetScheduleCmd
+	cmd.Add.Reference, cmd.Add.At, cmd.Add.Window = "browser", "2026-11-02T20:30:00Z", "5h"
+	if err := runZAIResetScheduleCommand(t.Context(), "add <reference>", cmd, true, deps); err != nil {
+		t.Fatal(err)
+	}
+	state, err := scheduler.Store.Load()
+	if err != nil || state.Enabled || requests != 1 || len(state.Entries) != 1 || state.Entries[0].AccountID != "zai_abcdef0123456789" || state.Entries[0].CreditID != "5h:first" || strings.Contains(out.String(), "private-") {
+		t.Fatal("OAuth schedule lost exact binding, enabled automatically or leaked")
 	}
 }
 

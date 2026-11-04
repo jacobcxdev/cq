@@ -19,6 +19,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -28,8 +29,10 @@ const zaiPrimerPoll = 5 * time.Minute
 // ZAIPrimer starts dormant five-hour Coding Plan windows. Weekly windows are
 // subscription-anchored and need no synthetic request.
 type ZAIPrimer struct {
-	PollInterval time.Duration
-	OnError      func(error)
+	PollInterval  time.Duration
+	OnError       func(error)
+	Gateway       *zcode.Gateway
+	ProjectTokens *zcode.ProjectTokenClient
 
 	fs       fsutil.FileSystem
 	path     string
@@ -180,13 +183,24 @@ func (p *ZAIPrimer) RunOnce(ctx context.Context, now time.Time) (next time.Time,
 	if err != nil {
 		return next, errors.New("read Z.ai primer accounts")
 	}
-	model, err := zaiPrimerModel(p.models())
-	if err != nil && len(accounts) > 0 {
-		return next, err
+	var model string
+	for _, account := range accounts {
+		if account.Transport != "zcode-start" {
+			model, err = zaiPrimerModel(p.models())
+			if err != nil {
+				return next, err
+			}
+			break
+		}
 	}
 	var failures []error
 	seen := make(map[string]bool, len(accounts))
 	for _, account := range accounts {
+		// Start Plan pools have provider-defined token periods, not dormant
+		// five-hour Coding Plan windows to prime.
+		if account.Transport == "zcode-start" {
+			continue
+		}
 		if seen[account.ID] {
 			continue
 		}
@@ -278,13 +292,33 @@ func (p *ZAIPrimer) send(ctx context.Context, account zaiprov.Account, model str
 		"model": model, "input": "Reply with OK.", "max_output_tokens": 16,
 		"store": false, "stream": false, "reasoning": map[string]string{"effort": "low"},
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, zaiprov.ResponsesBaseURL+"/responses", bytes.NewReader(body))
+	credential, err := account.Credential(ctx, p.ProjectTokens)
 	if err != nil {
-		return "rejected", errors.New("create Z.ai primer request")
+		return "rejected", errors.New("resolve Z.ai primer credential")
 	}
-	setZAIHeaders(req.Header, nil, account.APIKey)
-	req.Header.Set("Accept", "application/json")
-	response, err := p.client.Do(req)
+	var response *http.Response
+	if account.Transport == "zcode" {
+		if p.Gateway == nil {
+			return "rejected", errors.New("ZCode primer gateway unavailable")
+		}
+		auth := zcode.GatewayAuth{Credential: credential}
+		if account.OAuth != nil {
+			auth.ZCodeJWT = account.OAuth.ZCodeJWT
+			auth.DeviceMid = account.OAuth.DeviceMid
+		}
+		response, err = p.Gateway.Do(ctx, body, auth, "cq-primer-"+account.ID)
+	} else if account.Transport == "zcode-start" {
+		return "rejected", errors.New("Start Plan token pools do not have five-hour windows to prime")
+	} else {
+		var req *http.Request
+		req, err = http.NewRequestWithContext(ctx, http.MethodPost, zaiprov.ResponsesBaseURL+"/responses", bytes.NewReader(body))
+		if err != nil {
+			return "rejected", errors.New("create Z.ai primer request")
+		}
+		setZAIHeaders(req.Header, nil, credential)
+		req.Header.Set("Accept", "application/json")
+		response, err = p.client.Do(req)
+	}
 	if err != nil {
 		return "ambiguous", errors.New("Z.ai primer request delivery unknown")
 	}

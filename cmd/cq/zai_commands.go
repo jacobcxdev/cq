@@ -17,19 +17,23 @@ import (
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/provider"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 type ZAICmd struct {
-	Login    ZAILoginCmd     `cmd:"" help:"Add a Z.ai Coding Plan API key"`
+	Login    ZAILoginCmd     `cmd:"" help:"Add a Z.ai API key or sign in through ZCode OAuth"`
 	Accounts AccountsCmd     `cmd:"" help:"List Z.ai accounts without API keys"`
 	Switch   ZAIReferenceCmd `cmd:"" help:"Choose preferred Z.ai account"`
 	Remove   ZAIReferenceCmd `cmd:"" help:"Remove a stored Z.ai account"`
+	Route    ZAIRouteCmd     `cmd:"" help:"Choose an account's native or ZCode gateway route"`
+	ZCode    ZAIZCodeCmd     `cmd:"" name:"zcode" help:"Inspect ZCode login, token plans and reset cards"`
 	Prime    ZAIPrimeCmd     `cmd:"" help:"Manage Z.ai quota-window priming"`
 	Resets   ZAIResetsCmd    `cmd:"" help:"Inspect and use Z.ai reset cards"`
 }
 
 type ZAILoginCmd struct {
+	ZCode       bool   `name:"zcode" help:"Sign in through ZCode browser OAuth instead of an API key"`
 	APIKeyStdin bool   `help:"Read API key from standard input instead of hidden prompt"`
 	Label       string `help:"Account label for quota output and account selection"`
 	Activate    bool   `help:"Make this account preferred for routing"`
@@ -39,6 +43,11 @@ type ZAIReferenceCmd struct {
 	Reference string `arg:"" help:"Account ID or unique label"`
 }
 
+type ZAIRouteCmd struct {
+	Reference string `arg:"" help:"Account ID or unique label"`
+	Transport string `arg:"" enum:"responses,zcode,zcode-start" help:"Upstream route or Start Plan token pool"`
+}
+
 type zaiCommandDependencies struct {
 	fs         fsutil.FileSystem
 	configDir  func() (string, error)
@@ -46,7 +55,11 @@ type zaiCommandDependencies struct {
 	client     httputil.Doer
 	input      io.Reader
 	output     io.Writer
+	errOutput  io.Writer
 	promptKey  func() ([]byte, error)
+	deviceMid  func() (string, error)
+	openURL    func(context.Context, string) error
+	oauthLogin func(context.Context, zcode.OAuthClient) (zcode.LoginSession, error)
 	invalidate func()
 }
 
@@ -57,10 +70,16 @@ func defaultZAICommandDependencies() zaiCommandDependencies {
 			roots, err := userdirs.Default()
 			return roots.Config, err
 		},
-		getenv: os.Getenv,
-		client: zaiHTTPClient(10 * time.Second),
-		input:  os.Stdin,
-		output: os.Stdout,
+		getenv:    os.Getenv,
+		client:    zaiHTTPClient(10 * time.Second),
+		input:     os.Stdin,
+		output:    os.Stdout,
+		errOutput: os.Stderr,
+		deviceMid: zcodeDeviceMid,
+		openURL:   openZCodeBrowser,
+		oauthLogin: func(ctx context.Context, client zcode.OAuthClient) (zcode.LoginSession, error) {
+			return client.Login(ctx)
+		},
 		promptKey: func() ([]byte, error) {
 			if !term.IsTerminal(os.Stdin.Fd()) {
 				return nil, errors.New("use --api-key-stdin when standard input is not a terminal")
@@ -90,6 +109,12 @@ func runZAICommand(ctx context.Context, command string, options ZAICmd, jsonOutp
 	}
 	switch command {
 	case "login":
+		if options.Login.ZCode {
+			if options.Login.APIKeyStdin {
+				return errors.New("choose ZCode browser login or API-key input")
+			}
+			return runZAIOAuthLogin(ctx, options.Login, dir, jsonOutput, deps)
+		}
 		var raw []byte
 		if options.Login.APIKeyStdin {
 			raw, err = io.ReadAll(io.LimitReader(deps.input, 4097))
@@ -146,10 +171,15 @@ func runZAICommand(ctx context.Context, command string, options ZAICmd, jsonOutp
 			ID        string `json:"id"`
 			Label     string `json:"label,omitempty"`
 			Preferred bool   `json:"preferred"`
+			Transport string `json:"transport"`
 		}
 		info := make([]accountInfo, 0, len(accounts))
 		for i, account := range accounts {
-			info = append(info, accountInfo{ID: account.ID, Label: account.Label, Preferred: i == 0})
+			transport := account.Transport
+			if transport == "" {
+				transport = "responses"
+			}
+			info = append(info, accountInfo{ID: account.ID, Label: account.Label, Preferred: i == 0, Transport: transport})
 		}
 		if jsonOutput {
 			return json.NewEncoder(deps.output).Encode(info)
@@ -159,7 +189,7 @@ func runZAICommand(ctx context.Context, command string, options ZAICmd, jsonOutp
 			if account.Preferred {
 				marker = "*"
 			}
-			if _, err := fmt.Fprintf(deps.output, "%s %s  %s\n", marker, account.ID, account.Label); err != nil {
+			if _, err := fmt.Fprintf(deps.output, "%s %s  %s  [%s]\n", marker, account.ID, account.Label, account.Transport); err != nil {
 				return err
 			}
 		}
@@ -171,6 +201,8 @@ func runZAICommand(ctx context.Context, command string, options ZAICmd, jsonOutp
 		err = zaiprov.SetActiveAccount(deps.fs, dir, options.Switch.Reference)
 	case "remove <reference>":
 		err = zaiprov.RemoveAccount(deps.fs, dir, options.Remove.Reference)
+	case "route <reference> <transport>":
+		err = zaiprov.SetTransport(deps.fs, dir, options.Route.Reference, options.Route.Transport)
 	default:
 		return errors.New("unknown Z.ai command")
 	}

@@ -14,6 +14,9 @@ import (
 
 var validBrowserName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
+// OpenBrowser opens a validated login URL using CQ's existing browser policy.
+func OpenBrowser(rawURL string) error { return openBrowser(rawURL) }
+
 func openBrowser(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {

@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -79,9 +81,13 @@ func (s *Server) zaiAccounts() ([]zaiprov.Account, error) {
 	seen := make(map[string]bool, len(accounts))
 	for _, account := range accounts {
 		account.APIKey = strings.TrimSpace(account.APIKey)
-		if account.APIKey != "" && !seen[account.APIKey] {
+		identity := account.APIKey
+		if account.OAuth != nil {
+			identity = "oauth:" + account.OAuth.ID
+		}
+		if identity != "" && !seen[identity] {
 			unique = append(unique, account)
-			seen[account.APIKey] = true
+			seen[identity] = true
 		}
 	}
 	return unique, nil
@@ -96,7 +102,10 @@ func (s *Server) doZAIRequest(ctx context.Context, target string, header http.He
 		PreviousResponseID string `json:"previous_response_id"`
 	}
 	_ = json.Unmarshal(body, &request)
-	if request.PreviousResponseID != "" {
+	if len(accounts) == 0 {
+		return nil, fmt.Errorf("Z.ai account unavailable")
+	}
+	if accounts[0].Transport == "zcode-start" || request.PreviousResponseID != "" {
 		accounts = accounts[:1]
 	} else if s.ZAIQuota != nil {
 		accounts = PrioritiseZAIAccounts(accounts, s.ZAIQuota(), time.Now())
@@ -106,17 +115,56 @@ func (s *Server) doZAIRequest(ctx context.Context, target string, header http.He
 		transport = http.DefaultTransport
 	}
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	sessionID := header.Get("Session_id")
+	if sessionID == "" {
+		sessionID = header.Get("X-Session-Id")
+	}
+	if sessionID == "" {
+		sessionID = "cq-" + rand.Text()
+	}
 	for i, account := range accounts {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
-		if err != nil {
-			return nil, err
-		}
-		setZAIHeaders(request.Header, header, account.APIKey)
 		noteRouteAccount(ctx, redactedAccountHint("zai", account.ID), i > 0)
-		response, err := client.Do(request)
+		credential := account.APIKey
+		var jwt string
+		if account.OAuth != nil {
+			if s.ZAIProjectTokens == nil && account.Transport != "zcode-start" {
+				return nil, fmt.Errorf("ZCode authentication unavailable")
+			}
+			var err error
+			if account.Transport != "zcode-start" {
+				credential, err = s.ZAIProjectTokens.Resolve(ctx, *account.OAuth)
+			}
+			if err != nil {
+				if i < len(accounts)-1 {
+					continue
+				}
+				return nil, err
+			}
+			jwt = account.OAuth.ZCodeJWT
+		}
+		var response *http.Response
+		var err error
+		if account.Transport == "zcode" || account.Transport == "zcode-start" {
+			if s.ZAIGateway == nil {
+				return nil, fmt.Errorf("ZCode gateway unavailable")
+			}
+			auth := zcode.GatewayAuth{Credential: credential, ZCodeJWT: jwt, StartPlan: account.Transport == "zcode-start"}
+			if account.OAuth != nil {
+				auth.DeviceMid = account.OAuth.DeviceMid
+			}
+			response, err = s.ZAIGateway.Do(ctx, body, auth, sessionID)
+		} else {
+			var request *http.Request
+			request, err = http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+			if err != nil {
+				return nil, err
+			}
+			setZAIHeaders(request.Header, header, credential)
+			response, err = client.Do(request)
+		}
 		if err != nil {
 			return nil, err
 		}
