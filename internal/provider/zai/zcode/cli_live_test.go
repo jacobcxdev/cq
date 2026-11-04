@@ -72,10 +72,13 @@ func TestZCodeInstalledStartSerialization(t *testing.T) {
 		request["max_tokens"] = json.RawMessage("128")
 		body, _ = json.Marshal(request)
 		upstream, _ := http.NewRequestWithContext(ctx, "POST", startMessagesURL, bytes.NewReader(body))
-		for _, key := range []string{"User-Agent", "X-Title", "HTTP-Referer", "X-ZCode-App-Version", "X-Platform", "X-Os-Category", "X-Os-Version", "X-Client-Language", "X-Client-Timezone", "X-Device-Mid", "X-Request-Id", "X-ZCode-Trace-Id", "X-ZCode-Session-Type", "X-Session-Id", "X-Query-Id", "X-ZCode-Query-Source", "Anthropic-Version"} {
+		for _, key := range []string{"User-Agent", "X-Title", "HTTP-Referer", "X-ZCode-App-Version", "X-Release-Channel", "X-ZCode-Agent", "X-Platform", "X-Os-Category", "X-Os-Version", "X-Client-Language", "X-Client-Timezone", "X-Device-Mid", "X-Request-Id", "X-ZCode-Trace-Id", "X-ZCode-Session-Type", "X-Session-Id", "X-Query-Id", "X-ZCode-Query-Source", "Anthropic-Version", "Anthropic-Beta"} {
 			if value := req.Header.Get(key); value != "" {
 				upstream.Header.Set(key, value)
 			}
+		}
+		for _, key := range []string{"User-Agent", "X-Title", "HTTP-Referer", "X-ZCode-App-Version", "X-Release-Channel", "X-ZCode-Agent", "Anthropic-Beta"} {
+			t.Logf("SDK public header %s=%q", key, req.Header.Get(key))
 		}
 		upstream.Header.Set("Authorization", "Bearer "+login.ZCodeJWT)
 		upstream.Header.Set("X-Api-Key", login.ZCodeJWT)

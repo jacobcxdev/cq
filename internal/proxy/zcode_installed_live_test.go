@@ -61,6 +61,10 @@ func TestZCodeInstalledLive(t *testing.T) {
 		t.Fatal("qualification requires the preferred paid ZCode OAuth account; no API-key fallback")
 	}
 	account := accounts[0]
+	if os.Getenv("CQ_ZCODE_NATIVE_START") == "1" {
+		// Select Start only in this test's account copy; keep the saved route intact.
+		account.Transport = "zcode-start"
+	}
 	device := account.OAuth.DeviceMid
 	if device == "" {
 		home, err := os.UserHomeDir()
