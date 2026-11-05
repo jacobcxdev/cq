@@ -63,7 +63,7 @@ type ClaudeCmd struct {
 type CodexCmd struct {
 	Dots     CodexDotsCmd    `cmd:"" help:"Manage multi-account Dots"`
 	Network  CodexNetworkCmd `cmd:"" help:"Manage native ChatGPT network routing"`
-	Harness  CodexHarnessCmd `cmd:"" help:"Manage opt-in GLM harness profiles with automatically detected support"`
+	Harness  CodexHarnessCmd `cmd:"" help:"Manage scoped capability profiles with automatically detected support"`
 	Login    LoginCmd        `cmd:"" help:"Add Codex account"`
 	Accounts AccountsCmd     `cmd:"" help:"List Codex accounts"`
 	Switch   SwitchCmd       `cmd:"" help:"Switch active Codex account"`

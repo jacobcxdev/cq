@@ -109,6 +109,17 @@ func cloudStdioDefaults(cfg *Settings) cloudStdioDependencies {
 	}
 	return cloudStdioDependencies{
 		harnessReceipts: receipts,
+		readHarnessContextPolicy: func(cwd string) (harness.Policy, error) {
+			roots, err := userdirs.Default()
+			if err != nil {
+				return harness.Policy{}, err
+			}
+			return cloudRuntimeHarnessPolicy(fsutil.OSFileSystem{}, filepath.Join(roots.Config, "harness.json"), cwd)
+		},
+		nativeHarnessInventory: func(ctx context.Context, cwd string) (harness.Inventory, error) {
+			path := filepath.Join(cfg.AppPath, "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex")
+			return (harness.NativeInventory{Executable: path}).Snapshot(ctx, cwd)
+		},
 		readHarnessPolicy: func() (harness.Policy, error) {
 			roots, err := userdirs.Default()
 			if err != nil {

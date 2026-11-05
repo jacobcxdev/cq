@@ -39,38 +39,47 @@ type cloudHarness struct {
 }
 
 type cloudHarnessThread struct {
-	id, model, cwd  string
-	baseline        cloudMessage
-	settings        cloudMessage
-	fullConfig      cloudMessage
-	minimal         bool
-	active, owned   bool
-	pendingTurns    int
-	pendingSettings int
-	completedTurnID string
-	selection       harness.Selection
-	refresh         bool
-	failureKey      string
-	reportedPending string
-	lease           fsutil.ExclusiveLock
-	receiptState    string
-	plugins         []string
-	pluginsKnown    bool
-	restorePlugins  bool
-	diverged        bool
-	handoffReceipt  *harness.Receipt
+	id, model, cwd       string
+	baseline             cloudMessage
+	settings             cloudMessage
+	fullConfig           cloudMessage
+	fullConfigCwd        string
+	minimal              bool
+	active, owned        bool
+	pendingTurns         int
+	pendingSettings      int
+	completedTurnID      string
+	selection            harness.Selection
+	refresh              bool
+	failureKey           string
+	reportedPending      string
+	lease                fsutil.ExclusiveLock
+	receiptState         string
+	plugins              []string
+	pluginsKnown         bool
+	restorePlugins       bool
+	diverged             bool
+	handoffReceipt       *harness.Receipt
+	profilePlan          *cloudHarnessProfilePlan
+	profileManaged       bool
+	profileFingerprint   string
+	profileRefresh       bool
+	profileNeedsSettings bool
+	pendingProfile       *cloudHarnessProfilePlan
 }
 
 type cloudHarnessRequest struct {
-	method     string
-	params     cloudMessage
-	selection  harness.Selection
-	minimal    bool
-	fullConfig cloudMessage
+	method        string
+	params        cloudMessage
+	selection     harness.Selection
+	minimal       bool
+	fullConfig    cloudMessage
+	fullConfigCwd string
+	profilePlan   *cloudHarnessProfilePlan
 }
 
 func newCloudHarness(b *cloudBridge) *cloudHarness {
-	if b.deps.readHarnessPolicy == nil {
+	if b.deps.readHarnessPolicy == nil && b.deps.readHarnessContextPolicy == nil {
 		return nil
 	}
 	var nonce [16]byte
@@ -227,9 +236,23 @@ func (h *cloudHarness) record(id string, selection harness.Selection, state stri
 	baseline := []string{}
 	_ = json.Unmarshal(thread.baseline["disabledPluginIds"], &baseline)
 	plugins := slices.Clone(thread.plugins)
+	model, cwd := thread.model, thread.cwd
+	var unsupported, issues []string
+	var pendingPlugins []string
+	recordedPlan := thread.profilePlan
+	if thread.pendingProfile != nil {
+		recordedPlan = thread.pendingProfile
+	}
+	if recordedPlan != nil {
+		unsupported = slices.Clone(recordedPlan.unsupported)
+		issues = slices.Clone(recordedPlan.issues)
+		if state == "prepared" {
+			pendingPlugins = slices.Clone(recordedPlan.plugins)
+		}
+	}
 	h.mu.Unlock()
 	if store := h.b.deps.harnessReceipts; store != nil {
-		receipt := harness.Receipt{Version: 1, ChatID: id, Mode: "full", Profile: selection.Profile, Source: selection.Source, State: state, BaselinePlugins: baseline, AppliedPlugins: plugins, UpdatedAt: time.Now().UTC()}
+		receipt := harness.Receipt{Version: 1, ChatID: id, Mode: "full", Profile: selection.Profile, Source: selection.Source, State: state, BaselinePlugins: baseline, AppliedPlugins: plugins, PendingPlugins: pendingPlugins, UpdatedAt: time.Now().UTC(), Fingerprint: selection.Fingerprint, Model: model, Cwd: cwd, Unsupported: unsupported, Issues: issues}
 		if err := store.Save(receipt); err != nil {
 			h.event(id, selection, "failed")
 			return errors.New("native harness receipt could not be saved")
@@ -317,16 +340,21 @@ func (h *cloudHarness) prepare(request cloudMessage, raw []byte) ([]byte, error)
 	pending := cloudHarnessRequest{method: method, params: cloudHarnessClone(params)}
 	if method == "thread/start" {
 		model, cwd := cloudHarnessModel(params), cloudHarnessString(params, "cwd")
-		if model != "" && !strings.HasPrefix(strings.ToLower(model), "glm-") {
+		if cwd == "" {
+			if current, err := os.Getwd(); err == nil {
+				cwd = current
+			}
+		}
+		policy, err := h.readPolicy(cwd)
+		if model != "" && !strings.HasPrefix(strings.ToLower(model), "glm-") && (err != nil || policy.Version != 2) {
 			pending.selection = harness.Selection{Profile: harness.Full, Source: "model"}
 			h.mu.Lock()
 			h.requests[cloudHarnessID(request["id"])] = pending
 			h.mu.Unlock()
 			return raw, nil
 		}
-		policy, err := h.b.deps.readHarnessPolicy()
 		if err != nil {
-			return nil, errors.New("GLM harness policy unavailable")
+			return nil, errors.New("harness policy unavailable")
 		}
 		var native cloudMessage
 		if policy.Enabled && model == "" {
@@ -337,7 +365,27 @@ func (h *cloudHarness) prepare(request cloudMessage, raw []byte) ([]byte, error)
 			model = cloudHarnessString(cloudHarnessObject(native["config"]), "model")
 		}
 		pending.selection = policy.Resolve(model, cwd, "")
-		if pending.selection.Managed && pending.selection.Profile == harness.Minimal {
+		if policy.Version == 2 && pending.selection.Managed {
+			if native == nil {
+				native, err = h.config(cwd)
+				if err != nil {
+					return nil, err
+				}
+			}
+			snapshot := cloudHarnessThread{model: model, cwd: cwd, baseline: cloudHarnessClone(params)}
+			plan, baseline, err := h.profilePlan(policy.ResolveEffective(model, cwd, ""), native, snapshot)
+			if err != nil {
+				return nil, err
+			}
+			pending.fullConfig = baseline
+			pending.fullConfigCwd = cwd
+			pending.profilePlan = &plan
+			updated := cloudHarnessClone(params)
+			updated["config"] = cloudHarnessRaw(plan.config)
+			message := cloudHarnessClone(request)
+			message["params"] = cloudHarnessRaw(updated)
+			raw = append(cloudHarnessRaw(message), '\n')
+		} else if pending.selection.Managed && pending.selection.Profile == harness.Minimal {
 			if native == nil {
 				native, err = h.config(cwd)
 				if err != nil {
@@ -348,6 +396,7 @@ func (h *cloudHarness) prepare(request cloudMessage, raw []byte) ([]byte, error)
 			if err != nil {
 				return nil, err
 			}
+			pending.fullConfigCwd = cwd
 			updated := cloudHarnessClone(params)
 			updated["config"] = cloudHarnessRaw(cloudHarnessMinimalConfig(native, params["config"]))
 			message := cloudHarnessClone(request)
@@ -357,6 +406,11 @@ func (h *cloudHarness) prepare(request cloudMessage, raw []byte) ([]byte, error)
 		}
 	} else if method == "turn/start" {
 		id := cloudThreadID(request["params"])
+		h.mu.Lock()
+		if thread := h.threads[id]; thread != nil {
+			thread.profileRefresh = true
+		}
+		h.mu.Unlock()
 		if err := h.refresh(id); err != nil {
 			return nil, errors.New("native harness current model unavailable")
 		}
@@ -744,16 +798,23 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 	if cwd == "" {
 		cwd = snapshot.cwd
 	}
-	if !snapshot.minimal && !snapshot.restorePlugins && !strings.HasPrefix(strings.ToLower(model), "glm-") {
+	policy, err := h.readPolicy(cwd)
+	if err != nil {
+		if !snapshot.minimal && !snapshot.profileManaged && !snapshot.restorePlugins && !strings.HasPrefix(strings.ToLower(model), "glm-") {
+			return nil
+		}
+		h.event(id, snapshot.selection, "failed")
+		return errors.New("harness policy unavailable")
+	}
+	if policy.Version != 2 && !snapshot.minimal && !snapshot.profileManaged && !snapshot.restorePlugins && !strings.HasPrefix(strings.ToLower(model), "glm-") {
 		return nil
 	}
-	policy, err := h.b.deps.readHarnessPolicy()
-	if err != nil {
-		h.event(id, snapshot.selection, "failed")
-		return errors.New("GLM harness policy unavailable")
-	}
 	selection := policy.Resolve(model, cwd, id)
-	if !policy.Enabled && !snapshot.minimal && !snapshot.restorePlugins {
+	if !selection.Managed && !snapshot.profileManaged && !snapshot.minimal && !snapshot.restorePlugins {
+		return nil
+	}
+	contextChanged := snapshot.fullConfig != nil && snapshot.fullConfigCwd != cwd
+	if !policy.Enabled && !snapshot.minimal && !snapshot.profileManaged && !snapshot.restorePlugins {
 		return nil
 	}
 	if err := h.acquire(id); err != nil {
@@ -782,9 +843,16 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 	if snapshot.failureKey == key {
 		return errors.New("native harness reload previously failed; profile was not applied")
 	}
-	if minimal == snapshot.minimal && !snapshot.restorePlugins {
+	if policy.Version != 2 && !snapshot.profileManaged && minimal == snapshot.minimal && !snapshot.restorePlugins && !contextChanged {
 		if selection.Managed && (snapshot.receiptState != "applied" || snapshot.selection != selection) {
 			return h.record(id, selection, "applied")
+		}
+		return nil
+	}
+	if policy.Version == 2 && snapshot.profilePlan != nil && snapshot.profileFingerprint == selection.Fingerprint && !snapshot.profileRefresh && !snapshot.profileNeedsSettings && !snapshot.restorePlugins && !contextChanged {
+		state := cloudHarnessProfileState(snapshot.profilePlan)
+		if snapshot.receiptState != state || snapshot.selection != selection {
+			return h.record(id, selection, state)
 		}
 		return nil
 	}
@@ -800,21 +868,92 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		return nil
 	}
 	var native cloudMessage
-	if minimal {
+	var desiredPlan *cloudHarnessProfilePlan
+	compiledPlugins := bytes.Clone(snapshot.baseline["disabledPluginIds"])
+	if policy.Version == 2 && snapshot.profilePlan != nil && snapshot.profileFingerprint == selection.Fingerprint && !snapshot.profileRefresh && !contextChanged {
+		desiredPlan = snapshot.profilePlan
+	} else if policy.Version == 2 {
+		native, err = h.config(cwd)
+		if err != nil {
+			return err
+		}
+		profileSnapshot := snapshot
+		profileSnapshot.model, profileSnapshot.cwd = model, cwd
+		plan, baseline, err := h.profilePlan(policy.ResolveEffective(model, cwd, id), native, profileSnapshot)
+		if err != nil {
+			return err
+		}
+		desiredPlan = &plan
+		newBaseline = snapshot.fullConfig == nil || contextChanged
+		h.mu.Lock()
+		h.threads[id].fullConfig = baseline
+		h.threads[id].fullConfigCwd = cwd
+		h.mu.Unlock()
+	} else if minimal {
 		native, err = h.config(cwd)
 		if err != nil {
 			h.event(id, selection, "failed")
 			return err
 		}
-		if snapshot.fullConfig == nil {
+		if snapshot.fullConfig == nil || contextChanged {
 			snapshot.fullConfig, err = h.baselineConfig(native, snapshot.baseline["config"], id)
 			if err != nil {
 				return err
 			}
 			h.mu.Lock()
 			h.threads[id].fullConfig = snapshot.fullConfig
+			h.threads[id].fullConfigCwd = cwd
 			newBaseline = true
 			h.mu.Unlock()
+		}
+	}
+	if desiredPlan != nil {
+		h.mu.Lock()
+		h.threads[id].pendingProfile = desiredPlan
+		latest := *h.threads[id]
+		latest.baseline = cloudHarnessClone(latest.baseline)
+		latest.settings = cloudHarnessClone(latest.settings)
+		h.mu.Unlock()
+		if latest.active || latest.pendingTurns > 0 || latest.pendingSettings > 0 {
+			_ = h.record(id, selection, "pending")
+			return nil
+		}
+		if !bytes.Equal(compiledPlugins, latest.baseline["disabledPluginIds"]) || (requestedModel == "" && model != latest.model) || (requestedCwd == "" && cwd != latest.cwd) {
+			if newBaseline {
+				h.mu.Lock()
+				h.threads[id].fullConfig = nil
+				h.mu.Unlock()
+			}
+			return h.reconcile(id, requestedModel, requestedCwd)
+		}
+		snapshot = latest
+		if snapshot.profilePlan != nil && snapshot.profilePlan.key == desiredPlan.key && !snapshot.restorePlugins {
+			if snapshot.profileNeedsSettings {
+				if err := h.record(id, selection, "prepared"); err != nil {
+					return err
+				}
+				if _, err := h.call("thread/settings/update", map[string]any{"threadId": id, "disabledPluginIds": desiredPlan.plugins}); err != nil {
+					_ = h.record(id, selection, "failed")
+					return err
+				}
+			}
+			h.mu.Lock()
+			if current := h.threads[id]; current != nil {
+				current.profileNeedsSettings = false
+				current.profileRefresh = false
+				current.profileManaged = selection.Managed
+				current.profileFingerprint = selection.Fingerprint
+				current.profilePlan = desiredPlan
+				current.pendingProfile = nil
+				current.plugins = slices.Clone(desiredPlan.plugins)
+				current.pluginsKnown = true
+			}
+			h.mu.Unlock()
+			state := cloudHarnessProfileState(desiredPlan)
+			if snapshot.receiptState != state || snapshot.selection != selection || snapshot.profileRefresh || snapshot.profileNeedsSettings {
+				return h.record(id, selection, state)
+			}
+			return nil
 		}
 	}
 	if err := h.record(id, selection, "prepared"); err != nil {
@@ -844,7 +983,9 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		return h.reconcile(id, requestedModel, requestedCwd)
 	}
 	params := cloudHarnessResumeParams(snapshot, model, cwd)
-	if minimal {
+	if desiredPlan != nil {
+		params["config"] = cloudHarnessRaw(desiredPlan.config)
+	} else if minimal {
 		params["config"] = cloudHarnessRaw(cloudHarnessMinimalConfig(native, snapshot.baseline["config"]))
 	}
 	unsubscribed, err := h.call("thread/unsubscribe", map[string]string{"threadId": id})
@@ -862,7 +1003,11 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		err = errors.New("native harness resumed a different chat")
 	}
 	if err == nil {
-		_, err = h.call("thread/settings/update", cloudHarnessReplaySettings(snapshot, model, cwd))
+		replay := cloudHarnessReplaySettings(snapshot, model, cwd)
+		if desiredPlan != nil {
+			replay["disabledPluginIds"] = cloudHarnessRaw(desiredPlan.plugins)
+		}
+		_, err = h.call("thread/settings/update", replay)
 	}
 	if err != nil {
 		rollback := cloudHarnessResumeParams(snapshot, snapshot.model, snapshot.cwd)
@@ -879,6 +1024,10 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		h.mu.Lock()
 		if current := h.threads[id]; current != nil {
 			current.minimal = false
+			current.profileManaged = false
+			current.profileFingerprint = ""
+			current.profilePlan = nil
+			current.profileNeedsSettings = false
 			current.selection = harness.Selection{Profile: harness.Full, Source: "rollback"}
 			current.failureKey = key
 			if rollbackErr != nil {
@@ -898,8 +1047,17 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		current.failureKey = ""
 		current.reportedPending = ""
 		current.restorePlugins = false
+		current.profileManaged = policy.Version == 2 && selection.Managed
+		current.profileFingerprint = selection.Fingerprint
+		current.profilePlan = desiredPlan
+		current.pendingProfile = nil
+		current.profileRefresh = false
+		current.profileNeedsSettings = false
 		cloudHarnessActual(current, result)
-		if !minimal || snapshot.restorePlugins {
+		if desiredPlan != nil {
+			current.plugins = slices.Clone(desiredPlan.plugins)
+			current.pluginsKnown = true
+		} else if !minimal || snapshot.restorePlugins {
 			var plugins []string
 			if json.Unmarshal(snapshot.baseline["disabledPluginIds"], &plugins) == nil {
 				current.plugins = slices.Clone(plugins)
@@ -908,7 +1066,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		}
 	}
 	h.mu.Unlock()
-	return h.record(id, selection, "applied")
+	return h.record(id, selection, cloudHarnessProfileState(desiredPlan))
 }
 
 func cloudHarnessActual(thread *cloudHarnessThread, result cloudMessage) {
@@ -1104,12 +1262,23 @@ func (h *cloudHarness) observe(raw []byte) bool {
 					thread.minimal = pending.minimal
 					thread.selection = pending.selection
 					thread.fullConfig = pending.fullConfig
+					thread.fullConfigCwd = pending.fullConfigCwd
+					thread.profilePlan = pending.profilePlan
+					thread.profileManaged = pending.profilePlan != nil
+					thread.profileFingerprint = pending.selection.Fingerprint
 				}
 				cloudHarnessActual(thread, result)
 				cloudHarnessCaptureSettings(thread, pending.params, false)
 				cloudHarnessCaptureSettings(thread, result, true)
 				if plugin, ok := result["disabledPluginIds"]; ok {
-					thread.baseline["disabledPluginIds"] = bytes.Clone(plugin)
+					if pending.method == "thread/resume" && thread.profileManaged {
+						cloudHarnessManualPlugins(thread, plugin)
+					} else {
+						thread.baseline["disabledPluginIds"] = bytes.Clone(plugin)
+					}
+				}
+				if pending.profilePlan != nil {
+					thread.profileNeedsSettings = !cloudHarnessPluginEqual(thread.plugins, pending.profilePlan.plugins)
 				}
 			}
 		case "turn/start":
@@ -1121,13 +1290,11 @@ func (h *cloudHarness) observe(raw []byte) bool {
 				cloudHarnessActual(thread, result)
 				cloudHarnessCaptureSettings(thread, pending.params, false)
 				cloudHarnessCaptureSettings(thread, result, true)
-				if cloudHarnessModel(result) == "" && (thread.minimal || strings.HasPrefix(strings.ToLower(thread.model), "glm-") || strings.HasPrefix(strings.ToLower(cloudHarnessRequestedModel(pending.params)), "glm-")) {
+				if cloudHarnessModel(result) == "" && (thread.profileManaged || thread.minimal || strings.HasPrefix(strings.ToLower(thread.model), "glm-") || strings.HasPrefix(strings.ToLower(cloudHarnessRequestedModel(pending.params)), "glm-")) {
 					thread.refresh = true
 				}
 				if plugin, ok := pending.params["disabledPluginIds"]; ok {
-					thread.baseline["disabledPluginIds"] = bytes.Clone(plugin)
-					_ = json.Unmarshal(plugin, &thread.plugins)
-					thread.pluginsKnown = true
+					cloudHarnessManualPlugins(thread, plugin)
 				}
 			}
 		case "thread/settings/update":
@@ -1137,9 +1304,7 @@ func (h *cloudHarness) observe(raw []byte) bool {
 				cloudHarnessCaptureSettings(thread, result, true)
 				thread.refresh = true
 				if plugin, ok := pending.params["disabledPluginIds"]; ok {
-					thread.baseline["disabledPluginIds"] = bytes.Clone(plugin)
-					_ = json.Unmarshal(plugin, &thread.plugins)
-					thread.pluginsKnown = true
+					cloudHarnessManualPlugins(thread, plugin)
 				}
 			}
 		case "thread/unsubscribe", "thread/archive":
@@ -1170,6 +1335,9 @@ func (h *cloudHarness) observe(raw []byte) bool {
 		if message.method() == "thread/settings/updated" {
 			cloudHarnessActual(thread, cloudHarnessObject(params["threadSettings"]))
 			cloudHarnessCaptureSettings(thread, cloudHarnessObject(params["threadSettings"]), true)
+			if plugin, ok := cloudHarnessObject(params["threadSettings"])["disabledPluginIds"]; ok && thread.profileManaged {
+				cloudHarnessManualPlugins(thread, plugin)
+			}
 		}
 	}
 	h.mu.Unlock()

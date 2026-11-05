@@ -126,18 +126,74 @@ func decodePolicy(data []byte) (Policy, error) {
 	if err := validatePolicy(policy); err != nil {
 		return Policy{}, err
 	}
-	if policy.Projects == nil {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return Policy{}, err
+	}
+	for _, name := range []string{"projects", "chats"} {
+		if _, present := fields[name]; policy.Version == 2 && present {
+			return Policy{}, fmt.Errorf("legacy harness field %q is not valid in v2", name)
+		}
+	}
+	for _, name := range []string{"profiles", "global", "workspaces", "tasks"} {
+		if _, present := fields[name]; policy.Version == 1 && present {
+			return Policy{}, fmt.Errorf("layered harness field %q requires v2", name)
+		}
+	}
+	if policy.Version == 1 && policy.Projects == nil {
 		policy.Projects = make(map[string]Profile)
 	}
-	if policy.Chats == nil {
+	if policy.Version == 1 && policy.Chats == nil {
 		policy.Chats = make(map[string]Profile)
+	}
+	if policy.Version == 2 {
+		if policy.Profiles == nil {
+			policy.Profiles = make(map[string]Definition)
+		}
+		if policy.Workspaces == nil {
+			policy.Workspaces = make(map[string]Scope)
+		}
+		if policy.Tasks == nil {
+			policy.Tasks = make(map[string]Scope)
+		}
 	}
 	return policy, nil
 }
 
 func validatePolicy(policy Policy) error {
+	if policy.Version == 2 {
+		if policy.Projects != nil || policy.Chats != nil {
+			return fmt.Errorf("v2 harness policy must not contain legacy projects or chats")
+		}
+		if err := validateDefinitions(policy.Profiles); err != nil {
+			return err
+		}
+		if err := validateScope(policy.Global, policy.Profiles, true); err != nil {
+			return fmt.Errorf("global harness scope: %w", err)
+		}
+		for path, scope := range policy.Workspaces {
+			if !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.ContainsRune(path, '\x00') {
+				return fmt.Errorf("harness workspace path must be absolute and clean: %q", path)
+			}
+			if err := validateScope(scope, policy.Profiles, true); err != nil {
+				return fmt.Errorf("workspace %s: %w", path, err)
+			}
+		}
+		for chat, scope := range policy.Tasks {
+			if !canonicalChatID(chat) {
+				return fmt.Errorf("harness task ID must be a canonical lower-case UUID")
+			}
+			if err := validateScope(scope, policy.Profiles, true); err != nil {
+				return fmt.Errorf("task %s: %w", chat, err)
+			}
+		}
+		return nil
+	}
 	if policy.Version != 1 {
 		return fmt.Errorf("unsupported harness policy version %d", policy.Version)
+	}
+	if len(policy.Profiles) > 0 || !emptyScope(policy.Global) || len(policy.Workspaces) > 0 || len(policy.Tasks) > 0 {
+		return fmt.Errorf("layered harness fields require version 2")
 	}
 	for project, profile := range policy.Projects {
 		if !filepath.IsAbs(project) || filepath.Clean(project) != project || strings.ContainsRune(project, '\x00') {

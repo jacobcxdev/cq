@@ -19,6 +19,25 @@ import (
 const desktopTestChat = "01a198eb-f8e9-72a1-856c-0e986d10f6f7"
 const desktopTestOwner = "11111111-2222-3333-4444-555555555555"
 
+func TestDesktopIPCMissingEndpointIsUnavailable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix Desktop IPC")
+	}
+	root := t.TempDir()
+	client := DesktopIPC{SocketPath: filepath.Join(root, "ipc", "ipc.sock")}
+	for _, createDirectory := range []bool{false, true} {
+		if createDirectory {
+			if err := os.Mkdir(filepath.Join(root, "ipc"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		_, err := client.ReadModel(context.Background(), desktopTestChat)
+		if !errors.Is(err, ErrDesktopUnavailable) || !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("missing endpoint misclassified: %v", err)
+		}
+	}
+}
+
 func desktopTestServer(t *testing.T, serve func(net.Conn)) DesktopIPC {
 	t.Helper()
 	if runtime.GOOS == "windows" {

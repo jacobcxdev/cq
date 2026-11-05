@@ -7,7 +7,6 @@ import (
 	"os"
 	"slices"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,18 +29,24 @@ type PluginInventory interface {
 	Installed(context.Context, string) ([]string, error)
 }
 
+type InventorySource interface {
+	Snapshot(context.Context, string) (Inventory, error)
+}
+
 // Controller applies stock Desktop's per-chat plugin settings. The owning
 // Desktop queues these for its next turn; request bodies and history stay intact.
 type Controller struct {
-	Policy       func() (Policy, error)
-	Desktop      DesktopSettings
-	Receipts     ReceiptStore
-	Plugins      PluginInventory
-	Report       func(string, error)
-	queue        chan string
-	queueMu      sync.Mutex
-	queued       map[string]bool
-	pollInterval time.Duration
+	Policy        func() (Policy, error)
+	ContextPolicy func(string) (Policy, error)
+	Desktop       DesktopSettings
+	Receipts      ReceiptStore
+	Plugins       PluginInventory
+	Inventory     InventorySource
+	Report        func(string, error)
+	queue         chan string
+	queueMu       sync.Mutex
+	queued        map[string]bool
+	pollInterval  time.Duration
 }
 
 func NewController(policy func() (Policy, error), desktop DesktopSettings, receipts ReceiptStore, plugins PluginInventory) *Controller {
@@ -53,8 +58,15 @@ func (controller *Controller) Observe(chatID, model string) {
 	if !canonicalChatID(chatID) {
 		return
 	}
-	if !strings.HasPrefix(strings.ToLower(model), "glm-") {
-		if _, err := controller.Receipts.Load(chatID); err != nil {
+	if _, err := controller.Receipts.Load(chatID); err != nil {
+		if controller.Policy == nil {
+			return
+		}
+		policy, err := controller.Policy()
+		if err != nil || !policy.Enabled {
+			return
+		}
+		if policy.Version == 1 && policy.Resolve(model, "", chatID).Profile == Full {
 			return
 		}
 	}
@@ -107,6 +119,11 @@ func (controller *Controller) Run(ctx context.Context) {
 			return
 		}
 		if snapshot.Model != "" {
+			policy, err = controller.policyForContext(policy, snapshot.Cwd)
+			if err != nil {
+				controller.report(id, err)
+				return
+			}
 			watched[id] = watchedChat{snapshot.Model, snapshot.OwnerID, snapshot.Cwd, policy.Resolve(snapshot.Model, snapshot.Cwd, id)}
 		}
 	}
@@ -134,12 +151,40 @@ func (controller *Controller) Run(ctx context.Context) {
 					controller.report(id, err)
 					continue
 				}
+				policy, err = controller.policyForContext(policy, previous.cwd)
+				if err != nil {
+					controller.report(id, err)
+					continue
+				}
 				if current.Model != previous.model || current.OwnerID != previous.owner || policy.Resolve(current.Model, previous.cwd, id) != previous.selection {
+					// Resolve workspace files too; a portable policy can change while
+					// the native model and user-level policy stay unchanged.
 					reconcile(id)
 				}
 			}
 		}
 	}
+}
+
+func (controller *Controller) policyForContext(policy Policy, cwd string) (Policy, error) {
+	if controller.ContextPolicy != nil {
+		return controller.ContextPolicy(cwd)
+	}
+	return policy, nil
+}
+
+// Apply requests the current policy through stock IPC. A live launcher holds
+// the shared lease and consumes the saved policy through its own bridge.
+func (controller *Controller) Apply(ctx context.Context, chatID string) error {
+	if controller.Policy == nil {
+		return fmt.Errorf("harness policy reader unavailable")
+	}
+	policy, err := controller.Policy()
+	if err != nil {
+		return err
+	}
+	_, err = controller.Reconcile(ctx, chatID, policy)
+	return err
 }
 
 func (controller *Controller) report(id string, err error) {
@@ -170,22 +215,29 @@ func (controller *Controller) Reconcile(ctx context.Context, chatID string, poli
 	if snapshot.ChatID != chatID || !snapshot.PluginBaselineKnown || !snapshot.ReasoningEffortKnown || snapshot.Model == "" {
 		return Snapshot{}, fmt.Errorf("desktop settings baseline unavailable")
 	}
-	selection := policy.Resolve(snapshot.Model, snapshot.Cwd, chatID)
-	minimal := selection.Managed && selection.Profile == Minimal
-	if !minimal && errors.Is(receiptErr, os.ErrNotExist) {
+	policy, err = controller.policyForContext(policy, snapshot.Cwd)
+	if err != nil {
+		return snapshot, err
+	}
+	effective := policy.ResolveEffective(snapshot.Model, snapshot.Cwd, chatID)
+	selection := effective.Selection
+	managed := selection.Managed && selection.Profile != Full
+	if !managed && errors.Is(receiptErr, os.ErrNotExist) {
 		return snapshot, nil
 	}
 	receipt := previous
 	if errors.Is(receiptErr, os.ErrNotExist) || previous.State == "restored" {
-		if !minimal {
+		if !managed {
 			return snapshot, nil
 		}
 		receipt = Receipt{Version: 1, ChatID: chatID, Mode: "plugins", BaselinePlugins: append([]string{}, snapshot.DisabledPluginIDs...), AppliedPlugins: append([]string{}, snapshot.DisabledPluginIDs...)}
 	} else if previous.State == "diverged" {
-		if !minimal {
+		if !managed {
 			receipt.Profile, receipt.Source, receipt.State = selection.Profile, selection.Source, "restored"
 			receipt.BaselinePlugins = append([]string{}, snapshot.DisabledPluginIDs...)
 			receipt.AppliedPlugins, receipt.PendingPlugins = append([]string{}, snapshot.DisabledPluginIDs...), nil
+			receipt.Fingerprint, receipt.Model, receipt.Cwd = selection.Fingerprint, snapshot.Model, snapshot.Cwd
+			receipt.Unsupported, receipt.Issues = nil, nil
 			return snapshot, controller.Receipts.Save(receipt)
 		}
 		return snapshot, nil
@@ -194,7 +246,13 @@ func (controller *Controller) Reconcile(ctx context.Context, chatID string, poli
 		return snapshot, controller.Receipts.Save(receipt)
 	}
 	desired := append([]string{}, receipt.BaselinePlugins...)
-	if minimal {
+	var unsupported, issues []string
+	if managed && policy.Version == 2 {
+		desired, unsupported, issues, err = controller.selectPlugins(ctx, snapshot, receipt.BaselinePlugins, effective)
+		if err != nil {
+			return snapshot, err
+		}
+	} else if managed {
 		installed, err := controller.Plugins.Installed(ctx, snapshot.Cwd)
 		if err != nil {
 			return snapshot, err
@@ -204,6 +262,8 @@ func (controller *Controller) Reconcile(ctx context.Context, chatID string, poli
 	sort.Strings(desired)
 	desired = slices.Compact(desired)
 	receipt.Mode, receipt.Profile, receipt.Source = "plugins", selection.Profile, selection.Source
+	receipt.Fingerprint, receipt.Model, receipt.Cwd = selection.Fingerprint, snapshot.Model, snapshot.Cwd
+	receipt.Unsupported, receipt.Issues = unsupported, issues
 	receipt.PendingPlugins, receipt.State = desired, "prepared"
 	if err := controller.Receipts.Save(receipt); err != nil {
 		return snapshot, err
@@ -227,8 +287,11 @@ func (controller *Controller) Reconcile(ctx context.Context, chatID string, poli
 			return snapshot, fmt.Errorf("desktop declined harness settings condition")
 		}
 	}
-	if minimal {
+	if managed {
 		receipt.State = "applied"
+		if len(unsupported) > 0 || len(issues) > 0 {
+			receipt.State = "partial"
+		}
 	} else {
 		receipt.State = "restored"
 	}

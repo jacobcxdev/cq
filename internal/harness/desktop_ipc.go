@@ -20,6 +20,8 @@ import (
 
 const maxDesktopFrameBytes = 0x10000000
 
+var ErrDesktopUnavailable = errors.New("desktop IPC is unavailable")
+
 // Snapshot contains only the settings needed to apply and restore a profile.
 // Conversation contents received during follower synchronisation are discarded.
 type Snapshot struct {
@@ -275,7 +277,7 @@ func (client DesktopIPC) connect(parent context.Context) (*desktopSession, error
 	conn, err := dial(ctx, "unix", path)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("connect desktop IPC: %w", err)
+		return nil, fmt.Errorf("%w: %w", ErrDesktopUnavailable, err)
 	}
 	after, err := validateDesktopSocket(path)
 	if err != nil || !os.SameFile(before, after) {
@@ -314,6 +316,9 @@ func validateDesktopSocket(path string) (os.FileInfo, error) {
 	}
 	fsys := fsutil.OSFileSystem{}
 	if err := fsutil.ValidateSecureDirectory(fsys, filepath.Dir(path)); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %w", ErrDesktopUnavailable, err)
+		}
 		return nil, fmt.Errorf("unsafe desktop IPC directory: %w", err)
 	}
 	if err := fsutil.ValidateOwnerControlledDirectory(fsys, filepath.Dir(filepath.Dir(path))); err != nil {
@@ -321,6 +326,9 @@ func validateDesktopSocket(path string) (os.FileInfo, error) {
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %w", ErrDesktopUnavailable, err)
+		}
 		return nil, fmt.Errorf("inspect desktop IPC socket: %w", err)
 	}
 	if info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 || info.Mode()&(os.ModeSymlink|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {

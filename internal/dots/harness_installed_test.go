@@ -30,11 +30,12 @@ import (
 // home, fixture capabilities and a synthetic loopback provider. It never reads
 // account credentials, invokes a real model or changes the installed app.
 func TestHarnessInstalledChatCapabilityIsolation(t *testing.T) {
-	t.Run("native-controls", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, false) })
-	t.Run("bridge-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true) })
+	t.Run("native-controls", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, false, false) })
+	t.Run("bridge-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true, false) })
+	t.Run("selective-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true, true) })
 }
 
-func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled bool) {
+func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, selective bool) {
 	if os.Getenv("CQ_DOTS_HARNESS_INSTALLED_ACCEPTANCE") != "1" {
 		t.Skip("set CQ_DOTS_HARNESS_INSTALLED_ACCEPTANCE=1 for isolated installed acceptance")
 	}
@@ -86,6 +87,14 @@ func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled bool
 	manifest, _ := json.Marshal(map[string]any{"name": "probe-plugin", "version": "1.0.0", "description": "Synthetic capability plugin", "skills": "./skills/", "mcpServers": map[string]any{"pluginprobe": mcp}})
 	write("market/plugins/probe-plugin/.codex-plugin/plugin.json", string(manifest))
 	write("market/.claude-plugin/marketplace.json", `{"name":"cq-harness-market","owner":{"name":"CQ"},"plugins":[{"name":"probe-plugin","source":"./plugins/probe-plugin","description":"Synthetic plugin"}]}`)
+	if selective {
+		write("codex/skills/design-skill/SKILL.md", "---\nname: design-skill\ndescription: CQ_HARNESS_DESIGN_SKILL_MARKER\n---\nSynthetic design skill.\n")
+		write("codex/skills/curate-harness/SKILL.md", "---\nname: curate-harness\ndescription: CQ_HARNESS_CURATION_SKILL_MARKER\n---\nSynthetic curation entrypoint.\n")
+		write("market/plugins/design-plugin/skills/design-plugin-skill/SKILL.md", "---\nname: design-plugin-skill\ndescription: CQ_HARNESS_DESIGN_PLUGIN_SKILL_MARKER\n---\nSynthetic design plugin skill.\n")
+		manifest, _ := json.Marshal(map[string]any{"name": "design-plugin", "version": "1.0.0", "description": "Synthetic design plugin", "skills": "./skills/", "mcpServers": map[string]any{"designplugin": mcp}})
+		write("market/plugins/design-plugin/.codex-plugin/plugin.json", string(manifest))
+		write("market/.claude-plugin/marketplace.json", `{"name":"cq-harness-market","owner":{"name":"CQ"},"plugins":[{"name":"probe-plugin","source":"./plugins/probe-plugin","description":"Synthetic research plugin"},{"name":"design-plugin","source":"./plugins/design-plugin","description":"Synthetic design plugin"}]}`)
+	}
 	observed := make(chan harnessInstalledObservation, 32)
 	var spawnIssued atomic.Bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -124,6 +133,9 @@ func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled bool
 		var bodyFields map[string]any
 		if json.Unmarshal(body, &bodyFields) == nil {
 			harnessInstalledIdentityFields("body", bodyFields, observation.Identity)
+			if reasoning, ok := bodyFields["reasoning"].(map[string]any); ok {
+				observation.ReasoningEffort, _ = reasoning["effort"].(string)
+			}
 		}
 		for _, tool := range request.Tools {
 			name := tool.Name
@@ -138,6 +150,12 @@ func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled bool
 			observation.PluginCatalogueItems += strings.Count(text, "CQ_HARNESS_PLUGIN_SKILL_MARKER")
 			observation.FirstUser = observation.FirstUser || strings.Contains(text, "CQ_HARNESS_FIRST_USER")
 			observation.FirstReply = observation.FirstReply || strings.Contains(text, "CQ_HARNESS_REPLY")
+			if observation.Markers == nil {
+				observation.Markers = make(map[string]int)
+			}
+			for name, marker := range map[string]string{"research": "CQ_HARNESS_SKILL_MARKER", "research-plugin": "CQ_HARNESS_PLUGIN_SKILL_MARKER", "design": "CQ_HARNESS_DESIGN_SKILL_MARKER", "design-plugin": "CQ_HARNESS_DESIGN_PLUGIN_SKILL_MARKER", "curation": "CQ_HARNESS_CURATION_SKILL_MARKER", "developer": "CQ_HARNESS_DEVELOPER_MARKER"} {
+				observation.Markers[name] += strings.Count(text, marker)
+			}
 		}
 		observed <- observation
 		item := map[string]any{"id": "probe_message", "type": "message", "role": "assistant", "status": "completed", "content": []map[string]any{{"type": "output_text", "text": "CQ_HARNESS_REPLY", "annotations": []any{}}}}
@@ -157,7 +175,7 @@ func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled bool
 		}
 	}))
 	defer upstream.Close()
-	write("codex/config.toml", fmt.Sprintf(`model = "glm-5.3"
+	configText := fmt.Sprintf(`model = "glm-5.3"
 model_provider = "cq_harness"
 approval_policy = "never"
 sandbox_mode = "read-only"
@@ -182,7 +200,18 @@ args = ["-test.run=^TestHarnessInstalledMCPHelper$"]
 startup_timeout_sec = 5
 [mcp_servers.probe.env]
 CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
-`, upstream.URL, os.Args[0]))
+`, upstream.URL, os.Args[0])
+	if selective {
+		configText += fmt.Sprintf(`
+[mcp_servers.design]
+command = %q
+args = ["-test.run=^TestHarnessInstalledMCPHelper$"]
+startup_timeout_sec = 5
+[mcp_servers.design.env]
+CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
+`, os.Args[0])
+	}
+	write("codex/config.toml", configText)
 	profile := `(version 1) (allow default) (deny network*) (deny file-write*) (allow network-outbound (remote ip "localhost:*")) (allow file-write* (literal "/dev/null")) (allow file-write* (subpath ` + fmt.Sprintf("%q", root) + `))`
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
@@ -191,6 +220,27 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 	command.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin", "LANG=C", "LC_ALL=C", "TERM=dumb", "NO_COLOR=1", "CI=1", "SHELL=/bin/zsh", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "NO_PROXY=127.0.0.1,localhost"}
 	for name, directory := range map[string]string{"HOME": "home", "CODEX_HOME": "codex", "TMPDIR": "tmp", "XDG_CACHE_HOME": "cache", "XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "data"} {
 		command.Env = append(command.Env, name+"="+filepath.Join(root, directory))
+	}
+	policyPath := filepath.Join(root, "policy", "harness.json")
+	var fullInventory func(context.Context, string) (harness.Inventory, error)
+	if selective {
+		// Reuse NativeInventory's production protocol reader with an executable
+		// wrapper that removes the test runner's environment and enforces the
+		// same fixture HOME and egress sandbox as the native chat process.
+		quote := func(value string) string { return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'" }
+		script := "#!/bin/sh\nexec /usr/bin/env -i"
+		for _, value := range command.Env {
+			script += " " + quote(value)
+		}
+		script += " /usr/bin/sandbox-exec -p " + quote(profile) + " " + quote(client) + " \"$@\"\n"
+		write("native-inventory", script)
+		inventoryPath := filepath.Join(root, "native-inventory")
+		if err := os.Chmod(inventoryPath, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		fullInventory = func(ctx context.Context, cwd string) (harness.Inventory, error) {
+			return (harness.NativeInventory{Executable: inventoryPath}).Snapshot(ctx, cwd)
+		}
 	}
 	input, err := command.StdinPipe()
 	if err != nil {
@@ -265,6 +315,12 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 				return nil, errors.New("external cloud HTTP forbidden")
 			}),
 		}
+		if selective {
+			deps.readHarnessContextPolicy = func(cwd string) (harness.Policy, error) {
+				return harness.LoadForContext(fsutil.OSFileSystem{}, policyPath, cwd)
+			}
+			deps.nativeHarnessInventory = fullInventory
+		}
 		go func() {
 			defer func() {
 				if recover() != nil {
@@ -296,6 +352,9 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 	_ = rpc.encoder.Encode(map[string]string{"method": "initialized"})
 	rpc.call("marketplace/add", map[string]string{"source": filepath.Join(root, "market")})
 	rpc.call("plugin/install", map[string]string{"marketplacePath": filepath.Join(root, "market/.claude-plugin/marketplace.json"), "pluginName": "probe-plugin"})
+	if selective {
+		rpc.call("plugin/install", map[string]string{"marketplacePath": filepath.Join(root, "market/.claude-plugin/marketplace.json"), "pluginName": "design-plugin"})
+	}
 	if !bridgeEnabled {
 		native := cloudHarnessObject(rpc.call("config/read", map[string]any{"cwd": command.Dir, "includeLayers": true}))
 		logBaseline := func(label string, raw json.RawMessage) {
@@ -369,6 +428,226 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		if slices.Contains(observation.Tools, "mcp__probe") != standalone || slices.Contains(observation.Tools, "mcp__pluginprobe") != plugin {
 			t.Fatal("native capability set did not match this chat's configuration")
 		}
+	}
+	if selective {
+		const researchPlugin = "probe-plugin@cq-harness-market"
+		const designPlugin = "design-plugin@cq-harness-market"
+		const researchSkill = "user:probe-skill"
+		const designSkill = "user:design-skill"
+		const researchOwnedSkill = "plugin:" + researchPlugin + ":probe-plugin:plugin-skill"
+		const designOwnedSkill = "plugin:" + designPlugin + ":design-plugin:design-plugin-skill"
+		fsys := fsutil.OSFileSystem{}
+		userPolicy := harness.Policy{Version: 2, Enabled: true,
+			Profiles: map[string]harness.Definition{"research": {Changes: harness.Changes{
+				Plugins: map[string]harness.Decision{researchPlugin: harness.Enabled}, MCP: map[string]harness.Decision{"probe": harness.Enabled}, Skills: map[string]harness.Decision{researchSkill: harness.Enabled, researchOwnedSkill: harness.Enabled},
+			}}},
+			Global: harness.Scope{
+				All:    harness.Binding{Changes: harness.Changes{Plugins: map[string]harness.Decision{designPlugin: harness.Disabled}, MCP: map[string]harness.Decision{"design": harness.Disabled}, Skills: map[string]harness.Decision{designSkill: harness.Disabled, designOwnedSkill: harness.Disabled, "user:curate-harness": harness.Enabled}}},
+				Models: map[string]harness.Binding{"glm-*": {Changes: harness.Changes{Plugins: map[string]harness.Decision{researchPlugin: harness.Disabled}, MCP: map[string]harness.Decision{"probe": harness.Disabled, "design": harness.Disabled}, Skills: map[string]harness.Decision{researchSkill: harness.Disabled, researchOwnedSkill: harness.Disabled}}}},
+			},
+		}
+		if err := harness.Save(fsys, policyPath, userPolicy); err != nil {
+			t.Fatal(err)
+		}
+		workspacePath := filepath.Join(command.Dir, ".cq", "harness.json")
+		if _, err := harness.UpdateWorkspace(fsys, workspacePath, func(policy *harness.WorkspacePolicy) error {
+			policy.Version = 2
+			policy.Rules.All.Profiles = []string{"research"}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		var inventoryBaseline []string
+		checkInventory := func(label string) {
+			t.Helper()
+			inventory, err := fullInventory(ctx, command.Dir)
+			if err != nil {
+				t.Fatalf("isolated full native inventory: %v", err)
+			}
+			want := map[string]bool{"plugin:" + researchPlugin: false, "plugin:" + designPlugin: false, "mcp:probe": false, "mcp:design": false, "skill:" + researchSkill: false, "skill:" + designSkill: false, "skill:" + researchOwnedSkill: false, "skill:" + designOwnedSkill: false, "skill:user:curate-harness": false}
+			var current []string
+			for _, capability := range inventory.Capabilities {
+				key := string(capability.Kind) + ":" + capability.ID
+				current = append(current, fmt.Sprintf("%s enabled=%t available=%t", key, capability.Enabled, capability.Available))
+				t.Logf("selective full inventory row: key=%s owner=%s native=%s enabled=%t available=%t", key, capability.PluginID, capability.NativeID, capability.Enabled, capability.Available)
+				if _, ok := want[key]; ok {
+					if !capability.Enabled || !capability.Available {
+						t.Fatalf("full inventory lost enabled fixture %s", key)
+					}
+					want[key] = true
+				}
+			}
+			for key, found := range want {
+				if !found {
+					t.Fatalf("full native inventory omitted fixture %s", key)
+				}
+			}
+			slices.Sort(current)
+			if inventoryBaseline == nil {
+				inventoryBaseline = current
+			} else if !slices.Equal(inventoryBaseline, current) {
+				t.Fatal("chat filtering changed the complete native inventory")
+			}
+			t.Logf("selective inventory %s: fixture-capabilities=%d full-rows=%d issues=%v", label, len(want), len(inventory.Capabilities), inventory.Issues)
+		}
+		checkInventory("before-curation")
+		startSelective := func(model, cwd string) string {
+			t.Helper()
+			result := rpc.call("thread/start", map[string]any{"cwd": cwd, "model": model, "modelProvider": "cq_harness", "developerInstructions": "CQ_HARNESS_DEVELOPER_MARKER", "config": map[string]any{"model_reasoning_effort": "low"}})
+			var started struct{ Thread struct{ ID string } }
+			if json.Unmarshal(result, &started) != nil || started.Thread.ID == "" {
+				t.Fatal("decode selective native chat ID")
+			}
+			return started.Thread.ID
+		}
+		assertSelective := func(label string, observation harnessInstalledObservation, probe, design, pluginProbe, pluginDesign bool) {
+			t.Helper()
+			if observation.Markers["developer"] == 0 || observation.ReasoningEffort != "low" {
+				t.Fatalf("selective reload lost original instructions/reasoning: marker=%d effort=%q", observation.Markers["developer"], observation.ReasoningEffort)
+			}
+			if slices.Contains(observation.Tools, "list_mcp_resources") != (probe || design || pluginProbe || pluginDesign) {
+				t.Fatal("selective native MCP resources did not match the chosen subset")
+			}
+			if strings.HasPrefix(observation.Model, "glm-") {
+				for namespace, wanted := range map[string]bool{"mcp__probe": probe, "mcp__design": design, "mcp__pluginprobe": pluginProbe, "mcp__designplugin": pluginDesign} {
+					if slices.Contains(observation.Tools, namespace) != wanted {
+						t.Fatalf("selective namespace %s did not match wanted=%t", namespace, wanted)
+					}
+				}
+			}
+			t.Logf("selective %s: tools=%v catalogue-markers=%v effort=%s", label, observation.Tools, observation.Markers, observation.ReasoningEffort)
+		}
+		assertFreshSkills := func(observation harnessInstalledObservation, research, design, pluginResearch, pluginDesign bool) {
+			t.Helper()
+			for name, wanted := range map[string]bool{"research": research, "design": design, "research-plugin": pluginResearch, "design-plugin": pluginDesign, "curation": true} {
+				if (observation.Markers[name] > 0) != wanted {
+					t.Fatalf("first-turn skill %s did not match wanted=%t: %v", name, wanted, observation.Markers)
+				}
+			}
+		}
+		outside := startSelective("gpt-5.5", filepath.Join(root, "minimal-work"))
+		outsideFirst := turn("selective-global-all-model-design-denials", outside, "Synthetic global design denials", nil)
+		assertSelective("global-gpt", outsideFirst, true, false, true, false)
+		assertFreshSkills(outsideFirst, true, false, true, false)
+		outsideGLM := startSelective("glm-5.3", filepath.Join(root, "minimal-work"))
+		outsideRestricted := turn("selective-global-glm-restriction", outsideGLM, "Synthetic global model restriction", nil)
+		assertSelective("global-glm", outsideRestricted, false, false, false, false)
+		assertFreshSkills(outsideRestricted, false, false, false, false)
+		chat := startSelective("glm-5.3", command.Dir)
+		first := turn("selective-project-added-research", chat, "CQ_HARNESS_FIRST_USER", nil)
+		assertSelective("project-research", first, true, false, true, false)
+		assertFreshSkills(first, true, false, true, false)
+		sibling := startSelective("glm-5.3", command.Dir)
+		siblingFirst := turn("selective-project-sibling", sibling, "Synthetic selective sibling", nil)
+		assertSelective("project-sibling", siblingFirst, true, false, true, false)
+		updateTask := func(scope harness.Scope) {
+			t.Helper()
+			if _, err := harness.Update(fsys, policyPath, func(policy *harness.Policy) error {
+				policy.Tasks = map[string]harness.Scope{chat: scope}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		task := harness.Scope{All: harness.Binding{Changes: harness.Changes{MCP: map[string]harness.Decision{"design": harness.Enabled}}}}
+		updateTask(task)
+		allOverride := turn("selective-task-all-beats-global-glm", chat, "Synthetic narrower all-model override", nil)
+		assertSelective("task-all", allOverride, true, true, true, false)
+		if !allOverride.FirstUser || !allOverride.FirstReply {
+			t.Fatal("selective task reload lost original history")
+		}
+		task.Models = map[string]harness.Binding{"glm-*": {Changes: harness.Changes{MCP: map[string]harness.Decision{"probe": harness.Disabled}, Skills: map[string]harness.Decision{researchSkill: harness.Disabled}}}}
+		updateTask(task)
+		modelDelta := turn("selective-task-model-delta", chat, "Synthetic chat model delta", nil)
+		assertSelective("task-glm-delta", modelDelta, false, true, true, false)
+		if modelDelta.Markers["research"] != allOverride.Markers["research"] || modelDelta.Markers["research-plugin"] <= allOverride.Markers["research-plugin"] {
+			t.Fatal("native standalone skill suppression did not keep the selected plugin-owned skill")
+		}
+		deltaReceipt, err := receipts.Load(chat)
+		if err != nil || deltaReceipt.Fingerprint == "" || deltaReceipt.State != "partial" {
+			t.Fatal("selective receipt omitted fingerprint or truthful native coupling limitation")
+		}
+		gpt := turn("selective-model-change-restored-subset", chat, "Synthetic selective model change", map[string]any{"model": "gpt-5.5"})
+		assertSelective("task-gpt", gpt, true, true, true, false)
+		gptReceipt, err := receipts.Load(chat)
+		if err != nil || gptReceipt.Fingerprint == deltaReceipt.Fingerprint || gptReceipt.Model != "gpt-5.5" || gpt.Markers["research"] <= modelDelta.Markers["research"] {
+			t.Fatal("model change did not restore the subset and change its fingerprint")
+		}
+		back := turn("selective-model-return-restored-delta", chat, "Synthetic selective model return", map[string]any{"model": "glm-5.3"})
+		assertSelective("task-glm-return", back, false, true, true, false)
+		backReceipt, err := receipts.Load(chat)
+		if err != nil || backReceipt.Fingerprint != deltaReceipt.Fingerprint || backReceipt.Model != "glm-5.3" {
+			t.Fatal("model return did not restore the original selective fingerprint")
+		}
+		if back.Markers["research"] != gpt.Markers["research"] {
+			t.Fatal("returning to GLM reattached a denied standalone skill")
+		}
+		siblingAfter := turn("selective-sibling-isolation", sibling, "Synthetic sibling after task override", nil)
+		assertSelective("sibling-unchanged", siblingAfter, true, false, true, false)
+		if siblingAfter.Markers["research"] != siblingFirst.Markers["research"] || siblingAfter.Markers["design"] != 0 {
+			t.Fatal("chat override changed its sibling's skill catalogue")
+		}
+		nativeMu.Lock()
+		beforeWorkspace := slices.Clone(nativeRequests)
+		nativeMu.Unlock()
+		for _, request := range beforeWorkspace {
+			if (request.method() == "thread/resume" || request.method() == "thread/unsubscribe") && cloudThreadID(request["params"]) != chat {
+				t.Fatal("task-only changes reloaded a sibling")
+			}
+		}
+		if _, err := harness.UpdateWorkspace(fsys, workspacePath, func(policy *harness.WorkspacePolicy) error {
+			policy.Rules.All.Changes.Skills = map[string]harness.Decision{designSkill: harness.Enabled}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		fileChanged := turn("selective-workspace-edit-before-next-turn", chat, "Synthetic workspace file change", nil)
+		assertSelective("workspace-edit", fileChanged, false, true, true, false)
+		fileReceipt, err := receipts.Load(chat)
+		if err != nil || fileReceipt.Fingerprint == backReceipt.Fingerprint {
+			t.Fatal("workspace edit did not change the applied fingerprint")
+		}
+		if fileChanged.Markers["design"] <= back.Markers["design"] || fileChanged.Markers["research"] != back.Markers["research"] || !fileChanged.FirstUser || !fileChanged.FirstReply {
+			t.Fatal("workspace edit was not applied at the idle boundary with history intact")
+		}
+		workspaceSibling := turn("selective-workspace-edit-applied-to-matching-sibling", sibling, "Synthetic shared workspace update", nil)
+		assertSelective("workspace-sibling", workspaceSibling, true, false, true, false)
+		if workspaceSibling.Markers["design"] <= siblingAfter.Markers["design"] {
+			t.Fatal("workspace policy did not reach its other matching chat")
+		}
+		updateTask(harness.Scope{All: harness.Binding{Profiles: []string{"full"}}})
+		restored := turn("selective-full-restored-original-inventory", chat, "Synthetic full baseline restore", nil)
+		assertSelective("restored-full", restored, true, true, true, true)
+		for _, marker := range []string{"research", "design", "research-plugin", "design-plugin", "curation"} {
+			if restored.Markers[marker] <= fileChanged.Markers[marker] {
+				t.Fatalf("full restore omitted baseline skill %s", marker)
+			}
+		}
+		checkInventory("after-filtered-chats")
+		nativeMu.Lock()
+		requests := slices.Clone(nativeRequests)
+		nativeMu.Unlock()
+		resumes, workspaceSiblingResumes := 0, 0
+		for _, request := range requests {
+			if request.method() == "thread/resume" || request.method() == "thread/unsubscribe" {
+				id := cloudThreadID(request["params"])
+				if id != chat && id != sibling {
+					t.Fatal("workspace policy reloaded a chat outside its directory")
+				}
+				if request.method() == "thread/resume" {
+					if id == chat {
+						resumes++
+					} else {
+						workspaceSiblingResumes++
+					}
+				}
+			}
+		}
+		if resumes < 6 {
+			t.Fatalf("selective fingerprint changes did not reload the same chat: %d", resumes)
+		}
+		t.Logf("selective installed accepted: same-chat-reloads=%d task-sibling-reloads=0 workspace-sibling-reloads=%d outsider-reloads=0 stable-inventory-fixtures=9 custom-receipt=partial-for-plugin-MCP-coupling external-cloud-requests=0", resumes, workspaceSiblingResumes)
+		return
 	}
 	if bridgeEnabled {
 		startAt := func(model, cwd string) string {
@@ -612,6 +891,8 @@ type harnessInstalledObservation struct {
 	FirstUser            bool
 	FirstReply           bool
 	Identity             map[string]string
+	Markers              map[string]int
+	ReasoningEffort      string
 }
 
 // Only structural identity fields from synthetic requests are retained. Prompt

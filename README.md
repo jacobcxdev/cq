@@ -311,7 +311,34 @@ CQ-owned compact state uses the existing private proxy token as its key source. 
 
 CQ refreshes the provider catalogue every five minutes while running; `cq models refresh` requests an immediate refresh. New models appear when Z.ai adds them to that native catalogue for your subscription, without a CQ release or manual registry entry. Codex may retain its own catalogue cache until its next refresh. CQ caps GLM-5.3 automatic compaction at 70% of Codex's usable context window (697,302 tokens with the current 1,048,576-token window and 95% input allowance), retaining any earlier provider limit. The cap is recalculated from downloaded metadata. GLM-5.3-Flash, GLM-5-Turbo and future models such as GLM-5.4 keep their provider defaults.
 
-Opt-in harness profiles reduce optional capabilities for GLM chats without creating a new chat or rewriting history:
+Harness profiles select optional capabilities without creating a new chat or rewriting history. Install the CQ curation skill, then ask Codex to inspect the installed inventory and prepare a profile for the task:
+
+```sh
+cq codex harness skill install
+cq codex harness inventory --project /path/to/project --json
+cq codex harness profile list
+cq codex harness profile save review --file review-definition.json
+cq codex harness bind minimal review --chat current
+cq codex harness explain --chat current --project /path/to/project --json
+cq codex harness unbind --chat current
+```
+
+Definitions contain a description and `changes`, using `enabled`, `disabled` or `inherit` decisions keyed by stable IDs from `inventory`. `plugins`, `mcp` and `skills` each accept an ID-to-decision map; `"*"` supplies a per-kind default. `changes.default` applies to all kinds. `minimal` disables optional capabilities by default, while `full` restores native baseline choices. Multiple profile names apply in the given order. Saving or copying a definition does not bind it or enable policy. Existing names require explicit `--replace`; built-in `full` and `minimal` cannot be overwritten.
+
+Bindings support every model. `--scope chat` is the default; `--scope project` writes `<project>/.cq/harness.json`, and `--scope global` writes CQ's private user policy. `--model` accepts an exact ID or a family with one trailing wildcard, such as `glm-*`; omit it for all models. Rules apply from global all-model and model-specific rules, through project ancestry, then chat all-model and model-specific rules. `inherit` preserves the previous decision. A first binding enables a fresh policy and requests application for a known chat after saving. Chat and project bindings preserve a disabled policy that already contains rules, saving as pending with `policy_disabled`; use `enable` or an explicit global binding to activate it. Application errors also retain the saved binding and report pending. `--chat current` uses only a validated `CODEX_THREAD_ID`; it does not search session files or chat history. `explain` reads the selected chat's model when `--model` is omitted, reports decision layers and current application status, and keeps the last application receipt separate as an audit record.
+
+Profiles can be shared without installation paths:
+
+```sh
+cq codex harness export review > review-profile.json
+cq codex harness import --file review-profile.json --name imported-review
+cq codex harness profile copy review project-review --project /path/to/project
+cq codex harness bind project-review --scope project --project /path/to/project --model 'gpt-*'
+```
+
+`export` writes JSON with `version: 1`, `name`, and a `definition` containing only its description and changes. `profile save --file` accepts the raw definition; `import --file` accepts the exported envelope and uses its name unless `--name` is supplied. Importing does not bind or activate the profile. Skill decisions use stable inventory IDs such as `repo:review`, not absolute paths. User definitions live in CQ's private `harness.json`; an explicit `--project` saves definitions and rules in that project's `.cq/harness.json`. Project writes promote legacy policy without enabling it or changing its existing choices.
+
+The legacy GLM shortcuts remain available:
 
 ```sh
 cq codex harness enable
@@ -322,7 +349,7 @@ cq codex harness status --chat CHAT_ID --model glm-5.3 --project /path/to/projec
 cq codex harness disable
 ```
 
-When enabled, GLM defaults to `minimal`. A chat override wins over the deepest matching project directory; `auto` removes an override. Other models retain their normal harness. Saving an override does not enable the policy.
+With legacy policy enabled, GLM defaults to `minimal`. A chat override wins over the deepest matching project directory; `auto` removes an override. These shortcuts keep their GLM-only meaning after promotion to the newer format. Saving a legacy override does not enable policy.
 
 On macOS, normal ChatGPT launches use per-chat plugin exclusions after CQ observes a native request. These apply to a subsequent eligible turn; first-turn application is not guaranteed. Standalone MCP servers and local skill catalogues remain available. Under the CQ launcher, the same policy also disables standalone MCP servers and fresh skill-catalogue instructions before context assembly. Existing chats reload only at idle boundaries, retaining their ID and history. Core tools and project instructions remain available; historical catalogue text already in the chat is preserved.
 
@@ -923,11 +950,22 @@ cq codex dots start
 cq codex dots status
 cq codex dots stop
 cq codex dots sync
+cq codex harness bind
 cq codex harness chat
 cq codex harness disable
 cq codex harness enable
+cq codex harness explain
+cq codex harness export
+cq codex harness import
+cq codex harness inventory
+cq codex harness profile copy
+cq codex harness profile list
+cq codex harness profile save
+cq codex harness profile show
 cq codex harness project
+cq codex harness skill install
 cq codex harness status
+cq codex harness unbind
 cq codex login
 cq codex network
 cq codex network disable

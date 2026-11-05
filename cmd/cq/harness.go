@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,12 +18,20 @@ import (
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
-// CodexHarnessCmd stores opt-in GLM harness profiles independently of Codex config.
+// CodexHarnessCmd stores capability profiles independently of Codex configuration.
 type CodexHarnessCmd struct {
-	Status  CodexHarnessStatusCmd `cmd:"" default:"1" help:"Show saved harness policy; preview selection with --model"`
-	Enable  struct{}              `cmd:"" help:"Enable GLM minimal defaults with automatically detected profile support"`
-	Disable struct{}              `cmd:"" help:"Disable policy while preserving project and chat preferences"`
-	Project struct {
+	Inventory CodexHarnessInventoryCmd `cmd:"" help:"List installed capabilities by stable ID"`
+	Profile   CodexHarnessProfilesCmd  `cmd:"" help:"List, inspect and save reusable harness profiles"`
+	Bind      CodexHarnessBindCmd      `cmd:"" help:"Bind profiles and apply them to a known chat"`
+	Unbind    CodexHarnessUnbindCmd    `cmd:"" help:"Remove a binding and restore inherited decisions"`
+	Explain   CodexHarnessExplainCmd   `cmd:"" help:"Explain effective decisions, layers and last application"`
+	Export    CodexHarnessExportCmd    `cmd:"" help:"Export a portable named profile as JSON"`
+	Import    CodexHarnessImportCmd    `cmd:"" help:"Import a portable profile without binding or activating it"`
+	Skill     CodexHarnessSkillCmd     `cmd:"" help:"Install CQ curation skill"`
+	Status    CodexHarnessStatusCmd    `cmd:"" default:"1" help:"Show saved harness policy; preview selection with --model"`
+	Enable    struct{}                 `cmd:"" help:"Enable saved policy (legacy defaults apply only to GLM)"`
+	Disable   struct{}                 `cmd:"" help:"Disable policy while preserving project and chat preferences"`
+	Project   struct {
 		Directory string `arg:"" help:"Project directory prefix (normalised to an absolute path)"`
 		Profile   string `arg:"" enum:"minimal,full,auto" help:"Harness profile; auto removes this override and inherits"`
 	} `cmd:"" help:"Save a project harness default without implicitly enabling policy"`
@@ -38,7 +47,7 @@ type CodexHarnessStatusCmd struct {
 	Chat    string `help:"Chat UUID or codex://threads/ link for preview"`
 }
 
-const harnessApplicationNote = "CQ automatically detects profile support. With the CQ launcher, profiles control plugins, standalone MCP servers and local skills. With a standard ChatGPT launch, profiles control plugins only; standalone MCP servers and local skills stay unchanged. For standard launches, policy applies at the next eligible turn after CQ observes a GLM request; first-turn application is not guaranteed."
+const harnessApplicationNote = "CQ automatically detects profile support. With the CQ launcher, profiles control plugins, standalone MCP servers and local skills. With a standard ChatGPT launch, profiles control plugins only; standalone MCP servers and local skills stay unchanged. For standard launches, legacy GLM policy applies at the next eligible turn after CQ observes a GLM request; other model bindings apply after CQ observes that model's request. First-turn application is not guaranteed for standard launches."
 
 func (CodexHarnessCmd) Help() string       { return harnessApplicationNote }
 func (CodexHarnessStatusCmd) Help() string { return harnessApplicationNote }
@@ -46,9 +55,14 @@ func (CodexHarnessStatusCmd) Help() string { return harnessApplicationNote }
 var harnessChatIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type codexHarnessRunner struct {
-	fs      fsutil.FileSystem
-	path    func() (string, error)
-	receipt func(string) (harness.Receipt, error)
+	fs        fsutil.FileSystem
+	path      func() (string, error)
+	receipt   func(string) (harness.Receipt, error)
+	snapshot  func(context.Context, string) (harness.Inventory, error)
+	apply     func(context.Context, string) error
+	readModel func(context.Context, string) (harness.Snapshot, error)
+	getenv    func(string) string
+	getwd     func() (string, error)
 }
 
 type codexHarnessStatus struct {
@@ -59,8 +73,10 @@ type codexHarnessStatus struct {
 }
 
 func defaultCodexHarnessRunner() codexHarnessRunner {
-	return codexHarnessRunner{
-		fs: fsutil.OSFileSystem{},
+	runner := codexHarnessRunner{
+		fs:     fsutil.OSFileSystem{},
+		getenv: os.Getenv,
+		getwd:  os.Getwd,
 		receipt: func(chatID string) (harness.Receipt, error) {
 			roots, err := userdirs.Default()
 			if err != nil {
@@ -76,9 +92,17 @@ func defaultCodexHarnessRunner() codexHarnessRunner {
 			return filepath.Join(roots.Config, "harness.json"), nil
 		},
 	}
+	configureHarnessRunner(&runner)
+	return runner
 }
 
 func (runner codexHarnessRunner) execute(operation string, cmd CodexHarnessCmd, jsonOutput bool, output io.Writer) error {
+	if strings.HasPrefix(operation, "skill ") {
+		return runHarnessSkillCommand(operation, cmd, jsonOutput, output)
+	}
+	if operation == "inventory" || strings.HasPrefix(operation, "profile ") || operation == "bind <profiles>" || operation == "unbind" || operation == "explain" || operation == "export <name>" || operation == "import" {
+		return runner.executeProfiles(operation, cmd, jsonOutput, output)
+	}
 	var update func(*harness.Policy) error
 	var project, chat string
 	switch operation {
@@ -91,7 +115,7 @@ func (runner codexHarnessRunner) execute(operation string, cmd CodexHarnessCmd, 
 			}
 		}
 		if cmd.Status.Chat != "" {
-			chat, err = normaliseHarnessChat(cmd.Status.Chat)
+			chat, err = runner.harnessChat(cmd.Status.Chat, true)
 			if err != nil {
 				return err
 			}
@@ -111,6 +135,16 @@ func (runner codexHarnessRunner) execute(operation string, cmd CodexHarnessCmd, 
 			return err
 		}
 		update = func(policy *harness.Policy) error {
+			if policy.Version == 2 {
+				scope := policy.Workspaces[project]
+				binding := harness.Binding{}
+				if cmd.Project.Profile != "auto" {
+					binding.Profiles = []string{cmd.Project.Profile}
+				}
+				changeHarnessBinding(&scope, "glm-*", binding, cmd.Project.Profile == "auto")
+				policy.Workspaces[project] = scope
+				return nil
+			}
 			if cmd.Project.Profile == "auto" {
 				delete(policy.Projects, project)
 			} else {
@@ -128,6 +162,16 @@ func (runner codexHarnessRunner) execute(operation string, cmd CodexHarnessCmd, 
 			return err
 		}
 		update = func(policy *harness.Policy) error {
+			if policy.Version == 2 {
+				scope := policy.Tasks[chat]
+				binding := harness.Binding{}
+				if cmd.Chat.Profile != "auto" {
+					binding.Profiles = []string{cmd.Chat.Profile}
+				}
+				changeHarnessBinding(&scope, "glm-*", binding, cmd.Chat.Profile == "auto")
+				policy.Tasks[chat] = scope
+				return nil
+			}
 			if cmd.Chat.Profile == "auto" {
 				delete(policy.Chats, chat)
 			} else {
@@ -152,6 +196,13 @@ func (runner codexHarnessRunner) execute(operation string, cmd CodexHarnessCmd, 
 		return err
 	}
 	status := codexHarnessStatus{Policy: policy, Application: harnessApplicationNote}
+	if operation == "status" && project != "" && policy.Version == 2 {
+		policy, err = harness.LoadForContext(runner.fs, path, project)
+		if err != nil {
+			return err
+		}
+		status.Policy = policy
+	}
 	if operation == "status" && chat != "" && runner.receipt != nil {
 		receipt, readErr := runner.receipt(chat)
 		if readErr == nil {
@@ -171,7 +222,12 @@ func (runner codexHarnessRunner) execute(operation string, cmd CodexHarnessCmd, 
 	if update != nil {
 		text.WriteString("Harness policy saved.\n")
 	}
-	fmt.Fprintf(&text, "Codex GLM harness policy\n  enabled: %t\n  GLM default when enabled: minimal\n  other models: unmanaged\n", policy.Enabled)
+	if policy.Version == 2 {
+		fmt.Fprintf(&text, "Codex harness policy\n  enabled: %t\n  version: 2\n", policy.Enabled)
+		renderHarnessScopes(&text, policy)
+	} else {
+		fmt.Fprintf(&text, "Codex GLM harness policy\n  enabled: %t\n  GLM default when enabled: minimal\n  other models: unmanaged\n", policy.Enabled)
+	}
 	for _, project := range slices.Sorted(maps.Keys(policy.Projects)) {
 		fmt.Fprintf(&text, "  project %s: %s\n", project, policy.Projects[project])
 	}

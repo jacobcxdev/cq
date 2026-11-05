@@ -33,6 +33,7 @@ func init() {
 		}
 		deps := cloudStdioDefaults(&cfg)
 		deps.readHarnessPolicy = nil
+		deps.readHarnessContextPolicy = nil
 		deps.harnessReceipts = nil
 		deps.launch = func(context.Context, string, []string, []string, io.Writer) (*cloudLocal, error) { return local, nil }
 		if err := runCloudStdio(context.Background(), &cfg, nil, os.Args[4:], os.Stdin, os.Stdout, os.Stderr, deps); err != nil {

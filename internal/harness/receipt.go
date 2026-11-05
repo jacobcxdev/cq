@@ -23,6 +23,11 @@ type Receipt struct {
 	BaselinePlugins []string  `json:"baseline_plugins"`
 	AppliedPlugins  []string  `json:"applied_plugins"`
 	PendingPlugins  []string  `json:"pending_plugins,omitempty"`
+	Fingerprint     string    `json:"fingerprint,omitempty"`
+	Model           string    `json:"model,omitempty"`
+	Cwd             string    `json:"cwd,omitempty"`
+	Unsupported     []string  `json:"unsupported,omitempty"`
+	Issues          []string  `json:"issues,omitempty"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
@@ -124,19 +129,29 @@ func validateReceipt(receipt Receipt) error {
 	if receipt.Mode != "plugins" && receipt.Mode != "full" {
 		return fmt.Errorf("invalid harness receipt mode %q", receipt.Mode)
 	}
-	if receipt.Profile != Minimal && receipt.Profile != Full {
+	if receipt.Profile != Minimal && receipt.Profile != Full && receipt.Profile != Custom {
 		return fmt.Errorf("invalid harness receipt profile %q", receipt.Profile)
 	}
 	if strings.TrimSpace(receipt.Source) == "" {
 		return fmt.Errorf("harness receipt source is required")
 	}
 	switch receipt.State {
-	case "prepared", "applied", "pending", "failed", "diverged", "restored":
+	case "prepared", "applied", "partial", "pending", "failed", "diverged", "restored":
 	default:
 		return fmt.Errorf("invalid harness receipt state %q", receipt.State)
 	}
 	if receipt.UpdatedAt.IsZero() {
 		return fmt.Errorf("harness receipt timestamp is required")
+	}
+	if len(receipt.Model) > 1024 || strings.ContainsRune(receipt.Model, '\x00') || (receipt.Cwd != "" && (!filepath.IsAbs(receipt.Cwd) || filepath.Clean(receipt.Cwd) != receipt.Cwd || strings.ContainsRune(receipt.Cwd, '\x00'))) {
+		return fmt.Errorf("invalid harness receipt context")
+	}
+	for _, items := range [][]string{receipt.Unsupported, receipt.Issues} {
+		for _, item := range items {
+			if item == "" || len(item) > 4096 || strings.ContainsRune(item, '\x00') {
+				return fmt.Errorf("invalid harness receipt application detail")
+			}
+		}
 	}
 	for _, plugins := range [][]string{receipt.BaselinePlugins, receipt.AppliedPlugins, receipt.PendingPlugins} {
 		seen := make(map[string]bool, len(plugins))

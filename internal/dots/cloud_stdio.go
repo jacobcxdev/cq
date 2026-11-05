@@ -78,19 +78,22 @@ type cloudSocket interface {
 }
 
 type cloudStdioDependencies struct {
-	environment       []string
-	launch            func(context.Context, string, []string, []string, io.Writer) (*cloudLocal, error)
-	stock             func(context.Context, string, []string, []string, io.Reader, io.Writer, io.Writer) error
-	dial              func(context.Context, Account) (cloudSocket, int, error)
-	resolveOwner      func(string) (Account, error)
-	http              cloudHTTPDoer
-	readRoots         func(string, string) ([]byte, error)
-	event             func(map[string]any)
-	statusInterval    time.Duration
-	now               func() time.Time
-	readHarnessPolicy func() (harness.Policy, error)
-	harnessTimeout    time.Duration
-	harnessReceipts   cloudHarnessReceiptStore
+	environment              []string
+	launch                   func(context.Context, string, []string, []string, io.Writer) (*cloudLocal, error)
+	stock                    func(context.Context, string, []string, []string, io.Reader, io.Writer, io.Writer) error
+	dial                     func(context.Context, Account) (cloudSocket, int, error)
+	resolveOwner             func(string) (Account, error)
+	http                     cloudHTTPDoer
+	readRoots                func(string, string) ([]byte, error)
+	event                    func(map[string]any)
+	statusInterval           time.Duration
+	now                      func() time.Time
+	readHarnessPolicy        func() (harness.Policy, error)
+	readHarnessContextPolicy func(string) (harness.Policy, error)
+	readHarnessInventory     func(string) (harness.Inventory, error)
+	nativeHarnessInventory   func(context.Context, string) (harness.Inventory, error)
+	harnessTimeout           time.Duration
+	harnessReceipts          cloudHarnessReceiptStore
 }
 
 func startCloudLocal(ctx context.Context, path string, arguments, environment []string, stderr io.Writer) (*cloudLocal, error) {

@@ -45,7 +45,7 @@ func TestSaveAndLoadPrivatePolicy(t *testing.T) {
 func TestLoadRejectsInvalidPolicy(t *testing.T) {
 	tests := map[string]string{
 		"unknown field":   `{"version":1,"enabled":true,"fallback":"full"}`,
-		"future version":  `{"version":2,"enabled":true}`,
+		"future version":  `{"version":3,"enabled":true}`,
 		"missing version": `{"enabled":true}`,
 		"null policy":     `null`,
 		"trailing data":   `{"version":1} {"version":1}`,
