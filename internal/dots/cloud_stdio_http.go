@@ -18,7 +18,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/harness"
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 type cloudHTTPDoer interface {
@@ -100,7 +103,19 @@ func cloudStdioDefaults(cfg *Settings) cloudStdioDependencies {
 	if tlsErr != nil {
 		httpClient = cloudUnavailableHTTP{}
 	}
+	var receipts cloudHarnessReceiptStore
+	if roots, err := userdirs.Default(); err == nil {
+		receipts = harness.Receipts{FS: fsutil.OSFileSystem{}, Dir: filepath.Join(roots.State, "harness")}
+	}
 	return cloudStdioDependencies{
+		harnessReceipts: receipts,
+		readHarnessPolicy: func() (harness.Policy, error) {
+			roots, err := userdirs.Default()
+			if err != nil {
+				return harness.Policy{}, err
+			}
+			return harness.Load(fsutil.OSFileSystem{}, filepath.Join(roots.Config, "harness.json"))
+		},
 		environment: os.Environ(), launch: startCloudLocal, stock: cloudStock, readRoots: ReadOwned,
 		http: httpClient, now: time.Now, statusInterval: 2 * time.Second, event: event,
 		resolveOwner: func(alias string) (Account, error) {

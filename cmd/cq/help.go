@@ -50,6 +50,7 @@ Commands:
   codex validate    Validate installed Codex routing
   codex canary      Manage Codex routing canary
   codex network     Manage native ChatGPT network routing
+  codex harness     Manage opt-in GLM harness profiles
 `,
 	"codex network": `Usage: cq codex network <command>
 

@@ -57,7 +57,7 @@ func (s *Server) zaiResponsesURL() (string, error) {
 // Non-Z.ai requests retain their exact encoded request bytes for Codex.
 func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, string) {
 	zaiEnabled := s.ZAIAPIKey != nil || s.ZAIAccounts != nil || s.hasZAICatalog()
-	if !zaiEnabled {
+	if !zaiEnabled && s.HarnessObserver == nil {
 		return false, ""
 	}
 	if r.Body == nil {
@@ -82,6 +82,10 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 		decodedBody = decoded.Decoded()
 	}
 	model := extractModel(decodedBody)
+	s.observeHarness(r.Header, model, decodedBody)
+	if !zaiEnabled {
+		return false, ""
+	}
 	if RouteModelWithCatalog(model, s.Catalog) != ProviderZAI {
 		return false, ""
 	}
@@ -329,6 +333,7 @@ func zaiResponseInput(raw json.RawMessage) ([]json.RawMessage, error) {
 }
 
 func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *websocket.Conn, header http.Header, body []byte) (string, []json.RawMessage, error) {
+	s.observeHarness(header, extractModel(body), body)
 	body, _, err := normaliseCQCompactionInput(body, s.cqCompactionToken())
 	if err != nil {
 		return "", nil, err

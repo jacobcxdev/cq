@@ -63,6 +63,7 @@ type ClaudeCmd struct {
 type CodexCmd struct {
 	Dots     CodexDotsCmd    `cmd:"" help:"Manage multi-account Dots"`
 	Network  CodexNetworkCmd `cmd:"" help:"Manage native ChatGPT network routing"`
+	Harness  CodexHarnessCmd `cmd:"" help:"Manage opt-in GLM harness profiles with automatically detected support"`
 	Login    LoginCmd        `cmd:"" help:"Add Codex account"`
 	Accounts AccountsCmd     `cmd:"" help:"List Codex accounts"`
 	Switch   SwitchCmd       `cmd:"" help:"Switch active Codex account"`
@@ -333,9 +334,11 @@ func main() {
 		}
 		return
 	}
-	if err := ensureCompatibilityEpoch(); err != nil {
-		fmt.Fprintf(os.Stderr, "cq: compatibility: %v\n", err)
-		os.Exit(1)
+	if !isCodexHarnessCommand(os.Args[1:]) {
+		if err := ensureCompatibilityEpoch(); err != nil {
+			fmt.Fprintf(os.Stderr, "cq: compatibility: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	// Handle commands that conflict with kong's default:"withargs" on CheckCmd.
 	// Kong validates the enum constraint on providers before trying command
@@ -436,6 +439,9 @@ func runAgent(args []string) error {
 }
 
 func dispatch(ctx *kong.Context, cli *CLI) error {
+	if strings.HasPrefix(ctx.Command(), "codex harness ") {
+		return defaultCodexHarnessRunner().execute(strings.TrimPrefix(ctx.Command(), "codex harness "), cli.Codex.Harness, cli.JSON, os.Stdout)
+	}
 	if strings.HasPrefix(ctx.Command(), "codex dots ") {
 		return defaultDotsRunner().execute(context.Background(), &cli.Codex.Dots, strings.TrimPrefix(ctx.Command(), "codex dots "), cli.JSON, os.Stdout, os.Stderr)
 	}

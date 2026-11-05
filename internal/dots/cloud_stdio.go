@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jacobcxdev/cq/internal/harness"
 )
 
 const cloudAppMarker = "plugins.codex-app-tools@openai-bundled.mcp_servers.codex_app.enabled="
@@ -77,16 +78,19 @@ type cloudSocket interface {
 }
 
 type cloudStdioDependencies struct {
-	environment    []string
-	launch         func(context.Context, string, []string, []string, io.Writer) (*cloudLocal, error)
-	stock          func(context.Context, string, []string, []string, io.Reader, io.Writer, io.Writer) error
-	dial           func(context.Context, Account) (cloudSocket, int, error)
-	resolveOwner   func(string) (Account, error)
-	http           cloudHTTPDoer
-	readRoots      func(string, string) ([]byte, error)
-	event          func(map[string]any)
-	statusInterval time.Duration
-	now            func() time.Time
+	environment       []string
+	launch            func(context.Context, string, []string, []string, io.Writer) (*cloudLocal, error)
+	stock             func(context.Context, string, []string, []string, io.Reader, io.Writer, io.Writer) error
+	dial              func(context.Context, Account) (cloudSocket, int, error)
+	resolveOwner      func(string) (Account, error)
+	http              cloudHTTPDoer
+	readRoots         func(string, string) ([]byte, error)
+	event             func(map[string]any)
+	statusInterval    time.Duration
+	now               func() time.Time
+	readHarnessPolicy func() (harness.Policy, error)
+	harnessTimeout    time.Duration
+	harnessReceipts   cloudHarnessReceiptStore
 }
 
 func startCloudLocal(ctx context.Context, path string, arguments, environment []string, stderr io.Writer) (*cloudLocal, error) {
@@ -237,6 +241,7 @@ type cloudBridge struct {
 	statusMu      sync.Mutex
 	statusWatches map[string]bool
 	statusSeen    map[string]json.RawMessage
+	harness       *cloudHarness
 }
 
 func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, arguments []string, stdin io.Reader, stdout, stderr io.Writer, deps cloudStdioDependencies) error {
@@ -263,6 +268,11 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 	b.local, err = deps.launch(ctx, path, arguments, environment, stderr)
 	if err != nil {
 		return err
+	}
+	b.harness = newCloudHarness(b)
+	if b.harness != nil {
+		b.workers.Add(1)
+		go b.harness.run()
 	}
 	localExit := make(chan struct{})
 	var localErr error
@@ -298,6 +308,7 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 		case <-time.After(5 * time.Second):
 		}
 		b.workers.Wait()
+		b.harness.close()
 	}()
 	localClosed := make(chan struct{})
 	go b.guard("local", func() {
@@ -306,7 +317,9 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 		for {
 			raw, readErr := reader.ReadBytes('\n')
 			if len(raw) != 0 {
-				b.emitRaw(raw)
+				if !b.harness.observe(raw) {
+					b.emitRaw(raw)
+				}
 			}
 			if readErr != nil {
 				return
@@ -408,8 +421,13 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 				b.event(map[string]any{"blocked_method": method, "owner_alias": alias})
 				b.fail(request, "Secondary Dot operation is not supported")
 			} else {
+				forward, prepareErr := b.harness.prepare(request, next.raw)
+				if prepareErr != nil {
+					b.fail(request, prepareErr.Error())
+					continue
+				}
 				b.localWrite.Lock()
-				_, err := b.local.input.Write(next.raw)
+				_, err := b.local.input.Write(forward)
 				b.localWrite.Unlock()
 				if err != nil {
 					return errors.New("stock Codex CLI input closed")

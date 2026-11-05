@@ -311,6 +311,25 @@ CQ-owned compact state uses the existing private proxy token as its key source. 
 
 CQ refreshes the provider catalogue every five minutes while running; `cq models refresh` requests an immediate refresh. New models appear when Z.ai adds them to that native catalogue for your subscription, without a CQ release or manual registry entry. Codex may retain its own catalogue cache until its next refresh. CQ caps GLM-5.3 automatic compaction at 70% of Codex's usable context window (697,302 tokens with the current 1,048,576-token window and 95% input allowance), retaining any earlier provider limit. The cap is recalculated from downloaded metadata. GLM-5.3-Flash, GLM-5-Turbo and future models such as GLM-5.4 keep their provider defaults.
 
+Opt-in harness profiles reduce optional capabilities for GLM chats without creating a new chat or rewriting history:
+
+```sh
+cq codex harness enable
+cq codex harness project /path/to/project minimal
+cq codex harness chat CHAT_ID full
+cq codex harness chat CHAT_ID auto
+cq codex harness status --chat CHAT_ID --model glm-5.3 --project /path/to/project
+cq codex harness disable
+```
+
+When enabled, GLM defaults to `minimal`. A chat override wins over the deepest matching project directory; `auto` removes an override. Other models retain their normal harness. Saving an override does not enable the policy.
+
+On macOS, normal ChatGPT launches use per-chat plugin exclusions after CQ observes a native request. These apply to a subsequent eligible turn; first-turn application is not guaranteed. Standalone MCP servers and local skill catalogues remain available. Under the CQ launcher, the same policy also disables standalone MCP servers and fresh skill-catalogue instructions before context assembly. Existing chats reload only at idle boundaries, retaining their ID and history. Core tools and project instructions remain available; historical catalogue text already in the chat is preserved.
+
+Native subagents inherit their parent's capability configuration. A child of a minimal parent starts minimal. Internal native spawns do not cross the launcher's chat-start hook, so CQ cannot independently apply a different model-based profile before that child's first turn. Start a separately managed chat when that distinction is required. A fresh stock native process restores its normal global capabilities when resuming a chat previously run through the launcher.
+
+CQ saves the original plugin exclusions privately and restores its own changes when the profile returns to `full`, the model changes, or policy is disabled. If user changes diverge from CQ's saved exclusions, CQ preserves them. Desktop lacks an atomic plugin-list comparison, so CQ checks fresh settings before updating and guards the current model and reasoning effort. `status --chat` reports the last recorded application scope and state, separately from a policy preview. Profiles are disabled by default and stored in CQ's private `harness.json`; per-chat receipts share ownership between the standard controller and launcher.
+
 Routing tries the preferred subscription first, then the remaining saved subscriptions if Z.ai returns `401`, `403`, or `429` before a response starts. Each key is tried at most once per request. CQ does not replay a request after a transport error or a started response. WebSocket continuations retain full history across account fallback. HTTP requests containing an opaque `previous_response_id` use only the preferred account, because that upstream state cannot safely move between subscriptions.
 
 Fresh quota data moves exhausted subscriptions behind available accounts. Route diagnostics include a redacted account hint and whether a rejected request fell back to another account. Stale or missing quota data keeps normal bounded fallback available.
@@ -904,6 +923,11 @@ cq codex dots start
 cq codex dots status
 cq codex dots stop
 cq codex dots sync
+cq codex harness chat
+cq codex harness disable
+cq codex harness enable
+cq codex harness project
+cq codex harness status
 cq codex login
 cq codex network
 cq codex network disable

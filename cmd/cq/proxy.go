@@ -1355,11 +1355,14 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if zaiQuotaCacheErr != nil {
 		fmt.Fprintln(os.Stderr, "cq: Z.ai routing quota cache unavailable; using account fallback")
 	}
+	harnessObserver, stopHarness := startHarnessController(proxyCtx, fsys, roots)
+	defer stopHarness()
 	srv := &proxy.Server{
-		Config:    cfg,
-		Selector:  selector,
-		Discover:  discover,
-		Transport: transport,
+		HarnessObserver: harnessObserver,
+		Config:          cfg,
+		Selector:        selector,
+		Discover:        discover,
+		Transport:       transport,
 		ZAIAccounts: func() ([]zaiprov.Account, error) {
 			return zaiprov.ReadAccounts(fsys, os.Getenv, roots.Config)
 		},
