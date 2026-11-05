@@ -57,11 +57,12 @@ func TestZCodeInstalledLive(t *testing.T) {
 		t.Fatal("CQ_ZCODE_LIVE_CONFIG must select an existing private OAuth profile")
 	}
 	accounts, err := zaiprov.ReadAccounts(fsutil.OSFileSystem{}, func(string) string { return "" }, config)
-	if err != nil || len(accounts) == 0 || accounts[0].OAuth == nil || accounts[0].Transport != "zcode" {
-		t.Fatal("qualification requires the preferred paid ZCode OAuth account; no API-key fallback")
+	start := os.Getenv("CQ_ZCODE_NATIVE_START") == "1"
+	if err != nil || len(accounts) == 0 || accounts[0].OAuth == nil || accounts[0].Transport != "zcode" && !(start && accounts[0].Transport == "zcode-start") {
+		t.Fatal("qualification requires the preferred ZCode OAuth account; no API-key fallback")
 	}
 	account := accounts[0]
-	if os.Getenv("CQ_ZCODE_NATIVE_START") == "1" {
+	if start {
 		// Select Start only in this test's account copy; keep the saved route intact.
 		account.Transport = "zcode-start"
 	}
@@ -180,7 +181,10 @@ func TestZCodeInstalledLive(t *testing.T) {
 					}
 					defer func() {
 						_ = stdin.Close()
-						if child.Wait() != nil {
+						if t.Failed() {
+							cancel()
+						}
+						if child.Wait() != nil && !t.Failed() {
 							t.Error("isolated installed Codex exited unsuccessfully")
 						}
 						if after, err := captureCodexInstalledExecutable(clientPath); err != nil || after != proof {

@@ -31,11 +31,17 @@ archives:
         formats: [zip]
 checksum:
   name_template: "checksums.txt"
+  extra_files:
+    - glob: ./internal/provider/zai/zcode/third_party/zcode/LICENSE
+      name_template: ZCode-LICENSE.txt
 
 release:
   draft: true
   use_existing_draft: true
   replace_existing_artifacts: true
+  extra_files:
+    - glob: ./internal/provider/zai/zcode/third_party/zcode/LICENSE
+      name_template: ZCode-LICENSE.txt
 
 changelog:
   sort: asc

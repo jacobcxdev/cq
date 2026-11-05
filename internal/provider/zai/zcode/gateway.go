@@ -57,6 +57,12 @@ func (g *Gateway) Do(ctx context.Context, body []byte, auth GatewayAuth, session
 	if err != nil || len(projected) > maxGatewayRequest {
 		return nil, &Error{Code: "gateway_invalid_request"}
 	}
+	if auth.StartPlan {
+		projected, err = gatewayStartSystem(projected)
+		if err != nil || len(projected) > maxGatewayRequest {
+			return nil, &Error{Code: "gateway_invalid_request"}
+		}
+	}
 	if g.Catalogue != nil {
 		var request map[string]json.RawMessage
 		_ = json.Unmarshal(projected, &request)
