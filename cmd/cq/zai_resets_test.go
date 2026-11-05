@@ -11,6 +11,7 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 )
 
 const zaiResetCLIInventory = `{"code":200,"success":true,"data":{"fiveHourResets":[{"recordId":"first","grantType":"CAMPAIGN","available":true,"expireTime":"2026-11-04T12:00:00Z"}],"weekResets":[]}}`
@@ -89,5 +90,38 @@ func TestZAIResetListKeepsHealthyAccountAndOmitsKeys(t *testing.T) {
 	err := runZAIResetsCommand(context.Background(), "list", ZAIResetsCmd{}, true, deps)
 	if err == nil || !strings.Contains(out.String(), `"account_id":"second"`) || !strings.Contains(out.String(), `"id":"5h:first"`) || strings.Contains(out.String(), "private-key") {
 		t.Fatalf("partial inventory lost or leaked: %s err=%v", out.String(), err)
+	}
+}
+
+func TestZAIResetCLIListedAndUsedOAuthExactCards(t *testing.T) {
+	var output bytes.Buffer
+	deps := zaiResetTestDeps(&output)
+	deps.Accounts = func() ([]zaiprov.Account, error) {
+		return []zaiprov.Account{{ID: "oauth-stable", Label: "browser", OAuth: &zcode.LoginSession{UserID: "user", BusinessJWT: "private-business", ZCodeJWT: "private-zcode", RawOAuth: "private-oauth"}}}, nil
+	}
+	posts := 0
+	deps.Client.HTTP = zaiCommandDoer(func(r *http.Request) (*http.Response, error) {
+		if r.Header.Get("Authorization") != "private-business" || r.Header.Get("User-Agent") != "ZCode/"+zcode.ClientVersion {
+			t.Fatal("CLI did not use selected OAuth business identity")
+		}
+		body := zaiResetCLIInventory
+		if r.Method == http.MethodPost {
+			posts++
+			body = `{"code":200,"success":true}`
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	})
+	if err := runZAIResetsCommand(t.Context(), "list <reference>", ZAIResetsCmd{List: ZAIResetsListCmd{Reference: "browser"}}, true, deps); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), `"id":"5h:first"`) || strings.Contains(output.String(), "private-") || posts != 0 {
+		t.Fatal("OAuth card listing failed, leaked or consumed a card")
+	}
+	output.Reset()
+	if err := runZAIResetsCommand(t.Context(), "use <reference>", ZAIResetsCmd{Use: ZAIResetsUseCmd{Reference: "browser", Credit: "5h:first", Window: "5h", Yes: true}}, true, deps); err != nil {
+		t.Fatal(err)
+	}
+	if posts != 1 || !strings.Contains(output.String(), `"credit_id":"5h:first"`) || strings.Contains(output.String(), "private-") {
+		t.Fatal("OAuth exact-card CLI use failed or leaked")
 	}
 }

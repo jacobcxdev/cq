@@ -11,20 +11,25 @@ import (
 	"unicode"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // Account is one subscription credential. API keys are excluded from public JSON.
 type Account struct {
-	ID     string `json:"id"`
-	Label  string `json:"label,omitempty"`
-	APIKey string `json:"-"`
+	ID        string              `json:"id"`
+	Label     string              `json:"label,omitempty"`
+	APIKey    string              `json:"-"`
+	Transport string              `json:"transport,omitempty"`
+	OAuth     *zcode.LoginSession `json:"-"`
 }
 
 type storedAccount struct {
-	ID     string `json:"id"`
-	Label  string `json:"label,omitempty"`
-	APIKey string `json:"api_key"`
+	ID             string `json:"id"`
+	Label          string `json:"label,omitempty"`
+	APIKey         string `json:"api_key"`
+	Transport      string `json:"transport,omitempty"`
+	ZCodeAccountID string `json:"zcode_account_id,omitempty"`
 }
 
 type credentialFile struct {
@@ -73,12 +78,47 @@ func ReadAccounts(fsys fsutil.FileSystem, env func(string) string, configDir str
 	}
 	accounts := make([]Account, 0, len(*credentials.Accounts))
 	seen := make(map[string]bool)
+	var sessions map[string]zcode.LoginSession
 	for _, stored := range *credentials.Accounts {
+		if stored.ZCodeAccountID != "" {
+			if stored.APIKey != "" || !validLabel(stored.Label) || (stored.Transport != "zcode" && stored.Transport != "zcode-start") {
+				return nil, errors.New("invalid Z.ai credential file")
+			}
+			if sessions == nil {
+				store, err := zcode.OpenSessionStore(fsys, configDir, false)
+				if err != nil {
+					return nil, errors.New("ZCode login unavailable; run cq zai login --zcode")
+				}
+				all, err := store.Accounts()
+				if err != nil {
+					return nil, err
+				}
+				sessions = make(map[string]zcode.LoginSession, len(all))
+				for _, session := range all {
+					sessions[session.ID] = session
+				}
+			}
+			session, ok := sessions[stored.ZCodeAccountID]
+			if !ok {
+				return nil, errors.New("ZCode login unavailable; run cq zai login --zcode")
+			}
+			account := newZCodeAccount(session)
+			if stored.ID != account.ID {
+				return nil, errors.New("invalid Z.ai credential file")
+			}
+			account.Label, account.Transport = stored.Label, stored.Transport
+			if !seen[account.ID] {
+				accounts = append(accounts, account)
+				seen[account.ID] = true
+			}
+			continue
+		}
 		key, err := validateAPIKey(strings.TrimSpace(stored.APIKey))
-		if err != nil || key == "" || !validLabel(stored.Label) {
+		if err != nil || key == "" || !validLabel(stored.Label) || (stored.Transport != "" && stored.Transport != "zcode") {
 			return nil, errors.New("invalid Z.ai credential file")
 		}
 		account := newAccount(key, stored.Label)
+		account.Transport = stored.Transport
 		if stored.ID != "" && stored.ID != account.ID {
 			return nil, errors.New("invalid Z.ai credential file")
 		}
@@ -93,6 +133,57 @@ func ReadAccounts(fsys fsutil.FileSystem, env func(string) string, configDir str
 func newAccount(key, label string) Account {
 	digest := sha256.Sum256([]byte(key))
 	return Account{ID: "zai_" + hex.EncodeToString(digest[:8]), Label: label, APIKey: key}
+}
+
+func newZCodeAccount(session zcode.LoginSession) Account {
+	digest := sha256.Sum256([]byte("zcode:" + session.UserID))
+	label := session.Label
+	if label == "" {
+		label = session.Email
+	}
+	if label == "" {
+		label = session.Name
+	}
+	return Account{ID: "zai_" + hex.EncodeToString(digest[:8]), Label: label, Transport: "zcode", OAuth: &session}
+}
+
+// StoreZCodeAccount saves a fresh browser login without replacing API-key accounts.
+func StoreZCodeAccount(fsys fsutil.FileSystem, configDir string, session zcode.LoginSession, label string, activate bool) (Account, error) {
+	store, err := zcode.OpenSessionStore(fsys, configDir, true)
+	if err != nil {
+		return Account{}, err
+	}
+	session, err = store.Save(session, label, activate)
+	if err != nil {
+		return Account{}, err
+	}
+	accounts, err := ReadAccounts(fsys, func(string) string { return "" }, configDir)
+	if err != nil {
+		return Account{}, err
+	}
+	account := newZCodeAccount(session)
+	index := -1
+	for i, existing := range accounts {
+		if existing.ID == account.ID {
+			index = i
+			account.Transport = existing.Transport
+			break
+		}
+	}
+	if index < 0 {
+		accounts = append(accounts, account)
+		index = len(accounts) - 1
+	} else {
+		accounts[index] = account
+	}
+	if activate && index != 0 {
+		copy(accounts[1:index+1], accounts[:index])
+		accounts[0] = account
+	}
+	if err := writeAccounts(fsys, configDir, accounts); err != nil {
+		return Account{}, err
+	}
+	return account, nil
 }
 
 // StoreAccount adds or updates one subscription without discarding existing ones.
@@ -114,6 +205,7 @@ func StoreAccount(fsys fsutil.FileSystem, configDir, key, label string, activate
 	for i, existing := range accounts {
 		if existing.ID == account.ID {
 			index = i
+			account.Transport = existing.Transport
 			if label == "" {
 				account.Label = existing.Label
 			}
@@ -162,7 +254,42 @@ func RemoveAccount(fsys fsutil.FileSystem, configDir, reference string) error {
 	if err != nil {
 		return err
 	}
+	removed := accounts[index]
 	accounts = append(accounts[:index], accounts[index+1:]...)
+	if err := writeAccounts(fsys, configDir, accounts); err != nil {
+		return err
+	}
+	if removed.OAuth != nil {
+		store, err := zcode.OpenSessionStore(fsys, configDir, false)
+		if err != nil {
+			return err
+		}
+		return store.Remove(removed.OAuth.ID)
+	}
+	return nil
+}
+
+// SetTransport chooses an upstream protocol for one saved account. Empty is the
+// original native Responses route; ZCode uses the authenticated Messages gateway.
+func SetTransport(fsys fsutil.FileSystem, configDir, reference, transport string) error {
+	if transport != "responses" && transport != "zcode" && transport != "zcode-start" {
+		return errors.New("Z.ai transport must be responses, zcode or zcode-start")
+	}
+	accounts, err := ReadAccounts(fsys, func(string) string { return "" }, configDir)
+	if err != nil {
+		return err
+	}
+	index, err := accountIndex(accounts, reference)
+	if err != nil {
+		return err
+	}
+	if accounts[index].OAuth != nil && transport == "responses" || accounts[index].OAuth == nil && transport == "zcode-start" {
+		return errors.New("this route requires a matching ZCode browser login")
+	}
+	accounts[index].Transport = transport
+	if transport == "responses" {
+		accounts[index].Transport = ""
+	}
 	return writeAccounts(fsys, configDir, accounts)
 }
 
@@ -191,7 +318,11 @@ func writeAccounts(fsys fsutil.FileSystem, configDir string, accounts []Account)
 	stored := make([]storedAccount, 0, len(accounts))
 	credentials := credentialFile{Accounts: &stored}
 	for _, account := range accounts {
-		stored = append(stored, storedAccount{ID: account.ID, Label: account.Label, APIKey: account.APIKey})
+		entry := storedAccount{ID: account.ID, Label: account.Label, APIKey: account.APIKey, Transport: account.Transport}
+		if account.OAuth != nil {
+			entry.ZCodeAccountID = account.OAuth.ID
+		}
+		stored = append(stored, entry)
 	}
 	if len(accounts) > 0 {
 		credentials.APIKey = accounts[0].APIKey

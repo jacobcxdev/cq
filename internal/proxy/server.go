@@ -22,6 +22,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -90,11 +91,13 @@ type Server struct {
 	Discover  ClaudeDiscoverer
 	Transport http.RoundTripper
 	// Z.ai uses separate credentials and transport from Codex accounts.
-	ZAIAPIKey    func() (string, error)
-	ZAIAccounts  func() ([]zaiprov.Account, error)
-	ZAIQuota     func() []quota.Result
-	ZAIUpstream  string
-	ZAITransport http.RoundTripper
+	ZAIAPIKey        func() (string, error)
+	ZAIAccounts      func() ([]zaiprov.Account, error)
+	ZAIQuota         func() []quota.Result
+	ZAIUpstream      string
+	ZAITransport     http.RoundTripper
+	ZAIGateway       *zcode.Gateway
+	ZAIProjectTokens *zcode.ProjectTokenClient
 	// RuntimeNormalHandler is set only by the socket supervisor. It forwards
 	// public work to the selected private worker instead of running normal
 	// proxy semantics in the supervisor process.

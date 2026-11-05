@@ -85,7 +85,7 @@ func runZAIResetScheduleCommand(ctx context.Context, command string, cmd ZAIRese
 		if err != nil {
 			return err
 		}
-		inventory, err := deps.Client.List(ctx, account.APIKey, deps.Now())
+		inventory, err := deps.Client.ListAccount(ctx, &account, deps.Now())
 		if err != nil {
 			return err
 		}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,8 @@ import (
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
+	"github.com/jacobcxdev/cq/internal/quota"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
@@ -213,22 +216,32 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		opts.RefreshInterval = 5 * time.Minute
 	}
 	seedEntries := cachedRegistryEntries(opts)
-	zaiTokens := func(context.Context) ([]string, error) {
+	zcodeTokens := &zcode.ProjectTokenClient{HTTP: opts.HTTPClient, Version: zcode.ClientVersion}
+	zaiTokens := func(ctx context.Context) ([]string, error) {
 		accounts, err := zaiprov.ReadAccounts(opts.FS, opts.Env, opts.Roots.Config)
 		if err != nil {
 			return nil, err
 		}
 		keys := make([]string, 0, len(accounts))
 		for _, account := range accounts {
-			keys = append(keys, account.APIKey)
+			if account.Transport == "zcode-start" {
+				continue
+			}
+			key, err := account.Credential(ctx, zcodeTokens)
+			if err != nil {
+				continue
+			}
+			keys = append(keys, key)
 		}
 		return keys, nil
 	}
-	zaiKeys, zaiKeyErr := zaiTokens(context.Background())
+	// Construction only discovers local accounts. Project-token refresh belongs
+	// to the cancellable source fetch, not application startup.
+	zaiAccounts, zaiKeyErr := zaiprov.ReadAccounts(opts.FS, opts.Env, opts.Roots.Config)
 	if zaiKeyErr != nil {
 		fmt.Fprintln(opts.Stderr, "cq: registry: Z.ai credentials unavailable")
 	}
-	if zaiKeyErr != nil || len(zaiKeys) == 0 {
+	if zaiKeyErr != nil || len(zaiAccounts) == 0 {
 		filtered := seedEntries[:0]
 		for _, entry := range seedEntries {
 			if entry.Provider != modelregistry.ProviderZAI {
@@ -268,8 +281,46 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		},
 	}
 
-	if zaiKeyErr == nil && len(zaiKeys) > 0 {
-		refresher.ZAI = &modelregistry.ZAISource{Client: opts.HTTPClient, Tokens: zaiTokens}
+	if zaiKeyErr == nil && len(zaiAccounts) > 0 {
+		native := &modelregistry.ZAISource{Client: opts.HTTPClient, Tokens: zaiTokens}
+		readStartAccounts := func() ([]zaiprov.Account, error) {
+			accounts, err := zaiprov.ReadAccounts(opts.FS, opts.Env, opts.Roots.Config)
+			if err != nil {
+				return nil, err
+			}
+			// Inference pins an explicitly selected Start route to its preferred
+			// account. Discovery must expose that same entitlement scope.
+			if len(accounts) > 0 && accounts[0].Transport == "zcode-start" {
+				return accounts[:1], nil
+			}
+			return nil, nil
+		}
+		startQuota := zaiprov.NewAccounts(opts.HTTPClient, readStartAccounts)
+		start := &modelregistry.ZCodeStartSource{
+			Catalogue: &zcode.ModelCatalogue{HTTP: opts.HTTPClient, Version: zcode.ClientVersion},
+			Quota: func(ctx context.Context) ([]quota.Result, error) {
+				rows, err := startQuota.Fetch(ctx, time.Now())
+				if err != nil {
+					return nil, err
+				}
+				for _, row := range rows {
+					if row.Error != nil {
+						return nil, errors.New("ZCode Start model quota unavailable")
+					}
+				}
+				return rows, nil
+			},
+		}
+		refresher.ZAI = modelregistry.SourceFunc(func(ctx context.Context) (modelregistry.SourceResult, error) {
+			accounts, err := zaiprov.ReadAccounts(opts.FS, opts.Env, opts.Roots.Config)
+			if err != nil {
+				return modelregistry.SourceResult{}, err
+			}
+			if len(accounts) > 0 && accounts[0].Transport == "zcode-start" {
+				return start.Fetch(ctx)
+			}
+			return native.Fetch(ctx)
+		})
 	}
 
 	p := &registryPipeline{

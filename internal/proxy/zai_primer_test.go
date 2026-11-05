@@ -359,3 +359,20 @@ func TestNewZAIPrimerDoesNotCreateState(t *testing.T) {
 		t.Fatal("constructor created state before running")
 	}
 }
+
+func TestZAIPrimerSkippedStartTokenPools(t *testing.T) {
+	account := zaiPrimerAccountA
+	account.Transport = "zcode-start"
+	client := newZAIPrimerTestHTTP()
+	primer := newZAIPrimerTest(t, fsutil.NewMemFS(), client, account)
+	primer.models = func() []modelregistry.Entry {
+		t.Fatal("Start Plan does not need a priming model")
+		return nil
+	}
+	if _, err := primer.RunOnce(context.Background(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.gets) != 0 || len(client.posts) != 0 || len(primer.Health(true).Accounts) != 0 {
+		t.Fatal("Start Plan priming accessed quota or consumed tokens")
+	}
+}

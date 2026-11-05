@@ -117,7 +117,7 @@ func runZAIResetsCommand(ctx context.Context, command string, cmd ZAIResetsCmd, 
 	result := make([]zaiResetAccountInventory, 0, len(accounts))
 	var failures []error
 	for _, account := range accounts {
-		inventory, err := deps.Client.List(ctx, account.APIKey, deps.Now())
+		inventory, err := deps.Client.ListAccount(ctx, &account, deps.Now())
 		item := zaiResetAccountInventory{AccountID: account.ID, Label: account.Label, Credits: inventory.Credits}
 		if err != nil {
 			item.Error = err.Error()
