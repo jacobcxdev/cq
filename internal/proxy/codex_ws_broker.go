@@ -320,6 +320,7 @@ type codexTerminatingWSBrokerConfig struct {
 	AcceptedRevision     codex.Revision
 	DownstreamGeneration uint64
 	PrewarmTimeout       time.Duration
+	ResponseIdleTimeout  time.Duration
 	Drain                <-chan struct{}
 }
 
@@ -332,6 +333,7 @@ const (
 	codexWSIdleKeepAliveInterval  = 30 * time.Second
 	codexWSControlWriteTimeout    = time.Second
 	codexWSPrewarmResponseTimeout = 10 * time.Second
+	codexWSResponseIdleTimeout    = 5 * time.Minute
 )
 
 type codexWSFrameObservationSinkContextKey struct{}
@@ -422,6 +424,9 @@ func newCodexTerminatingWSBroker(config codexTerminatingWSBrokerConfig) (*codexT
 	}
 	if config.PrewarmTimeout <= 0 {
 		config.PrewarmTimeout = codexWSPrewarmResponseTimeout
+	}
+	if config.ResponseIdleTimeout <= 0 {
+		config.ResponseIdleTimeout = codexWSResponseIdleTimeout
 	}
 	config.Headers = config.Headers.Clone()
 	return &codexTerminatingWSBroker{config: config}, nil
@@ -1552,7 +1557,11 @@ func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *Cod
 }
 func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context, downstream websocketRelayConn, pending *codexWSPendingFrame, lifecycle *codexWSLifecycle, accounts []CodexFrozenDispatchAccount, accountIndex *int, resetAvailable, replanQuota bool, active *codexWSActiveUpstream) (bool, error) {
 	for {
-		messageType, frame, err := readCodexWSActiveMessage(ctx, active)
+		// A silent, open provider socket must not retain the lane forever. Bound
+		// each read, not the whole response, so progressing streams can continue.
+		readCtx, cancelRead := context.WithTimeout(ctx, broker.config.ResponseIdleTimeout)
+		messageType, frame, err := readCodexWSActiveMessage(readCtx, active)
+		cancelRead()
 		if err != nil {
 			failure := classifyCodexWebSocketFailure(err)
 			closeCode, closeReason := codexTraceWebSocketClose(err)
@@ -1670,8 +1679,8 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 					}
 				}
 				markCodexWSProviderTerminal(ctx, string(result.Kind), reason, reason, terminalAccountHint, 0)
-				if err := writeCodexWSMessage(ctx, downstream, messageType, frame); err != nil {
-					return false, fmt.Errorf("Codex downstream WebSocket write failed")
+				if err := broker.writeResponseMessage(ctx, downstream, messageType, frame); err != nil {
+					return false, fmt.Errorf("Codex downstream WebSocket write failed: %w", err)
 				}
 				return false, nil
 			}
@@ -1695,8 +1704,8 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 				}
 			}
 			markCodexWSProviderTerminal(ctx, string(result.Kind), reason, reason, terminalAccountHint, 0)
-			if err := writeCodexWSMessage(ctx, downstream, messageType, frame); err != nil {
-				return false, fmt.Errorf("Codex downstream WebSocket write failed")
+			if err := broker.writeResponseMessage(ctx, downstream, messageType, frame); err != nil {
+				return false, fmt.Errorf("Codex downstream WebSocket write failed: %w", err)
 			}
 			return false, nil
 		}
@@ -1705,15 +1714,15 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 				return false, err
 			}
 			markCodexWSProviderTerminal(ctx, string(result.Kind), "provider_failed", "provider_error", codexTraceAccountHint(active.account), 0)
-			if err := writeCodexWSMessage(ctx, downstream, messageType, frame); err != nil {
-				return false, fmt.Errorf("Codex downstream WebSocket write failed")
+			if err := broker.writeResponseMessage(ctx, downstream, messageType, frame); err != nil {
+				return false, fmt.Errorf("Codex downstream WebSocket write failed: %w", err)
 			}
 			closeCodexWSActiveUpstream(active)
 			return false, nil
 		}
-		if err := writeCodexWSMessage(ctx, downstream, messageType, frame); err != nil {
+		if err := broker.writeResponseMessage(ctx, downstream, messageType, frame); err != nil {
 			emitCodexTrace(ctx, CodexTraceEvent{Phase: "downstream_write", Outcome: "error", FrameType: codexTraceWebSocketFrameType(messageType), FrameBytes: len(frame), Reason: codexTraceErrorReason(err)})
-			return false, fmt.Errorf("Codex downstream WebSocket write failed")
+			return false, fmt.Errorf("Codex downstream WebSocket write failed: %w", err)
 		}
 		emitCodexTrace(ctx, CodexTraceEvent{Phase: "downstream_write", Outcome: "success", FrameType: codexTraceWebSocketFrameType(messageType), FrameBytes: len(frame), EventName: string(result.Kind)})
 		if result.Terminal {
@@ -1728,6 +1737,12 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 			return false, nil
 		}
 	}
+}
+
+func (broker *codexTerminatingWSBroker) writeResponseMessage(ctx context.Context, downstream websocketRelayConn, messageType int, frame []byte) error {
+	writeCtx, cancelWrite := context.WithTimeout(ctx, broker.config.ResponseIdleTimeout)
+	defer cancelWrite()
+	return writeCodexWSMessage(writeCtx, downstream, messageType, frame)
 }
 
 func (broker *codexTerminatingWSBroker) applicationAuthRetryAccount(ctx context.Context, account CodexFrozenDispatchAccount, current CandidateAttempt) (CodexFrozenDispatchAccount, bool) {
