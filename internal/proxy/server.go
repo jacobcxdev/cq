@@ -86,10 +86,13 @@ type CodexHealth struct {
 
 // Server is the reverse proxy HTTP server.
 type Server struct {
-	Config    *Config
-	Selector  ClaudeSelector
-	Discover  ClaudeDiscoverer
-	Transport http.RoundTripper
+	// HarnessObserver queues per-chat profile work outside the request path.
+	// It receives only the native session ID and model, never prompt contents.
+	HarnessObserver func(string, string)
+	Config          *Config
+	Selector        ClaudeSelector
+	Discover        ClaudeDiscoverer
+	Transport       http.RoundTripper
 	// Z.ai uses separate credentials and transport from Codex accounts.
 	ZAIAPIKey        func() (string, error)
 	ZAIAccounts      func() ([]zaiprov.Account, error)
@@ -1324,7 +1327,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	var firstKind int
 	var firstFrame []byte
-	if zaiEnabled {
+	if zaiEnabled || s.HarnessObserver != nil {
 		var upgrade <-chan struct{}
 		if s.runtimeUpgrade != nil {
 			upgrade = s.runtimeUpgrade.PauseSignal()
@@ -1355,6 +1358,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if firstKind == websocket.TextMessage {
+			s.observeHarness(r.Header, extractCodexWebSocketFrameModel(firstFrame), firstFrame)
 			firstFrame, _, err = normaliseCQCompactionInput(firstFrame, s.cqCompactionToken())
 			if err != nil {
 				return

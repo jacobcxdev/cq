@@ -9,9 +9,7 @@ import (
 	"io"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -82,14 +80,24 @@ func runZAIOAuthLogin(ctx context.Context, options ZAILoginCmd, dir string, json
 	}
 	client := zcode.OAuthClient{HTTP: deps.client, Version: zcodeClientVersion, DeviceMid: device, OpenURL: func(ctx context.Context, target string) error {
 		if deps.errOutput != nil {
-			if _, err := fmt.Fprintln(deps.errOutput, "Complete ZCode sign-in in your browser."); err != nil {
+			if _, err := fmt.Fprintf(deps.errOutput, "Complete ZCode sign-in in your browser.\nOpen this URL to sign in:\n  %s\n\n", target); err != nil {
 				return errors.New("write ZCode sign-in guidance")
 			}
 		}
 		if deps.openURL == nil {
 			return errors.New("ZCode browser opener unavailable")
 		}
-		return deps.openURL(ctx, target)
+		if err := deps.openURL(ctx, target); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if deps.errOutput != nil {
+				if _, err := fmt.Fprintln(deps.errOutput, "Could not open your browser automatically; open the URL above to continue signing in."); err != nil {
+					return errors.New("write ZCode sign-in guidance")
+				}
+			}
+		}
+		return nil
 	}}
 	session, err := deps.oauthLogin(ctx, client)
 	if err != nil {
@@ -200,13 +208,7 @@ func openZCodeBrowser(ctx context.Context, target string) error {
 	if err != nil || u.Host == "" || u.User != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return errors.New("invalid ZCode browser URL")
 	}
-	if runtime.GOOS == "darwin" {
-		if err := exec.CommandContext(ctx, "open", target).Run(); err != nil {
-			return errors.New("open ZCode browser")
-		}
-		return nil
-	}
-	if err := auth.OpenBrowserContext(ctx, target); err != nil {
+	if err := auth.OpenBrowserContextWithOutput(ctx, target, os.Stderr); err != nil {
 		return errors.New("open ZCode browser")
 	}
 	return nil
