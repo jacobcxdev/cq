@@ -166,8 +166,107 @@ homebrew_casks:
         unless %i[install uninstall_existing_cask].all? { |method| ::Cask::Installer.instance_method(method).arity == 0 }
           raise "CQ reinstall requires supported Homebrew installer callbacks"
         end
+        require "cask/upgrade"
+        cq_dependency_callbacks = [:satisfy_cask_and_formula_dependencies, :cask_and_formula_dependencies]
+        unless cq_dependency_callbacks.all? { |method| ::Cask::Installer.instance_method(method).arity.zero? }
+          raise "CQ companion reconciliation requires supported Homebrew dependency callbacks"
+        end
+        cq_upgrade_parameters = ::Cask::Upgrade.method(:upgrade_cask).parameters.map(&:last)
+        cq_required_parameters = [
+          :old_cask, :new_cask, :binaries, :force, :require_sha, :quit,
+          :skip_cask_deps, :verbose, :download_queue, :new_cask_installer,
+        ]
+        unless cq_required_parameters.all? { |parameter| cq_upgrade_parameters.include?(parameter) }
+          raise "CQ companion reconciliation requires a supported Homebrew upgrade transaction"
+        end
         cq_cask = cask
         ::Cask::Installer.prepend(Module.new do
+          define_method(:satisfy_cask_and_formula_dependencies) do
+            return super() unless @cask.equal?(cq_cask)
+            return super() unless @cask.depends_on.cask.include?("jacobcxdev/tap/cq-network")
+
+            # Homebrew considers any installed Cask dependency satisfied. Bind
+            # this one companion to the immutable release selected by CQ.
+            pin = JSON.parse(<<~'JSON')
+              {{ .Env.CQ_NATIVE_NETWORK_PIN }}
+            JSON
+            version = pin.fetch("version")
+            sha256 = pin.fetch("sha256")
+            url = "https://github.com/jacobcxdev/cq/releases/download/cq-network-v#{version}/CQNetwork_#{version}_universal.zip"
+            companion = cask_and_formula_dependencies.find do |dependency|
+              dependency.is_a?(::Cask::Cask) && dependency.token == "cq-network"
+            end
+            valid_pin = pin["schema_version"] == 1 &&
+                        version.is_a?(String) && version.match?(/\A\d+\.\d+\.\d+\z/) &&
+                        sha256.is_a?(String) && sha256.match?(/\A[0-9a-f]{64}\z/) &&
+                        companion && companion.version.to_s == version &&
+                        companion.sha256.to_s == sha256 && companion.url.to_s == url
+            unless valid_pin
+              raise "CQ Network dependency does not match CQ's reviewed companion release"
+            end
+            return super() unless companion.installed?
+
+            installed = ::Cask::CaskLoader.load_from_installed_caskfile(companion.installed_caskfile, api_fallback: false)
+            return super() if installed.version.to_s == version
+            raise "CQ Network is pinned; unpin it before upgrading CQ" if companion.pinned?
+            if Version.new(installed.version.to_s) > Version.new(version)
+              raise "Installed CQ Network is newer than CQ's reviewed companion release"
+            end
+
+            # This runs during dependency installation, before CQ's old binary
+            # is unlinked. It is never evaluated by info, audit, or brew fetch.
+            # Older companion receipts disable routing during their uninstall;
+            # retain only a validated opt-in and restore it after the transaction.
+            agent = Pathname(Dir.home)/"Library/LaunchAgents/dev.jacobcx.cq.network.plist"
+            restore_routing = agent.exist? || agent.symlink?
+            if restore_routing
+              stat = agent.lstat
+              private_agent = stat.file? && stat.uid == Process.uid &&
+                              stat.mode & 0o777 == 0o600 && stat.size <= 1_048_576
+              unless private_agent
+                raise "CQ Network LaunchAgent must be a private user-owned regular file"
+              end
+              result = @command.run("/usr/bin/plutil",
+                                    args: ["-convert", "json", "-o", "-", agent.to_s], must_succeed: true)
+              definition = JSON.parse(result.stdout)
+              arguments = definition["ProgramArguments"]
+              expected = ["/Applications/CQNetwork.app/Contents/MacOS/CQNetwork", "run", "--cq"]
+              valid_agent = definition["Label"] == "dev.jacobcx.cq.network" &&
+                            arguments.is_a?(Array) && arguments.length == 4 && arguments.take(3) == expected &&
+                            arguments.last.is_a?(String) && arguments.last.start_with?("/")
+              unless valid_agent
+                raise "CQ Network LaunchAgent has an unexpected definition"
+              end
+            end
+            executable = HOMEBREW_PREFIX/"bin/cq"
+            if restore_routing && (!executable.file? || !executable.executable?)
+              raise "CQ Network routing restoration requires the installed CQ executable"
+            end
+
+            failure = nil
+            begin
+              successor = self.class.new(companion, command: @command, upgrade: true, require_sha: true,
+                                         skip_cask_deps: true, download_queue: @download_queue)
+              ::Cask::Upgrade.upgrade_cask(installed, companion,
+                                        binaries: binaries?, force: false, require_sha: true, quit: false,
+                                        skip_cask_deps: true, verbose: verbose?, download_queue: @download_queue,
+                                        new_cask_installer: successor)
+            rescue => error
+              failure = error
+            end
+            if restore_routing
+              begin
+                @command.run(executable.to_s, args: ["codex", "network", "enable"], must_succeed: true)
+              rescue => error
+                detail = failure ? " (companion upgrade also failed: #{failure})" : ""
+                raise "CQ Network routing restoration failed: #{error}#{detail}"
+              end
+            end
+            raise failure if failure
+
+            super()
+          end
+
           define_method(:uninstall_existing_cask) do
             return super() unless @cask.equal?(cq_cask)
             return unless @cask.installed?

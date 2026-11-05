@@ -140,6 +140,9 @@ jobs:
           GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
         run: test -n "$GEMINI_ANTIGRAVITY_CLIENT_SECRET"
 
+      - name: Bind reviewed native companion to the CQ Cask
+        run: echo "CQ_NATIVE_NETWORK_PIN=$(jq -c . .github/native-network-release.json)" >> "$GITHUB_ENV"
+
       - name: Build draft release
         uses: goreleaser/goreleaser-action@v7
         with:

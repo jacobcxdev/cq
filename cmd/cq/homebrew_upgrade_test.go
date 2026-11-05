@@ -45,6 +45,7 @@ func runGeneratedCQHomebrewArtifactsWithFormatting(t *testing.T, prelude string,
 		lines = append(lines, strings.TrimPrefix(line, "      "))
 	}
 	block = strings.ReplaceAll(strings.Join(lines, "\n"), "{{ .Version }}", "0.34.0")
+	block = strings.ReplaceAll(block, "{{ .Env.CQ_NATIVE_NETWORK_PIN }}", reviewedHomebrewNativePin(t))
 	block = "  " + strings.ReplaceAll(strings.TrimRight(block, "\n"), "\n", "\n  ") + "\n"
 	// GoReleaser emits the custom block before package metadata. Homebrew's
 	// formatter must preserve the uninstall declaration before callback setup.

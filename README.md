@@ -16,8 +16,9 @@ post-install command is required.
 brew install --cask jacobcxdev/tap/cq
 ```
 
-On macOS 13 and later, the Cask includes the signed CQ Network companion. With WireGuard
-configured, `cq codex network enable` requests macOS approval to route native
+On macOS 13 and later, the Cask includes the signed CQ Network companion. Installation
+and upgrades check its reviewed package version and automatically upgrade an older
+companion. With WireGuard configured, `cq codex network enable` requests macOS approval to route native
 ChatGPT traffic without restarting it. See [Native network releases](docs/native-network-releases.md).
 
 Existing formula installations must migrate once so the legacy Homebrew service
@@ -263,24 +264,27 @@ Gemini authentication and project selection remain owned by Antigravity. cq read
 
 ### Z.ai Coding Plan
 
-Run `cq zai login --zcode --activate` to sign in through ZCode's browser OAuth flow. Repeat with `--label` for another account. CQ uses the inspected ZCode client identity and authentication protocol, exchanges the provider OAuth credential for its business identity, and obtains short-lived project access tokens for paid Coding Plan requests. OAuth sessions are encrypted in the private CQ configuration directory; `zai.json` contains account references rather than OAuth tokens. Each saved login retains its device identity. A fresh installation can register a stable local device UUID without installing ZCode.
+Run `cq zai login` to sign in through ZCode's browser OAuth flow. A completed login becomes the preferred account and uses its email as the default label. Repeat for another account; use `--no-activate` to keep the current preferred account or `--label` to choose a custom label. Existing `--zcode` and `--activate` flags remain accepted. CQ uses the inspected ZCode client identity and authentication protocol, exchanges the provider OAuth credential for its business identity, and obtains short-lived project access tokens for paid Coding Plan requests. OAuth sessions are encrypted in the private CQ configuration directory; `zai.json` contains account references rather than OAuth tokens. Each saved login retains its device identity. A fresh installation can register a stable local device UUID without installing ZCode.
 
-Run `cq zai login` and paste a Personal Coding Plan API key into the hidden prompt. Repeat for each subscription. Create the key under **API Keys → Personal Coding Plan**; Standard API Keys use separate billing. CQ validates quota access before saving the key in `$XDG_CONFIG_HOME/cq/zai.json` (default `~/.config/cq/zai.json`), using mode `0600` in a private directory. Quota access alone does not prove inference access; `cq zai prime now` checks whether an eligible dormant window can be started. Existing single-key files remain supported. Saved accounts also work for the background proxy service; new accounts and preferred-account changes apply on the next request without restarting CQ.
+For API-key authentication, run `cq zai login --api-key` and paste a Personal Coding Plan API key into the hidden prompt. Repeat for each subscription. Create the key under **API Keys → Personal Coding Plan**; Standard API Keys use separate billing. CQ validates quota access before saving the key in `$XDG_CONFIG_HOME/cq/zai.json` (default `~/.config/cq/zai.json`), using mode `0600` in a private directory. Quota access alone does not prove inference access; `cq zai prime now` checks whether an eligible dormant window can be started. Existing single-key files remain supported. Saved accounts also work for the background proxy service; new accounts and preferred-account changes apply on the next request without restarting CQ.
 
 `ZAI_API_KEY` remains an exclusive override: when set in a process's environment, that process uses only that key. Remove the override to use the saved account pool. For scripts, `cq zai login --api-key-stdin` reads the key from standard input without putting it in command arguments.
 
 CQ supports individual Coding Plan subscriptions through Z.ai's global endpoint. Group plans and regional endpoints are not configured separately.
 
 ```bash
-cq zai login --label primary
-cq zai login --label secondary
+cq zai login
+cq zai login --no-activate
 cq zai accounts
-cq zai switch secondary            # Prefer this subscription
+cq zai switch ACCOUNT_ID           # Prefer this subscription
 cq zai remove ACCOUNT_ID          # Remove one saved account
+cq zai remove --api-keys           # Remove stored API-key entries after browser login
 cq --refresh check zai
 cq models refresh
 cq models list --provider zai
 ```
+
+After saving replacement browser logins, `cq zai remove --api-keys` removes all stored API-key entries while retaining browser accounts and their relative preference order. It requires a saved browser login and makes no provider requests. API keys cannot reliably identify which browser account replaces them, so CQ never deletes them merely because another account signs in. An environment `ZAI_API_KEY` override is separate from stored entries and remains under the caller's control.
 
 Choose a saved account's billing route explicitly. New browser logins default to `zcode`, the paid Coding Plan gateway; `zcode-start` uses that OAuth account's separate Start Plan token pool. Start Plan access stays on the preferred account and never silently falls back to paid quota. Existing API-key accounts retain their saved route; `responses` is the original API-key route. Route changes apply on the next request.
 

@@ -269,6 +269,29 @@ func RemoveAccount(fsys fsutil.FileSystem, configDir, reference string) error {
 	return nil
 }
 
+// RemoveAPIKeyAccounts removes stored API-key entries only after a saved browser
+// login can be loaded. It preserves browser-login order and never revokes tokens
+// or changes the encrypted session store.
+func RemoveAPIKeyAccounts(fsys fsutil.FileSystem, configDir string) error {
+	accounts, err := ReadAccounts(fsys, func(string) string { return "" }, configDir)
+	if err != nil {
+		return err
+	}
+	kept := make([]Account, 0, len(accounts))
+	for _, account := range accounts {
+		if account.OAuth != nil {
+			kept = append(kept, account)
+		}
+	}
+	if len(kept) == 0 {
+		return errors.New("save a browser login with cq zai login before removing API keys")
+	}
+	if len(kept) == len(accounts) {
+		return nil
+	}
+	return writeAccounts(fsys, configDir, kept)
+}
+
 // SetTransport chooses an upstream protocol for one saved account. Empty is the
 // original native Responses route; ZCode uses the authenticated Messages gateway.
 func SetTransport(fsys fsutil.FileSystem, configDir, reference, transport string) error {

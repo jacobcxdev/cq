@@ -96,7 +96,7 @@ func runZAIOAuthLogin(ctx context.Context, options ZAILoginCmd, dir string, json
 		return err
 	}
 	session.DeviceMid = device
-	account, err := zaiprov.StoreZCodeAccount(deps.fs, dir, session, options.Label, options.Activate)
+	account, err := zaiprov.StoreZCodeAccount(deps.fs, dir, session, options.Label, options.shouldActivate())
 	if err != nil {
 		return err
 	}
