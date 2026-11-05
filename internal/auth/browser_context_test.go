@@ -56,7 +56,7 @@ func TestBrowserContextCancelsDetectionWithoutLaunching(t *testing.T) {
 						done <- errors.New("opener panic")
 					}
 				}()
-				done <- openBrowserContext(ctx, "https://example.com/login", tc.platform, commands)
+				done <- openBrowserContext(ctx, "https://example.com/login", tc.platform, commands, io.Discard)
 			}()
 			select {
 			case <-ready:
@@ -107,7 +107,7 @@ func TestBrowserContextPreservesPrivateFlagsAndBrowserLifetime(t *testing.T) {
 				}
 				return browserHelperCommand(commandCtx, "print", output)
 			}
-			if err := openBrowserContext(ctx, "https://example.com/login", tc.platform, commands); err != nil || !launched {
+			if err := openBrowserContext(ctx, "https://example.com/login", tc.platform, commands, io.Discard); err != nil || !launched {
 				t.Fatalf("launch = %v, launched=%v", err, launched)
 			}
 			cancel()
@@ -122,10 +122,10 @@ func TestBrowserContextRejectsCancelledOrInvalidInputBeforeCommands(t *testing.T
 	if err := OpenBrowserContext(ctx, "https://example.com"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("exported cancelled opener = %v", err)
 	}
-	if err := openBrowserContext(ctx, "https://example.com", "linux", command); !errors.Is(err, context.Canceled) {
+	if err := openBrowserContext(ctx, "https://example.com", "linux", command, io.Discard); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled opener = %v", err)
 	}
-	if err := openBrowserContext(context.Background(), "file:///private", "linux", command); err == nil {
+	if err := openBrowserContext(context.Background(), "file:///private", "linux", command, io.Discard); err == nil {
 		t.Fatal("accepted non-web URL")
 	}
 }
@@ -136,7 +136,7 @@ func TestBrowserContextDeadlineBoundsDetection(t *testing.T) {
 	commands := func(commandCtx context.Context, _ string, _ ...string) *exec.Cmd {
 		return browserHelperCommand(commandCtx, "block", "")
 	}
-	if err := openBrowserContext(ctx, "https://example.com/login", "linux", commands); !errors.Is(err, context.DeadlineExceeded) {
+	if err := openBrowserContext(ctx, "https://example.com/login", "linux", commands, io.Discard); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("detection deadline = %v", err)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -26,12 +27,18 @@ func openBrowser(rawURL string) error {
 // OpenBrowserContext bounds browser detection and launch preparation. Once a
 // browser starts, its lifetime is independent of the login or verification.
 func OpenBrowserContext(ctx context.Context, rawURL string) error {
-	return openBrowserContext(ctx, rawURL, runtime.GOOS, exec.CommandContext)
+	return OpenBrowserContextWithOutput(ctx, rawURL, os.Stdout)
+}
+
+// OpenBrowserContextWithOutput uses the shared browser policy with a separate
+// diagnostics stream, leaving machine-readable command output untouched.
+func OpenBrowserContextWithOutput(ctx context.Context, rawURL string, output io.Writer) error {
+	return openBrowserContext(ctx, rawURL, runtime.GOOS, exec.CommandContext, output)
 }
 
 type browserCommandFactory func(context.Context, string, ...string) *exec.Cmd
 
-func openBrowserContext(ctx context.Context, rawURL, platform string, command browserCommandFactory) error {
+func openBrowserContext(ctx context.Context, rawURL, platform string, command browserCommandFactory, output io.Writer) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -41,7 +48,7 @@ func openBrowserContext(ctx context.Context, rawURL, platform string, command br
 	}
 	switch platform {
 	case "darwin":
-		return openBrowserDarwin(ctx, rawURL, command)
+		return openBrowserDarwin(ctx, rawURL, command, output)
 	case "linux":
 		return openBrowserLinux(ctx, rawURL, command)
 	case "windows":
@@ -54,7 +61,7 @@ func openBrowserContext(ctx context.Context, rawURL, platform string, command br
 // macOS: detect default browser via Launch Services plist, open in private mode.
 // --args only works on fresh launch; when the browser is already running, macOS
 // ignores extra args and just sends the URL via Apple Events.
-func openBrowserDarwin(ctx context.Context, rawURL string, command browserCommandFactory) error {
+func openBrowserDarwin(ctx context.Context, rawURL string, command browserCommandFactory, output io.Writer) error {
 	bundleID := defaultBrowserBundleID(ctx, command)
 	if bundleID == "" || bundleID == "com.apple.safari" || !validBrowserName.MatchString(bundleID) {
 		return startBrowser(ctx, command, "open", rawURL)
@@ -88,11 +95,12 @@ func openBrowserDarwin(ctx context.Context, rawURL string, command browserComman
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		fmt.Printf("Browser already running \u2014 open this URL in a private window:\n  %s\n", rawURL)
+		_, err = fmt.Fprintf(output, "Browser already running \u2014 open this URL in a private window:\n  %s\n", rawURL)
+		return err
 	} else {
-		fmt.Println("Browser already running \u2014 URL copied to clipboard. Paste in a private window.")
+		_, err = fmt.Fprintln(output, "Browser already running \u2014 URL copied to clipboard. Paste in a private window.")
+		return err
 	}
-	return nil
 }
 
 func defaultBrowserBundleID(ctx context.Context, command browserCommandFactory) string {

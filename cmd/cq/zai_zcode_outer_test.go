@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -65,6 +67,65 @@ func TestZCodeOuterLoginUsedInjectedOAuthAndKeptJSONClean(t *testing.T) {
 	accounts, err := zaiprov.ReadAccounts(fsys, func(string) string { return "" }, "/config")
 	if err != nil || len(accounts) != 1 || accounts[0].OAuth == nil || accounts[0].OAuth.DeviceMid != "persisted-device" || accounts[0].Label != "browser" {
 		t.Fatal("OAuth login did not persist selected device/account")
+	}
+}
+
+func TestZCodeOuterLoginPrintedURLBeforeBrowserAndKeptManualLoginAvailable(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		for _, browserFailed := range []bool{false, true} {
+			t.Run(fmt.Sprintf("json=%t/browser_failed=%t", jsonOutput, browserFailed), func(t *testing.T) {
+				var output, diagnostics bytes.Buffer
+				deps := zaiTestDependencies(fsutil.NewMemFS(), &output)
+				deps.errOutput = &diagnostics
+				deps.deviceMid = func() (string, error) { return "device", nil }
+				const target = "https://chat.z.ai/fixture-login"
+				deps.openURL = func(context.Context, string) error {
+					if !strings.Contains(diagnostics.String(), target) {
+						t.Fatal("OAuth URL was not printed before opening browser")
+					}
+					if browserFailed {
+						return errors.New("browser unavailable")
+					}
+					return nil
+				}
+				deps.oauthLogin = func(ctx context.Context, client zcode.OAuthClient) (zcode.LoginSession, error) {
+					if err := client.OpenURL(ctx, target); err != nil {
+						return zcode.LoginSession{}, err
+					}
+					return zcode.LoginSession{UserID: "manual", Email: "manual@example.com", ZCodeJWT: "private-zcode", RawOAuth: "private-oauth", BusinessJWT: "private-business"}, nil
+				}
+				if err := runZAIOAuthLogin(t.Context(), ZAILoginCmd{}, "/config", jsonOutput, deps); err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(output.String(), target) {
+					t.Fatal("OAuth guidance contaminated account output")
+				}
+				if browserFailed && !strings.Contains(diagnostics.String(), "open the URL above") {
+					t.Fatal("browser failure omitted manual sign-in guidance")
+				}
+				if jsonOutput && !json.Valid(output.Bytes()) {
+					t.Fatal("OAuth --json output contained prose")
+				}
+			})
+		}
+	}
+}
+
+func TestZCodeOuterLoginDidNotSwallowBrowserCancellation(t *testing.T) {
+	deps := zaiTestDependencies(fsutil.NewMemFS(), io.Discard)
+	deps.errOutput = io.Discard
+	deps.deviceMid = func() (string, error) { return "device", nil }
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	deps.openURL = func(context.Context, string) error {
+		cancel()
+		return context.Canceled
+	}
+	deps.oauthLogin = func(ctx context.Context, client zcode.OAuthClient) (zcode.LoginSession, error) {
+		return zcode.LoginSession{}, client.OpenURL(ctx, "https://chat.z.ai/fixture-login")
+	}
+	if err := runZAIOAuthLogin(ctx, ZAILoginCmd{}, "/config", true, deps); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled browser login = %v", err)
 	}
 }
 
