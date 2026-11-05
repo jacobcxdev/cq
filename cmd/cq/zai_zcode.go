@@ -206,7 +206,7 @@ func openZCodeBrowser(ctx context.Context, target string) error {
 		}
 		return nil
 	}
-	if err := auth.OpenBrowser(target); err != nil {
+	if err := auth.OpenBrowserContext(ctx, target); err != nil {
 		return errors.New("open ZCode browser")
 	}
 	return nil

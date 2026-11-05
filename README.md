@@ -282,7 +282,7 @@ cq models refresh
 cq models list --provider zai
 ```
 
-Choose a saved account's billing route explicitly. `zcode` uses the paid Coding Plan gateway; `zcode-start` uses that OAuth account's separate Start Plan token pool. Start Plan access never silently falls back to paid quota. `responses` retains the original API-key route.
+Choose a saved account's billing route explicitly. New browser logins default to `zcode`, the paid Coding Plan gateway; `zcode-start` uses that OAuth account's separate Start Plan token pool. Start Plan access stays on the preferred account and never silently falls back to paid quota. Existing API-key accounts retain their saved route; `responses` is the original API-key route. Route changes apply on the next request.
 
 ```sh
 cq zai route ACCOUNT_ID zcode
