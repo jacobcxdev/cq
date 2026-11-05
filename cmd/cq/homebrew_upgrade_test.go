@@ -87,20 +87,15 @@ cask "cq" do
   # No zap stanza required
 end
 `
+	caskPath := filepath.Join(t.TempDir(), "cq.rb")
+	if err := os.WriteFile(caskPath, []byte(caskContent), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if format {
-		path := filepath.Join(t.TempDir(), "cq.rb")
-		if err := os.WriteFile(path, []byte(caskContent), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		output, err := exec.Command("/bin/bash", "../../.github/scripts/format-homebrew-cask.sh", path).CombinedOutput()
+		output, err := exec.Command("/bin/bash", "../../.github/scripts/format-homebrew-cask.sh", caskPath).CombinedOutput()
 		if err != nil {
 			t.Fatalf("Homebrew formatter failed: %v\n%s", err, output)
 		}
-		formatted, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		caskContent = string(formatted)
 	}
 	metadataRoot := filepath.Join(t.TempDir(), "caskroom")
 	metadataSetup := ""
@@ -131,8 +126,10 @@ class CQCommandRecorder
 end
 CQCommandRecorder.calls = []
 ` + metadataSetup + prelude + `
-cask = Cask::CaskLoader::FromContentLoader.new(<<~'CASK').load(config: nil)
-` + caskContent + `CASK
+
+# Load the generated file through the same loader as a published tap cask.
+# FromContentLoader's local cask variable shadows the DSL reader during eval.
+cask = Cask::CaskLoader::FromPathLoader.new(Pathname(` + strconv.Quote(caskPath) + `)).load(config: nil)
 ` + metadataProbe + `
 artifact = cask.artifacts.find { |a| a.is_a?(Cask::Artifact::Uninstall) }
 successor = Cask::Cask.new("cq") { version "0.34.1" }
