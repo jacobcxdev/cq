@@ -124,6 +124,9 @@ jobs:
           brew install --cask codex
           codex --version
 
+      - name: Verify companion upgrade and rollback
+        run: go test -race -count=1 ./cmd/cq -run '^TestHomebrewCompanionReconciliation$'
+
       - name: Validate normal, compaction, hard-limit failover, and rescue routing
         env:
           CQ_RUN_CODEX_TASK_AFFINITY_ACCEPTANCE: "1"

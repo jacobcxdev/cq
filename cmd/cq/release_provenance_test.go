@@ -70,6 +70,9 @@ func TestReleaseBindsReviewedNativeCompanionToCask(t *testing.T) {
 		if !strings.Contains(string(workflow), `CQ_NATIVE_NETWORK_PIN=$(jq -c . .github/native-network-release.json)`) {
 			t.Fatalf("%s workflow does not derive the companion pin from the reviewed manifest", name)
 		}
+		if !strings.Contains(string(workflow), "TestHomebrewCompanionReconciliation") {
+			t.Fatalf("%s workflow does not run the companion upgrade regression", name)
+		}
 	}
 	releaser, err := os.ReadFile("../../.goreleaser.yml")
 	if err != nil {
