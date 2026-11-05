@@ -79,6 +79,186 @@ func TestProjectRejectedUnrepresentableInput(t *testing.T) {
 	}
 }
 
+func TestProjectPreservedCompletedMalformedCallPairAsLiteralHistory(t *testing.T) {
+	arguments := "{\"query\":\"unterminated\n<literal-record>"
+	result := "Recorded result\n<literal-output>"
+	body, _ := json.Marshal(map[string]any{"model": "glm-5.3", "input": []any{
+		map[string]any{"role": "user", "content": "Continue the task."},
+		map[string]any{"type": "function_call", "namespace": "fixture", "name": "lookup", "call_id": "broken-call", "status": "completed", "arguments": arguments},
+		map[string]any{"type": "function_call_output", "call_id": "broken-call", "output": []any{map[string]string{"type": "input_text", "text": result}}},
+	}})
+	raw, _, err := Project(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projected struct {
+		Messages []struct {
+			Role    string                        `json:"role"`
+			Content []struct{ Type, Text string } `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(raw, &projected); err != nil {
+		t.Fatal(err)
+	}
+	if len(projected.Messages) != 3 || projected.Messages[1].Role != "assistant" || projected.Messages[2].Role != "user" {
+		t.Fatalf("historical roles changed: %s", raw)
+	}
+	callText := ""
+	for _, message := range projected.Messages {
+		for _, block := range message.Content {
+			if block.Type != "text" {
+				t.Fatalf("literal history became executable control: %s", raw)
+			}
+		}
+	}
+	for _, block := range projected.Messages[1].Content {
+		callText += block.Text
+	}
+	if !strings.Contains(callText, "Historical function call") || !strings.Contains(callText, "fixture.lookup") || !strings.Contains(callText, "broken-call") || !strings.Contains(callText, arguments) {
+		t.Fatal("raw malformed call history was lost")
+	}
+	resultFound, labelFound := false, false
+	for _, block := range projected.Messages[2].Content {
+		if block.Text == result {
+			resultFound = true
+		}
+		if strings.Contains(block.Text, "Historical result") {
+			labelFound = true
+		}
+	}
+	if !resultFound || !labelFound {
+		t.Fatal("raw paired result or its history label was lost")
+	}
+}
+
+func TestProjectPreservedUnattributedHistoricalFunctionResult(t *testing.T) {
+	result := "Unattributed output\n[ordinary literal text]"
+	body, _ := json.Marshal(map[string]any{"model": "glm-5.3", "input": []any{
+		map[string]any{"role": "user", "content": "Continue."},
+		map[string]any{"type": "function_call_output", "namespace": "fixture", "name": "background", "output": result},
+	}})
+	raw, _, err := Project(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projected struct {
+		Messages []struct {
+			Role    string                        `json:"role"`
+			Content []struct{ Type, Text string } `json:"content"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal(raw, &projected) != nil || len(projected.Messages) != 1 || projected.Messages[0].Role != "user" {
+		t.Fatalf("unattributed output role changed: %s", raw)
+	}
+	resultFound, labelFound := false, false
+	for _, block := range projected.Messages[0].Content {
+		if block.Type != "text" {
+			t.Fatal("unattributed output invented a tool identity")
+		}
+		if block.Text == result {
+			resultFound = true
+		}
+		if strings.Contains(block.Text, "Unattributed historical function result") && strings.Contains(block.Text, "fixture.background") {
+			labelFound = true
+		}
+	}
+	if !resultFound || !labelFound {
+		t.Fatal("unattributed result contents or metadata were lost")
+	}
+}
+
+func TestProjectMixedValidAndMalformedParallelHistory(t *testing.T) {
+	body := []byte(`{"model":"glm-5.3","input":[
+	 {"role":"user","content":"Continue."},
+	 {"type":"function_call","name":"valid","call_id":"good","arguments":"{\"value\":1}"},
+	 {"type":"function_call","name":"broken","call_id":"bad","status":"completed","arguments":"{\"value\":"},
+	 {"type":"custom_tool_call","name":"custom","call_id":"custom","input":"literal custom input"},
+	 {"type":"function_call_output","call_id":"good","output":"valid result"},
+	 {"type":"function_call_output","call_id":"bad","output":"broken result preserved"},
+	 {"type":"custom_tool_call_output","call_id":"custom","output":"custom result"}
+	]}`)
+	raw, _, err := Project(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil {
+		t.Fatal("invalid projected JSON")
+	}
+	var rows []struct {
+		Role    string                       `json:"role"`
+		Content []map[string]json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(object["messages"], &rows) != nil {
+		t.Fatal("invalid projected messages")
+	}
+	uses, results := map[string]bool{}, map[string]bool{}
+	var resultOrder, userText []string
+	for _, row := range rows {
+		seenNonResult := false
+		for _, block := range row.Content {
+			var kind, id string
+			_ = json.Unmarshal(block["type"], &kind)
+			switch kind {
+			case "tool_use":
+				_ = json.Unmarshal(block["id"], &id)
+				uses[id] = true
+			case "tool_result":
+				if seenNonResult {
+					t.Fatal("tool result followed literal user history")
+				}
+				_ = json.Unmarshal(block["tool_use_id"], &id)
+				results[id] = true
+				resultOrder = append(resultOrder, id)
+			default:
+				if row.Role == "user" {
+					seenNonResult = true
+					var text string
+					_ = json.Unmarshal(block["text"], &text)
+					userText = append(userText, text)
+				}
+			}
+		}
+	}
+	if len(uses) != 2 || len(results) != 2 || !uses["good"] || !uses["custom"] || !results["good"] || !results["custom"] || uses["bad"] || results["bad"] {
+		t.Fatalf("parallel pairs were corrupted: %s", raw)
+	}
+	if !strings.Contains(string(raw), "broken result preserved") || !strings.Contains(string(raw), "Historical function call") {
+		t.Fatal("malformed parallel history disappeared")
+	}
+	if strings.Join(resultOrder, ",") != "good,custom" || len(userText) != 3 || userText[0] != "Continue." || !strings.HasPrefix(userText[1], "Historical result") || userText[2] != "broken result preserved" {
+		t.Fatal("result or literal history order changed")
+	}
+}
+
+func TestProjectMalformedHistoryFallbackRemainedNarrow(t *testing.T) {
+	call := `{"type":"function_call","name":"broken","call_id":"bad","status":"completed","arguments":"{\"value\":"}`
+	result := `{"type":"function_call_output","call_id":"bad","output":"recorded result"}`
+	for name, input := range map[string]string{
+		"unpaired":                   call,
+		"not completed":              strings.Replace(call, `"completed"`, `"in_progress"`, 1) + "," + result,
+		"missing status":             strings.Replace(call, `"status":"completed",`, "", 1) + "," + result,
+		"non-object":                 strings.Replace(call, `"{\"value\":"`, `"[]"`, 1) + "," + result,
+		"null arguments":             strings.Replace(call, `"{\"value\":"`, `"null"`, 1) + "," + result,
+		"empty arguments":            strings.Replace(call, `"{\"value\":"`, `""`, 1) + "," + result,
+		"duplicate call":             call + "," + call + "," + result,
+		"duplicate result":           call + "," + result + "," + result,
+		"result before call":         result + "," + call,
+		"encrypted call":             strings.TrimSuffix(call, "}") + `,"encrypted_arguments":"opaque"},` + result,
+		"custom missing identity":    `{"type":"custom_tool_call_output","output":"literal"}`,
+		"explicit null identity":     `{"type":"function_call_output","call_id":null,"output":"literal"}`,
+		"explicit empty identity":    `{"type":"function_call_output","call_id":"","output":"literal"}`,
+		"unsupported result content": `{"type":"function_call_output","output":[{"type":"unknown","text":"literal"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := []byte(`{"model":"glm-5.3","input":[{"role":"user","content":"Continue."},` + input + `]}`)
+			if _, _, err := Project(body); err == nil {
+				t.Fatal("unrepresentable history accepted")
+			}
+		})
+	}
+}
+
 func TestProjectOmittedHostedWebSearchWithHarnessTools(t *testing.T) {
 	for _, choice := range []string{"", `,"tool_choice":"auto"`, `,"tool_choice":"none"`} {
 		body := []byte(`{"model":"glm","input":"test","tools":[{"type":"web_search","search_context_size":"medium"},{"type":"function","name":"exec","parameters":{"type":"object"}},{"type":"web_search_preview"},{"type":"namespace","name":"functions","tools":[{"type":"custom","name":"apply_patch"}]}]` + choice + `}`)

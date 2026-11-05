@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -274,7 +275,32 @@ func (c *Codec) projectInput(raw json.RawMessage, history *[]message, system *[]
 	if json.Unmarshal(raw, &input) != nil || input == nil {
 		return errors.New("invalid Responses input")
 	}
-	for _, item := range input {
+	// A malformed completed call can only be retained as literal history when
+	// its result is present and unambiguous in this complete request.
+	type toolPair struct {
+		calls, results, resultIndex int
+		resultKind                  string
+	}
+	pairs := make(map[string]toolPair)
+	for index, item := range input {
+		call, _ := stringField(item, "call_id")
+		if call == "" {
+			continue
+		}
+		kind, _ := stringField(item, "type")
+		pair := pairs[call]
+		switch kind {
+		case "function_call", "custom_tool_call":
+			pair.calls++
+		case "function_call_output", "custom_tool_call_output":
+			pair.results++
+			pair.resultIndex = index
+			pair.resultKind = kind
+		}
+		pairs[call] = pair
+	}
+	literalCalls := make(map[string]string)
+	for index, item := range input {
 		kind, _ := stringField(item, "type")
 		switch kind {
 		case "", "message":
@@ -299,10 +325,6 @@ func (c *Codec) projectInput(raw json.RawMessage, history *[]message, system *[]
 				return errors.New("invalid or encrypted Responses tool call")
 			}
 			t := tool{Namespace: namespace, Name: name, Custom: kind == "custom_tool_call"}
-			encoded, err := c.register(t, false)
-			if err != nil {
-				return err
-			}
 			var value any
 			if t.Custom {
 				input, ok := stringField(item, "input")
@@ -316,20 +338,58 @@ func (c *Codec) projectInput(raw json.RawMessage, history *[]message, system *[]
 					return errors.New("invalid Responses tool arguments")
 				}
 				var obj object
-				if json.Unmarshal([]byte(args), &obj) != nil || obj == nil {
+				parseErr := json.Unmarshal([]byte(args), &obj)
+				if parseErr != nil || obj == nil {
+					status, _ := stringField(item, "status")
+					pair := pairs[call]
+					if !json.Valid([]byte(args)) && strings.TrimSpace(args) != "" && status == "completed" && pair.calls == 1 && pair.results == 1 && pair.resultIndex > index && pair.resultKind == "function_call_output" {
+						display := name
+						if namespace != "" {
+							display = namespace + "." + name
+						}
+						label := fmt.Sprintf("Historical function call %q (call ID %q) with malformed JSON arguments. Literal recorded arguments:\n", display, call)
+						appendMessage(history, "assistant", []any{map[string]any{"type": "text", "text": label + args}})
+						literalCalls[call] = display
+						continue
+					}
 					return errors.New("Responses tool arguments must be a JSON object")
 				}
 				value = json.RawMessage(args)
 			}
+			encoded, err := c.register(t, false)
+			if err != nil {
+				return err
+			}
 			appendMessage(history, "assistant", []any{map[string]any{"type": "tool_use", "id": call, "name": encoded, "input": value}})
 		case "function_call_output", "custom_tool_call_output":
 			call, _ := stringField(item, "call_id")
-			if call == "" {
+			_, hasIdentity := item["call_id"]
+			unattributed := kind == "function_call_output" && !hasIdentity
+			if call == "" && !unattributed {
 				return errors.New("missing Responses tool result identity")
 			}
 			parts, err := projectContent(item["output"])
 			if err != nil {
 				return err
+			}
+			label := ""
+			if unattributed {
+				name, _ := stringField(item, "name")
+				namespace, _ := stringField(item, "namespace")
+				display := name
+				if namespace != "" && name != "" {
+					display = namespace + "." + name
+				}
+				label = "Unattributed historical function result. Literal recorded output:"
+				if display != "" {
+					label = fmt.Sprintf("Unattributed historical function result from %q. Literal recorded output:", display)
+				}
+			} else if display, ok := literalCalls[call]; ok {
+				label = fmt.Sprintf("Historical result for function call %q (call ID %q). Literal recorded output:", display, call)
+			}
+			if label != "" {
+				appendMessage(history, "user", append([]any{map[string]any{"type": "text", "text": label}}, parts...))
+				continue
 			}
 			appendMessage(history, "user", []any{map[string]any{"type": "tool_result", "tool_use_id": call, "content": parts}})
 		case "reasoning":
@@ -421,6 +481,16 @@ func appendMessage(history *[]message, role string, content []any) {
 		last.Content = append(last.Content, content...)
 	} else {
 		*history = append(*history, message{Role: role, Content: content})
+	}
+	if role == "user" {
+		last := &(*history)[len(*history)-1]
+		// Messages requires tool results before other user content. Preserve
+		// the recorded order within the results and within literal history.
+		sort.SliceStable(last.Content, func(i, j int) bool {
+			left := last.Content[i].(map[string]any)
+			right := last.Content[j].(map[string]any)
+			return left["type"] == "tool_result" && right["type"] != "tool_result"
+		})
 	}
 }
 
