@@ -22,10 +22,10 @@ import (
 )
 
 type ZAICmd struct {
-	Login    ZAILoginCmd     `cmd:"" help:"Add a Z.ai API key or sign in through ZCode OAuth"`
+	Login    ZAILoginCmd     `cmd:"" help:"Sign in through the browser; use --api-key for key login"`
 	Accounts AccountsCmd     `cmd:"" help:"List Z.ai accounts without API keys"`
 	Switch   ZAIReferenceCmd `cmd:"" help:"Choose preferred Z.ai account"`
-	Remove   ZAIReferenceCmd `cmd:"" help:"Remove a stored Z.ai account"`
+	Remove   ZAIRemoveCmd    `cmd:"" help:"Remove a stored account or API keys after browser login"`
 	Route    ZAIRouteCmd     `cmd:"" help:"Choose an account's native or ZCode gateway route"`
 	ZCode    ZAIZCodeCmd     `cmd:"" name:"zcode" help:"Inspect ZCode login, token plans and reset cards"`
 	Prime    ZAIPrimeCmd     `cmd:"" help:"Manage Z.ai quota-window priming"`
@@ -33,14 +33,44 @@ type ZAICmd struct {
 }
 
 type ZAILoginCmd struct {
-	ZCode       bool   `name:"zcode" help:"Sign in through ZCode browser OAuth instead of an API key"`
+	ZCode       bool   `name:"zcode" help:"Sign in through ZCode browser OAuth (default)"`
+	APIKey      bool   `name:"api-key" help:"Use a Personal Coding Plan API key through a hidden prompt"`
 	APIKeyStdin bool   `help:"Read API key from standard input instead of hidden prompt"`
-	Label       string `help:"Account label for quota output and account selection"`
-	Activate    bool   `help:"Make this account preferred for routing"`
+	Label       string `help:"Custom account label; defaults to the browser account email"`
+	Activate    *bool  `negatable:"" help:"Make this account preferred (default for browser login); --no-activate keeps the current preference"`
+}
+
+func (c ZAILoginCmd) Validate() error {
+	if c.ZCode && (c.APIKey || c.APIKeyStdin) {
+		return errors.New("choose browser login or API-key input")
+	}
+	return nil
+}
+
+func (c ZAILoginCmd) shouldActivate() bool {
+	if c.Activate != nil {
+		return *c.Activate
+	}
+	return !c.APIKey && !c.APIKeyStdin
 }
 
 type ZAIReferenceCmd struct {
 	Reference string `arg:"" help:"Account ID or unique label"`
+}
+
+type ZAIRemoveCmd struct {
+	Reference string `arg:"" optional:"" help:"Account ID or unique label"`
+	APIKeys   bool   `name:"api-keys" help:"Remove all stored API-key accounts after a saved browser login; keep browser logins"`
+}
+
+func (c ZAIRemoveCmd) Validate() error {
+	if c.APIKeys && c.Reference != "" {
+		return errors.New("choose one account or --api-keys")
+	}
+	if !c.APIKeys && c.Reference == "" {
+		return errors.New("provide an account ID, unique label or --api-keys")
+	}
+	return nil
 }
 
 type ZAIRouteCmd struct {
@@ -109,10 +139,10 @@ func runZAICommand(ctx context.Context, command string, options ZAICmd, jsonOutp
 	}
 	switch command {
 	case "login":
-		if options.Login.ZCode {
-			if options.Login.APIKeyStdin {
-				return errors.New("choose ZCode browser login or API-key input")
-			}
+		if err := options.Login.Validate(); err != nil {
+			return err
+		}
+		if !options.Login.APIKey && !options.Login.APIKeyStdin {
 			return runZAIOAuthLogin(ctx, options.Login, dir, jsonOutput, deps)
 		}
 		var raw []byte
@@ -149,7 +179,7 @@ func runZAICommand(ctx context.Context, command string, options ZAICmd, jsonOutp
 		if results[0].Error != nil {
 			return fmt.Errorf("validate Z.ai API key: %s", results[0].Error.Code)
 		}
-		account, err := zaiprov.StoreAccount(deps.fs, dir, key, options.Login.Label, options.Login.Activate)
+		account, err := zaiprov.StoreAccount(deps.fs, dir, key, options.Login.Label, options.Login.shouldActivate())
 		if err != nil {
 			return err
 		}
@@ -199,8 +229,15 @@ func runZAICommand(ctx context.Context, command string, options ZAICmd, jsonOutp
 		return err
 	case "switch <reference>":
 		err = zaiprov.SetActiveAccount(deps.fs, dir, options.Switch.Reference)
-	case "remove <reference>":
-		err = zaiprov.RemoveAccount(deps.fs, dir, options.Remove.Reference)
+	case "remove", "remove <reference>":
+		if err := options.Remove.Validate(); err != nil {
+			return err
+		}
+		if options.Remove.APIKeys {
+			err = zaiprov.RemoveAPIKeyAccounts(deps.fs, dir)
+		} else {
+			err = zaiprov.RemoveAccount(deps.fs, dir, options.Remove.Reference)
+		}
 	case "route <reference> <transport>":
 		err = zaiprov.SetTransport(deps.fs, dir, options.Route.Reference, options.Route.Transport)
 	default:

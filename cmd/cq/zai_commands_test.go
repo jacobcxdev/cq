@@ -23,10 +23,13 @@ func TestZAICommandClassification(t *testing.T) {
 		{[]string{"models", "list", "--provider", "zai"}, "models_list"},
 		{[]string{"models", "overlay", "add", "--provider", "zai", "--id", "glm-future"}, "models_overlay_add"},
 		{[]string{"zai", "login"}, "zai_login"},
+		{[]string{"zai", "login", "--api-key"}, "zai_login"},
+		{[]string{"zai", "login", "--api-key", "--api-key-stdin", "--no-activate"}, "zai_login"},
 		{[]string{"zai", "login", "--api-key-stdin", "--label", "second plan", "--activate"}, "zai_login"},
 		{[]string{"zai", "accounts", "--json"}, "zai_accounts"},
 		{[]string{"zai", "switch", "second"}, "zai_switch"},
 		{[]string{"zai", "remove", "second"}, "zai_remove"},
+		{[]string{"zai", "remove", "--api-keys"}, "zai_remove"},
 	} {
 		authority, err := ClassifyProxyCommand(test.args)
 		if err != nil || authority.Row != test.row {
@@ -85,7 +88,7 @@ func TestZAILoginPreservesExistingAccountAndListsWithoutKeys(t *testing.T) {
 	if key != "new-private-key" {
 		t.Fatal("switch did not change preferred key")
 	}
-	if err := runZAICommand(context.Background(), "remove <reference>", ZAICmd{Remove: ZAIReferenceCmd{Reference: "second"}}, false, deps); err != nil {
+	if err := runZAICommand(context.Background(), "remove <reference>", ZAICmd{Remove: ZAIRemoveCmd{Reference: "second"}}, false, deps); err != nil {
 		t.Fatal(err)
 	}
 	key, _ = zaiprov.ReadAPIKey(fsys, deps.getenv, "/config")
@@ -138,7 +141,7 @@ func TestZAILoginUsesHiddenPrompt(t *testing.T) {
 		prompted = true
 		return []byte("prompt-private-key"), nil
 	}
-	if err := runZAICommand(context.Background(), "login", ZAICmd{}, false, deps); err != nil {
+	if err := runZAICommand(context.Background(), "login", ZAICmd{Login: ZAILoginCmd{APIKey: true}}, false, deps); err != nil {
 		t.Fatal(err)
 	}
 	if !prompted || strings.Contains(out.String(), "private-key") {

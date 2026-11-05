@@ -1038,6 +1038,7 @@ class CQFixtureCommand < SystemCommand
  end
 end
 block=File.read(CQFixtureInputs.fetch("CQ_FIXTURE_RELEASER")).split("    custom_block: |\n",2).last.lines.take_while{|line|line.strip.empty?||line.start_with?("      ")}.map{|line|line.sub(/^      /,"")}.join
+block=block.gsub("{{ .Env.CQ_NATIVE_NETWORK_PIN }}",CQFixtureInputs.fetch("CQ_FIXTURE_NATIVE_PIN"))
 # The signed native companion has a separate release gate. Keep this runtime
 # fixture inside its temporary Caskroom, without loading the production tap.
 block=block.lines.reject{|line|line.strip=='depends_on cask: "jacobcxdev/tap/cq-network"'}.join
@@ -1094,6 +1095,7 @@ end
 		releaser = filepath.Join(f.root, "legacy-src/.goreleaser.yml")
 	}
 	inputs := map[string]string{"CQ_FIXTURE_PREFIX": filepath.Join(f.root, "prefix"), "CQ_FIXTURE_CASKROOM": filepath.Join(f.root, "caskroom"), "CQ_FIXTURE_COMMANDS": filepath.Join(f.output, "native-commands.jsonl"), "CQ_FIXTURE_RELEASER": releaser, "CQ_FIXTURE_VERSION": version, "CQ_FIXTURE_PREVIOUS": previous, "CQ_FIXTURE_ACTION": action, "CQ_FIXTURE_BINARY": f.binaries[version]}
+	inputs["CQ_FIXTURE_NATIVE_PIN"] = reviewedHomebrewNativePin(f.t)
 	data, _ := json.Marshal(inputs)
 	if err := os.WriteFile(filepath.Join(f.root, "operation-input.json"), data, 0o600); err != nil {
 		f.t.Fatal(err)

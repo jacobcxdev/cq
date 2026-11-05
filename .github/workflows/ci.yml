@@ -82,6 +82,7 @@ jobs:
             echo "PREVIOUS_VERSION=$previous_version"
             echo "CURRENT_VERSION=$current_version"
             echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go "$current_version" ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)"
+            echo "CQ_NATIVE_NETWORK_PIN=$(jq -c . .github/native-network-release.json)"
           } >> "$GITHUB_ENV"
           {
             echo "previous_tag=$previous_tag"
@@ -122,6 +123,9 @@ jobs:
           brew update
           brew install --cask codex
           codex --version
+
+      - name: Verify companion upgrade and rollback
+        run: go test -race -count=1 ./cmd/cq -run '^TestHomebrewCompanionReconciliation$'
 
       - name: Validate normal, compaction, hard-limit failover, and rescue routing
         env:

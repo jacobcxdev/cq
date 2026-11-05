@@ -61,6 +61,28 @@ func TestReleaseRequiresAndEmbedsGeminiOAuthSecret(t *testing.T) {
 	}
 }
 
+func TestReleaseBindsReviewedNativeCompanionToCask(t *testing.T) {
+	for _, name := range []string{"release", "ci"} {
+		workflow, err := os.ReadFile("../../.github/workflows/" + name + ".yml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(workflow), `CQ_NATIVE_NETWORK_PIN=$(jq -c . .github/native-network-release.json)`) {
+			t.Fatalf("%s workflow does not derive the companion pin from the reviewed manifest", name)
+		}
+		if !strings.Contains(string(workflow), "TestHomebrewCompanionReconciliation") {
+			t.Fatalf("%s workflow does not run the companion upgrade regression", name)
+		}
+	}
+	releaser, err := os.ReadFile("../../.goreleaser.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(releaser), "pin = JSON.parse(<<~'JSON')\n              {{ .Env.CQ_NATIVE_NETWORK_PIN }}") {
+		t.Fatal("CQ Cask does not bind companion reconciliation to its release pin")
+	}
+}
+
 func TestHomebrewServiceLeavesListenerToRuntimeSupervisor(t *testing.T) {
 	releaser, err := os.ReadFile("../../.goreleaser.yml")
 	if err != nil {

@@ -525,7 +525,7 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 
 	case "gemini accounts":
 		return app.RunAccounts(provider.Gemini, cli.JSON)
-	case "zai login", "zai accounts", "zai switch <reference>", "zai remove <reference>", "zai route <reference> <transport>":
+	case "zai login", "zai accounts", "zai switch <reference>", "zai remove", "zai remove <reference>", "zai route <reference> <transport>":
 		return runZAICommand(context.Background(), strings.TrimPrefix(ctx.Command(), "zai "), cli.ZAI, cli.JSON, defaultZAICommandDependencies())
 	default:
 		return fmt.Errorf("unknown command: %s", ctx.Command())

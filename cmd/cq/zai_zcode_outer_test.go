@@ -45,7 +45,8 @@ func TestZCodeOuterLoginUsedInjectedOAuthAndKeptJSONClean(t *testing.T) {
 		}
 		return zcode.LoginSession{UserID: "outer-user", Email: "outer@example.com", ZCodeJWT: "private-zcode", RawOAuth: "private-oauth", BusinessJWT: "private-business", RefreshToken: "private-refresh"}, nil
 	}
-	if err := runZAICommand(context.Background(), "login", ZAICmd{Login: ZAILoginCmd{ZCode: true, Label: "browser", Activate: true}}, true, deps); err != nil {
+	activate := true
+	if err := runZAICommand(context.Background(), "login", ZAICmd{Login: ZAILoginCmd{ZCode: true, Label: "browser", Activate: &activate}}, true, deps); err != nil {
 		t.Fatal(err)
 	}
 	if !called || !invalidated || !opened || !strings.Contains(diagnostics.String(), "Complete ZCode sign-in") {

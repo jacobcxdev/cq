@@ -15,6 +15,14 @@ original source commit so it remains available after a squash merge.
 Apple signing keys and notarisation credentials stay on the authorised release
 Mac; GitHub Actions only downloads and verifies completed artefacts.
 
+The generated CQ Cask reconciles the companion during installation and upgrade.
+It checks the dependency against that release's reviewed native pin and uses
+Homebrew's own upgrade transaction when the installed companion is older.
+An already-current companion is left alone. Metadata inspection and download-only
+commands do not upgrade it. Existing native routing is restored after a companion
+replacement or rollback; replacement can briefly cycle that routing. Restoration
+failures are reported explicitly. A previously disabled companion stays disabled.
+
 ## Stage a native release
 
 1. Build the final committed native sources using the signing instructions in
