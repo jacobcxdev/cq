@@ -112,6 +112,12 @@ Local IPC and unrelated desktop connections retain their existing route.
 
 ## Native ChatGPT network routing
 
+Use this integration to access Dots when they have not yet rolled out in your
+region, using a **US WireGuard profile**. It routes the normal signed ChatGPT
+app without requiring the multi-account Dots adapter. Primary Dot onboarding
+remains OpenAI's normal native or web flow. To combine already-onboarded Dots
+from several accounts, add the separate [multi-account adapter](dots.md).
+
 On macOS, the signed CQ Network companion can also route native ChatGPT traffic
 through the configured WireGuard profile, including launches from the normal
 ChatGPT Dock icon:
@@ -186,7 +192,8 @@ CQ never runs old and new WireGuard identities concurrently. Invalid changes
 block new and existing egress rather than continuing a stale or direct route.
 Unchanged profile snapshots preserve existing connections.
 
-For a VPN managed inside CQ, set `codex_wireguard_profile` to an absolute path
+For regional Dot access, use a US WireGuard profile and set
+`codex_wireguard_profile` to an absolute path
 such as `/absolute/private-directory/us.conf`, leaving `codex_egress_proxy`
 unset. The profile must be an owner-only regular file (0600) in a private
 owner-only directory (0700); CQ never copies its keys into JSON configuration.

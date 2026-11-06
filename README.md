@@ -1,6 +1,8 @@
 # cq
 
-`cq` checks AI subscription quota, manages accounts and routes compatible local clients through Claude, Codex and Z.ai. Gemini quota comes from Antigravity. You can use the dashboard on its own or opt into account routing, model publication and native ChatGPT integrations.
+`cq` checks AI subscription quota, manages accounts and routes compatible local clients through Claude, Codex and Z.ai. Gemini quota comes from Antigravity. On macOS, CQ can also help you access Dots before regional rollout through a US WireGuard profile, or bring existing Dots from multiple accounts into one ChatGPT sidebar.
+
+**Installing with an AI agent?** Give it the [agent installation guide](docs/agent-installation.md) before it changes anything. The guide covers package ownership, setup choices, macOS approvals and verification of the requested outcome.
 
 ![cq output](assets/screenshot.png)
 
@@ -132,13 +134,23 @@ These commands inspect service/runtime health. Verify a real request from the cl
 | Configure pools, pins, reserve, resets or priming | [Routing and automation](docs/usage.md#local-proxy) |
 | Select optional plugins, MCP servers and skills for a chat | [Harness profiles](docs/usage.md#harness-capability-profiles) |
 | Publish models or add an overlay | [Model registry](docs/usage.md#model-registry) |
-| Route normal ChatGPT launches or adapt their usage display | [Native network integration](docs/configuration.md#native-chatgpt-network-routing) |
-| Use multiple account-owned Dots in the native sidebar | [Multi-account Dots](docs/dots.md) |
+| Access my primary Dot before Dots is available in my region | Use a **US WireGuard profile** with [native ChatGPT routing](docs/configuration.md#native-chatgpt-network-routing). Normal ChatGPT launches work; the multi-account adapter is not required. |
+| Use Dots from several accounts in one ChatGPT sidebar | Install [multi-account Dots](docs/dots.md) and launch through CQ. Secondary Dots must already be onboarded; add US WireGuard routing too if regional access requires it. |
+| Show CQ's routed account availability in normal ChatGPT launches | [Usage response adaptation](docs/configuration.md#native-chatgpt-network-routing), a separate opt-in with certificate trust. |
 | Find settings, paths, environment variables and examples | [Configuration reference](docs/configuration.md) |
 | Diagnose login, quota, routing, upgrade or app failures | [Troubleshooting](docs/troubleshooting.md) |
 | Develop, validate or release CQ | [Contributing](CONTRIBUTING.md), [architecture](docs/architecture.md), [releases](docs/releases.md) |
 
 The usage guide covers every public command family. Run `cq COMMAND --help` for that command's exact arguments and supported flags; the index below lists the full command surface. Examples use synthetic addresses and placeholders: replace `EMAIL`, `ACCOUNT_ID`, `ENTRY_ID`, model IDs and absolute paths with values from the corresponding list/status command. Commands that log in, switch, remove, enable, send or consume change state; read their surrounding prerequisites before running them.
+
+For regional Dot access, configure your US WireGuard profile before enabling
+CQ Network, complete any macOS approval, and verify native ChatGPT routing.
+Your primary Dot's onboarding remains OpenAI's normal native or web flow; CQ
+does not add onboarding slots for secondary accounts. [Onboard those accounts
+separately](docs/dots.md#install) in a browser or by signing into the native app,
+then sync CQ and relaunch through CQ when required. A working CQ proxy alone
+does not prove ChatGPT uses the tunnel. See the [agent installation
+guide](docs/agent-installation.md#5-verify-the-requested-outcome) for the checks.
 
 ## Capabilities and platform support
 
