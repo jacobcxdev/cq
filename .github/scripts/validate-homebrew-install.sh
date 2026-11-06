@@ -175,7 +175,7 @@ RUBY
   selected_cask="$(brew --repository jacobcxdev/tap)/Casks/cq-network.rb"
   cmp "$current_native_cask" "$selected_cask"
   candidate_digest=$(jq -er .sha256 "$local_root/current.json")
-  [[ "$(shasum -a 256 "$current_native_archive" | awk '{print $1}')" == "$candidate_digest" ]]
+  [[ "$(shasum -a 256 "$current_native_archive" | awk '{print $1}')" == "$candidate_digest" ]] || { echo "candidate native archive differs from reviewed checksum" >&2; exit 1; }
   # A staged native release may still be private. Seed the normal reviewed URL's
   # download cache with its already-verified ZIP; Homebrew still checks SHA-256.
   candidate_cache=$(brew --cache --cask jacobcxdev/tap/cq-network)
@@ -190,7 +190,7 @@ RUBY
   tag=$(jq -er .tag "$local_root/previous-info.json")
   asset_id=$(jq -er .asset_id "$local_root/previous-info.json")
   release_api=$(gh release view "$tag" --repo jacobcxdev/cq --json apiUrl --jq .apiUrl)
-  [[ "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]]
+  [[ "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]] || { echo "predecessor release API differs from expected repository" >&2; exit 1; }
   gh api "${release_api#https://api.github.com/}" >"$local_root/release.json"
   gh api "repos/jacobcxdev/cq/releases/assets/$asset_id" --header 'Accept: application/octet-stream' >"$local_root/previous.zip"
   "$nativepackage_executable" verify "$local_root/previous.json" "$local_root/previous.zip" "$local_root/release.json"

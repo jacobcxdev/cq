@@ -58,8 +58,8 @@ cat >"$root/bin/gh" <<'SH'
 set -euo pipefail
 root=$CQ_COMPANION_TEST_ROOT
 case "$*" in
-  'release view cq-network-v0.41.8 --repo jacobcxdev/cq --json apiUrl --jq .apiUrl') echo https://api.github.com/repos/jacobcxdev/cq/releases/18 ;;
-  'api repos/jacobcxdev/cq/releases/18') cat "$root/release-18.json" ;;
+  'release view cq-network-v0.41.8 --repo jacobcxdev/cq --json apiUrl --jq .apiUrl') echo "${CQ_COMPANION_TEST_RELEASE_API:-https://api.github.com/repos/jacobcxdev/cq/releases/18}" ;;
+  'api repos/jacobcxdev/cq/releases/18'|'api repos/other/cq/releases/18') cat "$root/release-18.json" ;;
   'api repos/jacobcxdev/cq/releases/assets/18 --header Accept: application/octet-stream') cat "$root/0.41.8.zip" ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac
@@ -98,7 +98,9 @@ reset_case() {
 assert_restored() { cmp "$root/current-native.rb" "$root/tap/Casks/cq-network.rb"; }
 export root temporary_root nativepackage_executable previous_cask current_cask current_native_cask current_native_archive
 export -f install_previous_cq install_unchanged_cq
-run_setup() { bash -e -c 'source "$CQ_COMPANION_TEST_ROOT/function.sh"; with_previous_companion "$1"' fixture "${1:-install_previous_cq}"; }
+# Use the shell under test; expansion belongs to that child.
+# shellcheck disable=SC2016
+run_setup() { "$BASH" -e -c 'source "$CQ_COMPANION_TEST_ROOT/function.sh"; with_previous_companion "$1"' fixture "${1:-install_previous_cq}"; }
 reset_case
 run_setup
 assert_restored
@@ -134,6 +136,11 @@ fi
 assert_restored
 [[ ! -f "$root/events" ]]
 cp "$root/release-original.json" "$root/release-18.json"
+if CQ_COMPANION_TEST_RELEASE_API=https://api.github.com/repos/other/cq/releases/18 run_setup >"$root/error" 2>&1; then
+  echo "accepted predecessor API outside expected repository" >&2; exit 1
+fi
+assert_restored
+[[ ! -f "$root/events" ]]
 if CI=false run_setup >"$root/error" 2>&1; then
   echo "accepted companion setup outside disposable CI" >&2; exit 1
 fi

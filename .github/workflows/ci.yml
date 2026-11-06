@@ -127,7 +127,9 @@ jobs:
           codex --version
 
       - name: Verify companion upgrade and rollback
-        run: go test -race -count=1 ./cmd/cq -run '^TestHomebrewCompanionReconciliation$'
+        run: |
+          /bin/bash .github/scripts/test-homebrew-install-companion.sh
+          go test -race -count=1 ./cmd/cq -run '^TestHomebrewCompanionReconciliation$'
 
       - name: Validate normal, compaction, hard-limit failover, and rescue routing
         env:
