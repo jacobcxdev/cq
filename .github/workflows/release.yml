@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
       - name: Validate pinned native companion release
@@ -39,7 +39,7 @@ jobs:
         run: |
           go test -race -count=1 ./internal/tools/nativepackage
           .github/scripts/prepare-native-network.sh .github/native-network-release.json dist/native --allow-draft
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: native-network-cask
           path: dist/native/*
@@ -53,7 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
@@ -120,7 +120,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
@@ -153,7 +153,7 @@ jobs:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-homebrew-inputs
           path: |
@@ -170,16 +170,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: release-homebrew-inputs
           path: dist
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-network-cask
           path: dist/homebrew/Casks
@@ -240,7 +240,7 @@ jobs:
             "$PWD/dist/cq_${current_version}_darwin_${architecture}.tar.gz" \
             "$current_version"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: homebrew-cask
           path: dist/homebrew/Casks/*.rb
@@ -248,13 +248,14 @@ jobs:
           retention-days: 7
 
   windows-packages:
-    needs: release
+    # Windows payloads come from the draft, independently of macOS validation.
+    needs: draft-build
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
@@ -370,14 +371,14 @@ jobs:
             }
           }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: winget-manifests
           path: ${{ runner.temp }}/cq-release/winget/manifests
           if-no-files-found: error
           retention-days: 7
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-msi-validation
           path: ${{ runner.temp }}/cq-release/cq_*_windows_*.msi
@@ -398,11 +399,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: windows-msi-validation
           path: ${{ runner.temp }}/windows-msi-validation
@@ -433,7 +434,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
@@ -462,11 +463,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: homebrew-cask
           path: ${{ runner.temp }}/homebrew-cask
@@ -576,17 +577,17 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         if: matrix.winget
         with:
           name: winget-manifests
           path: ${{ runner.temp }}/winget-manifests
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         if: ${{ !matrix.winget }}
         with:
           name: windows-msi-validation
@@ -712,7 +713,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: winget-manifests
           path: ${{ runner.temp }}/winget-manifests

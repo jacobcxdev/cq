@@ -13,6 +13,17 @@ case "$version" in
   ''|*[!0-9.]*|.*|*..*|*.) echo "invalid version" >&2; exit 2 ;;
 esac
 
+for command in go jq systemctl readlink; do
+  if ! command -v "$command" >/dev/null; then
+    echo "missing required command: $command" >&2
+    exit 1
+  fi
+done
+# Keep setup-go's dependency and compiler caches while isolating CQ state.
+go_build_cache=$(go env GOCACHE)
+go_module_cache=$(go env GOMODCACHE)
+export GOCACHE="$go_build_cache" GOMODCACHE="$go_module_cache"
+
 temporary_root=$(mktemp -d /tmp/cqni.XXXXXX)
 temporary_root=$(cd "$temporary_root" && pwd -P)
 use_existing_user_manager=${CQ_LINUX_USE_EXISTING_USER_MANAGER:-}
@@ -77,12 +88,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-for command in go jq systemctl readlink; do
-  if ! command -v "$command" >/dev/null; then
-    echo "missing required command: $command" >&2
-    exit 1
-  fi
-done
 systemd_executable=/usr/lib/systemd/systemd
 if [[ ! -x "$systemd_executable" ]]; then
   echo "systemd user manager unavailable: $systemd_executable" >&2
