@@ -702,7 +702,10 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			t.Fatal(err)
 		}
 		emptyFirst := turn("selective-empty-chat-kept-subscription", emptyChat, "CQ_HARNESS_FIRST_USER", nil)
-		assertSelective("empty-chat-original-harness", emptyFirst, false, false, false, false)
+		assertSelective("empty-chat-plugin-settings", emptyFirst, false, false, true, false)
+		if emptyFirst.Markers["dependency"] != 0 {
+			t.Fatal("empty chat claimed to apply a skill configuration before reload")
+		}
 		emptyDependency := turn("selective-empty-chat-enabled-plugin", emptyChat, "Synthetic empty chat dependency", nil)
 		assertSelective("empty-chat-dependency-owner", emptyDependency, false, false, true, false)
 		if !emptyDependency.FirstUser || !emptyDependency.FirstReply || emptyDependency.Markers["dependency"] == 0 {

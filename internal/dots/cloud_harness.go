@@ -68,6 +68,7 @@ type cloudHarnessThread struct {
 	profileRefresh       bool
 	profileNeedsSettings bool
 	pendingProfile       *cloudHarnessProfilePlan
+	appliedPlugins       []string
 }
 
 type cloudHarnessRequest struct {
@@ -942,6 +943,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 			h.mu.Lock()
 			if current := h.threads[id]; current != nil {
 				current.profileNeedsSettings = false
+				current.appliedPlugins = nil
 				current.profileRefresh = false
 				current.profileManaged = selection.Managed
 				current.profileFingerprint = selection.Fingerprint
@@ -962,7 +964,28 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 	// Releasing that subscription would make both resume and rollback impossible.
 	// Ephemeral chats never acquire a durable rollout.
 	if snapshot.awaitingRollout || snapshot.ephemeral {
-		if snapshot.reportedPending != key {
+		pluginsUpdated := false
+		// Plugin settings do not require a reload. Apply them before admitting
+		// the turn, even if policy changed before initial exclusions were sent.
+		if desiredPlan != nil && (!snapshot.pluginsKnown || !cloudHarnessPluginEqual(snapshot.plugins, desiredPlan.plugins)) {
+			if err := h.record(id, selection, "prepared"); err != nil {
+				return err
+			}
+			if _, err := h.call("thread/settings/update", map[string]any{"threadId": id, "disabledPluginIds": desiredPlan.plugins}); err != nil {
+				_ = h.record(id, selection, "failed")
+				return err
+			}
+			h.mu.Lock()
+			if current := h.threads[id]; current != nil {
+				current.plugins = slices.Clone(desiredPlan.plugins)
+				current.pluginsKnown = true
+				current.profileNeedsSettings = true
+				current.appliedPlugins = append([]string{}, desiredPlan.plugins...)
+			}
+			h.mu.Unlock()
+			pluginsUpdated = true
+		}
+		if pluginsUpdated || snapshot.reportedPending != key || snapshot.receiptState != "pending" {
 			h.mu.Lock()
 			if current := h.threads[id]; current != nil {
 				current.reportedPending = key
@@ -1044,6 +1067,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 			current.profileFingerprint = ""
 			current.profilePlan = nil
 			current.profileNeedsSettings = false
+			current.appliedPlugins = nil
 			current.selection = harness.Selection{Profile: harness.Full, Source: "rollback"}
 			current.failureKey = key
 			if rollbackErr != nil {
@@ -1069,6 +1093,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		current.pendingProfile = nil
 		current.profileRefresh = false
 		current.profileNeedsSettings = false
+		current.appliedPlugins = nil
 		cloudHarnessActual(current, result)
 		if desiredPlan != nil {
 			current.plugins = slices.Clone(desiredPlan.plugins)
