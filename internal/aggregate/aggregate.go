@@ -1,9 +1,11 @@
 package aggregate
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/jacobcxdev/cq/internal/history"
+	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
@@ -33,6 +35,13 @@ func Compute(results []quota.Result, nowEpoch int64, providerID string, burnRate
 	windowSet := make(map[quota.WindowName]struct{})
 	for _, r := range valid {
 		m := quota.ExtractMultiplier(r.RateLimitTier)
+		if providerID == string(provider.Codex) {
+			var known bool
+			m, known = provider.CodexUsageMultiplier(r.Plan, r.RateLimitTier)
+			if !known {
+				return nil, nil
+			}
+		}
 		accounts = append(accounts, acctInfo{result: r, multiplier: m})
 		totalMulti += m
 		for winName := range r.Windows {
@@ -42,10 +51,20 @@ func Compute(results []quota.Result, nowEpoch int64, providerID string, burnRate
 		}
 	}
 
+	labelResults := valid
+	if providerID == string(provider.Codex) {
+		labelResults = append([]quota.Result(nil), valid...)
+		for i := range labelResults {
+			labelResults[i].Plan = provider.CodexPlanLabel(labelResults[i].Plan)
+			if labelResults[i].RateLimitTier == "" {
+				labelResults[i].RateLimitTier = fmt.Sprintf("codex_usage_%dx", accounts[i].multiplier)
+			}
+		}
+	}
 	summary := &AccountSummary{
 		Count:      len(accounts),
 		TotalMulti: totalMulti,
-		Label:      BuildLabel(valid),
+		Label:      BuildLabel(labelResults),
 	}
 
 	windowNames := make([]quota.WindowName, 0, len(windowSet))

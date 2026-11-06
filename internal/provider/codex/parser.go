@@ -4,14 +4,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 var (
 	nowFunc                 = time.Now
 	codexProLitePromoEndsAt = time.Date(2026, time.June, 1, 0, 0, 0, 0, time.UTC)
+	codexUsageIncreasedAt   = time.Date(2026, time.October, 29, 0, 0, 0, 0, time.UTC)
 )
 
 type usageWindow struct {
@@ -35,6 +38,7 @@ func parseUsage(body []byte, email, accountID string) quota.Result {
 func ParseUsageObservation(body []byte, email, accountID string) UsageObservation {
 	var usage struct {
 		PlanType             string          `json:"plan_type"`
+		RateLimitTier        string          `json:"rate_limit_tier"`
 		RateLimit            *usageRateLimit `json:"rate_limit"`
 		AdditionalRateLimits []struct {
 			LimitName string          `json:"limit_name"`
@@ -115,7 +119,10 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 		plan = "unknown"
 	}
 
-	rlt := rateLimitTierForPlan(plan, nowFunc())
+	rlt := usage.RateLimitTier
+	if rlt == "" {
+		rlt = rateLimitTierForPlan(plan, nowFunc())
+	}
 
 	return UsageObservation{
 		Result: quota.Result{
@@ -131,17 +138,22 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 }
 
 func rateLimitTierForPlan(plan string, now time.Time) string {
-	switch plan {
-	case "pro":
-		return "codex_pro_20x"
-	case "prolite":
-		if now.Before(codexProLitePromoEndsAt) {
-			return "codex_prolite_10x"
-		}
-		return "codex_prolite_5x"
-	default:
+	// These are published plan allowances relative to Plus, not speed-mode
+	// consumption multipliers. Pro 100 and Pro 500 doubled on 29 October.
+	// https://help.openai.com/en/articles/9793128-about-chatgpt-pro-tiers
+	// https://openai.com/index/devday-2026-recap/ (Pro 500 launched at 25x)
+	multiplier, known := provider.CodexUsageMultiplier(plan, "")
+	if !known || multiplier == 1 {
 		return ""
 	}
+	plan = strings.ToLower(plan)
+	if plan == "prolite" && !now.Before(codexProLitePromoEndsAt) && now.Before(codexUsageIncreasedAt) {
+		multiplier = 5
+	}
+	if plan == "promax" && now.Before(codexUsageIncreasedAt) {
+		multiplier = 25
+	}
+	return fmt.Sprintf("codex_%s_%dx", plan, multiplier)
 }
 
 // parseNumericResetAt handles reset_at as either a number (epoch seconds) or string.

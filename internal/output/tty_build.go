@@ -151,10 +151,15 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 			label = r.Tier
 		}
 		if label != "" && label != "null" {
-			if r.RateLimitTier != "" {
-				if m := quota.ExtractMultiplier(r.RateLimitTier); m > 1 {
-					label += fmt.Sprintf(" %dx", m)
-				}
+			if id == provider.Codex {
+				label = provider.CodexPlanLabel(label)
+			}
+			m := quota.ExtractMultiplier(r.RateLimitTier)
+			if id == provider.Codex {
+				m, _ = provider.CodexUsageMultiplier(r.Plan, r.RateLimitTier)
+			}
+			if m > 1 {
+				label += fmt.Sprintf(" %dx", m)
 			}
 			header += " " + boldDimItalicStyle.Render(label)
 		}
@@ -181,10 +186,15 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 		label = r.Tier
 	}
 	if label != "" && label != "null" {
-		if r.RateLimitTier != "" {
-			if m := quota.ExtractMultiplier(r.RateLimitTier); m > 1 {
-				label += fmt.Sprintf(" %dx", m)
-			}
+		if id == provider.Codex {
+			label = provider.CodexPlanLabel(label)
+		}
+		m := quota.ExtractMultiplier(r.RateLimitTier)
+		if id == provider.Codex {
+			m, _ = provider.CodexUsageMultiplier(r.Plan, r.RateLimitTier)
+		}
+		if m > 1 {
+			label += fmt.Sprintf(" %dx", m)
 		}
 		header += " " + boldDimItalicStyle.Render(label)
 	}
@@ -504,11 +514,16 @@ func headerVisibleWidth(r quota.Result, id provider.ID) int {
 		label = r.Tier
 	}
 	if label != "" && label != "null" {
+		if id == provider.Codex {
+			label = provider.CodexPlanLabel(label)
+		}
 		w += 1 + lipgloss.Width(label)
-		if r.RateLimitTier != "" {
-			if m := quota.ExtractMultiplier(r.RateLimitTier); m > 1 {
-				w += lipgloss.Width(fmt.Sprintf(" %dx", m))
-			}
+		m := quota.ExtractMultiplier(r.RateLimitTier)
+		if id == provider.Codex {
+			m, _ = provider.CodexUsageMultiplier(r.Plan, r.RateLimitTier)
+		}
+		if m > 1 {
+			w += lipgloss.Width(fmt.Sprintf(" %dx", m))
 		}
 	}
 	if r.Email != "" {

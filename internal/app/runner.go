@@ -183,6 +183,10 @@ func (r *Runner) enrichCachedWithDiscovered(ctx context.Context, id provider.ID,
 		row.AccountID = acct.AccountID
 		row.Email = acct.Email
 		row.Active = acct.Active
+		if id == provider.Codex {
+			row.Plan = acct.Label
+			row.RateLimitTier = acct.RateLimitTier
+		}
 		out = append(out, row)
 	}
 	return out

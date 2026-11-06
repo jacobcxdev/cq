@@ -325,16 +325,16 @@ func PrintClaudeAccounts(accounts []provider.Account, activeEmail string) {
 	}
 }
 
-// PrintCodexAccounts renders Codex accounts with plan and active status.
+// PrintCodexAccounts renders Codex accounts with plan, multiplier and active status.
 func PrintCodexAccounts(accounts []provider.Account) {
 	for _, a := range accounts {
 		email := a.Email
 		if email == "" {
 			email = "(no email stored)"
 		}
-		plan := a.Label
-		if plan == "" {
-			plan = "unknown"
+		plan := provider.CodexPlanLabel(a.Label)
+		if m, _ := provider.CodexUsageMultiplier(a.Label, a.RateLimitTier); m > 1 {
+			plan += fmt.Sprintf(" %dx", m)
 		}
 
 		labelStr := acctLabelStyle.Render(plan)

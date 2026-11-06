@@ -109,7 +109,7 @@ func TestProjectVisibleAccountsMatchesAccountsDiscoverInventory(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []provider.Account{
-		{AccountID: "acct-a", Email: "a@example.com", Label: "pro", Active: true, SwitchID: "a@example.com"},
+		{AccountID: "acct-a", Email: "a@example.com", Label: "pro", RateLimitTier: "codex_pro_20x", Active: true, SwitchID: "a@example.com"},
 		{AccountID: "acct-b", Email: "b@example.com", Label: "team", SwitchID: "b@example.com"},
 	}
 	if !reflect.DeepEqual(listed, want) {
