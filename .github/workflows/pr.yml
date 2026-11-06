@@ -30,3 +30,4 @@ jobs:
       - run: go test -race -count=1 ./...
       - run: bash .github/scripts/test-release-source.sh
       - run: bash .github/scripts/test-close-superseded-winget-prs.sh
+      - run: bash .github/scripts/test-homebrew-install-companion.sh
