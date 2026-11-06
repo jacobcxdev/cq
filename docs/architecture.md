@@ -186,6 +186,12 @@ that baseline, not unconditional enablement. `full` resets to native behaviour;
 capabilities. Exported definitions contain stable capability IDs and portable
 rules, not private chat bindings or versioned installation paths.
 
+`profile save NAME --file FILE` accepts both a bare definition and the versioned
+document emitted by `profile show --json` or `export`. The explicit save name
+takes precedence over the document name. `import` uses the document name unless
+overridden. Input directories may use aliases such as macOS `/tmp`; final file
+symlinks remain rejected. Saving definitions does not bind or activate them.
+
 The complete native metadata inventory includes capabilities excluded from the
 current reduced context. Application receipts record effective fingerprints and
 supported/unsupported/pending outcomes; a saved policy alone is not application
