@@ -1,6 +1,6 @@
 # cq
 
-`cq` is a quota dashboard, account manager, model-registry publisher, and local Claude/Codex/Z.ai API router. It checks **Claude**, **Codex**, **Gemini**, and **Z.ai** quota in parallel, presents per-account and aggregate burn information, and can keep local AI clients on healthy accounts without exposing provider credentials.
+`cq` checks AI subscription quota, manages accounts and routes compatible local clients through Claude, Codex and Z.ai. Gemini quota comes from Antigravity. You can use the dashboard on its own or opt into account routing, model publication and native ChatGPT integrations.
 
 ![cq output](assets/screenshot.png)
 
@@ -30,17 +30,8 @@ brew uninstall --formula cq
 brew install --cask jacobcxdev/tap/cq
 ```
 
-Homebrew versions that sandbox Cask flight hooks cannot run the service hooks
-stored by CQ 0.32.8. For that legacy installation, first verify that
-`$(brew --prefix)/bin/cq` is a symlink into the installed CQ Caskroom and that
-`cq service status --json` reports the `homebrew` owner and that stable executable.
-Keep a copy of the executable for rollback. Run `cq service uninstall
---owner=homebrew --service-executable="$(brew --prefix)/bin/cq"` outside Homebrew,
-then remove only that verified symlink before running `brew upgrade --cask cq`.
-This makes the old hook skip its executable call; the new installer recreates
-the link and services. Keep existing CQ configuration. If the upgrade fails,
-restore the stable link to the saved executable and reinstall its Homebrew-owned
-services before retrying.
+For legacy Cask hook failures and the first listener-preserving upgrade, see
+[Homebrew upgrades](docs/homebrew-upgrades.md).
 
 ### Windows — WinGet
 
@@ -99,824 +90,70 @@ install Python or optional integrations.
 
 ## Quick start
 
-```bash
-cq                                # Check Claude, Codex, Gemini, and Z.ai
-cq check claude codex             # Check selected providers
-cq check gemini                   # Check Gemini through Antigravity HTTP APIs
-cq check zai                      # Check Z.ai Coding Plan quota
-cq --json                         # Machine-readable report
-cq --refresh                      # Bypass quota cache
+You need at least one signed-in provider. Existing supported local credentials are discovered automatically. To add an account, choose the provider you use; these commands open its browser login:
+
+```sh
+cq claude login
+cq codex login
+cq zai login
+```
+
+Each command saves an account. Claude and Codex require `--activate` if you also want to replace the active client credential. A Z.ai browser login becomes preferred by default. Gemini sign-in stays with Antigravity; CQ has no Gemini login command.
+
+Check the providers you configured:
+
+```sh
+cq check claude codex             # Select one or more providers
+cq check gemini                   # Requires Antigravity credentials
+cq check zai                     # Z.ai Coding Plan or Start Plan
+cq                               # Check every provider in parallel
+cq --refresh check codex          # Fetch fresh quota instead of the cache
+cq --json check codex             # Report suitable for a pipe or file
 cq --version
 ```
 
-`check` accepts `claude`, `codex`, `gemini`, and `zai`. Provider fetches run concurrently. Multi-account work also runs concurrently within each provider.
+An unconfigured provider reports that condition; it does not mean the installed proxy is broken. In quota output, `active` identifies the current credential account. Routing can select another eligible account. Use [Reading quota and JSON](docs/usage.md#quota-checks-and-output) for the report fields and unknown values.
 
-Use context-sensitive help for exact flags and safety confirmations:
-
-```bash
-cq --help
-cq check --help
-cq claude --help
-cq codex --help
-cq gemini --help
-cq proxy --help
-cq models --help
-cq operation --help
-```
-
-## Capability map
-
-| Area | Capabilities |
-|------|--------------|
-| Quota | Parallel Claude, Codex, Gemini, and Z.ai checks; provider selection; cache bypass; stale-account backfill; TTY and JSON output. |
-| Analysis | Remaining quota, reset times, pace, smoothed burn rate, projected burndown, correction-deadline gauge, multi-account aggregate, provider availability. |
-| Accounts | Claude and Codex OAuth login, listing, activation, switching, removal, and token refresh; read-only Gemini account inspection. |
-| Background work | One-shot OAuth refresh and per-user periodic refresh on macOS, Windows, and Linux. |
-| Proxy | Loopback Claude/Codex routing, Anthropic Messages compatibility, native Codex Responses HTTP/WebSocket routing, model discovery, local authentication, health/status inspection. |
-| Routing controls | Claude/Codex pins, Codex default, account allowlist, quota/fairness selection, durable continuity, quota-window priming, capability pools, session bindings, rescue mode. |
-| Codex assurance | Installed HTTP/WebSocket validation, routing canary, candidate runtime lifecycle, client-bearer barrier, release receipts, durable operation recovery, legacy endpoint transition. |
-| Efficiency feedback | Privacy-safe Codex request-shape telemetry, turn receipts, observational no-affinity comparison, Codex Stop-hook output. |
-| Model registry | Anthropic/Codex/Z.ai source merge, local listing, refresh, overlays, Codex cache publication, Claude Code capability and picker publication. |
-| Diagnostics | Strict proxy snapshot, routing metadata JSONL, opt-in raw payload JSONL, health and runtime evidence, safe error classification. |
-
-## Quota checks and output
-
-### Providers
-
-- **Claude** discovers stored accounts, fetches profile and usage data in parallel, refreshes eligible tokens, and reports each account.
-- **Codex** discovers system, CQ-managed, and declared external accounts. Ordinary checks do not activate, remove, refresh, or rewrite system credentials. Eligible CQ-owned credentials refresh only through CQ's coordinator.
-- **Gemini** reads Antigravity Keychain credential and cached project ID concurrently, calls Antigravity OAuth and quota HTTP APIs directly, and never invokes `agy`. Credential/project stores remain read-only; refreshed tokens live only in process memory.
-- **Z.ai** reads saved Coding Plan API keys and reports 5-hour and weekly quota for each subscription. Monthly MCP usage appears separately when supplied by the API. Reset times remain unknown when Z.ai omits them.
-
-### Cache and history
-
-Successful quota rows are cached by provider. Default TTL is 30 seconds; `--refresh` bypasses it. If one account has a transient fetch failure and a matching usable cached row exists, cq shows stale quota with original error context instead of hiding that account. Auth errors are never written as fresh cache data.
-
-cq also keeps per-account/window burn history. Exhaustion ETA uses the **shorter of the recent-rate and whole-window-average estimates**: fast burns shorten it, while idle periods cannot extend it beyond the whole-window baseline. Recent rates use a 30-minute EWMA half-life, at least five minutes between samples, and a 15-minute observation warmup. Exact percentages are used when available. Resets, upward adjustments, precision changes, and observation gaps over two hours restart warmup; stale or mismatched snapshots fall back to the whole-window average. Matching cached reads can reuse a forecast for up to 15 minutes without advancing history.
-
-Account, aggregate, and proxy-pool ETAs select the same rate per account before weighting capacity and consumption. Budget pace and the main gauge retain their existing window-based calculations; the secondary imminent-block warning retains its separate EWMA. Cache and history failures degrade to uncached/cold-start behaviour.
-
-### TTY report
-
-For each provider/account, cq can show:
-
-- plan/account identity and active credential marker;
-- remaining percentage and reset time for each quota window;
-- usage pace and smoothed burn rate;
-- projected burndown;
-- aggregate coverage across two or more usable accounts;
-- correction-deadline gauge: overburn deadline on left, on-pace centre, projected waste on right;
-- Codex proxy-eligible subset when discovery and routing eligibility differ;
-- cached/stale and error context.
-
-TTY icons require a [Nerd Font](https://www.nerdfonts.com/). Recommended: [`jacobcxdev/tap/liga-sf-mono-nerd-font`](https://github.com/jacobcxdev/homebrew-tap).
-
-### JSON report
-
-```bash
-cq --json
-cq --json check codex
-cq codex accounts --json
-cq gemini accounts --json
-```
-
-JSON includes provider results, aggregates, cache age, error codes, proxy eligibility, and an `availability` object for automated consumers:
-
-- `available`: normal work is safe.
-- `limited`: quota is low; conserve it for small, necessary, or approved work.
-- `exhausted`: new work should not route there without explicit override.
-
-Account-level `active` means credential default/current account. It is not a proxy routing decision; pins, bindings, eligibility, continuity, and failover can select another account.
-
-## Accounts and authentication
-
-### Claude
-
-```bash
-cq claude login --activate
-cq claude accounts
-cq claude switch EMAIL
-cq claude remove EMAIL
-```
-
-Claude login uses browser OAuth. Stored account credentials support multi-account checks and proxy routing.
-
-### Codex
-
-```bash
-cq codex login --activate
-cq codex accounts
-cq codex switch EMAIL
-cq codex remove EMAIL
-cq codex resets list
-cq codex resets recommend
-cq codex resets use EMAIL
-cq codex resets use EMAIL --credit CREDIT_ID --yes
-```
-
-CQ-owned Codex accounts live under `~/.codex/accounts/` with registry metadata. System `~/.codex/auth.json` remains distinct. Automatic quota/routing reads never switch the system account.
-
-The credential coordinator also renews explicitly declared CodexBar managed accounts within 60 seconds of access expiry. It shares CodexBar's account lock and writes renewed tokens and their fingerprint back to the declared owner home; later CodexBar login takes priority. Renewal runs in the background, preserving healthy-account routing. If every credential is unavailable, reads wait up to one second for fast repair. Other external accounts and system auth remain read-only. An ambiguous refresh outcome is retained without replay and can require owner reauthentication.
-
-`cq codex resets recommend` plans across every account shown by `cq codex accounts`. It fetches fresh usage and banked-reset inventories, reports a non-actionable incomplete schedule when any portfolio input is missing, and never consumes a credit. Fresh upstream usage supplies reset dates after consumption; an account may expose one or both shared windows.
-
-`cq codex resets use EMAIL` previews selected credit, current shared usage, and current recommendation, then asks for confirmation with default No. Omit `--credit` to resume a pending attempt or select eligible credit with next expiry. Supply `--yes` only when explicit non-interactive consumption is intended.
-
-An automated reset schedule is optional. Preview with `cq codex resets recommend`,
-then accept with `cq codex resets recommend --schedule`. Confirmation defaults to
-No. New schedules use **fixed** dates; `--mode adaptive` allows fresh portfolio
-forecasts to move dates for the exact accepted credits. It never enrols newly
-found credits. Use `--replace` to replace existing pending entries.
+Complete installers start the proxy and refresh services. Check their state:
 
 ```sh
-cq codex resets schedule                       # Entries and fresh executor status
-cq codex resets schedule mode adaptive         # Confirm a mode change
-cq codex resets schedule add EMAIL --at 2026-10-28T18:00:00Z
-cq codex resets schedule set ENTRY --at 2026-10-28T20:00:00Z
-cq codex resets schedule set ENTRY --follow-mode
-cq codex resets schedule remove ENTRY
-cq codex resets schedule enable
-cq codex resets schedule disable
-cq codex resets schedule cancel
-```
-
-Manual additions create a disabled fixed schedule. Manual dates must not be in
-the past and pin entries in adaptive mode. Active edits and enabling require
-confirmation; non-interactive acceptance requires `--yes`. Disable pauses
-execution and replanning; cancel also cancels pending entries. A request already
-sent upstream may finish, and unknown
-outcomes remain visible with the same durable retry identity.
-
-Execution requires the CQ proxy runtime. Saved schedules survive restarts; fixed
-overdues catch up before expiry, while adaptive work first obtains a complete
-fresh plan. Unavailable forecast inputs block adaptive entries; explicit pins
-retain their fixed authority after fresh target validation. Status uses an
-authenticated live heartbeat rather than assuming an installed service is running.
-
-### Gemini
-
-```bash
-cq gemini accounts
-cq gemini accounts --json
-```
-
-Gemini authentication and project selection remain owned by Antigravity. cq reads Keychain service `gemini`, account `antigravity`, plus Antigravity's project cache. It does not provide Gemini login, switch, or removal commands.
-
-### Z.ai Coding Plan
-
-Run `cq zai login` to sign in through ZCode's browser OAuth flow. A completed login becomes the preferred account and uses its email as the default label. Repeat for another account; use `--no-activate` to keep the current preferred account or `--label` to choose a custom label. Existing `--zcode` and `--activate` flags remain accepted. CQ uses the inspected ZCode client identity and authentication protocol, exchanges the provider OAuth credential for its business identity, and obtains short-lived project access tokens for paid Coding Plan requests. OAuth sessions are encrypted in the private CQ configuration directory; `zai.json` contains account references rather than OAuth tokens. Each saved login retains its device identity. A fresh installation can register a stable local device UUID without installing ZCode.
-
-For API-key authentication, run `cq zai login --api-key` and paste a Personal Coding Plan API key into the hidden prompt. Repeat for each subscription. Create the key under **API Keys → Personal Coding Plan**; Standard API Keys use separate billing. CQ validates quota access before saving the key in `$XDG_CONFIG_HOME/cq/zai.json` (default `~/.config/cq/zai.json`), using mode `0600` in a private directory. Quota access alone does not prove inference access; `cq zai prime now` checks whether an eligible dormant window can be started. Existing single-key files remain supported. Saved accounts also work for the background proxy service; new accounts and preferred-account changes apply on the next request without restarting CQ.
-
-`ZAI_API_KEY` remains an exclusive override: when set in a process's environment, that process uses only that key. Remove the override to use the saved account pool. For scripts, `cq zai login --api-key-stdin` reads the key from standard input without putting it in command arguments.
-
-CQ supports individual Coding Plan subscriptions through Z.ai's global endpoint. Group plans and regional endpoints are not configured separately.
-
-```bash
-cq zai login
-cq zai login --no-activate
-cq zai accounts
-cq zai switch ACCOUNT_ID           # Prefer this subscription
-cq zai remove ACCOUNT_ID          # Remove one saved account
-cq zai remove --api-keys           # Remove stored API-key entries after browser login
-cq --refresh check zai
-cq models refresh
-cq models list --provider zai
-```
-
-After saving replacement browser logins, `cq zai remove --api-keys` removes all stored API-key entries while retaining browser accounts and their relative preference order. It requires a saved browser login and makes no provider requests. API keys cannot reliably identify which browser account replaces them, so CQ never deletes them merely because another account signs in. An environment `ZAI_API_KEY` override is separate from stored entries and remains under the caller's control.
-
-Choose a saved account's billing route explicitly. New browser logins default to `zcode`, the paid Coding Plan gateway; `zcode-start` uses that OAuth account's separate Start Plan token pool. Start Plan access stays on the preferred account and never silently falls back to paid quota. Existing API-key accounts retain their saved route; `responses` is the original API-key route. Route changes apply on the next request.
-
-```sh
-cq zai route ACCOUNT_ID zcode
-cq zai route ACCOUNT_ID zcode-start
-cq zai route API_KEY_ACCOUNT_ID responses
-cq zai zcode status ACCOUNT_ID --json
-cq zai zcode resets issue ACCOUNT_ID
-cq zai zcode resets use ACCOUNT_ID --window=5h
-cq zai zcode claims list ACCOUNT_ID
-cq zai zcode claims claim ACCOUNT_ID PLAN_ID
-```
-
-ZCode reset-card issuance is an explicit eligibility request. Using a card asks for confirmation; a weekly card restores both weekly and five-hour quotas. Durable request identities prevent a repeated accepted action from consuming another card. An unresolved retry uses the same request identity; `--new` confirms a separate action only after the previous one has resolved. Token claims require a currently offered plan, confirmation and the provider's browser verification. Status and offer listing never issue cards or claim plans. No ZCode issuance, card-use or claim schedule is enabled automatically. ZCode's advertised charging coefficient and promotional eligibility are applied by its server; CQ does not multiply displayed quota to simulate them.
-
-The existing `cq zai resets list`, `use` and `schedule` commands also accept saved OAuth accounts. They use the account's business identity to read and select exact returned card IDs. Scheduling remains disabled until explicitly enabled; OAuth does not require an API key or a project access token for these reset operations.
-
-Registry refresh fetches Z.ai's native Codex model catalogue from `https://api.z.ai/api/v1/models` and includes its models in the existing Codex picker. The native Responses route uses the saved Z.ai key through CQ's proxy. ZCode routes translate Codex Responses into the gateway's Messages protocol, including streamed output and tool continuations. CQ bridges Codex WebSocket requests over HTTP and keeps continuation history for that connection. Codex account credentials remain scoped to Codex upstream requests. CQ handles native Codex v2 compaction triggers by asking GLM for a continuation summary and returning authenticated CQ-owned compact state. On later HTTP or WebSocket requests, CQ restores that summary before forwarding to either provider, including after model or account changes. Original chat history remains with Codex. The older `/responses/compact` endpoint remains unsupported for Z.ai (`501`).
-
-When the preferred account uses `zcode-start`, discovery uses ZCode's public model configuration and that account's current model entitlements, without requesting a paid project token. Context, output limits and reasoning choices come from this source; CQ supplies its validated Codex harness defaults. A source advertising 1,000,000 context tokens retains that value. Future models appear when both the catalogue and current entitlement advertise them. Start requests include ZCode's public source identity and preserve Codex's caller instructions in one ordered block. OpenAI-hosted web search is unavailable through ZCode Messages; Codex's local function/custom tools and connected tools remain available. See [ZCode protocol and qualification](docs/zcode-routing.md) for the observed billing result, native tool/compaction checks and provider capacity limits.
-
-CQ-owned compact state uses the existing private proxy token as its key source. Retain the existing CQ proxy configuration across reinstalls or host migrations; changing that token makes previously generated CQ compact state unreadable. Provider account switching does not change this key.
-
-CQ refreshes the provider catalogue every five minutes while running; `cq models refresh` requests an immediate refresh. New models appear when Z.ai adds them to that native catalogue for your subscription, without a CQ release or manual registry entry. Codex may retain its own catalogue cache until its next refresh. CQ caps GLM-5.3 automatic compaction at 70% of Codex's usable context window (697,302 tokens with the current 1,048,576-token window and 95% input allowance), retaining any earlier provider limit. The cap is recalculated from downloaded metadata. GLM-5.3-Flash, GLM-5-Turbo and future models such as GLM-5.4 keep their provider defaults.
-
-Harness profiles select optional capabilities without creating a new chat or rewriting history. Install the CQ curation skill, then ask Codex to inspect the installed inventory and prepare a profile for the task:
-
-```sh
-cq codex harness skill install
-cq codex harness inventory --project /path/to/project --json
-cq codex harness profile list
-cq codex harness profile save review --file review-definition.json
-cq codex harness bind minimal review --chat current
-cq codex harness explain --chat current --project /path/to/project --json
-cq codex harness unbind --chat current
-```
-
-Definitions contain a description and `changes`, using `enabled`, `disabled` or `inherit` decisions keyed by stable IDs from `inventory`. `plugins`, `mcp` and `skills` each accept an ID-to-decision map; `"*"` supplies a per-kind default. `changes.default` applies to all kinds. `minimal` disables optional capabilities by default, while `full` restores native baseline choices. Multiple profile names apply in the given order. Saving or copying a definition does not bind it or enable policy. Existing names require explicit `--replace`; built-in `full` and `minimal` cannot be overwritten.
-
-Bindings support every model. `--scope chat` is the default; `--scope project` writes `<project>/.cq/harness.json`, and `--scope global` writes CQ's private user policy. `--model` accepts an exact ID or a family with one trailing wildcard, such as `glm-*`; omit it for all models. Rules apply from global all-model and model-specific rules, through project ancestry, then chat all-model and model-specific rules. `inherit` preserves the previous decision. A first binding enables a fresh policy and requests application for a known chat after saving. Chat and project bindings preserve a disabled policy that already contains rules, saving as pending with `policy_disabled`; use `enable` or an explicit global binding to activate it. Application errors also retain the saved binding and report pending. `--chat current` uses only a validated `CODEX_THREAD_ID`; it does not search session files or chat history. `explain` reads the selected chat's model when `--model` is omitted, reports decision layers and current application status, and keeps the last application receipt separate as an audit record.
-
-Profiles can be shared without installation paths:
-
-```sh
-cq codex harness export review > review-profile.json
-cq codex harness import --file review-profile.json --name imported-review
-cq codex harness profile copy review project-review --project /path/to/project
-cq codex harness bind project-review --scope project --project /path/to/project --model 'gpt-*'
-```
-
-`export` writes JSON with `version: 1`, `name`, and a `definition` containing only its description and changes. `profile save --file` accepts the raw definition; `import --file` accepts the exported envelope and uses its name unless `--name` is supplied. Importing does not bind or activate the profile. Skill decisions use stable inventory IDs such as `repo:review`, not absolute paths. User definitions live in CQ's private `harness.json`; an explicit `--project` saves definitions and rules in that project's `.cq/harness.json`. Project writes promote legacy policy without enabling it or changing its existing choices.
-
-The legacy GLM shortcuts remain available:
-
-```sh
-cq codex harness enable
-cq codex harness project /path/to/project minimal
-cq codex harness chat CHAT_ID full
-cq codex harness chat CHAT_ID auto
-cq codex harness status --chat CHAT_ID --model glm-5.3 --project /path/to/project
-cq codex harness disable
-```
-
-With legacy policy enabled, GLM defaults to `minimal`. A chat override wins over the deepest matching project directory; `auto` removes an override. These shortcuts keep their GLM-only meaning after promotion to the newer format. Saving a legacy override does not enable policy.
-
-On macOS, normal ChatGPT launches use per-chat plugin exclusions after CQ observes a native request. These apply to a subsequent eligible turn; first-turn application is not guaranteed. Standalone MCP servers and local skill catalogues remain available. Under the CQ launcher, the same policy also disables standalone MCP servers and fresh skill-catalogue instructions before context assembly. Existing chats reload only at idle boundaries, retaining their ID and history. Core tools and project instructions remain available; historical catalogue text already in the chat is preserved.
-
-Native subagents inherit their parent's capability configuration. A child of a minimal parent starts minimal. Internal native spawns do not cross the launcher's chat-start hook, so CQ cannot independently apply a different model-based profile before that child's first turn. Start a separately managed chat when that distinction is required. A fresh stock native process restores its normal global capabilities when resuming a chat previously run through the launcher.
-
-CQ saves the original plugin exclusions privately and restores its own changes when the profile returns to `full`, the model changes, or policy is disabled. If user changes diverge from CQ's saved exclusions, CQ preserves them. Desktop lacks an atomic plugin-list comparison, so CQ checks fresh settings before updating and guards the current model and reasoning effort. `status --chat` reports the last recorded application scope and state, separately from a policy preview. Profiles are disabled by default and stored in CQ's private `harness.json`; per-chat receipts share ownership between the standard controller and launcher.
-
-Routing tries the preferred subscription first, then the remaining saved subscriptions if Z.ai returns `401`, `403`, or `429` before a response starts. Each key is tried at most once per request. CQ does not replay a request after a transport error or a started response. WebSocket continuations retain full history across account fallback. HTTP requests containing an opaque `previous_response_id` use only the preferred account, because that upstream state cannot safely move between subscriptions.
-
-Fresh quota data moves exhausted subscriptions behind available accounts. Route diagnostics include a redacted account hint and whether a rejected request fell back to another account. Stale or missing quota data keeps normal bounded fallback available.
-
-Start dormant 5-hour windows with a minimal request, or enable automatic priming:
-
-```sh
-cq zai prime now
-cq zai prime enable
-cq zai prime status
-cq zai prime disable
-```
-
-Automatic priming starts with the next CQ runtime launch. It checks each saved account independently, skips active or exhausted windows, and records dispatch before sending so a crash or uncertain result cannot repeat quota consumption within five hours. Weekly windows start with the subscription and do not need priming. Model selection uses Z.ai's current native catalogue and prefers a Flash model. Priming never consumes reset cards.
-
-Inspect reset cards and use an exact card with default-No confirmation:
-
-```sh
-cq zai resets list
-cq zai resets use ACCOUNT_ID --window 5h --credit CARD_ID
-```
-
-Weekly cards restore both weekly and 5-hour quota. A successful reset restarts the corresponding reset timer. CQ checks availability again after confirmation, saves intent before dispatch, and retains the same request ID if an operator explicitly retries an uncertain result. It never substitutes another card for an unresolved attempt.
-
-Fixed-date schedules remain disabled until explicitly enabled:
-
-```sh
-cq zai resets schedule add ACCOUNT_ID --at RFC3339 --window 5h --credit CARD_ID
-cq zai resets schedule status
-cq zai resets schedule enable
-cq zai resets schedule disable
-cq zai resets schedule remove ENTRY_ID
-cq zai resets schedule cancel
-```
-
-Replace `RFC3339` with a future timestamp including its timezone, before the selected card expires. Enabling prompts before accepting automatic card consumption; `--yes` supplies explicit non-interactive consent. Enabled schedules pick up changes without restarting CQ. Each entry binds one exact account and card. Interrupted or uncertain execution remains visible and is not automatically repeated. Schedule dates remain fixed; CQ does not infer adaptive reset dates for Z.ai.
-
-See [Z.ai's Codex setup](https://docs.z.ai/devpack/tool/codex) for the supported Responses endpoint and model capabilities.
-
-### Token refresh
-
-```bash
-cq refresh
-cq agent install
-cq agent uninstall
-```
-
-`cq refresh` refreshes eligible Claude and Codex OAuth credentials before expiry. Complete installers schedule this work using the platform user service manager. `cq agent install` remains a focused macOS maintenance command. Expired Claude accounts can still require interactive login.
-
-Ordinary quota and account commands do not change background service registration. Complete installers use `cq service install`; focused `cq agent` commands remain available for maintenance.
-
-After an explicit account switch, already-running clients or MCP servers may need reconnection to reload credential state.
-
-## Local proxy
-
-`cq proxy` binds to loopback, routes Claude and Codex traffic, and publishes local model metadata. It supports Anthropic Messages clients plus native Codex Responses HTTP and WebSocket traffic, including compact, search, image, and realtime/live routes used by supported clients. The retired `/app-server` compatibility endpoint returns `410 Gone` with guidance to run Codex app-server locally and route its outbound Responses traffic through cq.
-
-### Service lifecycle and status
-
-macOS Homebrew upgrades retain the proxy listener, stop admitting new work, drain each current turn, and select verified runtime copies. Finished WebSocket chats reconnect while other turns finish. First adoption needs a maintenance window. See [Homebrew upgrades](docs/homebrew-upgrades.md).
-
-Complete installers own service installation and removal. Use `cq service` to
-inspect or restart both package-owned components together:
-
-```bash
 cq service status --json
-cq service restart
+cq proxy status --strict --json
 ```
 
-`cq service install` and `cq service uninstall` expose the same transaction for
-development and repair work. Package hooks call them automatically; users do
-not need them after a complete install.
-
-Focused proxy commands remain available for foreground and compatibility work,
-but do not form a complete installation:
-
-```bash
-cq proxy start
-cq proxy start --port 19280
-cq proxy start --migrate-legacy-managed
-cq proxy install
-cq proxy restart
-cq proxy uninstall
-```
-
-`--migrate-legacy-managed` explicitly adds routing identity metadata to legacy CQ-managed Codex records. Ordinary startup does not perform this migration.
-
-Bare `cq proxy status` performs a compatibility health probe. Inspection forms with flags reconcile desired configuration, service owner, listener, process, runtime health, and data-plane evidence:
-
-```bash
-cq proxy status                    # Compatibility /health JSON probe
-cq proxy status --human            # Reconciled human summary
-cq proxy status --json             # Reconciled stable JSON envelope
-cq proxy status --strict --json    # Non-zero when reconciled state is unhealthy
-cq proxy status --timeout 10s
-cq proxy status --instance-state-root PATH
-```
-
-`GET /health` proves runtime reachability only; strict status checks broader ownership and runtime facts.
-
-### Client routing
-
-Point Claude Code-compatible traffic at `http://127.0.0.1:19280` with `ANTHROPIC_BASE_URL`. cq accepts its generated local bearer token and known Claude OAuth tokens, routes Anthropic models to Claude, and translates supported GPT/o-series Anthropic Messages requests to Codex Responses. Native Codex clients use Codex HTTP/WebSocket routes without Anthropic translation.
-
-Core behaviour includes:
-
-- model-registry-first provider selection with prefix fallback;
-- Claude and Codex multi-account routing;
-- quota/capacity-aware fair selection;
-- account eligibility and explicit allowlists;
-- hard continuity for bound Codex turns/sessions;
-- HTTP per-turn routing and WebSocket connection-aware routing;
-- bounded failover before response commitment;
-- optional request headroom compression (`cache` or `token` mode);
-- durable leases and retention for Codex continuity;
-- automatic model-registry publication and drift repair.
-
-### Pins, defaults, and priming
-
-```bash
-cq proxy pin                              # Show Claude and Codex pins
-cq proxy pin claude EMAIL_OR_UUID
-cq proxy pin claude --clear
-cq proxy pin codex EMAIL_ALIAS_OR_KEY
-cq proxy pin codex --clear
-
-cq proxy default codex EMAIL_ALIAS_OR_KEY
-cq proxy default codex --clear
-
-cq proxy prime status
-cq proxy prime enable
-cq proxy prime disable
-```
-
-Claude pin changes hot-reload. Codex pin/default/priming changes require proxy restart. A Codex pin affects new and unbound work but does not break existing hard continuity.
-
-### System account reserve
-
-The running CQ service can protect a percentage of one Codex quota window for the current system account.
-The reserve follows the system account when it changes. Other accounts remain available under their existing routing rules.
-
-```bash
-cq proxy reserve windows                     # List available window selectors
-cq proxy reserve set --window 7d --percent 2   # Protect the final 2% of weekly quota
-cq proxy reserve status
-cq proxy reserve status --json
-cq proxy reserve disable                     # Release the reserve until this window resets
-cq proxy reserve enable                      # Restore protection immediately
-cq proxy reserve clear                       # Remove the configuration
-```
-
-Use the selectors from `reserve windows` for scoped limits, such as `7d:gpt-reserve` or `5h:gpt-5.3-codex-spark`.
-The commands require the running service. Changes apply immediately and survive service restarts.
-
-At or below the threshold, the system account becomes unavailable to routing. Pools can continue through their other eligible accounts.
-Pinned work receives HTTP 429 or the equivalent WebSocket usage-limit error when its account reaches the reserve.
-The reserve applies to the account, not to a pool or its aggregate percentage.
-
-`disable` requires fresh usage and reset evidence. A confirmed natural or forced reset restores protection automatically.
-CQ never consumes a reset credit for this feature. A system account change also removes the previous account's temporary bypass.
-
-The service consumes live response telemetry and refreshes usage in the background.
-Polling follows Codex's 60/30/15/5-second cadence as usage approaches exhaustion; the reserve threshold can shorten that interval.
-Concurrent refreshes share one request per account. Failed reads wait at least 30 seconds and honour longer `Retry-After` values.
-If selected-window data exceeds its refresh interval plus 10 seconds, CQ temporarily excludes the protected account until fresh data arrives.
-Already-running requests and usage outside CQ can cross the threshold before CQ receives an update.
-
-### Capability policy and session pools
-
-Advanced policy commands manage authenticated, capability-aware Codex account pools and privacy-safe session bindings:
-
-```bash
-cq proxy policy initialise --state-root DIR
-cq proxy policy apply --file FILE
-cq proxy policy status
-cq proxy policy pool set NAME --account ACCOUNT --account ACCOUNT [--value VALUE]
-cq proxy policy pool rename OLD_NAME NEW_NAME
-cq proxy policy pool value NAME VALUE
-cq proxy policy session bind --pool NAME --session-id ID
-cq proxy policy session show --session-id ID
-cq proxy policy session list
-cq proxy policy session unbind --session-id ID
-cq proxy policy session digest --session-id ID
-```
-
-Session selectors accept `--session-id`, `--session-id-stdin`, or a full keyed `--digest`. Live policy operations use authenticated loopback control; explicit `--state-root` supports offline state.
-
-Pool names are case-insensitive selectors and retain their configured display casing. Higher values preserve a pool's account capacity by routing ordinary unbound work through lower-value viable accounts first.
-
-The current Codex system account has an inherent preservation tier above every pool value because it may also serve clients on other hosts. Ordinary routing tries other eligible accounts first, even when soft affinity points to the system account. Within each tier, pool values retain their ordering. Hard continuation bindings and session-pool restrictions remain enforced, and the configured quota reserve still blocks protected system-account usage.
-
-### Lease redistribution and invalidation
-
-```bash
-cq proxy leases redistribute
-cq proxy leases invalidate
-```
-
-Redistribution schedules all existing Codex chats for fresh account selection at
-the next safe request boundary. Active responses finish unchanged; confirmed
-included quota is preferred over unknown or exhausted accounts within existing
-pools, pins, model compatibility, and reserve rules. WebSocket account-owned
-deltas use the existing reconnect/resync path before moving. HTTP continuations
-with `previous_response_id` stay on their account until the client sends a
-portable full-history request. Pending redistribution survives a worker restart.
-
-Successful `cq codex resets use` and fresh detected quota resets schedule this
-automatically. Redistribution itself never consumes a banked reset. Only an explicitly enabled reset schedule authorises automatic consumption. A failed reset
-notification emits a warning without undoing or repeating reset consumption.
-
-Lease invalidation clears reusable Codex account affinity across all sessions.
-Active requests and required continuity remain unchanged. Each next eligible
-request selects again using current pool membership and account capacity.
-
-### Rescue mode
-
-```bash
-cq proxy rescue enter
-cq proxy rescue status
-cq proxy rescue exit
-```
-
-Rescue mode is durable, local-token authenticated, and loopback-only. It lets operators move traffic through a bounded recovery path without sending control credentials upstream.
-
-## Codex validation and operational controls
-
-These commands exist for controlled validation, rollout, and recovery. Use each command's help before mutation.
-
-### Installed routing validation
-
-```bash
-cq codex validate capture --input FILE --output FILE --content-encoding ENCODING --metadata FILE
-cq codex validate http --client-build BUILD [--state-dir DIR]
-cq codex validate websocket --client-build BUILD [--client-executable PATH] [--state-dir DIR]
-cq proxy validate-http --port CANDIDATE_PORT
-```
-
-Validation checks current installed-listener readiness against cq/client builds, request/response evidence, and process attestation. `proxy validate-http` refuses live port `19280` and does not change shared proxy configuration.
-
-### Routing canary
-
-```bash
-cq codex canary start
-cq codex canary status
-cq codex canary stop
-```
-
-Canary start requires enforced HTTP routing and disabled payload diagnostics. Stop requests a drain; it does not discard active continuity.
-
-### Isolated candidate lifecycle
-
-```bash
-cq proxy candidate prepare ...
-cq proxy candidate status --instance-state-root PATH
-cq proxy candidate client-bearer-barrier refresh ...
-cq proxy candidate start ...
-cq proxy candidate artifact switch ...
-cq proxy candidate validate-release ...
-cq proxy candidate receipt show ...
-cq proxy candidate stop ...
-cq proxy candidate remove ...
-```
-
-Candidate validation uses an isolated state root, explicit port, pinned source/release/client digests, explicit credential mode, bounded timeouts, authenticated runtime control, client-bearer barrier, and retained receipts. It never uses installed listener or ambient credentials. Read-only credentials and payload capture require explicit confirmation; removal requires explicit state-loss confirmation.
-
-### Durable operations
-
-```bash
-cq operation status
-cq operation status --operation-id ID --json
-cq operation recover --operation-id ID --json
-```
-
-Durable operation inspection returns active, retained terminal, or idle state. Recovery reconciles exact operation identity instead of starting unrelated work.
-
-### Legacy credential endpoint maintenance
-
-```bash
-cq proxy endpoint inspect-legacy
-cq proxy endpoint transition-legacy prepare ...
-cq proxy endpoint transition-legacy resume ...
-cq proxy endpoint transition-legacy activate ...
-cq proxy endpoint transition-legacy finalise ...
-cq proxy endpoint transition-legacy rollback ...
-```
-
-Ordinary cq/proxy startup never performs legacy endpoint maintenance. Inspection is read-only. Transition steps require explicit snapshots/tickets, stopped-and-drained or healthy-candidate confirmations, and retain rollback state.
-
-### Codex Stop hook and efficiency receipt
-
-```bash
-cq proxy hook codex-stop
-```
-
-Configured as a Codex `Stop` hook, this command reads hook JSON from stdin, performs an authenticated loopback lookup, and returns a privacy-safe `systemMessage`. Receipt summarises recorded route state, transport, pool/account hint, model/effort, route reason, and observational no-affinity comparison. Recorded state can be planned, attempted, completed, failed, rejected, or indeterminate. Receipt does not include prompts, transcripts, raw IDs, or credentials and does not change routing.
-
-## Model registry
-
-```bash
-cq models refresh
-cq models list
-cq models list --json
-cq models list --provider codex
-cq models list --provider anthropic
-cq models list --provider zai
-
-cq models overlay add --provider codex --id gpt-5.5 --clone-from gpt-5.4
-cq models overlay remove --provider codex --id gpt-5.5
-cq models overlay prune
-```
-
-The running proxy refreshes upstream models every five minutes. Each Codex fetch resolves the current installed client version, so Desktop upgrades take effect without restarting CQ. Failed fetches retain the last usable models. Use `cq models refresh` for an immediate refresh.
-
-Registry refresh merges provider sources with local overlays, validates entries, and publishes:
-
-- Codex model cache at `$CODEX_HOME/models_cache.json` or `~/.codex/models_cache.json`;
-- Claude Code capability cache at `$CLAUDE_CONFIG_DIR/cache/model-capabilities.json` or `~/.claude/cache/model-capabilities.json`;
-- managed Claude Code picker entries in `~/.claude.json`.
-
-Overlays expose not-yet-native model IDs and can clone metadata from an existing model. `prune` removes overlays now supplied natively. Overlay store: `$XDG_CONFIG_HOME/cq/models.json` or `~/.config/cq/models.json`.
-
-Proxy endpoints also expose model metadata and authenticated registry refresh/snapshot APIs for local clients.
-
-## Proxy configuration
-
-Config lives at `$XDG_CONFIG_HOME/cq/proxy.json`, or `~/.config/cq/proxy.json`. First `cq proxy start` creates it with a random local token. Unknown fields are preserved across writes for version compatibility.
-
-| JSON field | Default | Purpose |
-|------------|---------|---------|
-| `port` | `19280` | Loopback listen port. |
-| `claude_upstream` | `https://api.anthropic.com` | Claude API upstream. |
-| `codex_upstream` | `https://chatgpt.com/backend-api/codex` | ChatGPT OAuth-compatible Codex upstream. |
-| `codex_egress_proxy` | unset | Codex upstream egress: ambient defaults, `direct`, or an HTTP/HTTPS/SOCKS5 proxy origin. Live reload. |
-| `codex_wireguard_profile` | unset | Absolute private WireGuard profile path; mutually exclusive with `codex_egress_proxy`. Live reload. |
-| `codex_egress_interface` | unset | Optional macOS network interface for WireGuard outer UDP sockets (for example `en0`). Fails closed if binding is unavailable. |
-| `local_token` | generated | Local control/proxy bearer token. |
-| `headroom` | `false` | Enable request headroom compression. |
-| `headroom_mode` | `cache` | `cache` or `token` compression strategy. |
-| `pinned_claude_account` | unset | Claude email/account UUID pin. Prefer `cq proxy pin claude`. |
-| `codex_turn_routing` | `off` | Codex HTTP routing mode: `off`, `observe`, or `enforce`. |
-| `codex_ws_turn_routing` | `off` | Codex WebSocket routing mode: `off`, `observe`, or `enforce`. |
-| `codex_routing_default_account_key` | unset | Default opaque Codex account key. |
-| `codex_routing_pinned_account_key` | unset | Pinned opaque Codex account key. |
-| `codex_routing_account_keys` | unset | Explicit eligible Codex account allowlist. |
-| `codex_lease_retention_days` | `7` | Durable continuity retention, valid from 1 to 365 days. |
-| `codex_continuity_state_dir` | cq config directory | Optional Codex lease/continuity state-root override. |
-| `proxy_resilience_state_dir` | unset | Optional policy/runtime authority root; resilience controls stay inactive while unset. |
-| `codex_window_priming` | disabled | Priming enablement and per-window model overrides. |
-| `diagnostics_log` | unset | Causal routing trace JSONL path; restart required. |
-| `payload_diagnostics_log` | unset | Raw request/response and WebSocket payload JSONL path; restart required. |
-
-For example, `"codex_egress_proxy": "http://127.0.0.1:8080"` sends Codex
-upstream HTTP (including streaming responses) and WebSocket connections through
-that proxy. The setting also covers the proxy's Codex model registry requests,
-window priming, CQ-owned managed credential refresh, and rescue relay. A failed proxy connection fails the request;
-CQ never retries it directly. HTTPS proxy certificates and upstream TLS
-certificates are verified normally. Proxy URLs accept only an origin (an
-optional trailing slash is allowed), without credentials, query, or fragment.
-Use an independently secured local forwarding endpoint for authenticated remote
-egress rather than placing proxy credentials in CQ configuration. Both
-`socks5://127.0.0.1:1080` and `socks5h://127.0.0.1:1080` use remote DNS and the
-same context-aware dialer for HTTP and WebSockets. HTTP CONNECT also supports
-WebSockets; SOCKS is an additional choice, not a requirement for WSS.
-
-Omitting the field or setting it to `""` preserves existing environment proxy
-behavior; `"direct"` explicitly ignores environment proxies for these Codex
-requests. This does not bypass a system VPN. The setting does not change process
-environment, Claude/Gemini egress, or standalone quota checks. When this runtime
-owns the credential coordinator, its eligible CQ-managed Codex refreshes use the
-same configured egress; an already running external coordinator retains its own
-transport and must be configured separately. Credential eligibility and
-read-only treatment of system/external tokens are unchanged. It routes requests
-received by CQ; other
-Codex app connections and child processes are not captured by the HTTP proxy.
-The optional Dots adapter shares this egress when a supported desktop app is
-launched through **ChatGPT via CQ** or `cq codex dots start`. Its catalogue,
-messaging, status, owner cloud sessions and computer-signalling connections use
-the supervisor's existing private broker. A configured egress failure blocks
-these requests instead of falling back to the host route. The adapter must be
-running; a normal app launch does not acquire the multi-account catalogue.
-Local IPC and unrelated desktop connections retain their existing route.
-
-On macOS, the signed CQ Network companion can also route native ChatGPT traffic
-through the configured WireGuard profile, including launches from the normal
-ChatGPT Dock icon:
-
-```sh
-cq codex network enable
-cq codex network status
-cq codex network disable
-```
-
-Enable requires the signed companion, a running CQ service and a configured
-WireGuard profile. macOS may require approval in System Settings. It does not
-restart or modify ChatGPT, install a TLS certificate, or read Keychain items.
-The extension verifies the source process's OpenAI signature and installed app
-location. Public TCP and UDP flows use CQ's existing WireGuard runtime; other
-apps and local destinations retain their original routes. Selected traffic
-fails closed if the broker or tunnel is unavailable. Existing connections are
-not moved; new connections acquire routing without restarting ChatGPT. System
-DNS behaviour remains unchanged. This network routing does not itself enable
-multi-account Dots; use the Dots launcher for that separate integration.
-Local UDP forwarding requires numeric destinations and uses translated ephemeral
-source ports; multicast discovery is not guaranteed.
-
-CQ can also adapt the app's usage display on normal launches. It changes credit
-availability in the usage HTTP response and Electron live updates. Provider
-balances and account routing remain unchanged. Multi-account Dots use the
-existing CQ launcher.
-
-This option needs a dedicated local TLS certificate for `chatgpt.com` and
-`ws.chatgpt.com`. The certificate has no CA capability and remains separate from
-Dots certificates. Prepare it without changing traffic:
-
-```sh
-cq codex network usage prepare
-```
-
-Review the printed certificate fingerprint, hosts and expiry. After you approve
-the certificate, add SSL trust to your login Keychain. Then enable response handling:
-
-```sh
-security add-trusted-cert -r trustRoot -p ssl \
-  -k "$HOME/Library/Keychains/login.keychain-db" \
-  "$HOME/.config/cq/state/native-usage/usage-cert.pem"
-cq codex network usage enable
-cq codex network usage status
-```
-
-If CQ uses another state directory, use the certificate path from `prepare`.
-This adapter handles TCP HTTPS and WebSocket connections. HTTP/3 traffic remains
-unchanged. Existing connections acquire response handling after they reconnect.
-TLS service names identify usage connections when native flows provide numeric
-destinations. The same handling applies to every account.
-
-Disable stops response changes on existing connections too. Remove certificate
-trust separately when you no longer need it:
-
-```sh
-cq codex network usage disable
-security remove-trusted-cert "$HOME/.config/cq/state/native-usage/usage-cert.pem"
-```
-
-LAN DNS resolvers with globally allocated addresses stay on their active local
-interface. CQ checks the interface subnet and binds the DNS socket's local
-address; other DNS destinations retain WireGuard routing. DNS transport traces
-record the route, numeric destination, transaction ID, header counts and bounded
-error codes. They omit query names, records, payloads and credentials.
-
-Egress configuration and profile contents are checked every five seconds. Valid
-changes atomically replace the egress generation without restarting the service
-or workers. Connections from the old generation close and clients reconnect;
-CQ never runs old and new WireGuard identities concurrently. Invalid changes
-block new and existing egress rather than continuing a stale or direct route.
-Unchanged profile snapshots preserve existing connections.
-
-For a VPN managed inside CQ, set `codex_wireguard_profile` to an absolute path
-such as `/absolute/private-directory/us.conf`, leaving `codex_egress_proxy`
-unset. The profile must be an owner-only regular file (0600) in a private
-owner-only directory (0700); CQ never copies its keys into JSON configuration.
-The supported WireGuard profile format is `[Interface]` `PrivateKey`,
-`Address`, `DNS` (IP literals), optional `MTU`, and `[Peer]` `PublicKey`,
-`Endpoint`, `AllowedIPs`, optional `PresharedKey` and `PersistentKeepalive`.
-Multiple peers use WireGuard longest-prefix routing. Peer keys must be unique,
-and the same exact AllowedIPs prefix cannot belong to two peers; overlapping
-broad/narrow prefixes are supported. Scripts/hooks, search-domain DNS entries,
-other unsupported directives, and OpenVPN `.ovpn` profiles are rejected. OpenVPN
-would require a separate native engine; this integration remains WireGuard-only.
-
-CQ snapshots each profile generation and lazily starts the official
-WireGuard userspace stack on the first selected request. HTTP/SSE, WebSocket,
-registry and CQ-owned managed refresh traffic share that stack. It creates no
-host TUN interface, route, DNS setting, privileged helper, or child process.
-Destination DNS runs through the profile's DNS servers inside the tunnel, and
-both DNS servers and destination IPs must be covered by `AllowedIPs`. DNS lookups
-try profile servers in order, with at most five seconds per server inside the
-overall connection budget. Addresses outside those routes fail; there is no
-direct fallback. Inner connection/DNS setup is bounded to 30 seconds and honors cancellation; established streams
-retain their existing request/session lifetimes. Shutdown closes the stack.
-Profile and configuration edits use the live reload behavior above.
-
-By default encrypted outer UDP packets follow host routing. On macOS,
-`codex_egress_interface` explicitly binds and verifies IPv4/IPv6 sockets to the
-selected network interface; loss or identity change fails closed. This uses
-per-socket routing, without editing routes, DNS or firewall settings. Kernel
-Network Extension policies and VPN kill switches can still block or mediate
-traffic; binding is not a promise to bypass those controls. A hostname in a peer
-`Endpoint` uses the system resolver for bootstrap; a literal endpoint IP avoids that lookup. This feature does not
-bypass an active system VPN or configure a VPN account. A compatible Nord manual
-WireGuard profile can supply the peer configuration; the Nord app is not needed
-for CQ's userspace tunnel.
-
-The supervisor owns one egress manager for both workers and rescue traffic.
-Workers use a private authenticated Unix socket and receive no WireGuard keys.
-Rescue continues through that same manager while workers drain or recover;
-there is no second copy of the WireGuard identity. The broker restricts origin
-connections to the configured Codex backend and the explicit OpenAI/Codex/Dots
-service origins; it is not a general-purpose desktop proxy.
-Foreground execution owns the same reloadable manager directly. No proxy
-settings are exported to child processes. Do not concurrently use the same
-WireGuard keys in another VPN client.
-
-## Diagnostics and privacy
-
-### Routing diagnostics
-
-Set `diagnostics_log` and restart. Every Codex HTTP request and WebSocket `response.create` frame receives a trace ID. Ordered JSONL events record ingress, request identity, candidate eligibility and exclusion, selected account hint, pool, durable lease state before and after transitions, credential refresh, upstream dispatch/status, retries, failover, relay result, close/error classification, and terminal outcome. WebSocket events also carry a stable connection ID. Route summaries share the same trace ID. Logs rotate at 64 MiB and retain four prior files. Enabling diagnostics does not change routing policy.
-
-Query one user-facing task, one trace, or recent traffic without manually searching JSONL:
-
-```bash
-cq proxy trace --session codex://threads/THREAD_ID --since 15m
-cq proxy trace --trace trace:ID --json
-cq proxy trace --follow
-```
-
-### Payload diagnostics
-
-`payload_diagnostics_log` is disabled by default and requires restart. It records up to 64 KiB of each HTTP request and response body and each downstream and upstream Codex WebSocket frame. Every entry contains its causal trace ID, direction, original byte count, encoding, account hint where applicable, and whether capture reached a complete body or was truncated. Credential-bearing headers are excluded. Query it with `cq proxy trace --payload` and the same session/trace/time filters.
-
-> **Warning:** payload diagnostics can contain prompts, system prompts, tool inputs, compact summaries, messages, provider responses, and other sensitive content. Do not share without review. Request and response bodies can themselves contain secrets.
-
-Session and thread keys in diagnostics are short deterministic hashes, not raw identifiers. `session_source` records which header/body/WebSocket signal supplied session correlation.
-
-## Environment and files
-
-### Environment variables
-
-| Variable | Default | Purpose |
-|----------|---------|---------|
-| `CQ_TTL` | `30` | Quota cache TTL in seconds. |
-| `XDG_CONFIG_HOME` | `~/.config` | cq config/state base. Must be absolute when supplied. |
-| `XDG_CACHE_HOME` | platform user-cache directory | Quota cache and burn-history base; supplied value must be absolute. |
-| `CLAUDE_CONFIG_DIR` | `~/.claude` | Claude Code model-capability cache base. CQ credential discovery still uses macOS Keychain and `~/.claude`. |
-| `CODEX_HOME` | `~/.codex` | Codex model-cache and client-discovery base. CQ managed/system credential discovery still uses `~/.codex`. |
-| `ANTHROPIC_BASE_URL` | unset | Point compatible clients at cq proxy. |
-
-### Important paths
-
-| Path | Purpose |
-|------|---------|
-| `~/.config/cq/proxy.json` | Proxy configuration and local token. |
-| `~/.config/cq/models.json` | User model overlays. |
-| `~/.config/cq/state/` | Compatibility epoch, credential-control endpoint, and Codex removal journal. |
-| `~/.config/cq/` | Default live-runtime lifecycle, canary, normal-caller admission, config, and overlay files. |
-| Configured `codex_continuity_state_dir`, defaulting to `~/.config/cq/` | Durable Codex continuity and lease state. |
-| Configured `proxy_resilience_state_dir` | Routing policy, dispatch-permit, and runtime-mode/rescue authority. No default is assumed; `cq proxy policy initialise --state-root DIR` configures it. |
-| Command-supplied `--instance-state-root` | Isolated candidate lifecycle, validation, staged-release, and receipt state. |
-| `$XDG_CACHE_HOME/cq/*.json` or platform cache equivalent | Provider quota cache. On macOS, default base is `~/Library/Caches/cq`. |
-| `$XDG_CACHE_HOME/cq/burn_state_v2.json` or platform cache equivalent | Smoothed burn history. |
-| `~/.claude/.credentials.json` | Claude account credentials. |
-| `~/.claude.json` | Claude Code global config and managed picker entries. |
-| `~/.codex/auth.json` | System Codex credential, read automatically but not rewritten by routing. |
-| `~/.codex/accounts/` | CQ-managed Codex accounts and registry. |
-| `~/.codex/models_cache.json` | Published Codex model cache. |
-| `~/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist` | Background refresh agent on macOS. |
-| `~/Library/Logs/cq/refresh.log` | Background refresh log. |
-| `~/Library/Logs/cq/proxy.log` | Proxy service log. |
-
-Secret/state writes use owner-only permissions and atomic replacement. External Gemini and declared external Codex credential stores remain read-only.
+These commands inspect service/runtime health. Verify a real request from the client after [connecting it](docs/usage.md#connecting-a-client); a healthy listener alone does not establish routed traffic.
+
+## Choose a workflow
+
+| I want to… | Read |
+|---|---|
+| Check quota, add/switch accounts or read JSON | [Usage guide](docs/usage.md) |
+| Connect Claude Code or Codex to account routing | [Client setup](docs/usage.md#connecting-a-client) |
+| Configure pools, pins, reserve, resets or priming | [Routing and automation](docs/usage.md#local-proxy) |
+| Select optional plugins, MCP servers and skills for a chat | [Harness profiles](docs/usage.md#harness-capability-profiles) |
+| Publish models or add an overlay | [Model registry](docs/usage.md#model-registry) |
+| Route normal ChatGPT launches or adapt their usage display | [Native network integration](docs/configuration.md#native-chatgpt-network-routing) |
+| Use multiple account-owned Dots in the native sidebar | [Multi-account Dots](docs/dots.md) |
+| Find settings, paths, environment variables and examples | [Configuration reference](docs/configuration.md) |
+| Diagnose login, quota, routing, upgrade or app failures | [Troubleshooting](docs/troubleshooting.md) |
+| Develop, validate or release CQ | [Contributing](CONTRIBUTING.md), [architecture](docs/architecture.md), [releases](docs/releases.md) |
+
+The usage guide covers every public command family. Run `cq COMMAND --help` for that command's exact arguments and supported flags; the index below lists the full command surface. Examples use synthetic addresses and placeholders: replace `EMAIL`, `ACCOUNT_ID`, `ENTRY_ID`, model IDs and absolute paths with values from the corresponding list/status command. Commands that log in, switch, remove, enable, send or consume change state; read their surrounding prerequisites before running them.
+
+## Capabilities and platform support
+
+| Area | Support |
+|---|---|
+| Quota | Concurrent Claude, Codex, Gemini and Z.ai checks; multi-account reports, cache, burn history, aggregate pace and availability. Gemini uses Antigravity's platform credential store. |
+| Accounts | Claude/Codex OAuth and activation; read-only system discovery; coordinated renewal of eligible managed accounts; Z.ai browser/API-key accounts and billing-route selection. |
+| Proxy | Loopback Anthropic Messages and native Codex Responses HTTP/WebSocket routing; local authentication; bounded failover and durable continuity. |
+| Routing | Pins/defaults, account allowlists, pools/session bindings, system-account preservation and reserve, priming, leases and rescue. |
+| Automation | Explicitly accepted reset schedules, periodic credential refresh, model registry refresh and publication. |
+| Models | Anthropic/Codex/Z.ai catalogues, overlays, CQ-owned registry cache and Claude Code publication; compatible Codex clients fetch CQ's model-discovery routes. |
+| Native ChatGPT | Optional macOS Dots adapter, scoped harness capability profiles, and signed native network/usage handling. Each integration has separate prerequisites. |
+| Operations | Privacy-aware trace JSONL, opt-in payload diagnostics, Stop-hook receipts, canary, isolated candidate validation, durable recovery and legacy endpoint maintenance. |
+
+Official packages target macOS, Windows and Linux on the architectures in each release. Core macOS support includes macOS 12; the signed native network companion requires macOS 13 or later. Dots uses macOS-specific native app contracts. Linux background services require a functional systemd user manager. Windows uses current-user scheduled tasks. Platform support for an external client is separate from CQ's own build support.
 
 ## Complete command index
 
@@ -1108,84 +345,17 @@ cq zai zcode status
 
 </details>
 
-## Multi-account Dots
-
-`cq codex dots install` defaults to the normal native app and its existing
-profile, tasks and signed-in account. Dots discovered from your CQ accounts
-share that app's sidebar. CQ runs its Go adapter from a separate private directory
-alongside installation state and loopback certificates. It does not patch or
-re-sign the installed app bundle. CQ discovers the installed renderer's API,
-account ownership, messaging cache, executor and message bus contracts from its
-content. Version and build numbers are descriptive metadata, not compatibility
-gates. Compatible rebuilt renderers are rediscovered automatically; changed or
-ambiguous contracts stop adapter startup. Both Vite and Rspack layouts are
-supported. A changed renderer snapshot can require relaunching ChatGPT when
-convenient, but a version bump alone does not require a new CQ release.
-
-CQ automatically rechecks cached access denials for active, configured Dots
-through their owner's native profile query. A successful check restores the
-sidebar entry without restarting ChatGPT. Genuine denials retry at most once
-per minute; deleted profiles remain untouched.
-
-Native installation also creates `~/Applications/ChatGPT via CQ.app`, bundled
-with CQ. Launch it through Raycast, Spotlight or Finder to open ChatGPT with Dots.
-The launcher preserves the original app signature and opens the existing profile.
-It sets `OPENAI_BASE_URL` to CQ's configured local proxy, independently of any CQ
-entry in `~/.codex/config.toml`. `cq codex dots start` provides the same routing
-from the terminal. Opening OpenAI's original app directly bypasses the adapter.
-Neither launcher quits an already-running app; if it needs a fresh launch,
-quit ChatGPT and open **ChatGPT via CQ** again.
-If adapter startup fails, the launcher reopens the signed app so other chats remain
-available and shows a native **CQ Dots unavailable** warning. An independent
-40-second watchdog also covers stalled startup and shows the same warning.
-Dots remain unavailable until the startup error is resolved. Abandoned private
-control sockets are recovered automatically; active brokers are never replaced.
-The previous isolated research mode remains available with `install --mode isolated`.
-
-```sh
-cq codex dots install
-cq codex dots list
-cq codex dots status
-cq codex dots prime DOT_ID
-cq codex dots prime --all
-cq codex dots broadcast "Please share a brief update on your current work."
-cq codex dots board codex://threads/THREAD_ID
-cq codex dots stop
-```
-
-Each discovered Dot receives one automatic setup attempt per installation,
-teaching the explicit relay and on-demand peer directory. Restarts, upgrades,
-renames, reboots and removing/re-adding an account do not repeat it. Unknown send
-outcomes are not automatically retried. `prime` explicitly sends a fresh reminder.
-`broadcast "MESSAGE"` sends one CQ-labelled user message to every discovered Dot
-and reports delivery per stable ID. It does not repeat setup or retry uncertain sends.
-Display names can repeat; use the stable ID from `list` when a name is ambiguous.
-`board THREAD_ID` assigns one existing local chat as a shared message board and
-notifies each Dot once. CQ mediates explicit board reads and attributed posts;
-Dots do not need separate local tasks. Run `board` to inspect or `board --clear`
-to remove the binding. Board posts start a brief acknowledgement turn in that chat.
-Account changes are watched automatically; `cq codex dots sync` requests an
-immediate reconciliation. A changed normal-profile catalogue requires an app
-restart through CQ; the watcher does not interrupt existing work. Roles and
-current work remain unknown unless reported.
-
-This optional macOS feature uses the CQ binary without Python, pip or a virtual
-environment. It requires valid read-only account credentials and already-onboarded
-Dots. It does not add empty-account onboarding slots,
-native cross-account `@` selection or persistent secondary Reboot. Secondary Dots
-use separate local executors with private account state and native task sandboxing.
-Local MCP configuration is not copied between accounts. See [Dots installation details](docs/dots.md)
-for qualification, explicit paths and lifecycle controls.
-
 ## Development
 
-```bash
+Source builds and the Go installer runner use the Go toolchain required by `go.mod` (currently Go 1.26.1). Official release binaries include release provenance and Gemini refresh material; development builds do not have the same provider-complete release contract.
+
+```sh
 go build ./...
 go vet ./...
 go test -race -count=1 ./...
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for branch, review, release, and Homebrew service rules.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for changes and review, [architecture](docs/architecture.md) for implementation boundaries, and [release operations](docs/releases.md) for publication and installed-traffic qualification. The frozen [routing authority reference](docs/reference/README.md) is a specialist protocol contract.
 
 ## Licence
 

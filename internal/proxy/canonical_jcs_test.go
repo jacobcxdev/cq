@@ -65,8 +65,8 @@ func TestAppendCanonicalJSONUsesECMAScriptNumberSerialisation(t *testing.T) {
 
 func TestVerifyBlueprintReviewAcceptsFrozenRound44(t *testing.T) {
 	err := VerifyBlueprintReview(
-		"../../docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.md",
-		"../../docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.review.json",
+		"../../docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.md",
+		"../../docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.review.json",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -74,11 +74,11 @@ func TestVerifyBlueprintReviewAcceptsFrozenRound44(t *testing.T) {
 }
 
 func TestVerifyBlueprintReviewRejectsSymlinkAuthorityFiles(t *testing.T) {
-	blueprint, err := filepath.Abs("../../docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.md")
+	blueprint, err := filepath.Abs("../../docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sibling, err := filepath.Abs("../../docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.review.json")
+	sibling, err := filepath.Abs("../../docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.review.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestVerifyBlueprintReviewRejectsSymlinkAuthorityFiles(t *testing.T) {
 }
 
 func TestParseBlueprintReviewSiblingAcceptsOneByteStreaming(t *testing.T) {
-	data, err := os.ReadFile("../../docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.review.json")
+	data, err := os.ReadFile("../../docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.review.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestParseBlueprintReviewSiblingAcceptsOneByteStreaming(t *testing.T) {
 }
 
 func TestParseBlueprintReviewSiblingRejectsRecordDigestCorruption(t *testing.T) {
-	data, err := os.ReadFile("../../docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.review.json")
+	data, err := os.ReadFile("../../docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.review.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestParseBlueprintReviewSiblingRejectsRecordDigestCorruption(t *testing.T) 
 }
 
 func TestParseBlueprintReviewSiblingEnforcesRecordCapBeforeDecodeAndJCS(t *testing.T) {
-	data, err := os.ReadFile("../../docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.review.json")
+	data, err := os.ReadFile("../../docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.review.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +416,7 @@ func TestBlueprintReviewNegativeVectorMatrix(t *testing.T) {
 		}
 	})
 	t.Run("later_blueprint_edit", func(t *testing.T) {
-		blueprint, err := os.ReadFile("../../docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.md")
+		blueprint, err := os.ReadFile("../../docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.md")
 		if err != nil {
 			t.Fatal(err)
 		}

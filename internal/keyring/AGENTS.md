@@ -9,7 +9,7 @@ Claude credential discovery and persistence across multiple storage backends.
 | File | Description |
 |------|-------------|
 | `keyring.go` | `DiscoverClaudeAccounts`, `StoreCQAccount`, `BackfillCredentialsFile`, `PersistRefreshedToken`, manifest management |
-| `keyring_darwin.go` | macOS keychain access via `security` CLI (credentials passed via stdin) |
+| `keyring_darwin.go` | Legacy macOS keychain access via `security`; `UpdateKeychainEntry` passes credential JSON as the `-w` argument |
 
 ## For AI Agents
 
@@ -20,3 +20,6 @@ Claude credential discovery and persistence across multiple storage backends.
 - `BackfillCredentialsFile` and `PersistRefreshedToken` log errors to stderr and return void — they are best-effort
 - `accountKey` falls back to hashed access token when no stable identifier exists — this is fragile after refresh
 - Functions call real OS/keychain — unit tests that need accounts should mock at the provider level
+
+- The legacy command argument is a credential exposure surface. Never log, print or retain its arguments or values. Do not describe it as stdin-based or copy it into new credential paths.
+- Proxy worker execution and credential-broker restrictions are independent; this legacy backend does not authorise ambient helper execution there.

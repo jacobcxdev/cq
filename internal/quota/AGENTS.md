@@ -20,4 +20,4 @@ Domain types shared across all providers and the aggregation layer.
 
 - `MinRemainingPct()` returns `-1` for empty windows — callers must handle this (not `0`)
 - `ErrorResult` always sets `Status: StatusError` — check `IsUsable()` to filter
-- Window names are `Window5Hour` and `Window7Day` — these are the only two used across all providers
+- Window names include canonical duration windows, optional bucket scopes and model pools (`WindowPro`, `WindowFlash`, `WindowFlashLite`). Use `BaseWindow`, `WindowBucket`, `PeriodFor` and `IsAggregable`; do not assume only `5h`/`7d` or aggregate non-duration pools

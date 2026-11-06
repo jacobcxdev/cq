@@ -1,3 +1,9 @@
+# ZCode routing protocol and qualification
+
+[Z.ai account and route setup](usage.md#zai-coding-plan) · [Configuration](configuration.md) · [Troubleshooting](troubleshooting.md#quota-routing-and-continuation)
+
+This document preserves the dated protocol and qualification evidence. Use the linked usage guide for current operator commands. An observed test result below qualifies that source, client and isolated setup; it does not assert that your installed service or a future provider campaign has the same outcome.
+
 CQ can keep Codex as the agent harness while transporting supported GLM requests through ZCode's account and model services. CQ translates supported Responses requests, tools and tool results to the Messages protocol, then converts JSON or streamed responses back for the caller. This route does not delegate work to the ZCode CLI or start a second agent harness.
 
 The implementation is pinned to **ZCode 3.17.2** and the public source revision [`a9fe401eede6e6e5e01be9048679c206fe6f02d9`](https://github.com/zai-org/ZCode/tree/a9fe401eede6e6e5e01be9048679c206fe6f02d9). The inspected installed `ZCode.app/Contents/Resources/app.asar` has SHA-256 `12a2fc939df2fcb4188699772590f5151f1f2b90556bd34ecb6d44cf0d793cc6`. The installed official build contains request-signing behavior omitted from the public edition. The source pin and installed artifact therefore provide different parts of the protocol evidence; a newer public checkout alone does not establish compatibility with a newer installed build.

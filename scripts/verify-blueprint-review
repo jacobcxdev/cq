@@ -23,5 +23,5 @@ exec /usr/bin/env -i \
   GOTELEMETRY=off GOTOOLCHAIN=local GOWORK=off \
   LC_ALL=C PATH=/usr/bin:/bin TZ=UTC \
   /opt/homebrew/bin/go run ./internal/tools/proxycu blueprint-review \
-  docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.md \
-  docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.review.json
+  docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.md \
+  docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.review.json
