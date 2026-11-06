@@ -44,11 +44,12 @@ runs:
       shell: bash
       run: go mod download
 
+    # Release drafts reuse the candidate job's cross-platform compiler cache.
     - name: Cache Go compiler outputs
       uses: actions/cache@v5
       with:
         path: ${{ steps.paths.outputs.build-cache }}
-        key: cq-go-build-v1-${{ runner.os }}-${{ steps.paths.outputs.image }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles(inputs.go-version-file, '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum') }}-${{ github.job }}-${{ hashFiles('**/*.go', '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum') }}
+        key: cq-go-build-v1-${{ runner.os }}-${{ steps.paths.outputs.image }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles(inputs.go-version-file, '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum') }}-${{ github.job == 'draft-build' && 'packages' || github.job }}-${{ hashFiles('**/*.go', '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum') }}
         restore-keys: |
-          cq-go-build-v1-${{ runner.os }}-${{ steps.paths.outputs.image }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles(inputs.go-version-file, '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum') }}-${{ github.job }}-
+          cq-go-build-v1-${{ runner.os }}-${{ steps.paths.outputs.image }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles(inputs.go-version-file, '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum') }}-${{ github.job == 'draft-build' && 'packages' || github.job }}-
           cq-go-build-v1-${{ runner.os }}-${{ steps.paths.outputs.image }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles(inputs.go-version-file, '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum') }}-
