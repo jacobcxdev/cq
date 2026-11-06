@@ -28,7 +28,9 @@ for version, asset in [('0.41.8', 18), ('0.41.9', 19)]:
     digest = hashlib.sha256(archive.read_bytes()).hexdigest()
     pin = dict(schema_version=1, version=version, source_commit='a'*40, asset_id=asset, sha256=digest, minimum_macos='13.0')
     (root / f'{version}.json').write_text(json.dumps(pin))
-    (root / f'{version}.rb').write_text("pin = JSON.parse(<<~'JSON')\n" + json.dumps(pin) + '\nJSON\n')
+    # Published Casks have Homebrew's unquoted heredoc; templates retain quotes.
+    delimiter = 'JSON' if version == '0.41.8' else "'JSON'"
+    (root / f'{version}.rb').write_text(f"pin = JSON.parse(<<~{delimiter})\n" + json.dumps(pin) + '\nJSON\n')
     url = f'https://github.com/jacobcxdev/cq/releases/download/cq-network-v{version}/CQNetwork_{version}_universal.zip'
     release = dict(tag_name=f'cq-network-v{version}', target_commitish='a'*40, draft=False, prerelease=True, assets=[dict(id=asset, name=f'CQNetwork_{version}_universal.zip', digest='sha256:'+digest, state='uploaded', browser_download_url=url)])
     (root / f'release-{asset}.json').write_text(json.dumps(release))
