@@ -49,6 +49,16 @@ func nativeCloudBridge(ctx context.Context, cfg *Settings, arguments []string, s
 	}
 	defer fromNative.Close()
 	defer output.Close()
+	gateway, err := newCloudGatewayListener(cfg.RuntimeRoot, os.Getpid())
+	if err != nil {
+		return true, err
+	}
+	defer gateway.Close()
+	gatewayFile, err := gateway.File()
+	if err != nil {
+		return true, errors.New("native gateway descriptor unavailable")
+	}
+	defer gatewayFile.Close()
 	executable, err := os.Executable()
 	if err != nil {
 		return true, errors.New("native bridge executable unavailable")
@@ -56,7 +66,7 @@ func nativeCloudBridge(ctx context.Context, cfg *Settings, arguments []string, s
 	brokerArgs := append([]string{"__dots", "cloud-stdio-bridge", filepath.Dir(cfg.RuntimeRoot)}, arguments...)
 	broker := exec.CommandContext(ctx, executable, brokerArgs...)
 	broker.Env, broker.Stdin, broker.Stdout, broker.Stderr = environment, os.Stdin, os.Stdout, os.Stderr
-	broker.ExtraFiles = []*os.File{toNative, fromNative}
+	broker.ExtraFiles = []*os.File{toNative, fromNative, gatewayFile}
 	if err := broker.Start(); err != nil {
 		return true, errors.New("native bridge launch failed")
 	}
@@ -68,6 +78,8 @@ func nativeCloudBridge(ctx context.Context, cfg *Settings, arguments []string, s
 	}()
 	_ = toNative.Close()
 	_ = fromNative.Close()
+	_ = gatewayFile.Close()
+	_ = gateway.UnixListener.Close()
 	if err := unix.Dup2(int(input.Fd()), int(os.Stdin.Fd())); err != nil {
 		return true, errors.New("native bridge input handoff failed")
 	}

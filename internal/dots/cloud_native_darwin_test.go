@@ -31,15 +31,24 @@ func init() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(4)
 		}
+		gateway, err := cloudBridgeGateway(&cfg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(4)
+		}
+		defer gateway.Close()
 		deps := cloudStdioDefaults(&cfg)
+		deps.gatewayListener = gateway
 		deps.readHarnessPolicy = nil
 		deps.readHarnessContextPolicy = nil
 		deps.harnessReceipts = nil
 		deps.launch = func(context.Context, string, []string, []string, io.Writer) (*cloudLocal, error) { return local, nil }
 		if err := runCloudStdio(context.Background(), &cfg, nil, os.Args[4:], os.Stdin, os.Stdout, os.Stderr, deps); err != nil {
+			_ = gateway.Close()
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(5)
 		}
+		_ = gateway.Close()
 		os.Exit(0)
 	}
 	if os.Args[1] == "app-server" {

@@ -98,7 +98,13 @@ func RunHelper(ctx context.Context, role, root string, args []string, stdin io.R
 				return err
 			}
 			defer local.stop()
+			gateway, err := cloudBridgeGateway(settings)
+			if err != nil {
+				return err
+			}
+			defer gateway.Close()
 			deps := cloudStdioDefaults(settings)
+			deps.gatewayListener = gateway
 			deps.launch = func(context.Context, string, []string, []string, io.Writer) (*cloudLocal, error) { return local, nil }
 			return runCloudStdio(worker, settings, inventory.Accounts, args, stdin, stdout, stderr, deps)
 		}

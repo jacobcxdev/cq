@@ -16,6 +16,9 @@ import (
 // remoteControl relays opaque WebSocket bytes. The native and public peers retain
 // frame masking, close and ping policy; no owner credential substitution occurs.
 func (p *Probe) remoteControl(w http.ResponseWriter, r *http.Request) {
+	if p.nativeCloudGateway(w, r) {
+		return
+	}
 	origin, err := url.Parse(p.options.Origin)
 	if err != nil {
 		w.WriteHeader(502)
