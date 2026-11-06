@@ -6,6 +6,8 @@ contracts, and [the release guide](docs/releases.md) for packaging and delivery.
 
 ## Development setup
 
+For a user-facing failure, start with the [diagnostics and issue-reporting guide](docs/agent-issue-reporting.md) and [bug-report form](https://github.com/jacobcxdev/cq/issues/new?template=bug_report.yml). Include minimal reviewed evidence; logs are helpful but not required.
+
 Install Git and the Go version declared in [go.mod](go.mod), currently **1.26.1**.
 Race tests also require a working C toolchain supported by Go on the host.
 Clone the repository, then run:

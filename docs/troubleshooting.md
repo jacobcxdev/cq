@@ -4,6 +4,8 @@
 
 Start with the affected provider, client and exact command. Preserve the error, timestamps, CQ/client versions and whether the request went through CQ. A healthy process or `/health` response establishes reachability; a completed routed request establishes that request's path. Avoid changing several routing, VPN and credential settings at once.
 
+For a workflow you can give Codex or another agent, use [Collect diagnostics and report an issue](agent-issue-reporting.md). It covers existing logs, temporary capture, restoration, redaction and the public [bug-report form](https://github.com/jacobcxdev/cq/issues/new?template=bug_report.yml).
+
 ## First inspection
 
 These commands inspect existing state. They do not log in, switch an account, send a Dot message, consume a reset or restart a service:
@@ -92,7 +94,7 @@ Broadcasts, board notices and setup reminders are ordinary messages. If delivery
 
 ### Routing diagnostics
 
-Set `diagnostics_log` and restart. Every Codex HTTP request and WebSocket `response.create` frame receives a trace ID. Ordered JSONL events record ingress, request identity, candidate eligibility and exclusion, selected account hint, pool, durable lease state before and after transitions, credential refresh, upstream dispatch/status, retries, failover, relay result, close/error classification, and terminal outcome. WebSocket events also carry a stable connection ID. Route summaries share the same trace ID. Logs rotate at 64 MiB and retain four prior files. Enabling diagnostics does not change routing policy.
+`diagnostics_log` is unset by default. Set an absolute private log path and arrange an approved restart to enable it; clearing/restoring the field also requires restart. Every Codex HTTP request and WebSocket `response.create` frame receives a trace ID. Ordered JSONL events record ingress, request identity, candidate eligibility and exclusion, selected account hint, pool, durable lease state before and after transitions, credential refresh, upstream dispatch/status, retries, failover, relay result, close/error classification, and terminal outcome. WebSocket events also carry a stable connection ID. Route summaries share the same trace ID. Metadata and payload JSONL logs rotate at a 64 MiB target and retain four prior files plus the current file. Retention is size-based, not age-based; oversized records can exceed the target. This policy does not apply to macOS service stderr or Dots logs. Enabling diagnostics does not change routing policy.
 
 Query one user-facing task, one trace, or recent traffic without manually searching JSONL:
 
@@ -102,9 +104,11 @@ cq proxy trace --trace trace:ID --json
 cq proxy trace --follow
 ```
 
+The command reads existing logs; it does not enable capture. Default output is the newest 200 matching records; use a narrow session/time filter with `--tail 0` when a complete retained trace is needed. `--json` emits original JSONL, not sanitised output. Ctrl-C stops `--follow`, not the proxy's logging. Follow the [capture and cleanup workflow](agent-issue-reporting.md#3-capture-one-bounded-reproduction-when-necessary) before changing log settings.
+
 ### Payload diagnostics
 
-`payload_diagnostics_log` is disabled by default and requires restart. It records up to 64 KiB of each HTTP request and response body and each downstream and upstream Codex WebSocket frame. Every entry contains its causal trace ID, direction, original byte count, encoding, account hint where applicable, and whether capture reached a complete body or was truncated. Credential-bearing headers are excluded. Query it with `cq proxy trace --payload` and the same session/trace/time filters.
+`payload_diagnostics_log` is disabled by default and requires restart both to enable and disable it. Codex trace capture records up to 64 KiB of each HTTP request and response body and each downstream and upstream Codex WebSocket frame. Other provider payload paths can record full buffered bodies; do not treat 64 KiB as a universal cap. Codex entries contain causal trace ID, direction, original byte count, encoding, account hint where applicable, and whether capture reached a complete body or was truncated. Common credential-bearing headers are excluded, but bodies and custom headers can still contain secrets. Query Codex records with `cq proxy trace --payload` and the same session/trace/time filters.
 
 > **Warning:** payload diagnostics can contain prompts, system prompts, tool inputs, compact summaries, messages, provider responses, and other sensitive content. Do not share without review. Request and response bodies can themselves contain secrets.
 
@@ -112,5 +116,7 @@ Session and thread keys in diagnostics are short deterministic hashes, not raw i
 
 
 ## Sharing useful evidence
+
+Use the [agent issue-reporting workflow](agent-issue-reporting.md#4-prepare-the-smallest-public-safe-report) and [bug-report form](https://github.com/jacobcxdev/cq/issues/new?template=bug_report.yml) for collection, public-sharing review and submission.
 
 Retain exact command, versions/builds, timestamp and timezone, platform, configured/effective routing mode, service owner/executable and the smallest matching trace. Redact identities when needed. Do not share `proxy.json`, WireGuard profiles, credential stores, OAuth callback URLs, encrypted session keys or raw payload logs without a separate review. Include whether a result came from a synthetic test, candidate listener or installed live client. A sent message, healthy status or successful build is not proof of installed affected traffic.

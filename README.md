@@ -4,6 +4,8 @@
 
 **For users and installation agents:** start with the [agent setup and feature guide](docs/agent-installation.md). **Agents: read that guide before installing or changing configuration.** Explain the relevant capabilities, help the user choose, then configure and verify their chosen setup. Users can send their agent this repository link; the guide covers desktop apps and CLIs, account routing, optional features and native ChatGPT integrations.
 
+**Something not working?** Give your agent the [diagnostics and issue-reporting guide](docs/agent-issue-reporting.md), or use the [bug-report form](https://github.com/jacobcxdev/cq/issues/new?template=bug_report.yml). **Agents: collect minimal evidence, restore temporary tracing, and show the user the redacted report and attachments before uploading.** Reports without logs are welcome.
+
 ![cq output](assets/screenshot.png)
 
 ## Install

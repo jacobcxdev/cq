@@ -9,6 +9,8 @@ choose, preserve existing state, and verify the requested outcome. A new user
 should not need to know command names or discover features by accident.
 Installing a package is not proof that its optional integrations work.
 
+When something fails, follow the [agent diagnostics and issue-reporting guide](agent-issue-reporting.md) before changing the setup. Collect existing evidence first, use temporary capture only as needed, restore its settings, and obtain approval for the exact redacted report and attachments before public submission.
+
 ## 1. Discover needs and explain the choices
 
 First identify the user's platform, installed clients, intended providers and
