@@ -224,6 +224,31 @@ func (c Controller) Start(ctx context.Context, preserveWatcher bool) (result map
 	if err = c.refreshAppPin(s, qualifiedAppPins); err != nil {
 		return nil, err
 	}
+	nativeAppAlive := false
+	if s.IntegrationMode == "native" {
+		nativeAppAlive, err = NormalAppRunning(ctx, s)
+		if err != nil {
+			return nil, err
+		}
+		if !nativeAppAlive {
+			pending, discoveryErr := c.prepareStartupDiscovery(ctx, s)
+			if discoveryErr != nil {
+				return nil, discoveryErr
+			}
+			// Discovery can await a previously unknown owner. If the user opened
+			// the app meanwhile, preserve that live session instead of stopping
+			// workers or launching another app from the earlier cold snapshot.
+			nativeAppAlive, err = NormalAppRunning(ctx, s)
+			if err != nil {
+				return nil, err
+			}
+			defer func() {
+				if pending && result != nil {
+					result["startup_discovery_pending"] = true
+				}
+			}()
+		}
+	}
 	if len(s.Dots) == 0 {
 		if _, err = StageExecutable(c.Executable, s.RuntimeRoot); err != nil {
 			return nil, err
@@ -251,11 +276,7 @@ func (c Controller) Start(ctx context.Context, preserveWatcher bool) (result map
 		return nil, err
 	}
 	if s.IntegrationMode == "native" {
-		alive, err := NormalAppRunning(ctx, s)
-		if err != nil {
-			return nil, err
-		}
-		if alive {
+		if nativeAppAlive {
 			owned := false
 			for _, row := range rows {
 				if row.Role == "app" {

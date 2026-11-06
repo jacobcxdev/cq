@@ -9,12 +9,15 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
 )
 
 const NativeUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+
+const catalogueRequestTimeout = 20 * time.Second
 
 // CatalogueClient reads owner credentials and native profiles without refreshing them.
 type CatalogueClient struct {
@@ -94,7 +97,7 @@ func (c *CatalogueClient) Get(ctx context.Context, account Account, path string,
 	client := c.HTTP
 	if client == nil {
 		bounded := probeHTTPClient()
-		bounded.Timeout = 20 * time.Second
+		bounded.Timeout = catalogueRequestTimeout
 		client = bounded
 	}
 	response, err := client.Do(request)
@@ -126,6 +129,10 @@ func (c *CatalogueClient) Discover(ctx context.Context) (Discovery, error) {
 	if err != nil {
 		return Discovery{}, err
 	}
+	return c.discoverInventory(ctx, inventory)
+}
+
+func (c *CatalogueClient) discoverInventory(ctx context.Context, inventory Inventory) (Discovery, error) {
 	result := Discovery{Dots: []DiscoveredDot{}, Accounts: []AccountOutcome{}}
 	profiles, roots, healthy := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, account := range inventory.Accounts {
@@ -251,24 +258,59 @@ func (c *CatalogueClient) PrimaryRoots(ctx context.Context, accounts map[string]
 }
 
 func (c *CatalogueClient) Fixture(ctx context.Context, headers http.Header, primaryItems []map[string]any) (*Catalogue, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	inventory, err := c.Inventory()
 	if err != nil {
 		return nil, err
 	}
 	result := &Catalogue{System: inventory.System, Profiles: []map[string]any{}, Owners: map[string]Account{}, Summary: []map[string]any{}}
 	profiles := c.Settings.ProfileIDs()
-	for _, account := range inventory.Accounts {
+	// Fetch independent owners concurrently inside the caller's shared deadline.
+	// Assemble afterwards in inventory order so completion timing cannot reorder
+	// the sidebar or bypass resource collision checks.
+	type ownerCatalogue struct {
+		items []map[string]any
+		err   error
+	}
+	results := make([]ownerCatalogue, len(inventory.Accounts))
+	slots := make(chan struct{}, 8)
+	var pending sync.WaitGroup
+	for index, account := range inventory.Accounts {
+		if _, configured := profiles[account.Alias]; !configured {
+			continue
+		}
+		if account.AccountID == inventory.System.AccountID {
+			results[index].items = primaryItems
+			continue
+		}
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		pending.Add(1)
+		go func(index int, account Account) {
+			defer pending.Done()
+			defer func() { <-slots }()
+			defer func() {
+				if recover() != nil {
+					results[index].err = fmt.Errorf("catalogue owner worker panic")
+				}
+			}()
+			results[index].items, results[index].err = c.Catalogue(ctx, account, headers)
+		}(index, account)
+	}
+	pending.Wait()
+	for index, account := range inventory.Accounts {
 		profileID, exists := profiles[account.Alias]
 		if !exists {
 			continue
 		}
-		items := primaryItems
+		items := results[index].items
 		isSystem := account.AccountID == inventory.System.AccountID
-		if !isSystem {
-			items, err = c.Catalogue(ctx, account, headers)
-			if err != nil {
-				return nil, err
-			}
+		if results[index].err != nil {
+			return nil, results[index].err
 		}
 		summary := []map[string]any{}
 		for _, profile := range items {

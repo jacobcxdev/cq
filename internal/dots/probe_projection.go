@@ -402,7 +402,12 @@ func (p *Probe) transform(r *http.Request, response *http.Response, data []byte,
 			}
 		}
 		if f != nil {
-			envelope["items"] = f.Profiles
+			ordered, orderErr := orderedSidebarProfiles(&p.settings, f.Profiles)
+			if orderErr != nil {
+				p.event(map[string]any{"sidebar_order_invalid": true})
+				ordered = f.Profiles
+			}
+			envelope["items"] = ordered
 			envelope["cursor"] = nil
 			data, err = json.Marshal(envelope)
 			if err != nil {
