@@ -2,21 +2,23 @@
 
 [README](../README.md) · [Troubleshooting](troubleshooting.md) · [Configuration and paths](configuration.md#important-paths) · [Report a bug](https://github.com/jacobcxdev/cq/issues/new?template=bug_report.yml)
 
-Give this guide to Codex or another coding agent when CQ does not work as expected.
-Start with existing evidence; reproduce with additional tracing only when needed.
+Follow this workflow when a user reports a CQ bug or says something in CQ is not
+working, including when they provide only this repository URL and the symptom.
+The README is the entry point; do not require a special prompt or ask the user to
+find diagnostics commands. Start with existing evidence and reproduce with
+additional tracing only when needed.
 A report without logs is still useful: explain what could not be collected and why.
 Do not make a fresh reproduction a requirement for reporting an intermittent bug.
 
-## A prompt to give your agent
+## Agent entry point
 
-> Read https://github.com/jacobcxdev/cq/blob/main/docs/agent-issue-reporting.md.
-> Help me investigate this CQ problem: [describe what happened and when].
-> Preserve my accounts, configuration and running work. Collect the smallest
-> relevant diagnostics, distinguish observed facts from guesses, and prepare a
-> redacted bug report for jacobcxdev/cq using its bug-report template. Ask before
-> restarting applications/services, enabling sensitive payload capture, or
-> uploading anything. Show me the exact report and attachments first, then submit
-> the approved report and give me its URL. Restore temporary tracing afterwards.
+Take ownership of collecting applicable evidence and preparing the report from
+the user's ordinary problem description. Ask only for missing incident details
+that the existing context or local evidence cannot supply. Preserve accounts,
+configuration and running work; distinguish observations from guesses. Obtain
+approval before disruptive restarts, sensitive payload capture or public uploads,
+then submit the approved report to `jacobcxdev/cq` and return its URL. Restore
+temporary capture even when reproduction fails or the task is interrupted.
 
 Agents should follow the installed command's `--help` and this workflow. Do not
 upgrade, reinstall, clear caches/leases, switch accounts, consume resets, change
