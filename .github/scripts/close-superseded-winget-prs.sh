@@ -18,6 +18,13 @@ gh pr list --repo microsoft/winget-pkgs --state open --author jacobcxdev \
         or .title == ("Update: jacobcxdev.cq to " + .version))]' >"$pending"
 
 if ! jq -e --arg version "$version" 'any(.[]; .version == $version)' "$pending" >/dev/null &&
+   ! gh pr list --repo microsoft/winget-pkgs --state open --head "cq-$version" \
+     --json number,title,headRefName,headRepositoryOwner,author |
+     jq -e --arg version "$version" 'any(.[];
+       .author.login == "jacobcxdev" and .headRepositoryOwner.login == "jacobcxdev"
+       and .headRefName == ("cq-" + $version)
+       and (.title == ("New version: jacobcxdev.cq version " + $version)
+         or .title == ("Update: jacobcxdev.cq to " + $version)))' >/dev/null &&
    ! gh api "repos/microsoft/winget-pkgs/contents/manifests/j/jacobcxdev/cq/$version" >/dev/null 2>&1; then
   echo "refusing cleanup: CQ $version has no current PR or published manifest" >&2
   exit 1

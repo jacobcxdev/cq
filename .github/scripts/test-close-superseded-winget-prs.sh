@@ -9,7 +9,16 @@ cat >"$root/bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 case "$1 $2" in
-  'pr list') cat "$CQ_WINGET_TEST_ROOT/prs.json" ;;
+  'pr list')
+    if [[ " $* " == *' --head '* ]]; then
+      if [[ -f "$CQ_WINGET_TEST_ROOT/current.json" ]]; then
+        cat "$CQ_WINGET_TEST_ROOT/current.json"
+      else
+        echo '[]'
+      fi
+    else
+      cat "$CQ_WINGET_TEST_ROOT/prs.json"
+    fi ;;
   'api repos/microsoft/winget-pkgs/contents/manifests/j/jacobcxdev/cq/0.42.5') test -f "$CQ_WINGET_TEST_ROOT/published" ;;
   'pr close')
     [[ "$3" =~ ^[0-9]+$ && "$4" == --repo && "$5" == microsoft/winget-pkgs && $# == 5 ]]
@@ -49,6 +58,21 @@ bash "$script"
 jq 'map(select(.number != 1))' "$root/prs.json" >"$root/older.json"
 mv "$root/older.json" "$root/prs.json"
 rm "$root/closed"
+# A newly created PR can be absent from GitHub's author search index while
+# the repository's exact-head lookup already returns it.
+jq -n '[{number:1,title:"New version: jacobcxdev.cq version 0.42.5",headRefName:"cq-0.42.5",headRepositoryOwner:{login:"jacobcxdev"},author:{login:"jacobcxdev"}}]' >"$root/current.json"
+bash "$script"
+[[ "$(cat "$root/closed")" == $'2\n4\n9' ]]
+rm "$root/closed"
+for mutation in '.title="Other.Package"' '.author.login="other"' '.headRepositoryOwner.login="other"' '.headRefName="cq-0.42.4"'; do
+  jq "map($mutation)" "$root/current.json" >"$root/invalid.json"
+  mv "$root/current.json" "$root/valid.json"
+  mv "$root/invalid.json" "$root/current.json"
+  if bash "$script" >"$root/log" 2>&1; then exit 1; fi
+  [[ ! -e "$root/closed" ]]
+  mv "$root/valid.json" "$root/current.json"
+done
+rm "$root/current.json"
 if bash "$script" >"$root/log" 2>&1; then exit 1; fi
 [[ ! -e "$root/closed" ]]
 
