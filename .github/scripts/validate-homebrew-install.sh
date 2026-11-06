@@ -2,8 +2,8 @@
 
 set -euo pipefail
 
-if [[ $# -ne 6 ]]; then
-  echo "usage: validate-homebrew-install.sh PREVIOUS_CASK PREVIOUS_ARCHIVE PREVIOUS_VERSION CURRENT_CASK CURRENT_ARCHIVE CURRENT_VERSION" >&2
+if [[ $# -ne 8 ]]; then
+  echo "usage: validate-homebrew-install.sh PREVIOUS_CASK PREVIOUS_ARCHIVE PREVIOUS_VERSION CURRENT_CASK CURRENT_ARCHIVE CURRENT_VERSION CURRENT_NATIVE_CASK CURRENT_NATIVE_ARCHIVE" >&2
   exit 64
 fi
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -17,7 +17,9 @@ previous_version=${3#v}
 current_cask=$4
 current_archive=$5
 current_version=${6#v}
-for path in "$previous_cask" "$previous_archive" "$current_cask" "$current_archive"; do
+current_native_cask=$7
+current_native_archive=$8
+for path in "$previous_cask" "$previous_archive" "$current_cask" "$current_archive" "$current_native_cask" "$current_native_archive"; do
   [[ -f "$path" ]] || { echo "validation input is not a regular file: $path" >&2; exit 66; }
 done
 [[ "$previous_version" != "$current_version" ]] || { echo "versions must differ" >&2; exit 64; }
@@ -34,6 +36,7 @@ codex_root="$HOME/.codex"
 logs_root="$HOME/Library/Logs/cq"
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/cq-homebrew-install.XXXXXX")
 probe_executable="$temporary_root/native-transport-probe"
+nativepackage_executable="$temporary_root/nativepackage"
 go_executable="$(go env GOROOT)/bin/go"
 address_file="$temporary_root/upstream-address.txt"
 upstream_pid=''
@@ -110,6 +113,7 @@ fi
 echo "Homebrew lifecycle launchd domain gui/$UID is available"
 
 go build -o "$probe_executable" ./.github/scripts/native-transport-probe.go
+go build -o "$nativepackage_executable" ./internal/tools/nativepackage
 "$probe_executable" serve --address-file "$address_file" &
 upstream_pid=$!
 for _ in $(seq 1 100); do
@@ -146,6 +150,65 @@ text.sub!(/^  installer script:/) { preflight + "  installer script:" } or abort
 File.write(destination, text)
 RUBY
 }
+
+# The predecessor Cask must see its own immutable companion definition and
+# installation. Restore the candidate definition before the real CQ upgrade so
+# its normal Homebrew transaction, rather than this setup, upgrades the companion.
+with_previous_companion() (
+  trap - EXIT
+  [[ "${CI:-}" == true ]] || { echo "companion lifecycle setup requires disposable CI" >&2; exit 64; }
+  local_root="$temporary_root/previous-companion"
+  mkdir -p "$local_root"
+  for entry in previous current; do
+    if [[ "$entry" == previous ]]; then source_cask=$previous_cask; else source_cask=$current_cask; fi
+    ruby - "$source_cask" "$local_root/$entry.json" <<'RUBY'
+require "json"
+source, destination = ARGV
+pins = File.read(source).scan(/pin = JSON\.parse\(<<~'JSON'\)\n(.*?)^\s*JSON$/m)
+abort "missing or ambiguous reviewed native companion pin" unless pins.length == 1
+File.write(destination, JSON.generate(JSON.parse(pins.first.first)))
+RUBY
+    "$nativepackage_executable" info "$local_root/$entry.json" >"$local_root/$entry-info.json"
+  done
+  "$nativepackage_executable" cask "$local_root/current.json" "$local_root/expected-current.rb"
+  cmp "$local_root/expected-current.rb" "$current_native_cask"
+  selected_cask="$(brew --repository jacobcxdev/tap)/Casks/cq-network.rb"
+  cmp "$current_native_cask" "$selected_cask"
+  candidate_digest=$(jq -er .sha256 "$local_root/current.json")
+  [[ "$(shasum -a 256 "$current_native_archive" | awk '{print $1}')" == "$candidate_digest" ]]
+  # A staged native release may still be private. Seed the normal reviewed URL's
+  # download cache with its already-verified ZIP; Homebrew still checks SHA-256.
+  candidate_cache=$(brew --cache --cask jacobcxdev/tap/cq-network)
+  mkdir -p "$(dirname "$candidate_cache")"
+  cache_stage=$(mktemp "${candidate_cache}.XXXXXX")
+  cp "$current_native_archive" "$cache_stage"
+  mv "$cache_stage" "$candidate_cache"
+  if cmp -s <(jq -S . "$local_root/previous.json") <(jq -S . "$local_root/current.json"); then
+    "$@"
+    exit
+  fi
+  tag=$(jq -er .tag "$local_root/previous-info.json")
+  asset_id=$(jq -er .asset_id "$local_root/previous-info.json")
+  release_api=$(gh release view "$tag" --repo jacobcxdev/cq --json apiUrl --jq .apiUrl)
+  [[ "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]]
+  gh api "${release_api#https://api.github.com/}" >"$local_root/release.json"
+  gh api "repos/jacobcxdev/cq/releases/assets/$asset_id" --header 'Accept: application/octet-stream' >"$local_root/previous.zip"
+  "$nativepackage_executable" verify "$local_root/previous.json" "$local_root/previous.zip" "$local_root/release.json"
+  /usr/bin/ditto -x -k "$local_root/previous.zip" "$local_root/unpacked"
+  app="$local_root/unpacked/CQNetwork.app"
+  provider="$app/Contents/Library/SystemExtensions/dev.jacobcx.cq.network.proxy.systemextension"
+  requirement='anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "K2648T24P4"'
+  /usr/bin/codesign --verify --deep --strict --all-architectures "-R=$requirement and identifier \"dev.jacobcx.cq.network\"" "$app"
+  /usr/bin/codesign --verify --strict --all-architectures "-R=$requirement and identifier \"dev.jacobcx.cq.network.proxy\"" "$provider"
+  /usr/bin/xcrun stapler validate "$app"
+  /usr/sbin/spctl --assess --type execute "$app"
+  "$nativepackage_executable" cask "$local_root/previous.json" "$local_root/cq-network.rb"
+  trap 'result=$?; cp "$current_native_cask" "$selected_cask" || result=1; exit "$result"' EXIT
+  cp "$local_root/cq-network.rb" "$selected_cask"
+  HOMEBREW_NO_AUTO_UPDATE=1 brew uninstall --cask --force jacobcxdev/tap/cq-network
+  HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask jacobcxdev/tap/cq-network
+  "$@"
+)
 
 HOMEBREW_NO_AUTO_UPDATE=1 brew tap-new --no-git "$validation_tap" >/dev/null
 tap_root=$(brew --repository "$validation_tap")
@@ -233,6 +296,7 @@ assert_installed() {
   return 1
 }
 
+install_previous_cq() {
 if ! HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$validation_tap/cq"; then
   launchctl print-disabled "gui/$UID" >&2 || true
   for path in "$proxy_plist" "$refresh_plist"; do
@@ -248,6 +312,8 @@ if ! HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$validation_tap/cq"; then
   exit 1
 fi
 assert_installed "$previous_version"
+}
+with_previous_companion install_previous_cq
 
 rewrite_cask "$current_cask" "$current_archive" "$validation_cask"
 HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask "$validation_tap/cq"

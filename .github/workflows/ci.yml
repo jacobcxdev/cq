@@ -227,7 +227,9 @@ jobs:
             "$PREVIOUS_VERSION" \
             "$PWD/dist/homebrew/Casks/cq.rb" \
             "$PWD/dist/cq_${CURRENT_VERSION}_darwin_${architecture}.tar.gz" \
-            "$CURRENT_VERSION"
+            "$CURRENT_VERSION" \
+            "$PWD/dist/homebrew/Casks/cq-network.rb" \
+            "$PWD/dist/homebrew/Casks/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' .github/native-network-release.json)"
 
   linux:
     timeout-minutes: 15

@@ -64,6 +64,7 @@ jobs:
         run: |
           .github/scripts/test-homebrew-lifecycle.sh
           .github/scripts/test-homebrew-install-status.sh
+          bash .github/scripts/test-homebrew-install-companion.sh
           go test -race -count=1 ./cmd/cq -run '^(TestHomebrew.*(Callback|Successor).*|TestHomebrewCompanionReconciliation)$'
 
       - name: Install current Codex client
@@ -238,7 +239,9 @@ jobs:
             "$previous_version" \
             "$PWD/dist/homebrew/Casks/cq.rb" \
             "$PWD/dist/cq_${current_version}_darwin_${architecture}.tar.gz" \
-            "$current_version"
+            "$current_version" \
+            "$PWD/dist/homebrew/Casks/cq-network.rb" \
+            "$PWD/dist/homebrew/Casks/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' .github/native-network-release.json)"
 
       - uses: actions/upload-artifact@v7
         with:
