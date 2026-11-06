@@ -28,6 +28,7 @@ type CodexDotsCmd struct {
 	Status    CodexDotsActionCmd    `cmd:"" help:"Show Dots status"`
 	Sync      CodexDotsActionCmd    `cmd:"" help:"Refresh Dots account discovery"`
 	List      CodexDotsActionCmd    `cmd:"" help:"List discovered Dots"`
+	Order     CodexDotsOrderCmd     `cmd:"" help:"Set persistent sidebar order; unlisted Dots follow in their existing order"`
 	Prime     CodexDotsPrimeCmd     `cmd:"" help:"Prime a Dot or all discovered Dots"`
 	Broadcast CodexDotsBroadcastCmd `cmd:"" help:"Send a user message to every discovered Dot"`
 	Board     CodexDotsBoardCmd     `cmd:"" help:"Show or assign one local chat as the shared Dot message board"`
@@ -41,6 +42,9 @@ type CodexDotsInstallCmd struct {
 	AccountSource string `help:"Optional read-only CodexBar account directory" placeholder:"ABS_PATH"`
 }
 type CodexDotsActionCmd struct{}
+type CodexDotsOrderCmd struct {
+	Dots []string `arg:"" help:"Stable Dot handles or exact unambiguous names, in sidebar order"`
+}
 type CodexDotsPrimeCmd struct {
 	Dot string `arg:"" optional:"" help:"Stable Dot handle or exact unambiguous display name"`
 	All bool   `help:"Prime all discovered Dots"`
@@ -255,6 +259,13 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 	}
 	if op == "prime" {
 		request.Target, request.All = options.Prime.Dot, options.Prime.All
+	}
+	if op == "order" {
+		data, err := json.Marshal(options.Order.Dots)
+		if err != nil {
+			return err
+		}
+		request.Target = string(data)
 	}
 	if op == "broadcast" {
 		request.Target = options.Broadcast.Message

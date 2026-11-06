@@ -45,6 +45,16 @@ The installation root must be private and outside source checkouts, app bundles 
 
 The qualified native app permits authenticated local proxy requests on `localhost:8000`. Dots therefore requires loopback port `8000` to be free. If another service owns it, startup stops without terminating that service or choosing an unsupported port.
 
+## Sidebar order
+
+The native Dot rows do not support dragging. Set their persistent presentation order with CQ:
+
+```sh
+cq codex dots order "Assistant" "Researcher" "Reviewer"
+```
+
+Use your own exact, unambiguous display names or stable handles from `cq codex dots list`. Duplicate names require handles. Unlisted or newly discovered Dots follow the listed Dots in their existing catalogue order. Renaming a Dot does not lose its position because CQ stores handles rather than names. The order lives in private `sidebar-order.json` beside the installation's settings; it does not change account ownership, authentication or the remote primary Dot. CQ updates the running native catalogue cache immediately and keeps that order across refetches, without restarting ChatGPT. The JSON result distinguishes saved order, an attached live cache adapter (`sidebar_refreshed`), and a matching native query-cache order (`sidebar_order_applied`). If the app is closed or unavailable, the saved order applies on its next catalogue load.
+
 ## CQ egress
 
 When CQ has `codex_wireguard_profile` or a remote `codex_egress_proxy` configured, the adapter's Dot control-plane HTTP and WebSocket connections use the supervisor's existing private egress broker. This covers discovery, messaging, live updates, owner cloud sessions and computer signalling. Dots do not read the WireGuard profile or start another tunnel. The CQ service must be running; a missing broker or failed tunnel blocks these requests without direct fallback. Each new connection reads the current broker descriptor so a service restart does not leave the adapter using an obsolete socket.

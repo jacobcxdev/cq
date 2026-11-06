@@ -297,9 +297,6 @@ var probeComputers = regexp.MustCompile(`^/backend-api/tbo/([^/]+)/computers$`)
 var probeFileInfo = regexp.MustCompile(`^/backend-api/messaging/rooms/[^/]+/files/[^/]+$`)
 
 func (p *Probe) resourceOwner(path string, f *CatalogueFixture) (*Account, error) {
-	if f == nil {
-		return nil, nil
-	}
 	match := probeResource.FindStringSubmatch(path)
 	if match == nil {
 		return nil, nil
@@ -311,6 +308,19 @@ func (p *Probe) resourceOwner(path string, f *CatalogueFixture) (*Account, error
 			id, _ = url.PathUnescape(match[i+1])
 			break
 		}
+	}
+	if f == nil {
+		// Cached native profiles can request details before the first aggregate
+		// catalogue response has established authenticated resource ownership.
+		// Forwarding a known secondary resource as primary creates a false 404
+		// and a persisted native access denial. Wait for the verified snapshot.
+		for _, dot := range p.settings.Dots {
+			if dot.OwnerAlias != p.settings.SystemAlias &&
+				(field == "id" && dot.ProfileID == id || field == "active_root_thread_id" && dot.RootThreadID == id) {
+				return nil, fmt.Errorf("secondary resource ownership is still loading")
+			}
+		}
+		return nil, nil
 	}
 	count := 0
 	var profile map[string]any
