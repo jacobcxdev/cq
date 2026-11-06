@@ -55,14 +55,15 @@ func (CodexHarnessStatusCmd) Help() string { return harnessApplicationNote }
 var harnessChatIDPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 type codexHarnessRunner struct {
-	fs        fsutil.FileSystem
-	path      func() (string, error)
-	receipt   func(string) (harness.Receipt, error)
-	snapshot  func(context.Context, string) (harness.Inventory, error)
-	apply     func(context.Context, string) error
-	readModel func(context.Context, string) (harness.Snapshot, error)
-	getenv    func(string) string
-	getwd     func() (string, error)
+	fs               fsutil.FileSystem
+	path             func() (string, error)
+	receipt          func(string) (harness.Receipt, error)
+	snapshot         func(context.Context, string) (harness.Inventory, error)
+	apply            func(context.Context, string) error
+	readModel        func(context.Context, string) (harness.Snapshot, error)
+	getenv           func(string) string
+	getwd            func() (string, error)
+	resolveDirectory func(string) (string, error)
 }
 
 type codexHarnessStatus struct {
@@ -74,9 +75,10 @@ type codexHarnessStatus struct {
 
 func defaultCodexHarnessRunner() codexHarnessRunner {
 	runner := codexHarnessRunner{
-		fs:     fsutil.OSFileSystem{},
-		getenv: os.Getenv,
-		getwd:  os.Getwd,
+		fs:               fsutil.OSFileSystem{},
+		getenv:           os.Getenv,
+		getwd:            os.Getwd,
+		resolveDirectory: filepath.EvalSymlinks,
 		receipt: func(chatID string) (harness.Receipt, error) {
 			roots, err := userdirs.Default()
 			if err != nil {

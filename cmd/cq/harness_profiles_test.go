@@ -221,6 +221,46 @@ func TestCodexHarnessProfileExportImportRoundTripWithoutBinding(t *testing.T) {
 	}
 }
 
+func TestCodexHarnessProfileShowSaveRoundTripWithoutBinding(t *testing.T) {
+	runner, fsys := harnessProfilesFixture(t)
+	runner.apply = func(context.Context, string) error { t.Fatal("profile save activated a chat"); return nil }
+	harnessProfileInput(t, fsys, "/work/source.json", harnessReviewDefinition())
+	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", "/work/source.json"); err != nil {
+		t.Fatal(err)
+	}
+	for _, source := range []string{"minimal", "full", "review"} {
+		t.Run(source, func(t *testing.T) {
+			var shown bytes.Buffer
+			if err := runHarnessTestCLI(t, runner, &shown, "profile", "show", source, "--json"); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsys.WriteFile("/work/shown.json", shown.Bytes(), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			name := source + "-copy"
+			if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", name, "--file", "/work/shown.json"); err != nil {
+				t.Fatal(err)
+			}
+			var document harnessProfileDocument
+			if err := json.Unmarshal(shown.Bytes(), &document); err != nil {
+				t.Fatal(err)
+			}
+			policy, err := harness.Load(fsys, "/cq/harness.json")
+			if err != nil || policy.Enabled || len(policy.Tasks) != 0 || !reflect.DeepEqual(policy.Profiles[name], document.Definition) {
+				t.Fatalf("profile show/save changed definition or activation: %#v, %v", policy, err)
+			}
+			before, _ := fsys.ReadFile("/cq/harness.json")
+			if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", name, "--file", "/work/shown.json"); err == nil || !strings.Contains(err.Error(), "--replace") {
+				t.Fatalf("document silently replaced a saved profile: %v", err)
+			}
+			after, _ := fsys.ReadFile("/cq/harness.json")
+			if !bytes.Equal(before, after) {
+				t.Fatal("rejected document replacement changed policy")
+			}
+		})
+	}
+}
+
 func TestCodexHarnessProfileInvalidFilesDoNotCreateUserState(t *testing.T) {
 	for _, test := range []struct {
 		name, json string
@@ -237,6 +277,10 @@ func TestCodexHarnessProfileInvalidFilesDoNotCreateUserState(t *testing.T) {
 		{"unknown portable version", `{"version":99,"name":"imported","definition":{"changes":{}}}`, true},
 		{"missing portable definition", `{"version":1,"name":"imported"}`, true},
 		{"null portable definition", `{"version":1,"name":"imported","definition":null}`, true},
+		{"save unknown document version", `{"version":99,"name":"source","definition":{"changes":{}}}`, false},
+		{"save null document definition", `{"version":1,"name":"source","definition":null}`, false},
+		{"save unknown document field", `{"version":1,"name":"source","definition":{"changes":{}},"unexpected":true}`, false},
+		{"save mixed document and definition", `{"version":1,"name":"source","definition":{"changes":{}},"changes":{}}`, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner, fsys := harnessProfilesFixture(t)

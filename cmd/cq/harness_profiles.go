@@ -34,7 +34,7 @@ type CodexHarnessProfilesCmd struct {
 	} `cmd:"" help:"Show one profile definition"`
 	Save struct {
 		Name    string `arg:""`
-		File    string `required:"" help:"JSON file containing a profile Definition"`
+		File    string `required:"" help:"JSON definition or profile document from profile show --json"`
 		Project string `help:"Save in this project's .cq/harness.json instead of user configuration"`
 		Replace bool   `help:"Explicitly replace an existing profile"`
 	} `cmd:"" help:"Save a profile definition without binding it"`
@@ -343,7 +343,12 @@ func (runner codexHarnessRunner) harnessProfileDefinition(operation string, cmd 
 		if err != nil {
 			return err
 		}
-		if operation == "import" {
+		var fields map[string]json.RawMessage
+		if err := decodeHarnessJSON(data, &fields); err != nil {
+			return err
+		}
+		_, documentFormat := fields["definition"]
+		if operation == "import" || documentFormat {
 			var document struct {
 				Version    int                 `json:"version"`
 				Name       string              `json:"name"`
@@ -455,6 +460,15 @@ func (runner codexHarnessRunner) readHarnessProfileFile(file string) ([]byte, er
 	path, err := runner.harnessProject(file)
 	if err != nil {
 		return nil, err
+	}
+	// External input may live under a directory alias such as macOS /tmp.
+	// Resolve only its parent; the final file still uses the no-follow opener.
+	if runner.resolveDirectory != nil {
+		directory, err := runner.resolveDirectory(filepath.Dir(path))
+		if err != nil {
+			return nil, fmt.Errorf("resolve harness profile directory: %w", err)
+		}
+		path = filepath.Join(directory, filepath.Base(path))
 	}
 	opener, ok := runner.fs.(fsutil.NoFollowFileOpener)
 	if !ok {
