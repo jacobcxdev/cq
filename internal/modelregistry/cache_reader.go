@@ -32,8 +32,8 @@ func LoadCodexEntriesFromCache(fsys fsutil.FileSystem, path string) ([]Entry, er
 		}
 		provider := ProviderCodex
 		var nativeRaw json.RawMessage
-		if envelope.CQProviders[info.Slug] == ProviderZAI {
-			provider = ProviderZAI
+		if selected := envelope.CQProviders[info.Slug]; selected == ProviderZAI || selected == ProviderGrok {
+			provider = selected
 			nativeRaw = raw
 		}
 		entries = append(entries, Entry{

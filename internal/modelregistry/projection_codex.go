@@ -29,7 +29,7 @@ const codexFallbackContextWindow = 272000
 const codexFallbackTruncationBytesLimit = 10000
 
 // CodexModelsResponse builds the models response payload from the snapshot.
-// Codex and Z.ai Responses entries are included.
+// Codex, Z.ai and supported Grok Responses entries are included.
 //
 // Native fields are preserved, with a model-specific compaction cap for GLM-5.3.
 //
@@ -40,10 +40,13 @@ const codexFallbackTruncationBytesLimit = 10000
 func CodexModelsResponse(snap Snapshot) codexModelsResponseOut {
 	models := make([]json.RawMessage, 0)
 	for _, e := range snap.Entries {
-		if e.Provider != ProviderCodex && e.Provider != ProviderZAI {
+		if e.Provider != ProviderCodex && e.Provider != ProviderZAI && e.Provider != ProviderGrok {
 			continue
 		}
 		raw := codexEntryRaw(e, snap.CodexRawByID)
+		if len(raw) == 0 {
+			continue
+		}
 		models = append(models, raw)
 	}
 	return codexModelsResponseOut{Models: models}
@@ -75,7 +78,7 @@ func AugmentCodexModels(body []byte, snap Snapshot) ([]byte, error) {
 	}
 	added := make(map[string]bool)
 	for _, e := range snap.Entries {
-		if e.Provider != ProviderZAI && (e.Provider != ProviderCodex || e.Source != SourceOverlay) {
+		if e.Provider != ProviderZAI && e.Provider != ProviderGrok && (e.Provider != ProviderCodex || e.Source != SourceOverlay) {
 			continue
 		}
 		if _, exists := rawByID[e.ID]; exists {
@@ -84,7 +87,11 @@ func AugmentCodexModels(body []byte, snap Snapshot) ([]byte, error) {
 		if added[e.ID] {
 			continue
 		}
-		models = append(models, codexEntryRaw(e, rawByID))
+		raw := codexEntryRaw(e, rawByID)
+		if len(raw) == 0 {
+			continue
+		}
+		models = append(models, raw)
 		added[e.ID] = true
 	}
 	encodedModels, err := json.Marshal(models)
@@ -97,6 +104,9 @@ func AugmentCodexModels(body []byte, snap Snapshot) ([]byte, error) {
 
 // codexEntryRaw returns the JSON bytes for a single Codex entry.
 func codexEntryRaw(e Entry, rawByID map[string]json.RawMessage) json.RawMessage {
+	if e.Provider == ProviderGrok {
+		return grokCodexEntryRaw(e)
+	}
 	if e.Provider == ProviderZAI && len(e.Raw) > 0 {
 		return zaiCodexEntryRaw(e)
 	}
@@ -180,33 +190,33 @@ func synthesiseCodexEntry(e Entry) json.RawMessage {
 	}
 
 	obj := map[string]any{
-		"slug":                          e.ID,
-		"display_name":                  label,
-		"description":                   e.Description,
-		"context_window":                cw,
-		"max_context_window":            cw,
+		"slug":                             e.ID,
+		"display_name":                     label,
+		"description":                      e.Description,
+		"context_window":                   cw,
+		"max_context_window":               cw,
 		"effective_context_window_percent": 100,
-		"shell_type":                    "default",
-		"visibility":                    visibility,
-		"supported_in_api":              true,
-		"priority":                      priority,
-		"base_instructions":             "",
-		"supported_reasoning_levels":    []string{},
-		"supports_reasoning_summaries":  false,
-		"default_reasoning_summary":     false,
-		"support_verbosity":             false,
-		"default_verbosity":             false,
-		"apply_patch_tool_type":         "default",
-		"web_search_tool_type":          "default",
-		"truncation_policy":             truncationPolicy,
-		"supports_parallel_tool_calls":  false,
-		"supports_image_detail_original": false,
-		"experimental_supported_tools":  []string{},
-		"input_modalities":              []string{"text"},
-		"supports_search_tool":          false,
-		"additional_speed_tiers":        []string{},
-		"availability_nux":              nil,
-		"upgrade":                       nil,
+		"shell_type":                       "default",
+		"visibility":                       visibility,
+		"supported_in_api":                 true,
+		"priority":                         priority,
+		"base_instructions":                "",
+		"supported_reasoning_levels":       []string{},
+		"supports_reasoning_summaries":     false,
+		"default_reasoning_summary":        false,
+		"support_verbosity":                false,
+		"default_verbosity":                false,
+		"apply_patch_tool_type":            "default",
+		"web_search_tool_type":             "default",
+		"truncation_policy":                truncationPolicy,
+		"supports_parallel_tool_calls":     false,
+		"supports_image_detail_original":   false,
+		"experimental_supported_tools":     []string{},
+		"input_modalities":                 []string{"text"},
+		"supports_search_tool":             false,
+		"additional_speed_tiers":           []string{},
+		"availability_nux":                 nil,
+		"upgrade":                          nil,
 	}
 
 	result, _ := json.Marshal(obj)

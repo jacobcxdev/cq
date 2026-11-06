@@ -193,143 +193,15 @@ func (w zaiFlushWriter) Write(p []byte) (int, error) {
 // frames. Execute each Codex frame over HTTP SSE and retain connection history
 // because Coding Plan responses with store:false cannot be resumed upstream.
 func (s *Server) serveZAIWebSocket(ctx context.Context, downstream *websocket.Conn, header http.Header, kind int, first []byte) error {
-	var upgrade <-chan struct{}
-	if gate := s.runtimeUpgrade; gate != nil {
-		release, err := gate.beginSession()
-		if err != nil {
-			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
-			return nil
-		}
-		defer release()
-		upgrade = gate.PauseSignal()
-		if releaseRequest, ok := ctx.Value(runtimeUpgradeRequestReleaseKey{}).(func()); ok {
-			releaseRequest()
-		}
-	}
-	serveCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	stopCancelClose := context.AfterFunc(serveCtx, func() { _ = downstream.Close() })
-	defer stopCancelClose()
-	bound := &providerBoundWebSocketConn{websocketRelayConn: downstream, acceptsModel: func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) == ProviderZAI }}
-	reader := startCodexWSDownstreamReader(serveCtx, cancel, bound)
-	defer reader.close()
-	var previousID string
-	var history []json.RawMessage
-	for {
-		select {
-		case <-upgrade:
-			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
-			return nil
-		default:
-		}
-		releaseTurn := func() {}
-		if gate := s.runtimeUpgrade; gate != nil {
-			release, err := gate.BeginTurn()
-			if err != nil {
-				_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
-				return nil
-			}
-			releaseTurn = release
-		}
-		err := func() error {
-			defer releaseTurn()
-			if kind != websocket.TextMessage {
-				return errors.New("Z.ai requires text response.create frames")
-			}
-			var request map[string]json.RawMessage
-			if err := json.Unmarshal(first, &request); err != nil || request == nil {
-				return errors.New("invalid Z.ai WebSocket request")
-			}
-			var frameType string
-			_ = json.Unmarshal(request["type"], &frameType)
-			if frameType != "response.create" {
-				return errors.New("Z.ai requires response.create frames")
-			}
-			delete(request, "type")
-			prewarm := false
-			if raw, ok := request["generate"]; ok {
-				var generate bool
-				if err := json.Unmarshal(raw, &generate); err != nil {
-					return errors.New("invalid Z.ai generate flag")
-				}
-				prewarm = !generate
-			}
-			delete(request, "generate")
-			input, err := zaiResponseInput(request["input"])
-			if err != nil {
-				return err
-			}
-			var previous string
-			_ = json.Unmarshal(request["previous_response_id"], &previous)
-			if previous != "" {
-				if previous != previousID {
-					return errors.New("Z.ai previous response unavailable; reconnect with full input")
-				}
-				input = append(append([]json.RawMessage(nil), history...), input...)
-			}
-			delete(request, "previous_response_id")
-			request["input"], _ = json.Marshal(input)
-			if prewarm {
-				previousID = fmt.Sprintf("cq_zai_prewarm_%x", time.Now().UnixNano())
-				history = input
-				model := extractModel(first)
-				for _, event := range []string{"response.created", "response.completed"} {
-					data, _ := json.Marshal(map[string]any{"type": event, "response": map[string]any{"id": previousID, "object": "response", "created_at": time.Now().Unix(), "status": "completed", "model": model, "output": []any{}, "usage": map[string]any{"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}}})
-					if err := downstream.WriteMessage(websocket.TextMessage, data); err != nil {
-						return err
-					}
-				}
-			} else {
-				request["stream"] = json.RawMessage("true")
-				body, err := json.Marshal(request)
-				if err != nil {
-					return errors.New("invalid Z.ai WebSocket request")
-				}
-				if len(body) > maxRequestBody {
-					return errors.New("Z.ai request body exceeds 10 MiB")
-				}
-				id, output, err := s.streamZAIWebSocketResponse(serveCtx, downstream, header, body)
-				if err != nil {
-					return err
-				}
-				previousID = id
-				compact, _ := zaiCompactionRequested(body)
-				if compact {
-					history = output
-				} else {
-					history = append(input, output...)
-				}
-			}
-			return nil
-		}()
-		if err != nil {
-			return err
-		}
-		kind, first, err = reader.read(ctx, serveCtx, nil, upgrade)
-		if errors.Is(err, errCodexWSUpgrading) {
-			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseServiceRestart, "proxy upgrading"), time.Now().Add(time.Second))
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-	}
+	return s.serveResponsesHTTPWebSocket(ctx, downstream, header, kind, first, responsesHTTPBridge{
+		Name: "Z.ai", PrewarmPrefix: "cq_zai_prewarm_",
+		AcceptsModel: func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) == ProviderZAI },
+		Stream:       s.streamZAIWebSocketResponse, Compaction: zaiCompactionRequested,
+	})
 }
 
 func zaiResponseInput(raw json.RawMessage) ([]json.RawMessage, error) {
-	if len(raw) == 0 {
-		return []json.RawMessage{}, nil
-	}
-	var input []json.RawMessage
-	if err := json.Unmarshal(raw, &input); err == nil {
-		return input, nil
-	}
-	var text string
-	if err := json.Unmarshal(raw, &text); err == nil {
-		message, _ := json.Marshal(map[string]string{"role": "user", "content": text})
-		return []json.RawMessage{message}, nil
-	}
-	return nil, errors.New("invalid Z.ai response input")
+	return responsesBridgeInput(raw, "Z.ai")
 }
 
 func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *websocket.Conn, header http.Header, body []byte) (string, []json.RawMessage, error) {
@@ -391,54 +263,9 @@ func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *web
 		_ = downstream.WriteMessage(websocket.TextMessage, data)
 		return "", nil, fmt.Errorf("Z.ai HTTP stream returned status %d", response.StatusCode)
 	}
-	parser := NewCodexSSEParser(1 << 20)
-	buffer := make([]byte, 32<<10)
-	for {
-		n, readErr := response.Body.Read(buffer)
-		if n > 0 {
-			events, err := parser.Feed(buffer[:n])
-			if err != nil {
-				return "", nil, errors.New("invalid Z.ai SSE stream")
-			}
-			for _, event := range events {
-				if event.Kind == CodexSSEDone {
-					continue
-				}
-				if !json.Valid(event.Data) {
-					return "", nil, errors.New("invalid Z.ai SSE event")
-				}
-				data, err := normaliseZAIResponse(event.Data)
-				if err != nil {
-					return "", nil, errors.New("invalid Z.ai SSE event")
-				}
-				if err := downstream.WriteMessage(websocket.TextMessage, data); err != nil {
-					return "", nil, err
-				}
-				if event.Type == "response.completed" {
-					var completed struct {
-						Response struct {
-							ID     string            `json:"id"`
-							Output []json.RawMessage `json:"output"`
-						} `json:"response"`
-					}
-					if err := json.Unmarshal(data, &completed); err != nil || completed.Response.ID == "" {
-						return "", nil, errors.New("invalid Z.ai completed response")
-					}
-					return completed.Response.ID, completed.Response.Output, nil
-				}
-				switch event.Type {
-				case "response.failed", "response.incomplete", "error":
-					return "", nil, errors.New("Z.ai response failed")
-				}
-			}
-		}
-		if readErr != nil {
-			if readErr == io.EOF {
-				return "", nil, errors.New("Z.ai stream ended before response completion")
-			}
-			return "", nil, errors.New("Z.ai HTTP stream read failed")
-		}
-	}
+	return relayResponsesSSE(response.Body, "Z.ai", normaliseZAIResponse, func(_ string, data []byte) error {
+		return downstream.WriteMessage(websocket.TextMessage, data)
+	})
 }
 
 // A consumed frame is replayed exactly once before reading the connection.

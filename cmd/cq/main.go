@@ -24,6 +24,7 @@ import (
 	claudeprov "github.com/jacobcxdev/cq/internal/provider/claude"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	geminiprov "github.com/jacobcxdev/cq/internal/provider/gemini"
+	grokprov "github.com/jacobcxdev/cq/internal/provider/grok"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"github.com/jacobcxdev/cq/internal/userdirs"
@@ -39,6 +40,7 @@ type CLI struct {
 	Claude    ClaudeCmd  `cmd:"" help:"Manage Claude accounts"`
 	Codex     CodexCmd   `cmd:"" help:"Manage Codex accounts"`
 	Gemini    GeminiCmd  `cmd:"" help:"Show Gemini account configuration"`
+	Grok      GrokCmd    `cmd:"" help:"Manage Grok subscription accounts"`
 	ZAI       ZAICmd     `cmd:"" help:"Manage Z.ai Coding Plan accounts"`
 	RefreshFn RefreshCmd `cmd:"" name:"refresh" help:"Refresh stored OAuth tokens"`
 	Agent     AgentCmd   `cmd:"" help:"Manage background quota refresh agent"`
@@ -48,7 +50,7 @@ type CLI struct {
 
 // CheckCmd is the default command that checks provider quota usage.
 type CheckCmd struct {
-	Providers []string `arg:"" optional:"" enum:"claude,codex,gemini,zai" help:"Providers to check"`
+	Providers []string `arg:"" optional:"" enum:"claude,codex,gemini,zai,grok" help:"Providers to check"`
 }
 
 // ClaudeCmd groups Claude-specific subcommands.
@@ -529,6 +531,12 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 			return runCodexResetScheduleCommand(context.Background(), ctx.Command(), cli.Codex.Resets.Schedule, cli.JSON, deps)
 		})
 
+	case "grok login", "grok accounts", "grok switch <reference>", "grok remove <reference>", "grok resets list", "grok resets list <reference>":
+		deps, err := defaultGrokCommandDependencies()
+		if err != nil {
+			return err
+		}
+		return runGrokCommand(context.Background(), strings.TrimPrefix(ctx.Command(), "grok "), cli.Grok, cli.JSON, deps)
 	case "gemini accounts":
 		return app.RunAccounts(provider.Gemini, cli.JSON)
 	case "zai login", "zai accounts", "zai switch <reference>", "zai remove", "zai remove <reference>", "zai route <reference> <transport>":
@@ -557,7 +565,7 @@ func runCheck(cli *CLI) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("resolve CQ directories: %w", err)
 	}
-	providerIDs := []provider.ID{provider.Claude, provider.Codex, provider.Gemini, provider.ZAI}
+	providerIDs := []provider.ID{provider.Claude, provider.Codex, provider.Gemini, provider.ZAI, provider.Grok}
 	if len(cli.Check.Providers) > 0 {
 		providerIDs = make([]provider.ID, len(cli.Check.Providers))
 		for i, p := range cli.Check.Providers {
@@ -579,10 +587,15 @@ func runCheck(cli *CLI) (returnErr error) {
 		defer func() { returnErr = errors.Join(returnErr, closeCodexClient()) }()
 	}
 	codexProvider := codexprov.New(codexHTTPClient)
+	grokHome, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve Grok credential sources: %w", err)
+	}
 	services := map[provider.ID]provider.Services{
 		provider.Claude: {Usage: claudeprov.New(httpClient)},
 		provider.Codex:  {Usage: codexProvider},
 		provider.Gemini: {Usage: geminiprov.New(httpClient, geminiOAuthClientSecret)},
+		provider.Grok:   {Usage: grokprov.New(grokReadAuthority(fsutil.OSFileSystem{}, roots.Config, grokHTTPClient(15*time.Second), os.Getenv, grokHome))},
 		provider.ZAI: {Usage: zaiprov.NewAccounts(httpClient, func() ([]zaiprov.Account, error) {
 			return zaiprov.ReadAccounts(fsutil.OSFileSystem{}, os.Getenv, roots.Config)
 		})},

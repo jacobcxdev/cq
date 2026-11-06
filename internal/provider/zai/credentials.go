@@ -11,25 +11,29 @@ import (
 	"unicode"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/provider/codexbar"
 	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 // Account is one subscription credential. API keys are excluded from public JSON.
 type Account struct {
-	ID        string              `json:"id"`
-	Label     string              `json:"label,omitempty"`
-	APIKey    string              `json:"-"`
-	Transport string              `json:"transport,omitempty"`
-	OAuth     *zcode.LoginSession `json:"-"`
+	ID                string              `json:"id"`
+	Label             string              `json:"label,omitempty"`
+	APIKey            string              `json:"-"`
+	Transport         string              `json:"transport,omitempty"`
+	OAuth             *zcode.LoginSession `json:"-"`
+	Source            string              `json:"source,omitempty"`
+	verifiedAPIKeyIDs []string
 }
 
 type storedAccount struct {
-	ID             string `json:"id"`
-	Label          string `json:"label,omitempty"`
-	APIKey         string `json:"api_key"`
-	Transport      string `json:"transport,omitempty"`
-	ZCodeAccountID string `json:"zcode_account_id,omitempty"`
+	ID                string   `json:"id"`
+	Label             string   `json:"label,omitempty"`
+	APIKey            string   `json:"api_key"`
+	Transport         string   `json:"transport,omitempty"`
+	ZCodeAccountID    string   `json:"zcode_account_id,omitempty"`
+	VerifiedAPIKeyIDs []string `json:"verified_api_key_ids,omitempty"`
 }
 
 type credentialFile struct {
@@ -49,8 +53,78 @@ func ReadAPIKey(fsys fsutil.FileSystem, env func(string) string, configDir strin
 }
 
 // ReadAccounts reads subscriptions in preferred-account order. An environment
-// key deliberately overrides all stored accounts, as it did before multi-account support.
+// key selects its verified OAuth account when available; otherwise it overrides
+// stored accounts. This path never discovers external credentials or writes.
 func ReadAccounts(fsys fsutil.FileSystem, env func(string) string, configDir string) ([]Account, error) {
+	accounts, err := readOwnedAccounts(fsys, env, configDir)
+	if err != nil {
+		return accounts, err
+	}
+	if strings.TrimSpace(env("ZAI_API_KEY")) != "" {
+		owned, readErr := readOwnedAccounts(fsys, func(string) string { return "" }, configDir)
+		if readErr == nil {
+			for _, account := range owned {
+				if account.OAuth != nil && containsAlias(account.verifiedAPIKeyIDs, accounts[0].ID) {
+					return []Account{account}, nil
+				}
+			}
+		}
+		return accounts, nil
+	}
+	accounts = preferVerifiedOAuth(accounts)
+	home, err := fsys.UserHomeDir()
+	if err != nil {
+		if len(accounts) > 0 {
+			return append(accounts, Account{ID: "zai_codexbar_unavailable", Label: "CodexBar source unavailable", Source: "codexbar"}), nil
+		}
+		return nil, errors.New("resolve CodexBar credential directory")
+	}
+	external, err := codexbar.ReadAccounts(fsys, env, home, "zai")
+	if err != nil {
+		if len(accounts) > 0 {
+			return append(accounts, Account{ID: "zai_codexbar_unavailable", Label: "CodexBar source unavailable", Source: "codexbar"}), nil
+		}
+		return nil, err
+	}
+	seen := make(map[string]bool, len(accounts))
+	for _, account := range accounts {
+		seen[account.ID] = true
+		for _, id := range account.verifiedAPIKeyIDs {
+			seen[id] = true
+		}
+	}
+	invalidExternal := false
+	for _, borrowed := range external {
+		// CQ's existing Coding Plan route is personal/global. Team scopes and
+		// regional endpoints require their own quota contracts, not key reuse.
+		if borrowed.UsageScope != "" && borrowed.UsageScope != "personal" || borrowed.Region != "" && borrowed.Region != "global" {
+			continue
+		}
+		key, err := validateAPIKey(borrowed.Token)
+		if err != nil || key == "" {
+			invalidExternal = true
+			continue
+		}
+		account := newAccount(key, borrowed.Label)
+		if !validLabel(account.Label) {
+			invalidExternal = true
+			continue
+		}
+		if !seen[account.ID] {
+			account.Source = "codexbar"
+			accounts = append(accounts, account)
+			seen[account.ID] = true
+		}
+	}
+	if invalidExternal {
+		accounts = append(accounts, Account{ID: "zai_codexbar_unavailable", Label: "CodexBar source unavailable", Source: "codexbar"})
+	}
+	return accounts, nil
+}
+
+// readOwnedAccounts is the mutation boundary: borrowed credentials are never
+// persisted, switched, removed or given renewal ownership by CQ store operations.
+func readOwnedAccounts(fsys fsutil.FileSystem, env func(string) string, configDir string) ([]Account, error) {
 	if key := strings.TrimSpace(env("ZAI_API_KEY")); key != "" {
 		key, err := validateAPIKey(key)
 		if err != nil {
@@ -107,6 +181,15 @@ func ReadAccounts(fsys fsutil.FileSystem, env func(string) string, configDir str
 				return nil, errors.New("invalid Z.ai credential file")
 			}
 			account.Label, account.Transport = stored.Label, stored.Transport
+			for _, id := range stored.VerifiedAPIKeyIDs {
+				if len(id) != 20 || !strings.HasPrefix(id, "zai_") {
+					return nil, errors.New("invalid Z.ai credential file")
+				}
+				if _, err := hex.DecodeString(id[4:]); err != nil {
+					return nil, errors.New("invalid Z.ai credential file")
+				}
+			}
+			account.verifiedAPIKeyIDs = stored.VerifiedAPIKeyIDs
 			if !seen[account.ID] {
 				accounts = append(accounts, account)
 				seen[account.ID] = true
@@ -149,6 +232,15 @@ func newZCodeAccount(session zcode.LoginSession) Account {
 
 // StoreZCodeAccount saves a fresh browser login without replacing API-key accounts.
 func StoreZCodeAccount(fsys fsutil.FileSystem, configDir string, session zcode.LoginSession, label string, activate bool) (Account, error) {
+	return StoreVerifiedZCodeAccount(fsys, configDir, session, label, activate, VerifiedAPIKeyOwnership{})
+}
+
+// StoreVerifiedZCodeAccount replaces only exact keys proved to belong to this
+// OAuth account. Borrowed source records are never written or removed.
+func StoreVerifiedZCodeAccount(fsys fsutil.FileSystem, configDir string, session zcode.LoginSession, label string, activate bool, proof VerifiedAPIKeyOwnership) (Account, error) {
+	if proof.userID != "" && proof.userID != session.UserID {
+		return Account{}, errors.New("Z.ai key ownership account mismatch")
+	}
 	store, err := zcode.OpenSessionStore(fsys, configDir, true)
 	if err != nil {
 		return Account{}, err
@@ -157,16 +249,34 @@ func StoreZCodeAccount(fsys fsutil.FileSystem, configDir string, session zcode.L
 	if err != nil {
 		return Account{}, err
 	}
-	accounts, err := ReadAccounts(fsys, func(string) string { return "" }, configDir)
+	accounts, err := readOwnedAccounts(fsys, func(string) string { return "" }, configDir)
 	if err != nil {
 		return Account{}, err
 	}
 	account := newZCodeAccount(session)
+	account.verifiedAPIKeyIDs = append([]string(nil), proof.keyIDs...)
+	filtered := accounts[:0]
+	replacementIndex := -1
+	for _, existing := range accounts {
+		remove := existing.OAuth == nil && containsAlias(proof.keyIDs, existing.ID)
+		if remove && replacementIndex < 0 {
+			replacementIndex = len(filtered)
+		}
+		if !remove {
+			filtered = append(filtered, existing)
+		}
+	}
+	accounts = filtered
 	index := -1
 	for i, existing := range accounts {
 		if existing.ID == account.ID {
 			index = i
 			account.Transport = existing.Transport
+			for _, id := range existing.verifiedAPIKeyIDs {
+				if !containsAlias(account.verifiedAPIKeyIDs, id) {
+					account.verifiedAPIKeyIDs = append(account.verifiedAPIKeyIDs, id)
+				}
+			}
 			break
 		}
 	}
@@ -175,6 +285,13 @@ func StoreZCodeAccount(fsys fsutil.FileSystem, configDir string, session zcode.L
 		index = len(accounts) - 1
 	} else {
 		accounts[index] = account
+	}
+	// Replacing a key preserves that logical account's earliest preferred
+	// position, even when an OAuth record already exists later in the list.
+	if replacementIndex >= 0 && replacementIndex < index {
+		copy(accounts[replacementIndex+1:index+1], accounts[replacementIndex:index])
+		accounts[replacementIndex] = account
+		index = replacementIndex
 	}
 	if activate && index != 0 {
 		copy(accounts[1:index+1], accounts[:index])
@@ -196,11 +313,23 @@ func StoreAccount(fsys fsutil.FileSystem, configDir, key, label string, activate
 	if !validLabel(label) {
 		return Account{}, errors.New("invalid Z.ai account label")
 	}
-	accounts, err := ReadAccounts(fsys, func(string) string { return "" }, configDir)
+	accounts, err := readOwnedAccounts(fsys, func(string) string { return "" }, configDir)
 	if err != nil {
 		return Account{}, err
 	}
 	account := newAccount(key, label)
+	for i, existing := range accounts {
+		if existing.OAuth != nil && containsAlias(existing.verifiedAPIKeyIDs, account.ID) {
+			if activate && i > 0 {
+				copy(accounts[1:i+1], accounts[:i])
+				accounts[0] = existing
+				if err := writeAccounts(fsys, configDir, accounts); err != nil {
+					return Account{}, err
+				}
+			}
+			return existing, nil
+		}
+	}
 	index := -1
 	for i, existing := range accounts {
 		if existing.ID == account.ID {
@@ -230,7 +359,7 @@ func StoreAccount(fsys fsutil.FileSystem, configDir, key, label string, activate
 
 // SetActiveAccount selects the preferred subscription by exact ID or unique label.
 func SetActiveAccount(fsys fsutil.FileSystem, configDir, reference string) error {
-	accounts, err := ReadAccounts(fsys, func(string) string { return "" }, configDir)
+	accounts, err := readOwnedAccounts(fsys, func(string) string { return "" }, configDir)
 	if err != nil {
 		return err
 	}
@@ -246,7 +375,7 @@ func SetActiveAccount(fsys fsutil.FileSystem, configDir, reference string) error
 
 // RemoveAccount removes one stored subscription by exact ID or unique label.
 func RemoveAccount(fsys fsutil.FileSystem, configDir, reference string) error {
-	accounts, err := ReadAccounts(fsys, func(string) string { return "" }, configDir)
+	accounts, err := readOwnedAccounts(fsys, func(string) string { return "" }, configDir)
 	if err != nil {
 		return err
 	}
@@ -273,7 +402,7 @@ func RemoveAccount(fsys fsutil.FileSystem, configDir, reference string) error {
 // login can be loaded. It preserves browser-login order and never revokes tokens
 // or changes the encrypted session store.
 func RemoveAPIKeyAccounts(fsys fsutil.FileSystem, configDir string) error {
-	accounts, err := ReadAccounts(fsys, func(string) string { return "" }, configDir)
+	accounts, err := readOwnedAccounts(fsys, func(string) string { return "" }, configDir)
 	if err != nil {
 		return err
 	}
@@ -298,7 +427,7 @@ func SetTransport(fsys fsutil.FileSystem, configDir, reference, transport string
 	if transport != "responses" && transport != "zcode" && transport != "zcode-start" {
 		return errors.New("Z.ai transport must be responses, zcode or zcode-start")
 	}
-	accounts, err := ReadAccounts(fsys, func(string) string { return "" }, configDir)
+	accounts, err := readOwnedAccounts(fsys, func(string) string { return "" }, configDir)
 	if err != nil {
 		return err
 	}
@@ -344,6 +473,7 @@ func writeAccounts(fsys fsutil.FileSystem, configDir string, accounts []Account)
 		entry := storedAccount{ID: account.ID, Label: account.Label, APIKey: account.APIKey, Transport: account.Transport}
 		if account.OAuth != nil {
 			entry.ZCodeAccountID = account.OAuth.ID
+			entry.VerifiedAPIKeyIDs = account.verifiedAPIKeyIDs
 		}
 		stored = append(stored, entry)
 	}
@@ -370,6 +500,33 @@ func validLabel(label string) bool {
 		}
 	}
 	return true
+}
+
+func containsAlias(aliases []string, id string) bool {
+	for _, alias := range aliases {
+		if alias == id {
+			return true
+		}
+	}
+	return false
+}
+
+func preferVerifiedOAuth(accounts []Account) []Account {
+	aliases := map[string]bool{}
+	for _, a := range accounts {
+		if a.OAuth != nil {
+			for _, id := range a.verifiedAPIKeyIDs {
+				aliases[id] = true
+			}
+		}
+	}
+	out := accounts[:0]
+	for _, a := range accounts {
+		if a.OAuth != nil || !aliases[a.ID] {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 func validateAPIKey(key string) (string, error) {
