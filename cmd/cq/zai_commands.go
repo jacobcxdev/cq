@@ -202,6 +202,7 @@ func runZAICommand(ctx context.Context, command string, options ZAICmd, jsonOutp
 			Label     string `json:"label,omitempty"`
 			Preferred bool   `json:"preferred"`
 			Transport string `json:"transport"`
+			Source    string `json:"source,omitempty"`
 		}
 		info := make([]accountInfo, 0, len(accounts))
 		for i, account := range accounts {
@@ -209,7 +210,7 @@ func runZAICommand(ctx context.Context, command string, options ZAICmd, jsonOutp
 			if transport == "" {
 				transport = "responses"
 			}
-			info = append(info, accountInfo{ID: account.ID, Label: account.Label, Preferred: i == 0, Transport: transport})
+			info = append(info, accountInfo{ID: account.ID, Label: account.Label, Preferred: i == 0, Transport: transport, Source: account.Source})
 		}
 		if jsonOutput {
 			return json.NewEncoder(deps.output).Encode(info)
@@ -219,7 +220,7 @@ func runZAICommand(ctx context.Context, command string, options ZAICmd, jsonOutp
 			if account.Preferred {
 				marker = "*"
 			}
-			if _, err := fmt.Fprintf(deps.output, "%s %s  %s  [%s]\n", marker, account.ID, account.Label, account.Transport); err != nil {
+			if _, err := fmt.Fprintf(deps.output, "%s %s  %s  [%s] %s\n", marker, account.ID, account.Label, account.Transport, account.Source); err != nil {
 				return err
 			}
 		}

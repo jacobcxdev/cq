@@ -17,6 +17,12 @@ func (s *Server) handleCodexCompactResponsesRoute(w http.ResponseWriter, r *http
 		rejectCodexCompactWebSocket(w, codexCompactResponsesPath)
 		return
 	}
+	if s.serveSubscriptionThroughNativeAdmission(w, r, true) {
+		return
+	}
+	if handled, _ := s.tryHandleGrok(w, r); handled {
+		return
+	}
 	if handled, _ := s.tryHandleZAI(w, r); handled {
 		return
 	}
@@ -33,6 +39,12 @@ func (s *Server) handleLegacyCodexCompactResponsesRoute(w http.ResponseWriter, r
 	r = r.WithContext(context.WithValue(r.Context(), cqCompactionTokenContextKey{}, s.cqCompactionToken()))
 	if isWebSocketUpgrade(r) {
 		rejectCodexCompactWebSocket(w, legacyCodexCompactResponsesPath)
+		return
+	}
+	if s.serveSubscriptionThroughNativeAdmission(w, r, true) {
+		return
+	}
+	if handled, _ := s.tryHandleGrok(w, r); handled {
 		return
 	}
 	if handled, _ := s.tryHandleZAI(w, r); handled {

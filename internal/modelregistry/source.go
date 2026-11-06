@@ -8,6 +8,10 @@ import (
 
 // SourceResult is the output of a NativeSource.Fetch call.
 type SourceResult struct {
+	// NotConfigured clears this provider's previous entries without counting
+	// as a successful upstream fetch. An empty configured catalogue is still
+	// a successful fetch; absence of credentials must not mask other failures.
+	NotConfigured bool
 	// Entries are the parsed model entries from the upstream provider.
 	Entries []Entry
 	// CodexRawByID holds the full upstream JSON keyed by model slug/ID.

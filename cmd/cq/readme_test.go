@@ -52,6 +52,7 @@ var commandDispatcherSpecs = []commandDispatcherSpec{
 	{"proxy_commands.go", "classifyCodexAuxiliaryAuthority", "argv[2]", "codex validate"},
 	{"main.go", "runAgent", "args[0]", "agent"},
 	{"zai_commands.go", "runZAICommand", "command", "zai"},
+	{"grok_commands.go", "runGrokCommand", "command", "grok"},
 	{"zai_zcode.go", "runZAIZCodeCommand", "command", "zai zcode"},
 	{"zai_priming.go", "runZAIPrimeCommand", "command", "zai prime"},
 	{"zai_resets.go", "runZAIResetsCommand", "command", "zai resets"},

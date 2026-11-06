@@ -104,9 +104,30 @@ func runZAIOAuthLogin(ctx context.Context, options ZAILoginCmd, dir string, json
 		return err
 	}
 	session.DeviceMid = device
-	account, err := zaiprov.StoreZCodeAccount(deps.fs, dir, session, options.Label, options.shouldActivate())
+	// Environment overrides do not own a saved credential and must not hide
+	// CQ/CodexBar candidates during an explicit browser-login upgrade.
+	discoveryEnv := func(name string) string {
+		if name == "ZAI_API_KEY" || deps.getenv == nil {
+			return ""
+		}
+		return deps.getenv(name)
+	}
+	accounts, proofErr := zaiprov.ReadAccounts(deps.fs, discoveryEnv, dir)
+	var proof zaiprov.VerifiedAPIKeyOwnership
+	if proofErr == nil {
+		proof, proofErr = zaiprov.VerifyAPIKeyOwnership(ctx, deps.client, session, accounts)
+	}
+	var account zaiprov.Account
+	if proofErr == nil {
+		account, err = zaiprov.StoreVerifiedZCodeAccount(deps.fs, dir, session, options.Label, options.shouldActivate(), proof)
+	} else {
+		account, err = zaiprov.StoreZCodeAccount(deps.fs, dir, session, options.Label, options.shouldActivate())
+	}
 	if err != nil {
 		return err
+	}
+	if proofErr != nil && deps.errOutput != nil {
+		fmt.Fprintln(deps.errOutput, "CQ could not verify existing API-key ownership; saved browser login and preserved existing keys.")
 	}
 	if deps.invalidate != nil {
 		deps.invalidate()

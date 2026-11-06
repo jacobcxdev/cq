@@ -46,6 +46,8 @@ type Refresher struct {
 	Codex NativeSource
 	// ZAI fetches the Z.ai Responses model catalogue. May be nil to skip.
 	ZAI NativeSource
+	// Grok fetches account-scoped subscription model metadata.
+	Grok NativeSource
 	// Now returns the current time. Defaults to time.Now when nil.
 	Now func() time.Time
 
@@ -89,6 +91,7 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 		{ProviderAnthropic, r.Anthropic},
 		{ProviderCodex, r.Codex},
 		{ProviderZAI, r.ZAI},
+		{ProviderGrok, r.Grok},
 	}
 
 	configuredSources := 0
@@ -135,6 +138,7 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 	freshCodexRaw := make(map[string]json.RawMessage)
 	freshAnthropicRaw := make(map[string]json.RawMessage)
 	allFailed := true
+	clearedUnconfigured := false
 
 	for _, fr := range results {
 		if fr.err != nil {
@@ -143,6 +147,12 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 		}
 		if fr.provider == ProviderCodex {
 			codexClientVersion = fr.result.CodexClientVersion
+		}
+		if fr.result.NotConfigured {
+			freshByProvider[fr.provider] = []Entry{}
+			diag.Counts[string(fr.provider)] = 0
+			clearedUnconfigured = true
+			continue
 		}
 		allFailed = false
 		freshByProvider[fr.provider] = fr.result.Entries
@@ -158,17 +168,23 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 		}
 	}
 
-	// If every configured source failed, leave the existing snapshot intact.
+	// If every configured source failed, preserve their previous entries.
+	// A newly unconfigured source still needs its obsolete entries removed,
+	// but that housekeeping is not a successful upstream fetch.
 	// Build the error list using the stable sources slice order so the message
 	// is deterministic regardless of map iteration order.
-	if allFailed && len(results) > 0 {
+	var allSourcesErr error
+	if allFailed && len(diag.SourceErrors) > 0 {
 		var errs []error
 		for _, s := range sources {
 			if e, ok := diag.SourceErrors[s.provider]; ok {
 				errs = append(errs, fmt.Errorf("%s model source: %w", s.provider, e))
 			}
 		}
-		return diag, fmt.Errorf("all model sources failed: %w", errors.Join(errs...))
+		allSourcesErr = fmt.Errorf("all model sources failed: %w", errors.Join(errs...))
+		if !clearedUnconfigured {
+			return diag, allSourcesErr
+		}
 	}
 
 	// For providers that failed, fall back to stale entries from the current snapshot.
@@ -251,5 +267,5 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 
 	r.Catalog.Replace(snap)
 
-	return diag, nil
+	return diag, allSourcesErr
 }

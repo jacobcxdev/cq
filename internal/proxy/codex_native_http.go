@@ -200,6 +200,12 @@ func (handler *CodexNativeHTTPHandler) TryServe(writer http.ResponseWriter, requ
 		return true, ""
 	}
 	emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "request_body", Outcome: "read", BytesIn: int64(len(encoded))})
+	if route, ok := request.Context().Value(responsesProviderRouteContextKey{}).(responsesProviderRoute); ok && route != nil {
+		if handled, model := route(writer, request, encoded); handled {
+			clearBytes(encoded)
+			return true, model
+		}
+	}
 	emitCodexRawTracePayload(request.Context(), PayloadEvent{
 		Method: request.Method, Path: request.URL.Path, Provider: "codex", RouteKind: "codex_native",
 		Direction: "downstream_request", Headers: codexTraceHeaders(request.Header), Complete: true,

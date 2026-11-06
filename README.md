@@ -1,6 +1,6 @@
 # cq
 
-`cq` checks AI subscription quota, manages accounts and routes compatible local clients through Claude, Codex and Z.ai. Gemini quota comes from Antigravity. On macOS, CQ can also help you access Dots before regional rollout through a US WireGuard profile, or bring existing Dots from multiple accounts into one ChatGPT sidebar.
+`cq` checks AI subscription quota, manages accounts and routes compatible local clients through Claude, Codex, Z.ai and Grok. Gemini quota comes from Antigravity. On macOS, CQ can also help you access Dots before regional rollout through a US WireGuard profile, or bring existing Dots from multiple accounts into one ChatGPT sidebar.
 
 **For users and installation agents:** start with the [agent setup and feature guide](docs/agent-installation.md). **Agents: read that guide before installing or changing configuration.** Explain the relevant capabilities, help the user choose, then configure and verify their chosen setup. Users can send their agent this repository link; the guide covers desktop apps and CLIs, account routing, optional features and native ChatGPT integrations.
 
@@ -163,8 +163,8 @@ guide](docs/agent-installation.md#5-verify-the-requested-outcome) for the checks
 
 | Area | Support |
 |---|---|
-| Quota | Concurrent Claude, Codex, Gemini and Z.ai checks; multi-account reports, cache, burn history, aggregate pace and availability. Gemini uses Antigravity's platform credential store. |
-| Accounts | Claude/Codex OAuth and activation; read-only system discovery; coordinated renewal of eligible managed accounts; Z.ai browser/API-key accounts and billing-route selection. |
+| Quota | Concurrent Claude, Codex, Gemini, Z.ai and Grok checks; multi-account reports, cache, burn history, aggregate pace and availability. Gemini uses Antigravity's platform credential store. |
+| Accounts | Claude/Codex OAuth and activation; read-only system discovery; coordinated renewal of eligible managed accounts; Z.ai browser/API-key accounts and billing-route selection; Grok subscription OAuth and borrowed CodexBar discovery. |
 | Proxy | Loopback Anthropic Messages and native Codex Responses HTTP/WebSocket routing; local authentication; bounded failover and durable continuity. |
 | Routing | Pins/defaults, account allowlists, pools/session bindings, system-account preservation and reserve, priming, leases and rescue. |
 | Automation | Explicitly accepted reset schedules, periodic credential refresh, model registry refresh and publication. |
@@ -253,6 +253,12 @@ cq codex validate capture
 cq codex validate http
 cq codex validate websocket
 cq gemini accounts
+cq grok
+cq grok accounts
+cq grok login
+cq grok remove
+cq grok resets list
+cq grok switch
 cq models
 cq models list
 cq models overlay
@@ -380,3 +386,20 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for changes and review, [architecture](do
 ## Licence
 
 MIT
+
+### Grok subscriptions
+
+```bash
+cq grok login
+cq check grok
+cq grok accounts
+cq models list --provider grok
+cq grok resets list
+```
+
+Grok support uses subscription authentication and included quota. CQ does not
+accept public xAI pay-as-you-go keys or manage purchased balances. The initial
+routing adapter supports models whose authenticated catalogue explicitly selects
+the Responses backend. Live subscription/Codex checks cover quota, local tools,
+CQ compaction and retained continuation over HTTP and WebSocket;
+see [Grok setup and current limits](docs/usage.md#grok-subscriptions).

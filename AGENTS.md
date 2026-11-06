@@ -4,7 +4,7 @@ Universal instruction file for all AI coding assistants working on cq.
 
 ## Project
 
-CQ is a Go CLI for quota reporting, account management and local API routing for Claude, Codex, Gemini and Z.ai. It also owns per-user services and optional native macOS integrations. Use Go **1.26.1**, as declared in `go.mod`.
+CQ is a Go CLI for quota reporting, account management and local API routing for Claude, Codex, Gemini, Z.ai and Grok. It also owns per-user services and optional native macOS integrations. Use Go **1.26.1**, as declared in `go.mod`.
 
 ## Commands
 
@@ -19,7 +19,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 ## Architecture
 
 - **Reporting phases:** Fetch provider quota results, then build/render TTY or JSON reports
-- **Four providers:** Claude, Codex and Z.ai support multiple accounts; Gemini uses a single Antigravity account
+- **Five providers:** Claude, Codex, Grok and Z.ai support multiple accounts; Gemini uses a single Antigravity account
 - **Concurrent fetch:** Each provider runs in its own goroutine with panic recovery
 - **Aggregate layer:** Weighted pace, correction-deadline gauge, and burndown across 2+ accounts
 
@@ -34,6 +34,7 @@ The [architecture guide](docs/architecture.md) covers runtime ownership, credent
 | `internal/provider/claude` | Multi-account, OAuth refresh, parallel profile+usage | [AGENTS.md](internal/provider/claude/AGENTS.md) |
 | `internal/provider/codex` | Multi-account, automatic reads only (shared system credentials) | [AGENTS.md](internal/provider/codex/AGENTS.md) |
 | `internal/provider/gemini` | Single account, direct Antigravity OAuth and quota HTTP | [AGENTS.md](internal/provider/gemini/AGENTS.md) |
+| `internal/provider/grok` | Subscription OAuth, quota, model catalogue and borrowed CodexBar discovery | Root rules and [usage](docs/usage.md#grok-subscriptions) |
 | `internal/provider/zai` | Multi-account Coding Plan, Start and ZCode quota/authentication | Root rules and [routing guide](docs/zcode-routing.md) |
 | `internal/proxy` | Supervisor/worker, routing, continuity, private control and transport | [Architecture](docs/architecture.md) |
 | `internal/modelregistry` | Native catalogues, overlays and client projections | [Architecture](docs/architecture.md) |
@@ -97,7 +98,7 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 
 - Go 1.26.1 (`go.mod` is the toolchain authority)
 - `go vet` and `-race` on all test runs — no exceptions
-- Provider IDs are lowercase constants (`claude`, `codex`, `gemini`, `zai`); display names are capitalised in output
+- Provider IDs are lowercase constants (`claude`, `codex`, `gemini`, `zai`, `grok`); display names are capitalised in output
 - Newtypes for domain concepts: `provider.ID`, `quota.WindowName`, `quota.Status`
 - `fmt.Fprintf(os.Stderr, ...)` for diagnostic messages, never `log.Printf`
 - File permissions: `0o600` for secrets, `0o700` for credential directories
@@ -105,7 +106,7 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 
 ## Gotchas
 
-- Claude, Codex and Z.ai have **multi-account** support; Gemini is single-account
+- Claude, Codex, Z.ai and Grok have **multi-account** support; Gemini is single-account
 - Gemini keeps provider ID `gemini`, reads Antigravity-owned local state concurrently, and calls private Antigravity HTTP endpoints directly
 - Gemini OAuth client secret is release-time link data; never add runtime environment, CLI, binary-scraping, or persistence fallbacks
 - `keyring.DiscoverClaudeAccounts()` calls real keychain — tests must mock at provider level

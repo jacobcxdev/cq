@@ -15,6 +15,7 @@ const (
 	Codex  ID = "codex"
 	Gemini ID = "gemini"
 	ZAI    ID = "zai"
+	Grok   ID = "grok"
 )
 
 // Provider fetches quota information for an AI service.

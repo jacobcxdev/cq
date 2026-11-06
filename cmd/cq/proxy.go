@@ -1359,6 +1359,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	defer stopHarness()
 	srv := &proxy.Server{
 		HarnessObserver: harnessObserver,
+		GrokAuthority:   grokReadAuthority(fsys, roots.Config, grokHTTPClient(0), os.Getenv, homeDir),
 		Config:          cfg,
 		Selector:        selector,
 		Discover:        discover,

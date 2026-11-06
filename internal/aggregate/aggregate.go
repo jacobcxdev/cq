@@ -22,6 +22,13 @@ type acctInfo struct {
 func Compute(results []quota.Result, nowEpoch int64, providerID string, burnRates history.BurnRates) (map[quota.WindowName]quota.AggregateResult, *AccountSummary) {
 	var valid []quota.Result
 	for _, r := range results {
+		if providerID == string(provider.Grok) {
+			// Legacy and unified Grok plans do not have interchangeable
+			// allowances. An unknown tier must not silently become 1x.
+			if _, known := quota.ParseMultiplier(r.RateLimitTier); !known {
+				continue
+			}
+		}
 		if r.IsUsable() {
 			valid = append(valid, r)
 		}

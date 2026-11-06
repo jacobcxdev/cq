@@ -8,7 +8,7 @@ Shared interfaces and per-provider implementations.
 
 | File | Description |
 |------|-------------|
-| `provider.go` | `Provider` interface, four `ID` constants, `Services` struct |
+| `provider.go` | `Provider` interface, five `ID` constants, `Services` struct |
 
 ## Subdirectories
 

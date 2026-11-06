@@ -15,6 +15,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/provider/grok"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
 	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/quota"
@@ -155,6 +156,7 @@ type registryPipelineOptions struct {
 	CodexToken                func() (string, error)
 	CodexTokenContext         func(context.Context) (string, error)
 	CodexAuthenticatedDo      func(context.Context, *http.Request) (*http.Response, error)
+	GrokAuthority             grok.Authority
 	Env                       func(string) string
 	Stderr                    io.Writer
 }
@@ -216,6 +218,19 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		opts.RefreshInterval = 5 * time.Minute
 	}
 	seedEntries := cachedRegistryEntries(opts)
+	if opts.GrokAuthority == nil {
+		opts.GrokAuthority = grokReadAuthority(opts.FS, opts.Roots.Config, opts.HTTPClient, opts.Env, opts.HomeDir)
+	}
+	// Grok's display union is repopulated by the cancellable source fetch.
+	// Construction must not invoke an external source's identity HTTP reads,
+	// and a previous account's cache cannot seed another account's catalogue.
+	filteredGrok := seedEntries[:0]
+	for _, entry := range seedEntries {
+		if entry.Provider != modelregistry.ProviderGrok {
+			filteredGrok = append(filteredGrok, entry)
+		}
+	}
+	seedEntries = filteredGrok
 	zcodeTokens := &zcode.ProjectTokenClient{HTTP: opts.HTTPClient, Version: zcode.ClientVersion}
 	zaiTokens := func(ctx context.Context) ([]string, error) {
 		accounts, err := zaiprov.ReadAccounts(opts.FS, opts.Env, opts.Roots.Config)
@@ -255,6 +270,7 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 	catalog := modelregistry.NewCatalog(seedSnap)
 	refresher := &modelregistry.Refresher{
 		Catalog: catalog,
+		Grok:    &modelregistry.GrokSource{Authority: opts.GrokAuthority},
 		Anthropic: &modelregistry.AnthropicSource{
 			Client:  opts.HTTPClient,
 			BaseURL: opts.ClaudeUpstream,
