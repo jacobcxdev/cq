@@ -295,6 +295,24 @@ var probeDownload = regexp.MustCompile(`^/backend-api/files/download/[A-Za-z0-9_
 var probeActivity = regexp.MustCompile(`^/backend-api/tbo/[^/]+/activity/stream$`)
 var probeComputers = regexp.MustCompile(`^/backend-api/tbo/([^/]+)/computers$`)
 var probeFileInfo = regexp.MustCompile(`^/backend-api/messaging/rooms/[^/]+/files/[^/]+$`)
+var probeVoiceOperation = regexp.MustCompile(`^/backend-api/tbo/[A-Za-z0-9_-]{1,256}/voice/calls(?:/rtc_[A-Za-z0-9_-]{1,252}/(?:attach|refresh|stop))?$`)
+
+func probeVoice(r *http.Request, body []byte) bool {
+	if r.Method != http.MethodPost || r.URL.RawQuery != "" || r.URL.Fragment != "" || !probeVoiceOperation.MatchString(r.URL.EscapedPath()) {
+		return false
+	}
+	if strings.HasSuffix(r.URL.Path, "/attach") {
+		return len(body) == 0
+	}
+	if strings.HasSuffix(r.URL.Path, "/stop") && len(body) == 0 {
+		return true
+	}
+	if !strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]), "application/json") {
+		return false
+	}
+	_, err := probeObject(body)
+	return err == nil
+}
 
 func (p *Probe) resourceOwner(path string, f *CatalogueFixture) (*Account, error) {
 	match := probeResource.FindStringSubmatch(path)
@@ -536,6 +554,7 @@ func (p *Probe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	receipt := r.Method == "POST" && roomOwner != nil && strings.HasSuffix(path, "/read") && probeReceipt(body)
 	watch := r.Method == "POST" && roomOwner != nil && (strings.HasSuffix(path, "/live") || strings.HasSuffix(path, "/responding_heartbeat")) && len(body) == 0
 	name := r.Method == "PATCH" && r.URL.RawQuery == "" && owner != nil && probeName(path, body)
+	voice := native && secondary && probeVoice(r, body)
 	target := ""
 	if native && r.Method == "POST" && p.options.ComputerTarget != nil {
 		target, err = p.options.ComputerTarget(r.Context(), r.URL.RequestURI(), body, fixture)
@@ -546,7 +565,7 @@ func (p *Probe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	allowed := r.Method == "GET" || runtimeOwner != nil || message || receipt || watch || (r.Method == "POST" && (strings.HasSuffix(path, "/wham/statsig/bootstrap") || path == "/backend-api/devicecheck"))
 	if native {
-		allowed = !secondary || r.Method == "GET" || r.Method == "HEAD" || runtimeOwner != nil || message || receipt || watch || name || target != "" || upload
+		allowed = !secondary || r.Method == "GET" || r.Method == "HEAD" || runtimeOwner != nil || message || receipt || watch || name || target != "" || upload || voice
 	}
 	if !allowed {
 		p.event(map[string]any{"method": r.Method, "path": path, "blocked": true})
