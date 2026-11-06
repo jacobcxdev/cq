@@ -51,7 +51,12 @@ func cloudHarnessManualPlugins(thread *cloudHarnessThread, raw json.RawMessage) 
 		return
 	}
 	if thread.profileManaged && thread.profilePlan != nil {
-		if cloudHarnessPluginEqual(actual, thread.profilePlan.plugins) || (thread.pendingProfile != nil && cloudHarnessPluginEqual(actual, thread.pendingProfile.plugins)) {
+		// Safe plugin settings may have preceded the full configuration reload.
+		owned := thread.profilePlan.plugins
+		if thread.appliedPlugins != nil {
+			owned = thread.appliedPlugins
+		}
+		if cloudHarnessPluginEqual(actual, owned) || (thread.pendingProfile != nil && cloudHarnessPluginEqual(actual, thread.pendingProfile.plugins)) {
 			thread.plugins = slices.Clone(actual)
 			thread.pluginsKnown = true
 			return
@@ -62,7 +67,7 @@ func cloudHarnessManualPlugins(thread *cloudHarnessThread, raw json.RawMessage) 
 		for _, id := range original {
 			baseline[id] = true
 		}
-		for _, id := range thread.profilePlan.plugins {
+		for _, id := range owned {
 			applied[id] = true
 		}
 		for _, id := range actual {

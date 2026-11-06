@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -198,24 +199,52 @@ func TestCloudHarnessSelectiveEmptyChatWaitedForDurableHistory(t *testing.T) {
 	for _, ephemeral := range []bool{false, true} {
 		t.Run(fmt.Sprint("ephemeral=", ephemeral), func(t *testing.T) {
 			f := newCloudHarnessSelectiveFixture(t)
+			store := harness.Receipts{FS: fsutil.NewMemFS(), Dir: "/state/harness"}
+			f.deps.harnessReceipts = store
+			originalPolicy := f.policy
 			f.start()
 			f.initialize()
 			response := f.request(2, "thread/start", map[string]any{"model": "glm-5.3", "cwd": "/project", "ephemeral": ephemeral})
 			id := cloudThreadID(response["result"])
 			f.waitEvent(id, "applied", "custom")
 			f.mu.Lock()
-			f.policy.Tasks = map[string]harness.Scope{id: {All: harness.Binding{Changes: harness.Changes{MCP: map[string]harness.Decision{"first": harness.Disabled, "second": harness.Enabled}}}}}
+			f.policy.Tasks = map[string]harness.Scope{id: {All: harness.Binding{Changes: harness.Changes{Plugins: map[string]harness.Decision{"keep@market": harness.Disabled, "drop@market": harness.Enabled}, MCP: map[string]harness.Decision{"first": harness.Disabled, "second": harness.Enabled}}}}}
 			f.mu.Unlock()
 			if reply := f.request(3, "turn/start", map[string]any{"threadId": id}); len(reply["error"]) != 0 {
 				t.Fatal("pending first-turn change blocked the original chat")
 			}
 			f.waitEvent(id, "pending", "custom")
+			f.mu.Lock()
+			plugins := slices.Clone(f.plugins[id])
+			f.mu.Unlock()
+			if !cloudHarnessPluginEqual(plugins, []string{"keep@market"}) {
+				t.Fatal("pending configuration change did not apply safe plugin exclusions")
+			}
 			if len(f.messages("thread/unsubscribe")) != 0 || len(f.messages("thread/resume")) != 0 {
 				t.Fatal("empty chat was released before it had durable history")
 			}
 			_, _ = f.localOutput.Write([]byte(`{"method":"turn/completed","params":{"threadId":"` + id + `","turn":{"id":"first"}}}` + "\n"))
 			if ephemeral {
-				f.request(4, "turn/start", map[string]any{"threadId": id})
+				f.request(4, "thread/settings/update", map[string]any{"threadId": id, "disabledPluginIds": []string{"keep@market", "manual@market"}})
+				f.setPolicy(originalPolicy)
+				f.request(5, "turn/start", map[string]any{"threadId": id})
+				f.mu.Lock()
+				plugins = slices.Clone(f.plugins[id])
+				f.mu.Unlock()
+				if !cloudHarnessPluginEqual(plugins, []string{"drop@market", "manual@market"}) {
+					t.Fatal("policy revert confused pending exclusions with manual choices")
+				}
+				revertedReceipt, err := store.Load(id)
+				if err != nil || !cloudHarnessPluginEqual(revertedReceipt.BaselinePlugins, []string{"manual@market"}) {
+					t.Fatal("pending plugin exclusions were absorbed into the manual baseline")
+				}
+				f.completeStoredTurn(id)
+				f.request(6, "thread/settings/update", map[string]any{"threadId": id, "disabledPluginIds": []string{"manual@market"}})
+				f.request(7, "turn/start", map[string]any{"threadId": id})
+				receipt, err := store.Load(id)
+				if err != nil || receipt.State != "pending" {
+					t.Fatalf("same-key plugin reapplication left receipt %q: %v", receipt.State, err)
+				}
 				if len(f.messages("thread/unsubscribe")) != 0 {
 					t.Fatal("ephemeral chat was released after a completed turn")
 				}
@@ -234,6 +263,45 @@ func TestCloudHarnessSelectiveEmptyChatWaitedForDurableHistory(t *testing.T) {
 				t.Fatal("idle application replayed or interrupted the original turn")
 			}
 		})
+	}
+}
+
+func TestCloudHarnessSelectiveEmptyChatRejectedPluginSettingsBlockedTurn(t *testing.T) {
+	f := newCloudHarnessSelectiveFixture(t)
+	f.start()
+	f.initialize()
+	id := f.startThread("glm-5.3", "/project")
+	f.waitEvent(id, "applied", "custom")
+	f.mu.Lock()
+	f.policy.Tasks = map[string]harness.Scope{id: {All: harness.Binding{Changes: harness.Changes{Plugins: map[string]harness.Decision{"keep@market": harness.Disabled}, MCP: map[string]harness.Decision{"first": harness.Disabled}}}}}
+	f.onRequest = func(request cloudMessage) (any, error, bool) {
+		if request.method() == "thread/settings/update" && strings.Contains(string(request["params"]), "keep@market") {
+			return nil, errors.New("reject plugin exclusions"), true
+		}
+		return nil, nil, false
+	}
+	f.mu.Unlock()
+	if reply := f.request(3, "turn/start", map[string]any{"threadId": id}); len(reply["error"]) == 0 {
+		t.Fatal("rejected plugin exclusions admitted the first turn")
+	}
+	f.waitEvent(id, "failed", "custom")
+	if len(f.messages("turn/start")) != 0 || len(f.messages("thread/unsubscribe")) != 0 {
+		t.Fatal("failed first-turn settings forwarded work or released the chat")
+	}
+}
+
+func TestCloudHarnessPendingPluginsKeptManualOldPlanChoices(t *testing.T) {
+	thread := cloudHarnessThread{
+		baseline:       cloudMessage{"disabledPluginIds": cloudHarnessRaw([]string{})},
+		profileManaged: true,
+		profilePlan:    &cloudHarnessProfilePlan{plugins: []string{"drop@market"}},
+		pendingProfile: &cloudHarnessProfilePlan{plugins: []string{"keep@market"}},
+		appliedPlugins: []string{"keep@market"},
+	}
+	cloudHarnessManualPlugins(&thread, cloudHarnessRaw([]string{"drop@market"}))
+	var baseline []string
+	if json.Unmarshal(thread.baseline["disabledPluginIds"], &baseline) != nil || !cloudHarnessPluginEqual(baseline, []string{"drop@market"}) {
+		t.Fatal("manual old-plan choice was mistaken for a CQ acknowledgement")
 	}
 }
 

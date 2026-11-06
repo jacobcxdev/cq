@@ -207,8 +207,10 @@ its remaining issues listed. Stock Desktop controls plugins only and cannot
 guarantee first-turn application. Launcher controls can cover standalone MCP
 servers and skills. Full configuration changes made after an empty chat starts
 wait until its first turn completes: native Codex has no durable history to
-reload before then. Ephemeral chats retain their initial configuration because
-they cannot be reloaded from disk. Internal child creation has no independent
+reload before then. Plugin exclusions still apply immediately through native
+settings; standalone MCP and skill configuration remains pending. Ephemeral
+chats retain that initial configuration because they cannot be reloaded from
+disk. Internal child creation has no independent
 model-specific first-turn hook. Model/workspace changes restore the captured native baseline
 and recalculate policy while retaining chat history and user edits. Existing
 catalogue text already in history is not removed. The embedded
