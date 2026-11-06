@@ -49,6 +49,7 @@ Commands:
   codex resets      Inspect and use banked reset credits
   codex validate    Validate installed Codex routing
   codex canary      Manage Codex routing canary
+  codex dots        Manage multi-account Dots
   codex network     Manage native ChatGPT network routing
   codex harness     Manage harness capability profiles
 `,
@@ -428,9 +429,23 @@ Commands:
 `,
 	"proxy candidate status": `Usage: cq proxy candidate status --instance-state-root PATH [--json]
 `,
+	"proxy candidate client-bearer-barrier": `Usage: cq proxy candidate client-bearer-barrier <command>
+
+Manage the candidate client barrier.
+
+Commands:
+  client-bearer-barrier refresh   Refresh candidate client barrier
+`,
 	"proxy candidate client-bearer-barrier refresh": `Usage: cq proxy candidate client-bearer-barrier refresh --instance-state-root PATH --validation-run DIGEST [--json] TIMEOUT
 `,
 	"proxy candidate start": `Usage: cq proxy candidate start --instance-state-root PATH [--json] TIMEOUT
+`,
+	"proxy candidate artifact": `Usage: cq proxy candidate artifact <command>
+
+Manage the candidate runtime release set.
+
+Commands:
+  artifact switch   Switch candidate runtime release set
 `,
 	"proxy candidate artifact switch": `Usage: cq proxy candidate artifact switch --instance-state-root PATH --role runtime-bundle --release-set DIGEST --validation-run DIGEST --confirm-artifact-switch [--json] TIMEOUT
 `,
@@ -439,6 +454,13 @@ Commands:
 	"proxy candidate stop": `Usage: cq proxy candidate stop --instance-state-root PATH --confirm-client-stopped [--json] TIMEOUT
 `,
 	"proxy candidate remove": `Usage: cq proxy candidate remove --instance-state-root PATH --confirm-candidate-state-loss [--json] TIMEOUT
+`,
+	"proxy candidate receipt": `Usage: cq proxy candidate receipt <command>
+
+Read retained candidate release receipts.
+
+Commands:
+  receipt show   Show one retained candidate release receipt
 `,
 	"proxy candidate receipt show": `Usage: cq proxy candidate receipt show --instance-state-root PATH --attempt-id ID [--json]
 
@@ -1403,6 +1425,11 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 			}
 			if args[1] == "artifact" && len(args) >= 3 && args[2] == "switch" {
 				return []string{"proxy", "candidate", "artifact", "switch"}, true
+			}
+			if args[1] == "artifact" || args[1] == "client-bearer-barrier" || args[1] == "receipt" {
+				if len(args) != 3 || !isHelpToken(args[2]) {
+					return nil, false
+				}
 			}
 			path := []string{"proxy", "candidate", args[1]}
 			_, ok := manualHelp(path)

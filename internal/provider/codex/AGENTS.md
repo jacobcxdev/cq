@@ -2,13 +2,13 @@
 
 # provider/codex
 
-Multi-account Codex provider. Returns `auth_expired` on 401/403. Automatic code never refreshes, activates, removes, or rewrites system auth. Eligible CQ-owned managed lineages and explicitly declared CodexBar managed accounts renew only through the credential coordinator owner.
+Multi-account Codex provider. Returns `auth_expired` on HTTP 401 or HTTP 403 whose error type is `authentication_error`; other 403 responses are API errors. Automatic code never refreshes, activates, removes, or rewrites system auth. Eligible CQ-owned managed lineages and explicitly declared CodexBar managed accounts renew only through the credential coordinator owner.
 
 ## Key Files
 
 | File | Description |
 |------|-------------|
-| `provider.go` | `Fetch`: discovers accounts, fetches usage, returns `auth_expired` on 401/403 |
+| `provider.go` | `Fetch`: discovers accounts, fetches usage, classifies authentication rejection separately from other API failures |
 | `parser.go` | `parseUsage`: parses Codex usage JSON, handles numeric/string reset_at |
 | `refresh.go` | `fetchUsage` (HTTP call) |
 

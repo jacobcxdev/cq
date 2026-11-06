@@ -8,7 +8,7 @@ Shared interfaces and per-provider implementations.
 
 | File | Description |
 |------|-------------|
-| `provider.go` | `Provider` interface, `ID` type, `Ordered` list, `Services` struct |
+| `provider.go` | `Provider` interface, four `ID` constants, `Services` struct |
 
 ## Subdirectories
 
@@ -17,6 +17,7 @@ Shared interfaces and per-provider implementations.
 | `claude/` | Multi-account provider with parallel profile+usage fetch, dedup, token refresh ([AGENTS.md](claude/AGENTS.md)) |
 | `codex/` | Multi-account provider with read-only automatic credential use ([AGENTS.md](codex/AGENTS.md)) |
 | `gemini/` | Single-account provider using direct Antigravity OAuth and quota HTTP ([AGENTS.md](gemini/AGENTS.md)) |
+| `zai/` | Multi-account Coding Plan, Start and ZCode authentication/quota; [routing guide](../../docs/zcode-routing.md) |
 
 ## For AI Agents
 
@@ -26,5 +27,5 @@ Shared interfaces and per-provider implementations.
 - HTTP providers use `httputil.Doer`; Gemini also injects filesystem and Keychain readers
 - Panic recovery is mandatory in all fetch goroutines
 - Error results use `quota.ErrorResult` with specific codes — never return bare errors to the runner
-- Claude and Codex are multi-account providers; Codex system credentials remain read-only automatically
+- Claude, Codex and Z.ai are multi-account providers; Codex system credentials remain read-only automatically
 - Gemini account authority stays with Antigravity; cq reads credentials and refreshes in memory but never writes Antigravity-owned state

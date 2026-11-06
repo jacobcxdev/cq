@@ -71,9 +71,49 @@ func TestCodexHelpShowsImmediateCommands(t *testing.T) {
 		t.Fatalf("codex help = %t, %d, %v", handled, exitCode, err)
 	}
 	help := out.String()
-	for _, want := range []string{"codex login", "codex accounts", "codex switch", "codex remove", "codex resets", "codex validate", "codex canary"} {
+	for _, want := range []string{"codex login", "codex accounts", "codex switch", "codex remove", "codex resets", "codex validate", "codex canary", "codex dots"} {
 		if !strings.Contains(help, want) {
 			t.Fatalf("codex help missing %q:\n%s", want, help)
+		}
+	}
+}
+
+func TestCandidateGroupHelpListsChildrenWithoutCreatingState(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "absent-home")
+	xdg := filepath.Join(t.TempDir(), "absent-xdg")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	for _, tt := range []struct{ group, child string }{
+		{"artifact", "switch"},
+		{"client-bearer-barrier", "refresh"},
+		{"receipt", "show"},
+	} {
+		for _, token := range []string{"--help", "-h", "help"} {
+			t.Run(tt.group+"/"+token, func(t *testing.T) {
+				args := []string{"proxy", "candidate", tt.group, token}
+				var stdout, stderr bytes.Buffer
+				handled, exitCode, err := runPureGlobalInspection(args, &stdout, &stderr)
+				if !handled || exitCode != 0 || err != nil || stderr.Len() != 0 {
+					t.Fatalf("help(%v) = %t, %d, %v, stderr=%q", args, handled, exitCode, err, stderr.String())
+				}
+				for _, want := range []string{"Usage: cq proxy candidate " + tt.group + " <command>", tt.group + " " + tt.child} {
+					if !strings.Contains(stdout.String(), want) {
+						t.Fatalf("help(%v) missing %q:\n%s", args, want, stdout.String())
+					}
+				}
+			})
+		}
+		t.Run(tt.group+"/unknown-child", func(t *testing.T) {
+			var stdout bytes.Buffer
+			handled, exitCode, err := runPureGlobalInspection([]string{"proxy", "candidate", tt.group, "unknown", "--help"}, &stdout, io.Discard)
+			if !handled || exitCode == 0 || err == nil || stdout.Len() != 0 {
+				t.Fatalf("unknown child help = %t, %d, %v, stdout=%q", handled, exitCode, err, stdout.String())
+			}
+		})
+	}
+	for _, path := range []string{home, xdg} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("help created state at %s: %v", path, err)
 		}
 	}
 }
@@ -236,6 +276,9 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		{args: []string{"proxy", "help", "start"}},
 		{args: []string{"proxy", "hook", "--help"}},
 		{args: []string{"proxy", "hook", "codex-stop", "--help"}},
+		{args: []string{"proxy", "candidate", "artifact", "--help"}},
+		{args: []string{"proxy", "candidate", "client-bearer-barrier", "--help"}},
+		{args: []string{"proxy", "candidate", "receipt", "--help"}},
 		{args: []string{"proxy", "help", "hook"}},
 		{args: []string{"models", "list", "--help"}},
 		{args: []string{"models", "list", "--provider", "codex", "--help"}},

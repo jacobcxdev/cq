@@ -12,8 +12,9 @@
 /dist/
 coverage.out
 
-# Local plans and evidence
-/docs/
+# Local plans, evidence and user configuration
+/docs/superpowers/
+/.config/cq/models.json
 
 # IDE
 .idea/

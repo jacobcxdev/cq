@@ -779,3 +779,76 @@ func TestLinuxNativeInstallAcceptsMissingPreviousVersion(t *testing.T) {
 		t.Fatalf("validation did not reach command preflight:\n%s", output)
 	}
 }
+
+func TestNativeStaplerValidationRetriesNetworkDisconnects(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("requires bash")
+	}
+	source, err := os.ReadFile("../../.github/scripts/prepare-native-network.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, validation, ok := strings.Cut(string(source), "# Validate the stapled ticket.\n")
+	if !ok {
+		t.Fatal("stapled ticket validation block missing")
+	}
+	validation, _, ok = strings.Cut(validation, "/usr/sbin/spctl --assess")
+	if !ok {
+		t.Fatal("Gatekeeper assessment missing")
+	}
+	validation = strings.ReplaceAll(validation, "/usr/bin/xcrun", `"$STAPLER_FAKE"`)
+	for _, tc := range []struct {
+		name  string
+		mode  string
+		calls int
+		code  int
+	}{
+		{"success", "success", 1, 0},
+		{"recovered disconnect", "recover", 2, 0},
+		{"persistent disconnect", "network", 3, 68},
+		{"invalid ticket", "invalid", 1, 68},
+		{"other failure", "other", 1, 65},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			directory := t.TempDir()
+			fake := filepath.Join(directory, "stapler")
+			calls := filepath.Join(directory, "calls")
+			const fakeScript = `#!/usr/bin/env bash
+set -eu
+printf 'x\n' >> "$STAPLER_CALLS"
+case "$STAPLER_MODE" in
+  success) exit 0 ;;
+  recover) [[ $(wc -l < "$STAPLER_CALLS") -gt 1 ]] && exit 0 ;;
+  invalid) echo 'Ticket validation failed'; exit 68 ;;
+  other) echo 'Unexpected failure'; exit 65 ;;
+esac
+echo 'Error Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."'
+exit 68
+`
+			if err := os.WriteFile(fake, []byte(fakeScript), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			command := exec.Command("bash", "-c", "set -euo pipefail\ntemporary=$STAPLER_TEMP\napp=unused\nsleep() { :; }\n"+validation)
+			command.Env = append(os.Environ(), "STAPLER_FAKE="+fake, "STAPLER_CALLS="+calls, "STAPLER_MODE="+tc.mode, "STAPLER_TEMP="+directory)
+			output, err := command.CombinedOutput()
+			code := 0
+			if err != nil {
+				exit, ok := err.(*exec.ExitError)
+				if !ok {
+					t.Fatal(err)
+				}
+				code = exit.ExitCode()
+			}
+			if code != tc.code {
+				t.Errorf("exit = %d, want %d: %s", code, tc.code, output)
+			}
+			recorded, err := os.ReadFile(calls)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := bytes.Count(recorded, []byte("x\n")); got != tc.calls {
+				t.Errorf("attempts = %d, want %d: %s", got, tc.calls, output)
+			}
+		})
+	}
+}

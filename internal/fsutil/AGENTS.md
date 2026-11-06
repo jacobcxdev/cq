@@ -2,20 +2,15 @@
 
 # fsutil
 
-Filesystem abstraction for dependency injection in tests.
+Filesystem interfaces, secure persistence capabilities and test implementations.
 
-## Key Files
+| File family | Responsibility |
+| --- | --- |
+| `fs.go` | Basic `FileSystem`, durable/secure directory and file interfaces, identity and lock capabilities |
+| `secure_*` | Platform-specific no-follow access, private authority, atomic/durable commits and locks |
+| `memfs.go` | Mutex-protected files/directories, permissions, owner/inode identity and lock modelling for tests |
 
-| File | Description |
-|------|-------------|
-| `fs.go` | `FileSystem` interface: ReadFile, WriteFile, Rename, Remove, Stat, MkdirAll, UserHomeDir, ReadDir |
-| `memfs.go` | `MemFS`: in-memory implementation for tests (MkdirAll is a no-op, ReadDir not implemented) |
-
-## For AI Agents
-
-### Working In This Directory
-
-- `OSFileSystem` is the production implementation (delegates to `os` package)
-- `MemFS` supports injectable errors via `HomeDir`/`HomeDirErr` fields
-- `MemFS.MkdirAll` is a no-op and `ReadDir` returns an error — only file operations are implemented
-- Used by cache and Codex provider for testable file I/O
+- `OSFileSystem` is the production implementation. Request the narrow capability required by the owner; a basic `FileSystem` alone does not prove durable or secure mutation support.
+- Credential commits fail closed when required durable/secure capabilities are absent. Preserve retained descriptor identity, exclusive creation, sync and lock requirements.
+- `MemFS` implements directories and `ReadDir`; it is not a file-only stub. Use an owner-specific fake/wrapper when tests need injected failures or capabilities it does not model.
+- Memory tests do not replace native Unix/Windows ownership, ACL, no-follow, locking or crash-safety checks. Use temporary roots for native filesystem tests.

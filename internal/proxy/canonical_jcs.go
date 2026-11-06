@@ -22,9 +22,11 @@ import (
 )
 
 const (
-	frozenBlueprintSHA256   = "bd8bdff9a8ce4582d0a66e847c74f5e69744651de457ba8e6847e0fcda678f38"
-	frozenReviewSHA256      = "f65a7a0693ddc6c426e706f7d29ed96619cf0cba95cf257c20029b11162719e6"
-	frozenReviewBaseline    = "9fe30df8d4101f69084d6487740ed324a5d0b59d"
+	frozenBlueprintSHA256 = "bd8bdff9a8ce4582d0a66e847c74f5e69744651de457ba8e6847e0fcda678f38"
+	frozenReviewSHA256    = "f65a7a0693ddc6c426e706f7d29ed96619cf0cba95cf257c20029b11162719e6"
+	frozenReviewBaseline  = "9fe30df8d4101f69084d6487740ed324a5d0b59d"
+	// This logical path is frozen into the review identity. The physical
+	// authority files now live under docs/reference without changing bytes.
 	blueprintReviewPath     = "docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.md"
 	maxFrozenBlueprintBytes = 4 << 20
 	maxReviewSiblingJCS     = 4_288

@@ -1,5 +1,7 @@
 # Homebrew upgrades on macOS
 
+[Install CQ](../README.md#install) · [Service troubleshooting](troubleshooting.md#installation-and-background-services) · [Release operations](releases.md)
+
 Compatible installations keep their proxy LaunchAgent and listener registered.
 CQ stages each executable in private, immutable storage before package cleanup.
 It stops admitting new work before waiting for active HTTP requests, SSE streams
@@ -7,13 +9,16 @@ and WebSocket turns to finish. Each broker WebSocket session reconnects with
 `1012` after its current turn completes; idle sessions reconnect immediately.
 Normal package upgrades allow 15 seconds for drainage. If active work cannot
 finish in that time, CQ resumes admissions on the previous runtime and defers
-the upgrade. Retry after that work finishes. Raw relayed WebSocket connections
+the upgrade. The retained candidate refresh service automatically retries the
+handoff after deferral; repeating the package upgrade is not required. Inspect
+`cq service status --json` for the active/pending versions and upgrade phase.
+Raw relayed WebSocket connections
 must close before upgrading. New connections can wait in the kernel backlog
 during drainage and while the successor starts. A full backlog or loss of both
 successor and guard can still interrupt service; this is not an unconditional
 zero-downtime promise.
 
-Use `brew upgrade jacobcxdev/tap/cq` for normal package upgrades. Homebrew's
+Use `brew upgrade --cask jacobcxdev/tap/cq` for normal package upgrades. Homebrew's
 same-token successor callback keeps CQ services installed. Genuine uninstall
 removes both jobs, retained runtimes and the upgrade journal after verifying
 that all runtime owners released their lifecycle lock. Credentials, caches,
@@ -59,7 +64,7 @@ commit. Linux and Windows runtime upgrades are unsupported.
 
 Older CQ releases and previously installed cask metadata cannot use the new
 handoff protocol. Finish outstanding turns and stop clients before the first
-`brew upgrade jacobcxdev/tap/cq`. Homebrew runs the predecessor's existing
+`brew upgrade --cask jacobcxdev/tap/cq`. Homebrew runs the predecessor's existing
 uninstall hook, then installs retained runtime copies and new cask metadata.
 Keep clients stopped until startup and real routed traffic are verified. This
 transition has a listener gap; it is a maintenance upgrade. Do not edit
@@ -92,3 +97,20 @@ bootstrap interruption is recorded
 separately. Coordinator process sampling supplements the lifecycle lock fence;
 sampling alone cannot prove that no transient overlap occurred. Failed assertions
 exit nonzero and preserve the isolated fixture for diagnosis.
+
+## Legacy sandboxed Cask hooks
+
+Homebrew versions that sandbox Cask flight hooks cannot run the service hooks
+stored by CQ 0.32.8. For that legacy installation, first verify that
+`$(brew --prefix)/bin/cq` is a symlink into the installed CQ Caskroom and that
+`cq service status --json` reports the `homebrew` owner and that stable executable.
+Keep a copy of the executable for rollback. Run `cq service uninstall
+--owner=homebrew --service-executable="$(brew --prefix)/bin/cq"` outside Homebrew,
+then remove only that verified symlink before running `brew upgrade --cask cq`.
+This makes the old hook skip its executable call; the new installer recreates
+the link and services. Keep existing CQ configuration. If the upgrade fails,
+restore the stable link to the saved executable and reinstall its Homebrew-owned
+services before retrying.
+
+
+See [troubleshooting](troubleshooting.md#installation-and-background-services) before repairing an installation; the executable and service owner must match.

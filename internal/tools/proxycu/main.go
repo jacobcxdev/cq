@@ -61,8 +61,8 @@ func runCU0(repositoryRoot, cuID string) (resultErr error) {
 		return fmt.Errorf("construction unit %q has no manifest", cuID)
 	}
 	if err := proxy.VerifyBlueprintReview(
-		filepath.Join(repositoryRoot, "docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.md"),
-		filepath.Join(repositoryRoot, "docs/superpowers/specs/2026-08-13-proxy-resilience-and-routing-blueprint.review.json"),
+		filepath.Join(repositoryRoot, "docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.md"),
+		filepath.Join(repositoryRoot, "docs/reference/2026-08-13-proxy-resilience-and-routing-blueprint.review.json"),
 	); err != nil {
 		return err
 	}

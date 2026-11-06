@@ -1,5 +1,7 @@
 # Multi-account Dots
 
+[Getting started](../README.md) · [Other client integrations](usage.md#connecting-a-client) · [Troubleshooting](troubleshooting.md#native-network-and-dots)
+
 `cq codex dots` defaults to the normal native app, using its existing profile, local tasks and signed-in account. Existing account-owned Dots share that app's sidebar. The packaged CQ binary includes the Go controller and runtime; installation creates private adapter state and loopback certificates. Python, pip and virtual environments are not needed. It uses the installed app bundle without patching or re-signing it. Account credential sources and CQ services remain unchanged.
 
 Native installation creates `~/Applications/ChatGPT via CQ.app` from the controller bundled in CQ. Launch it through Raycast, Spotlight or Finder for new sessions, or run `cq codex dots start`. Both routes preserve OpenAI's original app signature and use the existing profile. CQ sets `OPENAI_BASE_URL` to its configured local proxy even when `~/.codex/config.toml` contains no CQ entry. Direct launches of OpenAI's original app bypass the adapter. CQ does not quit an already-running normal app. Installation and account changes report `restart_required` until the user quits it and starts it through CQ. The launcher reports that instruction instead of silently opening an unmanaged app.
@@ -24,7 +26,7 @@ Installation stages a private copy of the Go CQ executable, discovers existing D
 
 For disposable research, use `cq codex dots install --mode isolated`. Only that mode creates a separate app-data directory and Codex home. If its fresh window shows welcome or role onboarding, complete that native flow through the role stage. There is no supported Skip for that stage. The window stays open while CQ setup messages and the relay pause; the watcher resumes them once the native workspace is ready. Existing installations without a mode retain their isolated behaviour until explicitly reinstalled.
 
-The default installation root is `~/.local/share/cq/dots`. Account discovery reads the signed-in account at `~/.codex/auth.json` and CQ accounts under `~/.codex/accounts`. These credential sources remain read-only. Optional CodexBar discovery reads explicitly declared managed accounts; it does not scan arbitrary account homes or refresh their credentials.
+The Dots installation root is independent of the CQ platform configuration/cache roots. The default installation root is `~/.local/share/cq/dots`. Account discovery reads the signed-in account at `~/.codex/auth.json` and CQ accounts under `~/.codex/accounts`. These credential sources remain read-only. Optional CodexBar discovery reads explicitly declared managed accounts; it does not scan arbitrary account homes or refresh their credentials.
 
 Use absolute paths to override the installation or account sources:
 
@@ -95,7 +97,9 @@ Posts start a brief acknowledgement turn in the shared chat. CQ refuses to post 
 
 ## Account changes and lifecycle
 
-The running account watcher checks source metadata every five seconds. When accounts or declared credentials change, it requests discovery again. A changed normal-profile catalogue requires the user to quit the app and run `cq codex dots start`; existing tasks and transports remain alive until then. Isolated mode can restart its research app automatically. Adding an already-onboarded owner can trigger that owner's first setup attempt once the updated catalogue starts. Removing an owner closes its old runtime sessions on that restart. Failed discovery remains visible as an account availability outcome; a temporary upstream outage can preserve a previously known profile. Temporary backend failures retry with a delay capped at one minute. Invalid local credentials wait for source changes instead.
+The running account watcher checks source metadata every five seconds. When accounts or declared credentials change, it requests discovery again. A changed normal-profile catalogue requires the user to quit the app and run `cq codex dots start`; existing tasks and transports remain alive until then. Isolated mode can restart its research app automatically. Adding an already-onboarded owner can trigger that owner's first setup attempt once the updated catalogue starts. Removing an owner closes its old runtime sessions on that restart. CQ rechecks cached access denials for active, configured Dots through the owner's native profile query. A successful recheck restores the sidebar entry without restarting ChatGPT; genuine denials retry at most once a minute, and deleted profiles remain untouched.
+
+Failed discovery remains visible as an account availability outcome; a temporary upstream outage can preserve a previously known profile. Temporary backend failures retry with a delay capped at one minute. Invalid local credentials wait for source changes instead.
 
 Request immediate reconciliation, or control the installation manually:
 

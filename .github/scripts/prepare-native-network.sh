@@ -52,7 +52,21 @@ fi
 requirement='anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "K2648T24P4"'
 /usr/bin/codesign --verify --deep --strict --all-architectures "-R=$requirement and identifier \"dev.jacobcx.cq.network\"" "$app"
 /usr/bin/codesign --verify --strict --all-architectures "-R=$requirement and identifier \"dev.jacobcx.cq.network.proxy\"" "$provider"
-/usr/bin/xcrun stapler validate "$app"
+# Validate the stapled ticket.
+for attempt in 1 2 3; do
+  if /usr/bin/xcrun stapler validate "$app" >"$temporary/stapler-validation.log" 2>&1; then
+    cat "$temporary/stapler-validation.log"
+    break
+  else
+    validation_status=$?
+  fi
+  cat "$temporary/stapler-validation.log" >&2
+  if [[ "$validation_status" -ne 68 || "$attempt" -eq 3 ]] || ! /usr/bin/grep -Fq 'NSURLErrorDomain Code=-1005' "$temporary/stapler-validation.log"; then
+    exit "$validation_status"
+  fi
+  echo "Apple ticket connection lost; retrying validation ($attempt/3)." >&2
+  sleep 2
+done
 /usr/sbin/spctl --assess --type execute "$app"
 build_number=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")
 [[ "$build_number" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]

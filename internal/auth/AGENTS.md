@@ -9,6 +9,7 @@ OAuth PKCE login flow, browser detection, and JWT utilities.
 | File | Description |
 |------|-------------|
 | `oauth.go` | `Login` function: PKCE flow, local callback server, token exchange, profile fetch |
+| `codex_oauth.go` | Codex PKCE callback/exchange and owner-invoked refresh helpers |
 | `browser.go` | Platform-specific browser detection and private-mode launch (Darwin/Linux/Windows) |
 | `jwt.go` | `DecodeEmail`: extracts email from JWT payload without signature verification |
 
@@ -21,3 +22,5 @@ OAuth PKCE login flow, browser detection, and JWT utilities.
 - All `exec.Command(...).Start()` calls must use `startAndReap` to prevent zombie processes
 - `openBrowser` validates URL scheme (http/https only) before any exec
 - `validBrowserName` regex is a security boundary for AppleScript interpolation
+
+- Browser detection helpers follow the verification context; cancellation prevents fallback launch and reaps detection children. An already launched browser remains independent. Codex refresh helpers do not themselves grant credential ownership.

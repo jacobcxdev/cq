@@ -1,6 +1,51 @@
 # Contributing
 
-Git strategy and workflow for cq development.
+CQ combines quota reporting, account management and local request routing. Read
+[the architecture guide](docs/architecture.md) for package ownership and runtime
+contracts, and [the release guide](docs/releases.md) for packaging and delivery.
+
+## Development setup
+
+Install Git and the Go version declared in [go.mod](go.mod), currently **1.26.1**.
+Race tests also require a working C toolchain supported by Go on the host.
+Clone the repository, then run:
+
+```sh
+go mod download
+go build ./...
+go vet ./...
+go test -race -count=1 ./...
+```
+
+For a development executable with a predictable location:
+
+```sh
+go build -o ./cq ./cmd/cq
+./cq --help
+```
+
+`go run ./cmd/cq` and `./cq check` read real local account state and may contact
+providers. Use injected HTTP/filesystem/credential fakes and temporary roots for
+tests. Building and testing does not install services or activate native routing.
+Do not replace a running installed executable with the development build.
+
+Source builds report a development version and omit the release-linked Gemini
+OAuth client secret. Do not add a runtime secret fallback. Official packages
+provide that release input. Portable archives and `go install` are development
+or portable binaries; a complete supported installation also owns both per-user
+background components.
+
+For native macOS changes, install Xcode with Swift 6 tools and run:
+
+```sh
+swift test --package-path native/macos-network --sanitize thread
+```
+
+The Swift package requires macOS 13 and uses Swift 5 language mode. Signed app
+bundles require the separate Xcode project and authorised signing environment;
+see [the native README](native/macos-network/README.md). Cross-builds check Go
+compilation only; they do not qualify service managers, MSI packages, native
+admission or installed traffic on another platform.
 
 ## Branching Model
 
@@ -29,9 +74,9 @@ Format: `type: description`
 
 Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`
 
-- Keep subjects imperative and specific.
-- When useful, lead with the package: `fix: auth — validate URL scheme before browser open`.
-- Avoid `wip` and `fix stuff`.
+- Sign every commit. Use a conventional prefix and a specific past-tense subject under 50 characters, for example `fix: corrected callback validation`.
+- Follow the subject with a blank line and a concise description of significant changes; use unordered lists and British English.
+- Keep code references in backticks. Avoid `wip` and `fix stuff`.
 
 ## PR Workflow
 
@@ -45,7 +90,24 @@ Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`
 
 Every pull request into `main` runs the required **Build, vet and race tests** check on Linux ARM64, using the Go version declared in `go.mod`. Superseded runs are cancelled. The branch must be up to date with `main` before merging.
 
-Packaging, installed-client and native platform validation remain available through the manual **CI** workflow. Release publication remains manual through **Release**.
+The **CI** workflow runs on pushes to `main` and can also be dispatched manually.
+Its native-companion and package jobs run independently; their outputs feed
+separate macOS Codex/Cask and Homebrew lifecycle jobs. Linux and Windows each
+have AMD64 and ARM64 jobs. Linux runs the full race suite and requires its native
+transport/confinement gates to pass. Windows runs builds, vet and MSI lifecycle
+validation on both architectures, with selected race tests on AMD64.
+
+The shared setup action installs Go from `go.mod` and caches downloaded modules
+separately from compiler outputs. Keys include runner image, OS, architecture,
+resolved Go version and dependency files; compiler caches also distinguish jobs
+and source. A module-cache miss downloads dependencies before saving the cache.
+Workflows use the upgraded action versions with Node24 or later runtimes; new
+action examples must not reintroduce Node20. See the actual
+[PR workflow](.github/workflows/pr.yml), [CI workflow](.github/workflows/ci.yml)
+and [setup action](.github/actions/setup-go/action.yml) for exact gates.
+
+Release publication is a separate manually dispatched **Release** workflow. Its
+platform, installed-client and package gates are described in the release guide.
 
 All checks must pass before merge:
 
@@ -53,6 +115,8 @@ All checks must pass before merge:
 go build ./...
 go vet ./...
 go test -race -count=1 ./...
+bash .github/scripts/test-release-source.sh
+bash .github/scripts/test-close-superseded-winget-prs.sh
 ```
 
 ## Code Review
@@ -63,37 +127,11 @@ go test -race -count=1 ./...
 
 ## Releasing
 
-cq uses [semver](https://semver.org/) starting at `v0.1.0`. Bump minor for features, patch for fixes.
-
-To release a new version:
-
-1. Ensure `main` is green (CI passing).
-2. Validate current installed Codex against live upstream:
-   ```bash
-   scripts/validate-codex-release
-   ```
-   This runs normal WebSocket, repeated HTTP, compaction, and rescue traffic through isolated proxy listeners. It leaves any production listener unchanged and publishes the commit-bound `cq/live-normal-routing` status required by the tag workflow.
-   Live checks discover the installed client's recommended model through `model/list`, log its concrete ID, and keep that selection fixed across direct and proxied traffic for the run. Model discovery uses an isolated profile and fails explicitly if no unambiguous visible default is available. Synthetic checks keep their reviewed fixture model and do not require live model access.
-3. Tag the final reviewed `main` commit: `git tag -s v0.x.y`. The release
-   preflight rejects branch candidates and tags which omit newer merged changes.
-4. Push the tag: `git push origin v0.x.y`
-5. Run the `Release` workflow against that tag. It builds and validates release
-   artifacts, publishes the GitHub release, and publishes the generated
-   Homebrew Cask to [`jacobcxdev/homebrew-tap`](https://github.com/jacobcxdev/homebrew-tap).
-6. Verify the published package channels and installed transport validation.
-
-Stable versions must follow the highest published stable release with the next
-patch, minor or major version, resetting lower components. The release preflight
-rejects gaps, older versions and tags outside current `origin/main`. Review the
-complete diff from the previous release before tagging, including native
-companion changes. Do not publish a feature branch because its tests passed.
-The WinGet publication job closes older CQ candidates only after the current
-candidate or published manifest exists.
-
-macOS packages also require the reviewed native companion pin. See
-[Native network releases](docs/native-network-releases.md) for the separate
-signing, notarisation and immutable-asset process. Go-only releases reuse that
-pin; CI does not receive Apple signing keys.
+Follow [the release guide](docs/releases.md). It covers sequential versions,
+reviewed current-main provenance, the live commit-bound routing status, signed
+tags, draft/package checks, native companion pins, publication and deployed
+validation. The [native release guide](docs/native-network-releases.md) owns the
+separate signing, notarisation and immutable native-asset procedure.
 
 ## Homebrew Cask Service Lifecycle
 
@@ -141,6 +179,17 @@ old executable as a rollback, atomically rename the new executable into place,
 then restart and health-check the service. The rename must stay on the same
 filesystem; a cross-filesystem move can degrade to a copy.
 
-### Required Secret
+## Documentation and local work
 
-The release workflow needs a `HOMEBREW_TAP_TOKEN` repository secret — a GitHub PAT with `repo` scope on `jacobcxdev/homebrew-tap`.
+Keep user guidance in `README.md` and maintained `docs/` pages. Keep package
+ownership rules in the applicable `AGENTS.md`; `CLAUDE.md` imports the root rules.
+Implementation checklists and task evidence belong in ignored
+`docs/superpowers/`, rather than the published documentation tree. Transfer
+current product and maintainer contracts into maintained guides before
+untracking a plan. The frozen [proxy reference](docs/reference/README.md) remains
+tracked because verification consumes its exact bytes.
+
+Use normal reviewed commits for repository hygiene. Preserve local planning
+copies when removing them from tracking; ignore rules alone do not untrack
+files. Verify links and a clean checkout so ignored local files cannot conceal
+missing build or test inputs.

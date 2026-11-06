@@ -20,7 +20,7 @@ Multi-account Claude provider with parallel profile+usage fetch and dedup.
 ### Working In This Directory
 
 - `Fetch` spawns one goroutine per account; each has panic recovery
-- `fetchAccount` spawns two inner goroutines (profile + usage) — both have panic recovery
+- `fetchAccount` starts a profile goroutine and, for paid accounts, a concurrent usage goroutine; both have panic recovery. Known free accounts skip usage.
 - `dedup` prefers usable results over errors on key collision (not first-occurrence wins)
 - Profile fetch errors are non-fatal (falls back to keychain metadata)
 - Usage fetch errors are fatal for that account (returns `fetch_error`)
