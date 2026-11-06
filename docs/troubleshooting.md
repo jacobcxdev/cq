@@ -50,7 +50,7 @@ Run only commands applicable to your platform/integration. Some other apparent i
 | CodexBar managed refresh outcome uncertain | CQ preserves the journal instead of replaying a rotating exchange. A newer owner login wins. Reauthenticate with the owner when required; do not delete journals to force a retry. |
 | Gemini project/credential error | Credential service/account is `gemini` / `antigravity`; project cache is `~/.gemini/antigravity-cli/cache/default_project_id.txt`. Re-establish credentials/project through Antigravity. CQ does not invoke `agy` or write those stores. |
 | Gemini works until token expiry only in a development build | Official releases include refresh link material; plain source builds do not. Install an official binary rather than inventing a runtime client-secret environment variable. |
-| Saved Z.ai accounts seem ignored | `ZAI_API_KEY` exclusively overrides every saved account for that process. Remove it from the relevant client/service environment to use saved accounts; do not print it while diagnosing. |
+| Saved Z.ai accounts seem ignored | `ZAI_API_KEY` selects one account, using saved OAuth only when that exact key's ownership was previously verified. Remove it from the relevant client/service environment to use the saved pool; do not print it while diagnosing. |
 
 ## Quota, routing and continuation
 
@@ -120,3 +120,19 @@ Session and thread keys in diagnostics are short deterministic hashes, not raw i
 Use the [agent issue-reporting workflow](agent-issue-reporting.md#4-prepare-the-smallest-public-safe-report) and [bug-report form](https://github.com/jacobcxdev/cq/issues/new?template=bug_report.yml) for collection, public-sharing review and submission.
 
 Retain exact command, versions/builds, timestamp and timezone, platform, configured/effective routing mode, service owner/executable and the smallest matching trace. Redact identities when needed. Do not share `proxy.json`, WireGuard profiles, credential stores, OAuth callback URLs, encrypted session keys or raw payload logs without a separate review. Include whether a result came from a synthetic test, candidate listener or installed live client. A sent message, healthy status or successful build is not proof of installed affected traffic.
+
+## Grok subscriptions
+
+Run `cq grok accounts` and `cq check grok`. Reauthenticate with `cq grok login`
+when a CQ-owned session expires or renewal has an uncertain outcome. A CodexBar
+source remains owned by CodexBar; repair or replace its login there. Unverified
+cookies and public API keys are visible as unavailable sources, not inference
+credentials. Healthy CQ-owned accounts remain available when an external source
+is malformed.
+
+If no Grok model appears, inspect `cq models list --provider grok`: the current
+adapter publishes only native Responses models with known context. A missing or
+Chat Completions backend is not silently converted. Unknown opaque continuation
+state after restart requires a fresh readable conversation. Reset inventory
+failure does not imply no rewards; redemption is not implemented. See
+[current qualification limits](usage.md#grok-subscriptions).

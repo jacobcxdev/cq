@@ -13,7 +13,7 @@ Development checks are in [CONTRIBUTING](../CONTRIBUTING.md); delivery gates are
 | `cmd/cq` | Kong command tree, explicit command dispatch, dependency wiring, platform service adapters and installed validation |
 | `cmd/cq-install`, `internal/installer`, `internal/installstate` | Official archive installation, verified downloads, ownership, transactional replacement and rollback |
 | `internal/app` | Concurrent provider fetch, reports, account operations and reset orchestration |
-| `internal/provider/{claude,codex,gemini,zai}` | Provider-specific account, authentication and quota contracts |
+| `internal/provider/{claude,codex,gemini,zai,grok}` | Provider-specific account, authentication and quota contracts |
 | `internal/auth`, `internal/keyring` | Shared browser/OAuth helpers and legacy Claude credential backends |
 | `internal/quota`, `internal/history`, `internal/aggregate` | Domain windows, observed burn estimates, aggregate pace/gauges and reset simulation |
 | `internal/output` | TTY model/renderer and JSON output |
@@ -224,3 +224,39 @@ and recalculate policy while retaining chat history and user edits. Existing
 catalogue text already in history is not removed. The embedded
 [curation skill](../internal/harness/curate-harness/SKILL.md) describes the CLI
 workflow and supported fallbacks.
+
+## Grok and shared provider mechanics
+
+`internal/credentials.Rotate` owns the transaction sequence extracted from
+Codex's rotating refresh implementation. Codex retains its existing journal,
+record, single-flight and ownership adapters. Grok supplies a separate encrypted
+store and account identity adapter using the same transaction sequence and
+existing secure filesystem locks. A retained durable response is committed
+without repeating its exchange; an attempted exchange without a durable result
+is indeterminate. Fresh login generations supersede old retained operations.
+
+`internal/provider/codexbar` reads provider-scoped external configuration. Grok
+verifies borrowed bearer identities before exposing usable accounts. Z.ai browser
+login verifies exact subscription keys through authenticated personal-project
+reads before replacing a CQ key with OAuth. The OAuth record retains only opaque
+key aliases, allowing discovery to suppress matching borrowed keys without
+changing their source. External sources never gain CQ renewal ownership.
+
+Grok quota/model providers join the existing report and catalogue pipelines.
+Registry sources distinguish no configured accounts from successful empty model
+lists, so removing Grok access clears its entries without hiding other providers'
+typed errors. Display catalogue unions never authorize another account's model.
+
+The Grok proxy adapter reuses the WebSocket-to-HTTP bridge extracted from Z.ai and
+shared Responses SSE handling. Both original and new callers retain regression
+coverage. Grok-specific code owns subscription headers, schema/tool projection,
+model/quota admission and native state binding. There is no new background
+service or native macOS component.
+
+Verified native reasoning also retains its original container under a bounded
+byte budget, since Codex reserializes optional fields and private bookkeeping.
+Restoration checks account/model ownership and rejects substantive edits before
+dispatch. Expanded request bytes are bounded before serialization. Grok
+compaction uses the Responses summary preparation and CQ sealing extracted from
+Z.ai, because the subscription endpoint returns 404 for standalone native
+compaction. CQ-owned summaries are restored before native-state admission.

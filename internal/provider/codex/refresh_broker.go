@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/auth"
+	"github.com/jacobcxdev/cq/internal/credentials"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 )
@@ -204,101 +205,111 @@ func (c *CredentialCoordinator) retryRetainedLocked(ctx context.Context, record 
 	if record.Metadata.OperationState != OperationRefreshing && record.Metadata.OperationState != OperationRotationUncertain && record.Metadata.OperationState != OperationReady {
 		return RefreshResult{}, true, ErrRefreshIneligible
 	}
-	if retained.commitDigest == "" {
-		commitDigest, err := c.CredentialOwner.PublishCommit(retained.operationID, retained.selection.ReservationDigest, retained.selection.CapacityLeaseDigest)
-		if err != nil {
-			return RefreshResult{}, true, err
-		}
-		retained.commitDigest = commitDigest
-		c.retainRefresh(record.Metadata.CandidateID, retained)
-	}
-	if retained.attemptIndeterminate {
-		return RefreshResult{}, true, ErrRefreshOutcomeIndeterminate
-	}
-	if retained.resultErr == nil && !retained.materialReady {
-		if record.Metadata.OperationState == OperationReady {
-			record.Metadata.OperationState = OperationRefreshing
-			record.Metadata.OperationID = retained.operationID
-			if err := c.Store.Commit(&record, record.Metadata.Revision); err != nil {
-				return RefreshResult{}, true, &RefreshPersistenceError{Err: err}
-			}
-		}
-		if !retained.attemptPersisted {
-			if err := c.persistRefreshAttempt(retained); err != nil {
-				return RefreshResult{}, true, &RefreshPersistenceError{Err: err}
-			}
-			retained.attemptPersisted = true
-			c.retainRefresh(record.Metadata.CandidateID, retained)
-		}
-		tokens, exchangeErr := c.RefreshExchange(ctx, record.Credential.RefreshToken)
-		if exchangeErr != nil || tokens == nil || tokens.AccessToken == "" {
-			if exchangeErr == nil {
-				exchangeErr = errors.New("Codex refresh returned empty access token")
-			}
-			retained.resultErr = exchangeErr
-			c.retainRefresh(record.Metadata.CandidateID, retained)
-			if err := c.persistRefreshResult(retained); err != nil {
-				return RefreshResult{}, true, &RefreshPersistenceError{Err: err}
-			}
-			retained.resultPersisted = true
-			record.Metadata.OperationState = OperationRotationUncertain
-			if isDefinitiveRefreshError(exchangeErr) {
-				record.Metadata.OperationState = OperationReady
-				record.Metadata.OperationID = ""
-			}
-			if err := c.Store.Commit(&record, record.Metadata.Revision); err != nil {
-				c.retainRefresh(record.Metadata.CandidateID, retained)
-				return RefreshResult{}, true, &RefreshPersistenceError{Err: err}
-			}
-			c.retainRefresh(record.Metadata.CandidateID, retained)
-		} else {
-			retained.material = record.Credential
-			retained.material.AccessToken = tokens.AccessToken
-			if tokens.RefreshToken != "" {
-				retained.material.RefreshToken = tokens.RefreshToken
-			}
-			if tokens.IDToken != "" {
-				retained.material.IDToken = tokens.IDToken
-			}
-			retained.materialReady = true
-			retained.expiresIn = tokens.ExpiresIn
-			c.retainRefresh(record.Metadata.CandidateID, retained)
-			if err := c.persistRefreshResult(retained); err != nil {
-				return RefreshResult{}, true, &RefreshPersistenceError{Err: err}
-			}
-			retained.resultPersisted = true
-			c.retainRefresh(record.Metadata.CandidateID, retained)
-		}
-	}
 	if retained.materialReady && !retained.materialCommitted && record.Metadata.OperationState == OperationReady && record.Metadata.OperationID == "" && record.Credential == retained.material {
 		retained.materialCommitted = true
+	}
+	state := credentials.Rotation[CredentialMaterial]{Material: retained.material, MaterialReady: retained.materialReady, MaterialCommitted: retained.materialCommitted, AttemptPersisted: retained.attemptPersisted, AttemptIndeterminate: retained.attemptIndeterminate, ResultPersisted: retained.resultPersisted, ExpiresIn: retained.expiresIn, ResultErr: retained.resultErr}
+	update := func(state credentials.Rotation[CredentialMaterial]) {
+		retained.material, retained.materialReady, retained.materialCommitted = state.Material, state.MaterialReady, state.MaterialCommitted
+		retained.attemptPersisted, retained.attemptIndeterminate, retained.resultPersisted = state.AttemptPersisted, state.AttemptIndeterminate, state.ResultPersisted
+		retained.expiresIn, retained.resultErr = state.ExpiresIn, state.ResultErr
 		c.retainRefresh(record.Metadata.CandidateID, retained)
 	}
-	if retained.materialReady && !retained.materialCommitted {
-		record.Credential = retained.material
-		record.Metadata.OperationState = OperationReady
-		record.Metadata.OperationID = ""
-		now := time.Now()
-		if c.Now != nil {
-			now = c.Now()
-		}
-		record.Document["last_refresh"] = now.UTC().Format(time.RFC3339Nano)
-		if retained.expiresIn > 0 {
-			record.Document["cq_expires_at"] = now.Add(time.Duration(retained.expiresIn) * time.Second).UnixMilli()
-		}
-		if err := c.Store.Commit(&record, record.Metadata.Revision); err != nil {
-			c.restoreRotationUncertain(&record, retained.operationID)
-			return RefreshResult{}, true, &RefreshPersistenceError{Err: err}
-		}
-		retained.materialCommitted = true
-		c.retainRefresh(record.Metadata.CandidateID, retained)
+	completed := false
+	err := credentials.Rotate(ctx, &state, credentials.Hooks[CredentialMaterial]{
+		Prepare: func() error {
+			if retained.commitDigest == "" {
+				digest, err := c.CredentialOwner.PublishCommit(retained.operationID, retained.selection.ReservationDigest, retained.selection.CapacityLeaseDigest)
+				if err != nil {
+					return err
+				}
+				retained.commitDigest = digest
+				c.retainRefresh(record.Metadata.CandidateID, retained)
+			}
+			if !state.AttemptIndeterminate && state.ResultErr == nil && !state.MaterialReady && record.Metadata.OperationState == OperationReady {
+				record.Metadata.OperationState = OperationRefreshing
+				record.Metadata.OperationID = retained.operationID
+				if err := c.Store.Commit(&record, record.Metadata.Revision); err != nil {
+					return &RefreshPersistenceError{Err: err}
+				}
+			}
+			return nil
+		},
+		PersistAttempt: func() error {
+			if err := c.persistRefreshAttempt(retained); err != nil {
+				return &RefreshPersistenceError{Err: err}
+			}
+			return nil
+		},
+		Exchange: func(ctx context.Context) (CredentialMaterial, int64, error) {
+			tokens, err := c.RefreshExchange(ctx, record.Credential.RefreshToken)
+			if err != nil {
+				return CredentialMaterial{}, 0, err
+			}
+			if tokens == nil || tokens.AccessToken == "" {
+				return CredentialMaterial{}, 0, errors.New("Codex refresh returned empty access token")
+			}
+			material := record.Credential
+			material.AccessToken = tokens.AccessToken
+			if tokens.RefreshToken != "" {
+				material.RefreshToken = tokens.RefreshToken
+			}
+			if tokens.IDToken != "" {
+				material.IDToken = tokens.IDToken
+			}
+			return material, tokens.ExpiresIn, nil
+		},
+		Changed: update,
+		PersistResult: func(state credentials.Rotation[CredentialMaterial]) error {
+			update(state)
+			if err := c.persistRefreshResult(retained); err != nil {
+				return &RefreshPersistenceError{Err: err}
+			}
+			return nil
+		},
+		Commit: func(state credentials.Rotation[CredentialMaterial]) error {
+			record.Metadata.OperationState = OperationReady
+			record.Metadata.OperationID = ""
+			if state.ResultErr != nil {
+				if !isDefinitiveRefreshError(state.ResultErr) {
+					record.Metadata.OperationState = OperationRotationUncertain
+					record.Metadata.OperationID = retained.operationID
+				}
+			} else {
+				record.Credential = state.Material
+				now := time.Now()
+				if c.Now != nil {
+					now = c.Now()
+				}
+				record.Document["last_refresh"] = now.UTC().Format(time.RFC3339Nano)
+				if state.ExpiresIn > 0 {
+					record.Document["cq_expires_at"] = now.Add(time.Duration(state.ExpiresIn) * time.Second).UnixMilli()
+				}
+			}
+			if err := c.Store.Commit(&record, record.Metadata.Revision); err != nil {
+				if state.ResultErr == nil {
+					c.restoreRotationUncertain(&record, retained.operationID)
+				}
+				return &RefreshPersistenceError{Err: err}
+			}
+			return nil
+		},
+		Complete: func() error {
+			if err := c.completeRefreshMutation(retained.operationID, retained.commitDigest); err != nil {
+				return &RefreshPersistenceError{Err: err}
+			}
+			completed = true
+			return nil
+		},
+	})
+	if errors.Is(err, credentials.ErrOutcomeIndeterminate) {
+		err = ErrRefreshOutcomeIndeterminate
 	}
-	if err := c.completeRefreshMutation(retained.operationID, retained.commitDigest); err != nil {
-		return RefreshResult{}, true, &RefreshPersistenceError{Err: err}
+	if completed {
+		c.clearRetained(record.Metadata.CandidateID)
 	}
-	c.clearRetained(record.Metadata.CandidateID)
-	if retained.resultErr != nil {
-		return RefreshResult{}, true, retained.resultErr
+	if err != nil {
+		return RefreshResult{}, true, err
 	}
 	return RefreshResult{Ref: recordRef(record), Revision: record.Metadata.Revision, Material: record.Credential}, true, nil
 }

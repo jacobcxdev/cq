@@ -32,6 +32,7 @@ const (
 	ProviderCodex
 	// ProviderZAI routes to Z.ai Responses with its own Coding Plan key.
 	ProviderZAI
+	ProviderGrok
 )
 
 // RouteModelWithCatalog maps a model name to the provider that serves it,
@@ -43,6 +44,9 @@ func RouteModelWithCatalog(model string, cat *modelregistry.Catalog) Provider {
 		snap := cat.Snapshot()
 		for _, e := range snap.Entries {
 			if strings.ToLower(e.ID) == normalised {
+				if e.Provider == modelregistry.ProviderGrok {
+					return ProviderGrok
+				}
 				if e.Provider == modelregistry.ProviderZAI {
 					return ProviderZAI
 				}
@@ -61,6 +65,8 @@ func RouteModelWithCatalog(model string, cat *modelregistry.Catalog) Provider {
 func RouteModel(model string) Provider {
 	lower := strings.ToLower(ParseModel(model))
 	switch {
+	case strings.HasPrefix(lower, "grok-"):
+		return ProviderGrok
 	case strings.HasPrefix(lower, "glm-"):
 		return ProviderZAI
 	case strings.HasPrefix(lower, "gpt-"):

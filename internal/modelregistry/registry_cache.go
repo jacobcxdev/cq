@@ -28,7 +28,7 @@ func PublishCodexRegistryCache(fsys fsutil.FileSystem, roots userdirs.Roots, sna
 	}
 	var entries []Entry
 	for _, entry := range snap.Entries {
-		if (entry.Provider == ProviderCodex || entry.Provider == ProviderZAI) && entry.Source == SourceNative {
+		if (entry.Provider == ProviderCodex || entry.Provider == ProviderZAI || entry.Provider == ProviderGrok) && entry.Source == SourceNative {
 			entries = append(entries, entry)
 		}
 	}
@@ -56,7 +56,7 @@ func LoadCodexRegistryCache(fsys fsutil.FileSystem, roots userdirs.Roots) ([]Ent
 		return nil, true, fmt.Errorf("unsupported CQ model cache version")
 	}
 	for _, entry := range cache.Models {
-		if entry.ID == "" || entry.Source != SourceNative || (entry.Provider != ProviderCodex && entry.Provider != ProviderZAI) {
+		if entry.ID == "" || entry.Source != SourceNative || (entry.Provider != ProviderCodex && entry.Provider != ProviderZAI && entry.Provider != ProviderGrok) {
 			return nil, true, fmt.Errorf("invalid CQ model cache entry")
 		}
 	}

@@ -28,6 +28,7 @@ var (
 	discoverClaudeAccountsFn  = keyring.DiscoverClaudeAccounts
 	newHTTPClientFn           = func(timeout time.Duration, version string) httputil.Doer { return httputil.NewClient(timeout, version) }
 	refreshCodexAccountsFn    = refreshCodexAccounts
+	refreshGrokAccountsFn     = refreshGrokAccounts
 	invalidateProviderCacheFn = invalidateProviderCache
 	codexRefreshFSFactory     = func() fsutil.DurableFileSystem { return fsutil.OSFileSystem{} }
 	persistRefreshedTokenFn   = keyring.PersistRefreshedToken
@@ -125,6 +126,13 @@ func refreshAccounts() error {
 		invalidateProviderCacheFn(provider.Codex)
 	}
 
+	grokChanged, grokErr := refreshGrokAccountsFn(ctx)
+	if grokErr != nil {
+		return grokErr
+	}
+	if grokChanged {
+		invalidateProviderCacheFn(provider.Grok)
+	}
 	if len(accounts) == 0 {
 		return nil
 	}
@@ -348,4 +356,20 @@ func isStdinTerminal() bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+func refreshGrokAccounts(ctx context.Context) (bool, error) {
+	roots, err := resolveRefreshRootsFn()
+	if err != nil {
+		return false, err
+	}
+	authority := newGrokAuthority(fsutil.OSFileSystem{}, roots.Config, grokHTTPClient(15*time.Second))
+	accounts, err := authority.Accounts(ctx)
+	if err != nil || len(accounts) == 0 {
+		return false, err
+	}
+	if err := authority.Refresh(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
