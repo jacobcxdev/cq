@@ -2271,7 +2271,7 @@ func releaseEnvironmentForTest() []BuildEnvironmentEntryV1 {
 
 func releaseCUManifestForTest(t *testing.T, cuID string) []byte {
 	t.Helper()
-	if data, err := CanonicalCUManifestV1(cuID); err == nil {
+	if data, err := legacyCUManifestV1(cuID); err == nil {
 		return data
 	}
 	data, err := CanonicalJSONV1(CUManifestV1{SchemaVersion: 1, Kind: "construction_unit_verification_manifest_v1", BlueprintSHA256: frozenBlueprintSHA256, ReviewAttestationAggregateSHA256: frozenReviewAggregateSHA256, ReviewAuthorityBaselineCommit: frozenReviewBaseline, Unit: cuID, RaceCount: 1, Packages: []CUTestPackageV1{{Package: "./internal/proxy", TopLevelTests: []string{"TestFixture"}, FullTestIDs: []string{"TestFixture"}, MinimumPassCount: 1}}})
@@ -2535,7 +2535,7 @@ func TestParseCUManifestAcceptsClosedCU0Selection(t *testing.T) {
 }
 
 func TestCanonicalCUManifestV1ProvidesPinnedCU0Selection(t *testing.T) {
-	data, err := CanonicalCUManifestV1("CU-0")
+	data, err := legacyCUManifestV1("CU-0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2557,7 +2557,7 @@ func TestCanonicalCUManifestV1ProvidesPinnedCU0Selection(t *testing.T) {
 			t.Fatalf("CU-0 manifest package %s has %d tests, want %d", selection.Package, got, want)
 		}
 	}
-	cu1Data, err := CanonicalCUManifestV1("CU-1")
+	cu1Data, err := legacyCUManifestV1("CU-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2574,7 +2574,7 @@ func TestCanonicalCUManifestV1ProvidesPinnedCU0Selection(t *testing.T) {
 			t.Fatalf("CU-1 manifest package %s has %d tests, want %d", selection.Package, got, want)
 		}
 	}
-	cu2Data, err := CanonicalCUManifestV1("CU-2")
+	cu2Data, err := legacyCUManifestV1("CU-2")
 	if err != nil {
 		t.Fatal(err)
 	}

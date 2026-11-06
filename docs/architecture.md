@@ -108,10 +108,10 @@ continuity or capability restriction. Public/TTY pool labels use names, not UUID
 or an added `Proxy` prefix; report labels share a terminal-cell-width alignment.
 The store and planner tests are authority for migration and ordering details.
 
-The [frozen proxy reference](reference/README.md) retains the exact reviewed
-construction authority and its review sibling. Its historical baseline and
-logical path are intentionally fixed. Use current source/tests and this guide
-for the implemented package map; preserve the reference bytes during moves.
+Current [routing-policy types and validation](../internal/proxy/routing_policy_store.go),
+[capability routing](../internal/proxy/capability_routing.go) and their tests define
+the implemented contracts. Historical planning and review documents are not
+runtime or clean-checkout verification dependencies.
 
 ## Banked resets
 

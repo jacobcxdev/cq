@@ -685,4 +685,4 @@ Proxy endpoints also expose model metadata and authenticated registry refresh/sn
 
 ## Command and operation reference
 
-The [complete command index](../README.md#complete-command-index) is checked against the public command tree. Use leaf help, for example `cq zai resets use --help`, for argument selectors and confirmation flags. The [release guide](releases.md) covers advanced installed validation, canary, candidate lifecycle, operation recovery and legacy endpoint transitions. The [frozen routing reference](reference/README.md) supplies protocol authority; it is not a beginner setup sequence.
+The [complete command index](../README.md#complete-command-index) is checked against the public command tree. Use leaf help, for example `cq zai resets use --help`, for argument selectors and confirmation flags. The [release guide](releases.md) covers advanced installed validation, canary, candidate lifecycle, operation recovery and legacy endpoint transitions. Current [routing-policy types and validation](../internal/proxy/routing_policy_store.go) define the implemented policy format.

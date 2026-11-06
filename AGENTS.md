@@ -23,7 +23,7 @@ go run ./cmd/cq check claude      # Run (single provider)
 - **Concurrent fetch:** Each provider runs in its own goroutine with panic recovery
 - **Aggregate layer:** Weighted pace, correction-deadline gauge, and burndown across 2+ accounts
 
-The [architecture guide](docs/architecture.md) covers runtime ownership, credentials, routing pools, resets, installation and harness contracts. The [release guide](docs/releases.md) covers packaging and delivery. Current source and tests remain authority; the [frozen proxy reference](docs/reference/README.md) retains historical reviewed bytes.
+The [architecture guide](docs/architecture.md) covers runtime ownership, credentials, routing pools, resets, installation and harness contracts. The [release guide](docs/releases.md) covers packaging and delivery. Current source and tests remain authority.
 
 ## Package Structure
 
@@ -125,7 +125,7 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 - Every rule: test the happy path, the error path, and at least one edge case
 
 - Native macOS changes also require `swift test --package-path native/macos-network --sanitize thread` and the applicable signed/installed gates; a Go cross-build does not qualify native behaviour.
-- Keep implementation plans and task evidence in ignored `docs/superpowers/`. Maintain current product/maintainer contracts in tracked guides, and preserve frozen reference bytes and their verification consumers.
+- Keep implementation plans and review evidence local and ignored. Maintain current product/maintainer contracts in published guides; local planning and review records are not clean-checkout dependencies.
 
 ## What NOT To Do
 
