@@ -1,0 +1,15 @@
+name: Question
+description: Ask about using CQ.
+labels: [question, needs-triage]
+assignees: [jacobcxdev]
+body:
+  - type: markdown
+    attributes:
+      value: This issue is public. Do not include credentials, private prompts or raw logs.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to understand? Include your CQ version and platform if relevant.
+    validations:
+      required: true

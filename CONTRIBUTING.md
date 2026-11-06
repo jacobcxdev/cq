@@ -49,6 +49,30 @@ see [the native README](native/macos-network/README.md). Cross-builds check Go
 compilation only; they do not qualify service managers, MSI packages, native
 admission or installed traffic on another platform.
 
+## Issue triage
+
+Bug, feature and question forms apply `bug`, `enhancement` or `question`, plus
+`needs-triage`, and assign `jacobcxdev`. The **Issue triage** workflow queues new
+and reopened issues, including issues created without a form, and assigns
+`jacobcxdev` only when no owner is set. Existing labels and owners are preserved.
+It uses the repository's `GITHUB_TOKEN` with only `issues: write`; no extra
+service, secret or issue-content evaluation is required.
+
+Create the `needs-triage` repository label before enabling the workflow. To
+queue an existing open issue after the workflow reaches `main`, run:
+
+```sh
+gh workflow run issue-triage.yml --repo jacobcxdev/cq -f issue_number=317
+```
+
+During human triage, confirm the category and owner, check duplicates and missing
+evidence, then remove `needs-triage` once the next action is clear. Use
+`needs-info` when investigation needs more evidence, and remove it when that
+evidence arrives. Category and priority decisions remain with the maintainer;
+a report is not a confirmed cause.
+Blank issues remain available and enter the same queue. The bot adds no comments
+and does not close issues automatically.
+
 ## Branching Model
 
 cq uses trunk-based development on `main`.
