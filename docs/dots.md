@@ -166,6 +166,8 @@ On older pinned renderers CQ gives shared Dot room/history reads their own reque
 
 Native messaging starts its primary WebSocket without waiting for secondary account URL lookups. Each secondary connects independently and reconnects after failures with a delay capped at 30 seconds, restoring active subscriptions and presence. An unavailable broker returns a retryable bootstrap error instead of silently leaving secondary Dots on a primary-only connection. This recovery never retries message sends.
 
+Native voice calls to secondary Dots use the owning account for call creation, attachment, connection refresh and stopping. CQ preserves the app's call response and never retries a failed or uncertain voice operation.
+
 ## Current limits
 
 Discovery includes each available owner’s existing primary Dot. Empty accounts do not gain onboarding slots. Native cross-account `@` selection and persistent secondary Reboot remain unsupported. Secondary local execution uses native task sandboxing and separate account state; a synthetic file-read task has been verified end to end. Local MCP configuration is not copied between accounts. Connection status comes from the owning account's backend, including offline and permission states.
