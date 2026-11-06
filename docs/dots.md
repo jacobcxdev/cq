@@ -33,12 +33,15 @@ For an account without an onboarded Dot, choose one of these routes:
   browser traffic; if onboarding is region-restricted, the browser needs its
   own suitable US connection. A private window separates sign-ins but does not
   change the browser's region.
-- **Desktop:** at a suitable break in active work, sign out of the ChatGPT app
-  and sign in to the secondary account. Complete its normal primary Dot setup,
-  then sign back in to the original system account. Use the app's own sign-in
-  flow; changing CQ's routing selection is not a native ChatGPT account switch.
-  Coordinate any required restart rather than assuming sign-in changes are
-  safe during active sessions.
+- **Desktop:** at a suitable break in active work, quit ChatGPT and open the
+  original ChatGPT app **without the multi-account adapter**, rather than
+  `ChatGPT via CQ`. Sign out and sign in to the secondary account, complete its
+  normal primary Dot setup, then sign back in to the original system account
+  and quit the app. CQ Network can remain enabled for US routing throughout.
+  Use the app's own sign-in flow; changing CQ's routing selection is not a
+  native ChatGPT account switch. Then sync CQ and reopen through CQ as described
+  below. Do not change native accounts inside an already-adapted session: its
+  catalogue and ownership bindings belong to the original system account.
 
 ```sh
 cq codex dots install

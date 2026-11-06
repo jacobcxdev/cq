@@ -164,9 +164,11 @@ Private Relay or Keychain trust as a speculative repair.
 
 Follow [the Dots installation guide](dots.md#install). Each secondary entry is
 the owning account's already-onboarded primary Dot. If setup is missing, use a
-separate browser profile/private window, or coordinate signing the desktop app
-into that account, completing normal onboarding and returning to the original
-account. A private browser window does not change its region; CQ Network's
+separate browser profile/private window, or coordinate a quit and open the
+original desktop app without the multi-account adapter. Sign into that account,
+complete normal onboarding, restore the original account and quit before
+reopening through CQ. Do not switch native accounts inside an adapted session.
+A private browser window does not change its region; CQ Network's
 ChatGPT route does not cover the browser. After onboarding, sync CQ and arrange
 a relaunch through CQ when `restart_required` is reported.
 
