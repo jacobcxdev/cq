@@ -85,6 +85,7 @@ type Capability struct {
 	NativeID     string   `json:"native_id"`
 	Path         string   `json:"path,omitempty"`
 	PluginID     string   `json:"plugin_id,omitempty"`
+	MCPServers   []string `json:"mcp_servers,omitempty"`
 	Enabled      bool     `json:"enabled"`
 	Available    bool     `json:"available"`
 	Dependencies []string `json:"dependencies,omitempty"`

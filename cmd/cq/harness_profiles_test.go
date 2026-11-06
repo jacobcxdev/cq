@@ -875,6 +875,56 @@ func TestCodexHarnessExplainDistinguishesMatchingAndOutdatedReceipts(t *testing.
 	}
 }
 
+func TestCodexHarnessExplainReportsCurrentApplicationMode(t *testing.T) {
+	definition := harness.Definition{Changes: harness.Changes{Default: harness.Disabled}}
+	inventory := harness.Inventory{Capabilities: []harness.Capability{}}
+	fingerprint := harnessExplainPlan(t, definition, inventory, nil).Effective.Selection.Fingerprint
+	for _, mode := range []string{"plugins", "full"} {
+		t.Run(mode, func(t *testing.T) {
+			receipt := &harness.Receipt{Version: 1, ChatID: harnessProfilesChat, Mode: mode, Profile: harness.Minimal, State: "partial", Source: "global", Model: "gpt-6.1", Cwd: "/work/project", Fingerprint: fingerprint, UpdatedAt: time.Now().UTC()}
+			result := harnessExplainPlan(t, definition, inventory, receipt)
+			raw, _ := json.Marshal(result.ApplicationStatus)
+			var status map[string]string
+			_ = json.Unmarshal(raw, &status)
+			if status["mode"] != mode || status["state"] != "partial" {
+				t.Fatalf("actual application mode was omitted or state replaced: %s", raw)
+			}
+			receipt.Fingerprint = "outdated"
+			result = harnessExplainPlan(t, definition, inventory, receipt)
+			raw, _ = json.Marshal(result.ApplicationStatus)
+			_ = json.Unmarshal(raw, &status)
+			if strings.Contains(string(raw), `"mode"`) {
+				t.Fatal("outdated receipt established a current control mode")
+			}
+		})
+	}
+}
+
+func TestCodexHarnessExplainDoesNotReuseModeAcrossContexts(t *testing.T) {
+	definition := harness.Definition{Changes: harness.Changes{Default: harness.Disabled}}
+	inventory := harness.Inventory{Capabilities: []harness.Capability{}}
+	fingerprint := harnessExplainPlan(t, definition, inventory, nil).Effective.Selection.Fingerprint
+	for _, context := range []string{"chat", "model", "project", "unknown"} {
+		t.Run(context, func(t *testing.T) {
+			receipt := &harness.Receipt{Version: 1, ChatID: harnessProfilesChat, Mode: "full", Profile: harness.Minimal, State: "applied", Source: "global", Model: "gpt-6.1", Cwd: "/work/project", Fingerprint: fingerprint, UpdatedAt: time.Now().UTC()}
+			switch context {
+			case "chat":
+				receipt.ChatID = "019c7714-3b77-74d1-9866-e1f484aae2ab"
+			case "model":
+				receipt.Model = "glm-5.3"
+			case "project":
+				receipt.Cwd = "/different"
+			case "unknown":
+				receipt.Model, receipt.Cwd = "", ""
+			}
+			result := harnessExplainPlan(t, definition, inventory, receipt)
+			if result.ApplicationStatus.State != "pending" || result.ApplicationStatus.Reason != "outdated" || result.ApplicationStatus.Mode != "" {
+				t.Fatalf("different receipt context established current mode: %#v", result.ApplicationStatus)
+			}
+		})
+	}
+}
+
 func TestCodexHarnessExplainClassifiesUnmanagedAndFullWithoutReceipt(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "disabled", true: "unbound"}[enabled], func(t *testing.T) {

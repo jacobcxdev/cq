@@ -52,11 +52,6 @@ func SelectCapabilities(effective Effective, inventory Inventory, baseline func(
 		}
 		selection.Enabled[capability.Kind][capability.ID] = wanted
 	}
-	for _, entry := range inventory.Issues {
-		if applicationIssueRelevant(effective, entry, selection) {
-			issue(entry.Code + ":" + string(entry.Kind) + ":" + entry.ID)
-		}
-	}
 	for kind, items := range map[Kind]map[string]Decision{PluginKind: effective.Changes.Plugins, MCPKind: effective.Changes.MCP, SkillKind: effective.Changes.Skills} {
 		for id, decision := range items {
 			if id != "*" && decision == Enabled {
@@ -123,6 +118,13 @@ func SelectCapabilities(effective Effective, inventory Inventory, baseline func(
 			queue = append(queue, dependency)
 		}
 	}
+	// Dependencies may select a plugin which was not requested directly.
+	// Evaluate metadata gaps against that final selection, not its initial seed.
+	for _, entry := range inventory.Issues {
+		if applicationIssueRelevant(effective, entry, selection) {
+			issue(entry.Code + ":" + string(entry.Kind) + ":" + entry.ID)
+		}
+	}
 	sort.Strings(selection.Issues)
 	return selection
 }
@@ -138,6 +140,10 @@ func requestedDecision(effective Effective, kind Kind, id string) Decision {
 }
 
 func applicationIssueRelevant(effective Effective, entry InventoryIssue, selection CapabilitySelection) bool {
+	if entry.Code == "plugin_mcp_ownership_unresolved" {
+		changed := len(effective.Changes.Plugins)+len(effective.Changes.MCP)+len(effective.Changes.Skills) > 0 || (effective.Changes.Default != "" && effective.Changes.Default != Inherit)
+		return changed && entry.Kind == PluginKind && entry.ID != "" && selection.Wants(PluginKind, entry.ID)
+	}
 	items := map[Kind]map[string]Decision{PluginKind: effective.Changes.Plugins, MCPKind: effective.Changes.MCP, SkillKind: effective.Changes.Skills}[entry.Kind]
 	touched := len(items) > 0 || (effective.Changes.Default != "" && effective.Changes.Default != Inherit)
 	if entry.Code == "inventory_incomplete" {

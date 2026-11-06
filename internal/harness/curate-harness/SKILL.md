@@ -27,7 +27,9 @@ Use CQ's CLI; make task-specific choices without another MCP or model service.
    supply `--model ID` when native model lookup is unavailable.
 5. Select relevant capabilities and available dependencies. A plugin-owned skill
    may require its plugin and expose coupled tools. Use exact stable inventory
-   IDs. Read details only for plausible candidates. Never store native paths,
+   IDs. Plugins are bundles: selecting one includes its declared `mcp_servers`;
+   standalone MCP rows are controlled separately. Read details only for plausible
+   candidates. Never store native paths,
    versioned cache locations, commands, URLs, environment values or credentials.
 6. Save a Definition JSON containing description and changes. Decisions are
    enabled/disabled/inherit in plugins, mcp and skills maps. Use default:disabled
@@ -43,8 +45,11 @@ Use CQ's CLI; make task-specific choices without another MCP or model service.
    chat bindings or receipts. Follow actual CLI help for flags.
 8. Re-read explain before reporting. Distinguish saved/requested/pending/partial
    from confirmed application. State retained/removed capabilities and scope
-   briefly. Standard Desktop enforces plugins only; never claim standalone MCP
-   or skill removal there. Report unsupported controls, missing capabilities and
+   briefly. Read `application_status.mode` from the current receipt: `full`
+   covers plugins, standalone MCP servers and local skills; `plugins` covers
+   plugins only. Do not infer the active mode from launch method or generic help.
+   If no current receipt establishes the mode, report it as unconfirmed.
+   Report unsupported controls, missing capabilities and
    dependency conflicts. Existing history/catalogue text stays intact.
 
 Keep CQ's small curation entrypoint and native core tools available. Native child
