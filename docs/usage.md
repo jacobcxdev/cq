@@ -330,7 +330,7 @@ cq codex harness profile copy review project-review --project /path/to/project
 cq codex harness bind project-review --scope project --project /path/to/project --model 'gpt-*'
 ```
 
-`export` writes JSON with `version: 1`, `name`, and a `definition` containing only its description and changes. `profile save --file` accepts the raw definition; `import --file` accepts the exported envelope and uses its name unless `--name` is supplied. Importing does not bind or activate the profile. Skill decisions use stable inventory IDs such as `repo:review`, not absolute paths. User definitions live in CQ's private `harness.json`; an explicit `--project` saves definitions and rules in that project's `.cq/harness.json`. Project writes promote legacy policy without enabling it or changing its existing choices.
+`export` writes JSON with `version: 1`, `name`, and a `definition` containing only its description and changes. `profile save --file` accepts either the raw definition or the exported envelope, using the explicit save name; `import --file` accepts the exported envelope and uses its name unless `--name` is supplied. Neither operation binds or activates the profile. Skill decisions use stable inventory IDs such as `repo:review`, not absolute paths. User definitions live in CQ's private `harness.json`; an explicit `--project` saves definitions and rules in that project's `.cq/harness.json`. Project writes promote legacy policy without enabling it or changing its existing choices.
 
 The legacy GLM shortcuts remain available:
 
@@ -352,6 +352,8 @@ Native subagents inherit their parent's capability configuration. A child of a m
 CQ saves the original plugin exclusions privately and restores its own changes when the profile returns to `full`, the model changes, or policy is disabled. If user changes diverge from CQ's saved exclusions, CQ preserves them. Desktop lacks an atomic plugin-list comparison, so CQ checks fresh settings before updating and guards the current model and reasoning effort. `status --chat` reports the last recorded application scope and state, separately from a policy preview. `changes.reset: true` first clears inherited capability choices before applying that definition's changes. Use it only for an intentional fresh baseline. Profiles are disabled by default and stored in CQ's private `harness.json`; per-chat receipts share ownership between the standard controller and launcher.
 
 ## Connecting a client
+
+Compatible clients include desktop applications as well as terminal clients. ChatGPT Desktop's Codex chats use a Codex app-server backend; that backend can send supported model requests through CQ. Claude Code and compatible API clients can also connect. This does not make every desktop app or every ChatGPT conversation a CQ client: the application must support the required API, endpoint and authentication configuration.
 
 Install CQ with a complete installer, sign in to the relevant provider, and check `cq service status --json` first. A portable binary can instead run `cq proxy start` in a foreground terminal. The default endpoint is `http://127.0.0.1:19280`; substitute your configured port. Keep it on loopback.
 
@@ -386,6 +388,37 @@ Choose a real model in the client. A prompt such as “Reply with PONG” sends 
 Persistent client configuration can use the same `[model_providers.cq]` fields in the client's own config. Keep the token in a private environment/credential mechanism, preserve unrelated configuration, and consult the installed client's help. Removing the CQ provider selection restores the prior client endpoint. A model registry entry does not itself connect a client to CQ.
 
 ### ChatGPT Desktop integrations
+
+For ordinary **Codex chat account routing**, configure the app's actual Codex
+backend to use CQ's loopback Responses endpoint. A compatible app-server build
+can use a persistent custom-provider fragment in its Codex `config.toml`,
+normally beneath `~/.codex` unless its configuration home is overridden:
+
+```toml
+model_provider = "cq"
+
+[model_providers.cq]
+name = "CQ"
+base_url = "http://127.0.0.1:19280"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = true
+```
+
+Merge these fields into the client's existing configuration; do not overwrite
+unrelated settings or duplicate an existing provider table. This variant uses
+the client's existing recognised OpenAI sign-in rather than embedding CQ's local
+bearer. API-key style clients can instead use the local-bearer pattern above,
+but their credential environment must reach the app-server process. Exporting
+a token or base URL in one terminal does not configure an app launched from
+the Dock. Never replace native account credentials with the local bearer.
+
+Check which provider/configuration the running app actually uses and coordinate
+any reload or restart with the user. Verify a request from a real Desktop Codex
+chat reaches CQ, then inspect configured/effective HTTP and WebSocket routing
+modes before claiming account load balancing. The normal app icon can be used;
+ordinary model-request routing does not require the Dots launcher, a US tunnel
+or CQ Network. It does not route cloud work that never reaches this Mac's proxy.
 
 Normal ChatGPT launches can use the optional [native network integration](configuration.md#native-chatgpt-network-routing). It requires the signed macOS companion, WireGuard and explicit activation. Usage response handling has an additional certificate-trust step. These are separate from account routing and from [multi-account Dots](dots.md), which requires launching through `ChatGPT via CQ` or `cq codex dots start`.
 
@@ -541,6 +574,30 @@ Session selectors accept `--session-id`, `--session-id-stdin`, or a full keyed `
 Pool names are case-insensitive selectors and retain their configured display casing. Higher values preserve a pool's account capacity by routing ordinary unbound work through lower-value viable accounts first.
 
 The current Codex system account has an inherent preservation tier above every pool value because it may also serve clients on other hosts. Ordinary routing tries other eligible accounts first, even when soft affinity points to the system account. Within each tier, pool values retain their ordering. Hard continuation bindings and session-pool restrictions remain enforced, and the configured quota reserve still blocks protected system-account usage.
+
+Bindings select one exact session at a time. To keep several related chats
+within the same account group, bind each to the same pool. CQ does not provide
+an automatic parent/child session-family or conversation-bundling command.
+Account pools are separate from harness profiles, which select tools, plugins,
+MCP servers and skills rather than provider credentials.
+
+### Cyber-aware routing
+
+Use this when some Codex accounts have Cyber access and ordinary accounts do
+not. With routing-policy authority configured, CQ reads each account's own
+model catalogue and reconciles a generated `Cyber` pool from explicit access
+programme evidence. Background discovery runs every five minutes. Inspect
+`cq proxy policy status` for the current policy instead of manually declaring
+unknown accounts eligible.
+
+When a supported client sends an active Cyber access-programme request, CQ
+selects the generated pool for that request. The chat's saved ordinary pool
+binding remains intact, so turning Cyber access off does not rewrite it.
+Selection still checks the particular account, model and programme; membership
+alone does not grant entitlement. Failed/absent discovery is unknown rather
+than an explicit denial, while a confirmed upstream access denial temporarily
+excludes that exact combination. Do not fabricate capability evidence or imply
+that binding an account to a pool enrols it in an upstream programme.
 
 ### Lease redistribution and invalidation
 
