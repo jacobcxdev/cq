@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"os/exec"
@@ -78,6 +79,7 @@ type cloudSocket interface {
 }
 
 type cloudStdioDependencies struct {
+	gatewayListener          net.Listener
 	environment              []string
 	launch                   func(context.Context, string, []string, []string, io.Writer) (*cloudLocal, error)
 	stock                    func(context.Context, string, []string, []string, io.Reader, io.Writer, io.Writer) error
@@ -273,6 +275,23 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 		return err
 	}
 	b.harness = newCloudHarness(b)
+	if deps.gatewayListener != nil {
+		if b.harness == nil {
+			_ = deps.gatewayListener.Close()
+		} else {
+			gateway := newCloudHarnessGateway(b.harness)
+			b.harness.gateway = gateway
+			b.workers.Add(1)
+			go func() {
+				defer b.workers.Done()
+				b.guard("harness_gateway", func() {
+					if gateway.Serve(deps.gatewayListener) != nil {
+						b.event(map[string]any{"harness_gateway_unavailable": true})
+					}
+				})
+			}()
+		}
+	}
 	if b.harness != nil {
 		b.workers.Add(1)
 		go b.harness.run()

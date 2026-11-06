@@ -211,7 +211,17 @@ reload before then. Plugin exclusions still apply immediately through native
 settings; standalone MCP and skill configuration remains pending. Ephemeral
 chats retain that initial configuration because they cannot be reloaded from
 disk. Another native subscriber can retain an existing chat's configuration
-even when unsubscribe and resume both succeed. CQ checks the chat's effective
+even when unsubscribe and resume both succeed. The macOS launcher gives its
+stdio broker a private gateway listener. The existing CQ gateway forwards each
+qualified native process's relay to that same broker, preserving authentication,
+enrolment identity and public message sequences. At an idle boundary, CQ releases
+all known subscriptions for only the selected chat, reloads its configuration,
+then restores the other notification subscriptions without replaying history.
+Observed resume requests remain candidates when large history responses are
+chunked; native unsubscribe results establish which candidates were subscribed.
+Other chats and spawned children retain their subscriptions. Gateway reconnects
+preserve logical ownership; replayed traffic cannot repeat preparation or clear
+a newer active turn. CQ checks the chat's effective
 plugin feature and standalone MCP tools, resources and templates after reload.
 Retained or unverified controls produce a `partial` receipt and leave the chat
 usable. Skills have no independent per-chat readback; changed skill settings

@@ -122,7 +122,7 @@ func TestCloudHarnessSelectiveTaskChangeWaitedForIdleAndChangedSameCustomProfile
 	if len(f.messages("thread/resume")) != 0 {
 		t.Fatal("active custom chat was reloaded")
 	}
-	_, _ = f.localOutput.Write([]byte(`{"method":"turn/completed","params":{"threadId":"` + id + `","turn":{"id":"turn"}}}` + "\n"))
+	f.completeStoredTurn(id)
 	deadline := time.NewTimer(3 * time.Second)
 	defer deadline.Stop()
 	for len(f.messages("thread/resume")) == 0 {
@@ -223,7 +223,7 @@ func TestCloudHarnessSelectiveEmptyChatWaitedForDurableHistory(t *testing.T) {
 			if len(f.messages("thread/unsubscribe")) != 0 || len(f.messages("thread/resume")) != 0 {
 				t.Fatal("empty chat was released before it had durable history")
 			}
-			_, _ = f.localOutput.Write([]byte(`{"method":"turn/completed","params":{"threadId":"` + id + `","turn":{"id":"first"}}}` + "\n"))
+			f.completeStoredTurn(id)
 			if ephemeral {
 				f.request(4, "thread/settings/update", map[string]any{"threadId": id, "disabledPluginIds": []string{"keep@market", "manual@market"}})
 				f.setPolicy(originalPolicy)
@@ -343,7 +343,7 @@ func TestCloudHarnessSelectiveFullRestoredManualChoicesWithoutPolicyEchoes(t *te
 	f.request(3, "turn/start", map[string]any{"threadId": id, "disabledPluginIds": []string{"manual@market", "drop@market"}})
 	f.request(4, "thread/settings/update", map[string]any{"threadId": id, "disabledPluginIds": []string{"manual@market", "drop@market", "keep@market"}})
 	f.setPolicy(harness.Policy{Version: 2, Enabled: true, Global: harness.Scope{All: harness.Binding{Profiles: []string{"full"}}}})
-	_, _ = f.localOutput.Write([]byte(`{"method":"turn/completed","params":{"threadId":"` + id + `","turn":{"id":"turn"}}}` + "\n"))
+	f.completeStoredTurn(id)
 	f.waitEvent(id, "applied", "full")
 	updates := f.messages("thread/settings/update")
 	var params struct {
@@ -366,7 +366,7 @@ func TestCloudHarnessSelectiveFullClearedPluginExclusionsWithAnArray(t *testing.
 	// user choice while retaining the exclusion applied by the policy.
 	f.request(4, "thread/settings/update", map[string]any{"threadId": id, "disabledPluginIds": []string{"drop@market"}})
 	f.setPolicy(harness.Policy{Version: 2, Enabled: true, Global: harness.Scope{All: harness.Binding{Profiles: []string{"full"}}}})
-	_, _ = f.localOutput.Write([]byte(`{"method":"turn/completed","params":{"threadId":"` + id + `","turn":{"id":"turn"}}}` + "\n"))
+	f.completeStoredTurn(id)
 	f.waitEvent(id, "applied", "full")
 	updates := f.messages("thread/settings/update")
 	params := cloudHarnessObject(updates[len(updates)-1]["params"])

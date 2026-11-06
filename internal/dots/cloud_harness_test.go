@@ -24,13 +24,15 @@ type cloudHarnessFixture struct {
 	models      map[string]string
 	plugins     map[string][]string
 	configs     map[string]cloudMessage
+	activeTurns map[string]string
 	globalModel string
 	next        int
+	nextTurn    int
 	onRequest   func(cloudMessage) (any, error, bool)
 }
 
 func newCloudHarnessFixture(t *testing.T) *cloudHarnessFixture {
-	f := &cloudHarnessFixture{cloudTestHarness: newCloudTestHarness(t), policy: harness.Policy{Version: 1, Enabled: true}, models: make(map[string]string), plugins: make(map[string][]string), configs: make(map[string]cloudMessage), globalModel: "glm-5.3"}
+	f := &cloudHarnessFixture{cloudTestHarness: newCloudTestHarness(t), policy: harness.Policy{Version: 1, Enabled: true}, models: make(map[string]string), plugins: make(map[string][]string), configs: make(map[string]cloudMessage), activeTurns: make(map[string]string), globalModel: "glm-5.3"}
 	f.deps.readHarnessPolicy = func() (harness.Policy, error) { f.mu.Lock(); defer f.mu.Unlock(); return f.policy, nil }
 	f.deps.harnessTimeout = 100 * time.Millisecond
 	f.deps.launch = func(_ context.Context, _ string, _ []string, _ []string, _ io.Writer) (*cloudLocal, error) {
@@ -134,7 +136,13 @@ func newCloudHarnessFixture(t *testing.T) *cloudHarnessFixture {
 					if mode.Settings.Model != "" {
 						f.models[id] = mode.Settings.Model
 					}
-					result = map[string]any{"turn": map[string]any{"id": "turn", "status": "inProgress"}, "model": f.models[id]}
+					f.nextTurn++
+					result = map[string]any{"turn": map[string]any{"id": fmt.Sprintf("turn-%d", f.nextTurn), "status": "inProgress"}, "model": f.models[id]}
+				}
+			}
+			if request.method() == "turn/start" && responseErr == nil {
+				if turnID := cloudHarnessString(cloudHarnessObject(cloudHarnessObject(cloudHarnessRaw(result))["turn"]), "id"); turnID != "" {
+					f.activeTurns[cloudThreadID(request["params"])] = turnID
 				}
 			}
 			f.mu.Unlock()
@@ -252,7 +260,13 @@ func (f *cloudHarnessFixture) startThread(model, cwd string) string {
 // Reload tests model an existing chat whose first turn has reached disk.
 func (f *cloudHarnessFixture) completeStoredTurn(id string) {
 	f.t.Helper()
-	raw := cloudHarnessRaw(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": id, "turn": map[string]string{"id": "stored-history", "status": "completed"}}})
+	f.mu.Lock()
+	turnID := f.activeTurns[id]
+	f.mu.Unlock()
+	if turnID == "" {
+		turnID = "stored-history"
+	}
+	raw := cloudHarnessRaw(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": id, "turn": map[string]string{"id": turnID, "status": "completed"}}})
 	if _, err := f.localOutput.Write(append(raw, '\n')); err != nil {
 		f.t.Fatal(err)
 	}
@@ -308,7 +322,7 @@ func TestCloudHarnessLoadedPolicyReloadAndModelReturnRestore(t *testing.T) {
 		t.Fatal("full sibling was reloaded")
 	}
 	// The completed notification is an idle boundary; no turn is interrupted.
-	_, _ = f.localOutput.Write([]byte(`{"method":"turn/completed","params":{"threadId":"` + first + `","turn":{"id":"turn","status":"completed"}}}` + "\n"))
+	f.completeStoredTurn(first)
 	f.request(22, "turn/start", map[string]any{"threadId": first, "model": "gpt-5.5", "unknown": "retained"})
 	f.waitEvent(first, "applied", "full")
 	resumes = f.messages("thread/resume")
@@ -342,7 +356,7 @@ func TestCloudHarnessActiveTurnDefersReloadUntilCompletion(t *testing.T) {
 	if len(f.messages("thread/unsubscribe")) != 0 {
 		t.Fatal("active turn subscription was released")
 	}
-	_, _ = f.localOutput.Write([]byte(`{"method":"turn/completed","params":{"threadId":"` + id + `"}}` + "\n"))
+	f.completeStoredTurn(id)
 	f.waitEvent(id, "applied", "minimal")
 	if len(f.messages("thread/unsubscribe")) != 1 || len(f.messages("turn/interrupt")) != 0 {
 		t.Fatal("idle boundary did not apply without interruption")
@@ -790,7 +804,7 @@ func TestCloudHarnessReloadPreservesLatestAcceptedNativeSettings(t *testing.T) {
 	id := cloudThreadID(started["result"])
 	f.request(3, "thread/settings/update", map[string]any{"threadId": id, "approvalPolicy": "on-request", "permissions": ":workspace", "serviceTier": nil, "effort": "xhigh", "summary": "detailed"})
 	f.request(4, "turn/start", map[string]any{"threadId": id, "runtimeWorkspaceRoots": []string{"/B"}})
-	_, _ = f.localOutput.Write([]byte(`{"method":"turn/completed","params":{"threadId":"` + id + `","turn":{"id":"turn"}}}` + "\n"))
+	f.completeStoredTurn(id)
 	f.setPolicy(harness.Policy{Version: 1, Enabled: true})
 	_, _ = f.localOutput.Write([]byte(`{"method":"thread/status/changed","params":{"threadId":"` + id + `","status":{"type":"idle"}}}` + "\n"))
 	f.waitEvent(id, "applied", "minimal")
