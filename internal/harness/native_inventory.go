@@ -56,6 +56,7 @@ type nativePluginMetadata struct {
 	Availability   *string                    `json:"availability"`
 	DisabledReason *string                    `json:"disabledReason"`
 	Interface      *nativeCapabilityInterface `json:"interface"`
+	RemotePluginID string                     `json:"remotePluginId"`
 }
 
 type nativeCapabilityInterface struct {
@@ -81,13 +82,9 @@ type nativeSkillMetadata struct {
 }
 
 type nativeCurationResponse struct {
-	Plugins *struct {
-		Marketplaces *[]struct {
-			Plugins *[]nativePluginMetadata `json:"plugins"`
-		} `json:"marketplaces"`
-		LoadErrors json.RawMessage `json:"marketplaceLoadErrors"`
-	} `json:"plugins"`
-	Skills *struct {
+	Plugins       *nativePluginInventory     `json:"plugins"`
+	PluginDetails map[string]json.RawMessage `json:"pluginDetails"`
+	Skills        *struct {
 		Data *[]struct {
 			Cwd    string                 `json:"cwd"`
 			Errors json.RawMessage        `json:"errors"`
@@ -99,6 +96,35 @@ type nativeCurationResponse struct {
 		Layers  *[]nativeInventoryConfigLayer `json:"layers"`
 		Origins map[string]json.RawMessage    `json:"origins"`
 	} `json:"config"`
+}
+
+type nativePluginInventory struct {
+	Marketplaces *[]struct {
+		Name    string                  `json:"name"`
+		Path    *string                 `json:"path"`
+		Plugins *[]nativePluginMetadata `json:"plugins"`
+	} `json:"marketplaces"`
+	LoadErrors json.RawMessage `json:"marketplaceLoadErrors"`
+}
+
+func nativePluginMCPServers(raw json.RawMessage, expected nativePluginMetadata) ([]string, bool) {
+	var detail struct {
+		Plugin *struct {
+			Summary *struct{ ID, Name string } `json:"summary"`
+			Servers *[]string                  `json:"mcpServers"`
+		} `json:"plugin"`
+	}
+	if json.Unmarshal(raw, &detail) != nil || detail.Plugin == nil || detail.Plugin.Summary == nil || detail.Plugin.Servers == nil || detail.Plugin.Summary.ID != expected.ID || detail.Plugin.Summary.Name != expected.Name {
+		return nil, false
+	}
+	servers := append([]string{}, (*detail.Plugin.Servers)...)
+	sort.Strings(servers)
+	for index, name := range servers {
+		if !inventoryIdentifier(name) || index > 0 && name == servers[index-1] {
+			return nil, false
+		}
+	}
+	return servers, true
 }
 
 type nativeInventoryConfigLayer struct {
@@ -147,6 +173,7 @@ func decodeNativeInventory(data []byte, cwd string) (Inventory, error) {
 		issue("inventory_incomplete", PluginKind, "")
 	}
 	plugins := make(map[string]Capability)
+	mcpOwners := make(map[string][]string)
 	for _, marketplace := range *response.Plugins.Marketplaces {
 		if marketplace.Plugins == nil {
 			return Inventory{}, fmt.Errorf("incomplete native plugin metadata")
@@ -163,6 +190,16 @@ func decodeNativeInventory(data []byte, cwd string) (Inventory, error) {
 				available = false
 			}
 			capability := Capability{ID: plugin.ID, Kind: PluginKind, NativeID: plugin.ID, Name: plugin.Name, Enabled: *plugin.Enabled, Available: available}
+			if *plugin.Installed {
+				var known bool
+				capability.MCPServers, known = nativePluginMCPServers(response.PluginDetails[plugin.ID], plugin)
+				if !known {
+					issue("plugin_mcp_ownership_unresolved", PluginKind, plugin.ID)
+				}
+				for _, server := range capability.MCPServers {
+					mcpOwners[server] = append(mcpOwners[server], plugin.ID)
+				}
+			}
 			if plugin.Interface != nil {
 				if plugin.Interface.DisplayName != "" {
 					capability.Name = plugin.Interface.DisplayName
@@ -314,9 +351,20 @@ func decodeNativeInventory(data []byte, cwd string) (Inventory, error) {
 						return Inventory{}, fmt.Errorf("invalid native skill dependency metadata")
 					}
 					resolved := false
-					if *dependency.Type == "mcp" && all[*dependency.Value] {
-						dependencies["mcp:"+*dependency.Value] = true
-						resolved = true
+					if *dependency.Type == "mcp" {
+						owners := mcpOwners[*dependency.Value]
+						standalone := all[*dependency.Value]
+						switch {
+						case len(owners) > 1 || standalone && len(owners) > 0:
+							issue("skill_dependency_ambiguous", SkillKind, id)
+							resolved = true
+						case standalone:
+							dependencies["mcp:"+*dependency.Value] = true
+							resolved = true
+						case len(owners) == 1:
+							dependencies["plugin:"+owners[0]] = true
+							resolved = true
+						}
 					}
 					if *dependency.Type == "plugin" {
 						if _, ok := plugins[*dependency.Value]; ok {
@@ -340,9 +388,6 @@ func decodeNativeInventory(data []byte, cwd string) (Inventory, error) {
 	}
 	if !matchedCwd {
 		return Inventory{}, fmt.Errorf("native skill inventory project missing")
-	}
-	if len(plugins) > 0 {
-		issue("plugin_mcp_coupling_unresolved", PluginKind, "")
 	}
 	sort.Slice(inventory.Capabilities, func(i, j int) bool {
 		left, right := inventory.Capabilities[i], inventory.Capabilities[j]
@@ -605,6 +650,74 @@ func (output *nativeCurationOutput) Write(data []byte) (int, error) {
 	return output.data.Write(data)
 }
 
+type nativeCurationRequest struct {
+	method, name, pluginID string
+	params                 any
+}
+
+// Plugin summaries identify the native read locator. Ambiguous or absent
+// locators are left without details so decoding reports that plugin's gap.
+// The protocol keeps its existing 128-message and 8 MiB bounds; at most 124
+// detail reads can follow initialization and the three base inventory reads.
+func nativePluginDetailRequests(raw json.RawMessage) []nativeCurationRequest {
+	var plugins nativePluginInventory
+	if json.Unmarshal(raw, &plugins) != nil || plugins.Marketplaces == nil {
+		return nil
+	}
+	type candidate struct {
+		id, locator string
+		params      map[string]string
+	}
+	var candidates []candidate
+	locators := make(map[string]int)
+	ids := make(map[string]int)
+	for _, marketplace := range *plugins.Marketplaces {
+		if marketplace.Plugins == nil {
+			continue
+		}
+		for _, plugin := range *marketplace.Plugins {
+			if plugin.Installed == nil || !*plugin.Installed || !inventoryIdentifier(plugin.ID) || !inventoryIdentifier(plugin.Name) {
+				continue
+			}
+			params := map[string]string{"pluginName": plugin.Name}
+			if marketplace.Path != nil {
+				path := *marketplace.Path
+				if !filepath.IsAbs(path) || filepath.Clean(path) != path || strings.ContainsRune(path, '\x00') {
+					continue
+				}
+				params["marketplacePath"] = path
+			} else {
+				if !inventoryIdentifier(marketplace.Name) {
+					continue
+				}
+				if plugin.RemotePluginID != "" {
+					if !inventoryIdentifier(plugin.RemotePluginID) {
+						continue
+					}
+					params["pluginName"] = plugin.RemotePluginID
+				}
+				params["remoteMarketplaceName"] = marketplace.Name
+			}
+			encoded, _ := json.Marshal(params)
+			locator := string(encoded)
+			locators[locator]++
+			ids[plugin.ID]++
+			candidates = append(candidates, candidate{id: plugin.ID, locator: locator, params: params})
+		}
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].id < candidates[j].id })
+	requests := make([]nativeCurationRequest, 0, min(len(candidates), 124))
+	for _, candidate := range candidates {
+		if locators[candidate.locator] == 1 && ids[candidate.id] == 1 {
+			requests = append(requests, nativeCurationRequest{method: "plugin/read", pluginID: candidate.id, params: candidate.params})
+			if len(requests) == 124 {
+				break
+			}
+		}
+	}
+	return requests
+}
+
 func runNativeCurationInventory(ctx context.Context, executable, cwd string, output io.Writer) error {
 	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
 		return fmt.Errorf("native inventory executable must be absolute and clean")
@@ -647,17 +760,31 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 	if err := encoder.Encode(map[string]any{"id": 1, "method": "initialize", "params": map[string]any{"clientInfo": map[string]any{"name": "cq_capability_inventory", "version": "0.0.0"}, "capabilities": map[string]any{"experimentalApi": true}}}); err != nil {
 		return err
 	}
-	requests := []struct {
-		method string
-		params any
-	}{
-		{"plugin/installed", map[string]any{"cwds": []string{cwd}}},
-		{"skills/list", map[string]any{"cwds": []string{cwd}, "forceReload": true}},
-		{"config/read", map[string]any{"cwd": cwd, "includeLayers": true}},
+	requests := []nativeCurationRequest{
+		{method: "plugin/installed", name: "plugins", params: map[string]any{"cwds": []string{cwd}}},
+		{method: "skills/list", name: "skills", params: map[string]any{"cwds": []string{cwd}, "forceReload": true}},
+		{method: "config/read", name: "config", params: map[string]any{"cwd": cwd, "includeLayers": true}},
 	}
 	phase, messages, totalBytes := 1, 0, 0
+	complete := false
 	responses := make(map[string]json.RawMessage)
-	names := []string{"plugins", "skills", "config"}
+	details := make(map[string]json.RawMessage)
+	nextDetail := 3
+	pendingDetails := make(map[string]nativeCurationRequest)
+	// Remote details are independent metadata reads. Keep a fixed window so
+	// installed catalogues fit the existing deadline without an unbounded fanout.
+	sendDetails := func() error {
+		for nextDetail < len(requests) && len(pendingDetails) < 8 {
+			request := requests[nextDetail]
+			id := nextDetail + 2
+			pendingDetails[strconv.Itoa(id)] = request
+			nextDetail++
+			if err := encoder.Encode(map[string]any{"id": id, "method": request.method, "params": request.params}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 64*1024), 4<<20)
 	for scanner.Scan() {
@@ -675,14 +802,42 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 		if json.Unmarshal(line, &message) != nil {
 			return fmt.Errorf("invalid native inventory protocol JSON")
 		}
-		if phase == 5 || string(message.ID) != strconv.Itoa(phase) {
+		if complete {
 			continue
 		}
-		if len(message.Error) > 0 && !bytes.Equal(bytes.TrimSpace(message.Error), []byte("null")) {
+		if phase == 5 {
+			key := string(message.ID)
+			request, ok := pendingDetails[key]
+			if !ok {
+				continue
+			}
+			delete(pendingDetails, key)
+			failed := len(message.Error) > 0 && !bytes.Equal(bytes.TrimSpace(message.Error), []byte("null"))
+			result := bytes.TrimSpace(message.Result)
+			if !failed && len(result) > 0 && result[0] == '{' {
+				details[request.pluginID] = append(json.RawMessage(nil), message.Result...)
+			}
+			if err := sendDetails(); err != nil {
+				return err
+			}
+			if len(pendingDetails) == 0 {
+				complete = true
+				if err := stdin.Close(); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if string(message.ID) != strconv.Itoa(phase) {
+			continue
+		}
+		failed := len(message.Error) > 0 && !bytes.Equal(bytes.TrimSpace(message.Error), []byte("null"))
+		if failed {
 			return fmt.Errorf("native inventory request rejected")
 		}
 		result := bytes.TrimSpace(message.Result)
-		if len(result) == 0 || result[0] != '{' {
+		valid := len(result) > 0 && result[0] == '{'
+		if !valid {
 			return fmt.Errorf("invalid native inventory response")
 		}
 		if phase == 1 {
@@ -690,12 +845,22 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 				return err
 			}
 		} else {
-			responses[names[phase-2]] = append(json.RawMessage(nil), message.Result...)
+			request := requests[phase-2]
+			responses[request.name] = append(json.RawMessage(nil), message.Result...)
+			if request.name == "plugins" {
+				requests = append(requests, nativePluginDetailRequests(message.Result)...)
+			}
 		}
 		phase++
 		if phase == 5 {
-			if err := stdin.Close(); err != nil {
+			if err := sendDetails(); err != nil {
 				return err
+			}
+			if len(pendingDetails) == 0 {
+				complete = true
+				if err := stdin.Close(); err != nil {
+					return err
+				}
 			}
 			continue
 		}
@@ -704,11 +869,15 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 			return err
 		}
 	}
-	if scanner.Err() != nil || phase != 5 {
+	if scanner.Err() != nil || !complete {
 		return fmt.Errorf("incomplete native inventory protocol")
 	}
 	err = command.Wait()
 	waited = true
+	if err != nil {
+		return err
+	}
+	responses["pluginDetails"], err = json.Marshal(details)
 	if err != nil {
 		return err
 	}

@@ -66,7 +66,7 @@ func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, sel
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(root) })
-	for _, name := range []string{"home", "codex", "work", "minimal-work", "tmp", "cache", "config", "data"} {
+	for _, name := range []string{"home", "codex", "work", "minimal-work", "dependency-work", "tmp", "cache", "config", "data"} {
 		if err := os.Mkdir(filepath.Join(root, name), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -89,6 +89,8 @@ func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, sel
 	write("market/.claude-plugin/marketplace.json", `{"name":"cq-harness-market","owner":{"name":"CQ"},"plugins":[{"name":"probe-plugin","source":"./plugins/probe-plugin","description":"Synthetic plugin"}]}`)
 	if selective {
 		write("codex/skills/design-skill/SKILL.md", "---\nname: design-skill\ndescription: CQ_HARNESS_DESIGN_SKILL_MARKER\n---\nSynthetic design skill.\n")
+		write("codex/skills/bundle-dependent/SKILL.md", "---\nname: bundle-dependent\ndescription: CQ_HARNESS_DEPENDENCY_SKILL_MARKER\n---\nSynthetic skill requiring a plugin MCP.\n")
+		write("codex/skills/bundle-dependent/agents/openai.yaml", "dependencies:\n  tools:\n    - type: \"mcp\"\n      value: \"pluginprobe\"\n      description: \"Synthetic plugin MCP\"\n")
 		write("codex/skills/curate-harness/SKILL.md", "---\nname: curate-harness\ndescription: CQ_HARNESS_CURATION_SKILL_MARKER\n---\nSynthetic curation entrypoint.\n")
 		write("market/plugins/design-plugin/skills/design-plugin-skill/SKILL.md", "---\nname: design-plugin-skill\ndescription: CQ_HARNESS_DESIGN_PLUGIN_SKILL_MARKER\n---\nSynthetic design plugin skill.\n")
 		manifest, _ := json.Marshal(map[string]any{"name": "design-plugin", "version": "1.0.0", "description": "Synthetic design plugin", "skills": "./skills/", "mcpServers": map[string]any{"designplugin": mcp}})
@@ -153,7 +155,7 @@ func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, sel
 			if observation.Markers == nil {
 				observation.Markers = make(map[string]int)
 			}
-			for name, marker := range map[string]string{"research": "CQ_HARNESS_SKILL_MARKER", "research-plugin": "CQ_HARNESS_PLUGIN_SKILL_MARKER", "design": "CQ_HARNESS_DESIGN_SKILL_MARKER", "design-plugin": "CQ_HARNESS_DESIGN_PLUGIN_SKILL_MARKER", "curation": "CQ_HARNESS_CURATION_SKILL_MARKER", "developer": "CQ_HARNESS_DEVELOPER_MARKER"} {
+			for name, marker := range map[string]string{"research": "CQ_HARNESS_SKILL_MARKER", "research-plugin": "CQ_HARNESS_PLUGIN_SKILL_MARKER", "design": "CQ_HARNESS_DESIGN_SKILL_MARKER", "design-plugin": "CQ_HARNESS_DESIGN_PLUGIN_SKILL_MARKER", "curation": "CQ_HARNESS_CURATION_SKILL_MARKER", "developer": "CQ_HARNESS_DEVELOPER_MARKER", "dependency": "CQ_HARNESS_DEPENDENCY_SKILL_MARKER"} {
 				observation.Markers[name] += strings.Count(text, marker)
 			}
 		}
@@ -476,6 +478,20 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 					}
 					want[key] = true
 				}
+				if capability.Kind == harness.PluginKind && (capability.ID == researchPlugin || capability.ID == designPlugin) {
+					raw, _ := json.Marshal(capability)
+					var metadata struct {
+						MCPServers []string `json:"mcp_servers"`
+					}
+					_ = json.Unmarshal(raw, &metadata)
+					server := "pluginprobe"
+					if capability.ID == designPlugin {
+						server = "designplugin"
+					}
+					if !slices.Equal(metadata.MCPServers, []string{server}) {
+						t.Fatalf("native plugin bundle ownership missing for %s", capability.ID)
+					}
+				}
 			}
 			for key, found := range want {
 				if !found {
@@ -564,8 +580,8 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			t.Fatal("native standalone skill suppression did not keep the selected plugin-owned skill")
 		}
 		deltaReceipt, err := receipts.Load(chat)
-		if err != nil || deltaReceipt.Fingerprint == "" || deltaReceipt.State != "partial" {
-			t.Fatal("selective receipt omitted fingerprint or truthful native coupling limitation")
+		if err != nil || deltaReceipt.Fingerprint == "" || deltaReceipt.State != "applied" || len(deltaReceipt.Issues) != 0 || len(deltaReceipt.Unsupported) != 0 {
+			t.Fatal("verified selective plugin bundles did not produce a complete application receipt")
 		}
 		gpt := turn("selective-model-change-restored-subset", chat, "Synthetic selective model change", map[string]any{"model": "gpt-5.5"})
 		assertSelective("task-gpt", gpt, true, true, true, false)
@@ -646,7 +662,57 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		if resumes < 6 {
 			t.Fatalf("selective fingerprint changes did not reload the same chat: %d", resumes)
 		}
-		t.Logf("selective installed accepted: same-chat-reloads=%d task-sibling-reloads=0 workspace-sibling-reloads=%d outsider-reloads=0 stable-inventory-fixtures=9 custom-receipt=partial-for-plugin-MCP-coupling external-cloud-requests=0", resumes, workspaceSiblingResumes)
+		if _, err := harness.Update(fsys, policyPath, func(policy *harness.Policy) error {
+			policy.Workspaces = map[string]harness.Scope{filepath.Join(root, "dependency-work"): {All: harness.Binding{Changes: harness.Changes{Reset: true, Default: harness.Disabled, Skills: map[string]harness.Decision{"user:bundle-dependent": harness.Enabled}}}}}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		dependentChat := startSelective("glm-5.3", filepath.Join(root, "dependency-work"))
+		dependent := turn("selective-skill-enabled-owning-plugin", dependentChat, "Synthetic bundled MCP dependency", nil)
+		assertSelective("dependency-owner", dependent, false, false, true, false)
+		if dependent.Markers["dependency"] == 0 {
+			t.Fatal("selected dependent skill was absent from native catalogue")
+		}
+		assertFreshSkills(dependent, false, false, false, false)
+		dependencyReceipt, err := receipts.Load(dependentChat)
+		if err != nil || dependencyReceipt.State != "applied" || len(dependencyReceipt.Issues) != 0 || len(dependencyReceipt.Unsupported) != 0 {
+			t.Fatal("native dependency closure was not completely applied")
+		}
+		if _, err := harness.Update(fsys, policyPath, func(policy *harness.Policy) error {
+			policy.Tasks[outsideGLM] = harness.Scope{All: harness.Binding{Changes: harness.Changes{Reset: true, Default: harness.Disabled, Skills: map[string]harness.Decision{"user:bundle-dependent": harness.Enabled}}}}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		lateDependency := turn("selective-skill-reenabled-excluded-plugin", outsideGLM, "Synthetic late bundled MCP dependency", nil)
+		assertSelective("late-dependency-owner", lateDependency, false, false, true, false)
+		if lateDependency.Markers["dependency"] <= outsideRestricted.Markers["dependency"] {
+			t.Fatal("late dependency selection did not attach the selected skill")
+		}
+		lateReceipt, err := receipts.Load(outsideGLM)
+		if err != nil || lateReceipt.State != "applied" || len(lateReceipt.Issues) != 0 || len(lateReceipt.Unsupported) != 0 {
+			t.Fatal("late native dependency closure was not completely applied")
+		}
+		emptyChat := startSelective("glm-5.3", filepath.Join(root, "minimal-work"))
+		if _, err := harness.Update(fsys, policyPath, func(policy *harness.Policy) error {
+			policy.Tasks[emptyChat] = harness.Scope{All: harness.Binding{Changes: harness.Changes{Reset: true, Default: harness.Disabled, Skills: map[string]harness.Decision{"user:bundle-dependent": harness.Enabled}}}}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		emptyFirst := turn("selective-empty-chat-kept-subscription", emptyChat, "CQ_HARNESS_FIRST_USER", nil)
+		assertSelective("empty-chat-original-harness", emptyFirst, false, false, false, false)
+		emptyDependency := turn("selective-empty-chat-enabled-plugin", emptyChat, "Synthetic empty chat dependency", nil)
+		assertSelective("empty-chat-dependency-owner", emptyDependency, false, false, true, false)
+		if !emptyDependency.FirstUser || !emptyDependency.FirstReply || emptyDependency.Markers["dependency"] == 0 {
+			t.Fatal("deferred empty-chat reload lost its first turn or dependent skill")
+		}
+		emptyReceipt, err := receipts.Load(emptyChat)
+		if err != nil || emptyReceipt.State != "applied" || len(emptyReceipt.Issues) != 0 || len(emptyReceipt.Unsupported) != 0 {
+			t.Fatal("deferred empty-chat dependency was not completely applied")
+		}
+		t.Logf("selective installed accepted: same-chat-reloads=%d task-sibling-reloads=0 workspace-sibling-reloads=%d outsider-reloads=0 plugin-MCP-dependency=verified custom-receipt=applied external-cloud-requests=0", resumes, workspaceSiblingResumes)
 		return
 	}
 	if bridgeEnabled {

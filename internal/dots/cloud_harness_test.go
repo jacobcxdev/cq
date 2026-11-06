@@ -220,6 +220,17 @@ func (f *cloudHarnessFixture) startThread(model, cwd string) string {
 	return id
 }
 
+// Reload tests model an existing chat whose first turn has reached disk.
+func (f *cloudHarnessFixture) completeStoredTurn(id string) {
+	f.t.Helper()
+	raw := cloudHarnessRaw(map[string]any{"method": "turn/completed", "params": map[string]any{"threadId": id, "turn": map[string]string{"id": "stored-history", "status": "completed"}}})
+	if _, err := f.localOutput.Write(append(raw, '\n')); err != nil {
+		f.t.Fatal(err)
+	}
+	// The next native reply follows the notification on the same output pipe.
+	f.request(time.Now().UnixNano(), "thread/read", map[string]any{"threadId": id})
+}
+
 func (f *cloudHarnessFixture) waitEvent(threadID, state, profile string) map[string]any {
 	f.t.Helper()
 	deadline := time.NewTimer(3 * time.Second)
@@ -249,6 +260,7 @@ func TestCloudHarnessLoadedPolicyReloadAndModelReturnRestore(t *testing.T) {
 	f.initialize()
 	first := f.startThread("glm-5.3", "/project")
 	sibling := f.startThread("glm-5.3", "/project")
+	f.completeStoredTurn(first)
 	f.setPolicy(harness.Policy{Version: 1, Enabled: true, Chats: map[string]harness.Profile{sibling: harness.Full}})
 	f.request(20, "turn/start", map[string]any{"threadId": first})
 	f.waitEvent(first, "applied", "minimal")
@@ -314,6 +326,7 @@ func TestCloudHarnessFailedReloadResumesOriginalConfig(t *testing.T) {
 	f.start()
 	f.initialize()
 	id := f.startThread("glm-5.3", "/project")
+	f.completeStoredTurn(id)
 	f.mu.Lock()
 	f.policy.Enabled = true
 	f.onRequest = func(request cloudMessage) (any, error, bool) {
@@ -455,6 +468,7 @@ func TestCloudHarnessHandoffRestoresOnlyMatchingPluginBaseline(t *testing.T) {
 			f.start()
 			f.initialize()
 			id := f.startThread("glm-5.3", "/project")
+			f.completeStoredTurn(id)
 			applied := []string{"user-excluded@market"}
 			if diverged {
 				applied = []string{"different@market"}
@@ -629,6 +643,7 @@ func TestCloudHarnessCollaborationModeModelWinsForTurnPreflight(t *testing.T) {
 			f.start()
 			f.initialize()
 			id := f.startThread("gpt-5.5", "/project")
+			f.completeStoredTurn(id)
 			response := f.request(20, "turn/start", map[string]any{"threadId": id, "model": tc.top, "collaborationMode": map[string]any{"mode": "default", "settings": map[string]any{"model": tc.mode}}})
 			if len(response["error"]) != 0 {
 				t.Fatal("conflicting model turn failed")
@@ -696,6 +711,7 @@ func TestCloudHarnessFullRestoresDisabledUserDefaults(t *testing.T) {
 	f.start()
 	f.initialize()
 	id := f.startThread("glm-5.3", "/project")
+	f.completeStoredTurn(id)
 	f.setPolicy(harness.Policy{Version: 1, Enabled: true, Chats: map[string]harness.Profile{id: harness.Full}})
 	f.request(30, "turn/start", map[string]any{"threadId": id})
 	resumes := f.messages("thread/resume")
@@ -716,6 +732,7 @@ func TestCloudHarnessReloadUsesSettingsArrivingDuringConfigRead(t *testing.T) {
 	f.initialize()
 	started := f.request(2, "thread/start", map[string]any{"model": "glm-5.3", "cwd": "/project", "approvalPolicy": "never", "permissions": ":read-only"})
 	id := cloudThreadID(started["result"])
+	f.completeStoredTurn(id)
 	f.mu.Lock()
 	f.onRequest = func(request cloudMessage) (any, error, bool) {
 		if request.method() == "config/read" {
@@ -744,6 +761,7 @@ func TestCloudHarnessRejectedSettingsDoNotReplaceCurrentSettings(t *testing.T) {
 	f.initialize()
 	started := f.request(2, "thread/start", map[string]any{"model": "glm-5.3", "cwd": "/project", "approvalPolicy": "on-request", "permissions": ":workspace"})
 	id := cloudThreadID(started["result"])
+	f.completeStoredTurn(id)
 	f.mu.Lock()
 	f.onRequest = func(request cloudMessage) (any, error, bool) {
 		if request.method() == "thread/settings/update" && strings.Contains(string(request["params"]), `"permissions":":read-only"`) {

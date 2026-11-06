@@ -186,6 +186,12 @@ that baseline, not unconditional enablement. `full` resets to native behaviour;
 capabilities. Exported definitions contain stable capability IDs and portable
 rules, not private chat bindings or versioned installation paths.
 
+Plugins are controlled as bundles, including their declared MCP servers. The
+inventory exposes those server names on the owning plugin; standalone MCP rows
+remain independent controls. Native plugin detail metadata resolves a skill's
+MCP dependency to the owning plugin when unambiguous. A missing or ambiguous
+owner remains an explicit dependency issue rather than a guessed relationship.
+
 `profile save NAME --file FILE` accepts both a bare definition and the versioned
 document emitted by `profile show --json` or `export`. The explicit save name
 takes precedence over the document name. `import` uses the document name unless
@@ -195,10 +201,15 @@ symlinks remain rejected. Saving definitions does not bind or activate them.
 The complete native metadata inventory includes capabilities excluded from the
 current reduced context. Application receipts record effective fingerprints and
 supported/unsupported/pending outcomes; a saved policy alone is not application
-proof. Stock Desktop controls plugins only and cannot guarantee first-turn
-application. Launcher controls can cover standalone MCP/skills, subject to
-plugin coupling; internal child creation has no independent model-specific
-first-turn hook. Model/workspace changes restore the captured native baseline
+proof. `explain` reports the current receipt's application mode separately from
+its state; a `partial` full-bridge receipt still identifies full controls, with
+its remaining issues listed. Stock Desktop controls plugins only and cannot
+guarantee first-turn application. Launcher controls can cover standalone MCP
+servers and skills. Full configuration changes made after an empty chat starts
+wait until its first turn completes: native Codex has no durable history to
+reload before then. Ephemeral chats retain their initial configuration because
+they cannot be reloaded from disk. Internal child creation has no independent
+model-specific first-turn hook. Model/workspace changes restore the captured native baseline
 and recalculate policy while retaining chat history and user edits. Existing
 catalogue text already in history is not removed. The embedded
 [curation skill](../internal/harness/curate-harness/SKILL.md) describes the CLI

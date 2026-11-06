@@ -111,6 +111,7 @@ type harnessCapabilityDecision struct {
 type harnessApplicationStatus struct {
 	State  string `json:"state"`
 	Reason string `json:"reason"`
+	Mode   string `json:"mode,omitempty"`
 }
 
 type harnessExplanation struct {
@@ -735,10 +736,10 @@ func (runner codexHarnessRunner) harnessExplain(ctx context.Context, cmd CodexHa
 	}
 	result.ApplicationStatus = harnessApplicationStatus{State: "pending", Reason: "not_confirmed"}
 	if receipt := result.LastApplication; receipt != nil {
-		if receipt.Fingerprint != result.Effective.Selection.Fingerprint || receipt.Profile != result.Effective.Selection.Profile {
+		if receipt.Fingerprint != result.Effective.Selection.Fingerprint || receipt.Profile != result.Effective.Selection.Profile || receipt.ChatID != chat || receipt.Model != model || receipt.Cwd != project {
 			result.ApplicationStatus.Reason = "outdated"
 		} else {
-			result.ApplicationStatus = harnessApplicationStatus{State: receipt.State, Reason: "receipt_matches"}
+			result.ApplicationStatus = harnessApplicationStatus{State: receipt.State, Reason: "receipt_matches", Mode: receipt.Mode}
 		}
 	} else if !result.Effective.Selection.Managed {
 		result.ApplicationStatus = harnessApplicationStatus{State: "unmanaged", Reason: "not_managed"}
@@ -788,6 +789,12 @@ func (runner codexHarnessRunner) harnessExplain(ctx context.Context, cmd CodexHa
 	var text strings.Builder
 	fmt.Fprintf(&text, "Chat: %s\nProject: %s\nModel: %s\nSelection: %s (managed: %t, source: %s)\n", chat, project, model, result.Effective.Selection.Profile, result.Effective.Selection.Managed, result.Effective.Selection.Source)
 	fmt.Fprintf(&text, "Application: %s (%s)\n", result.ApplicationStatus.State, result.ApplicationStatus.Reason)
+	switch result.ApplicationStatus.Mode {
+	case "full":
+		text.WriteString("Application mode: full bridge (plugins, standalone MCP servers and local skills)\n")
+	case "plugins":
+		text.WriteString("Application mode: plugins only (standalone MCP servers and local skills unchanged)\n")
+	}
 	for _, layer := range result.Effective.Layers {
 		fmt.Fprintf(&text, "Layer: %s %s %s profiles=%s\n", layer.Scope, layer.Path, layer.Model, strings.Join(layer.Profiles, ","))
 	}

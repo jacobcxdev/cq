@@ -19,6 +19,32 @@ func TestCapabilitySelectionUsesFullInventoryAndDependencies(t *testing.T) {
 	}
 }
 
+func TestCapabilitySelectionOwnershipGapsFollowSelectedBundles(t *testing.T) {
+	inventory := Inventory{Capabilities: []Capability{
+		{Kind: PluginKind, ID: "owner", Enabled: true, Available: true},
+		{Kind: SkillKind, ID: "dependent", Enabled: true, Available: true, Dependencies: []string{"plugin:owner"}},
+		{Kind: MCPKind, ID: "standalone", Enabled: true, Available: true},
+	}, Issues: []InventoryIssue{{Code: "plugin_mcp_ownership_unresolved", Kind: PluginKind, ID: "owner"}}}
+	for _, test := range []struct {
+		name      string
+		changes   Changes
+		wantIssue bool
+	}{
+		{"unmanaged baseline", Changes{}, false},
+		{"plugins excluded", Changes{Default: Disabled, MCP: map[string]Decision{"standalone": Enabled}}, false},
+		{"explicit plugin", Changes{Default: Disabled, Plugins: map[string]Decision{"owner": Enabled}}, true},
+		{"plugin dependency", Changes{Default: Disabled, Skills: map[string]Decision{"dependent": Enabled}}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			selected := SelectCapabilities(Effective{Changes: test.changes}, inventory, nil)
+			found := slices.Contains(selected.Issues, "plugin_mcp_ownership_unresolved:plugin:owner")
+			if found != test.wantIssue {
+				t.Fatalf("bundle ownership gap relevance = %t, want %t; issues=%v", found, test.wantIssue, selected.Issues)
+			}
+		})
+	}
+}
+
 func TestCapabilitySelectionPreservesExplicitDenialsAndReportsMissing(t *testing.T) {
 	inventory := Inventory{Capabilities: []Capability{
 		{Kind: PluginKind, ID: "owner", Available: true},

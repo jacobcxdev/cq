@@ -19,10 +19,14 @@ import (
 )
 
 const nativeCurationFixture = `{
- "plugins":{"marketplaceLoadErrors":[],"marketplaces":[{"plugins":[
+ "plugins":{"marketplaceLoadErrors":[],"marketplaces":[{"name":"market","path":"/private/marketplace.json","plugins":[
   {"id":"one@market","name":"one","installed":true,"enabled":true,"availability":"AVAILABLE","interface":{"displayName":"One","shortDescription":"Native plugin description"}},
   {"id":"disabled@market","name":"disabled","installed":true,"enabled":false,"availability":"AVAILABLE"}
  ]}]},
+ "pluginDetails":{
+  "one@market":{"plugin":{"summary":{"id":"one@market","name":"one"},"mcpServers":[]}},
+  "disabled@market":{"plugin":{"summary":{"id":"disabled@market","name":"disabled"},"mcpServers":[]}}
+ },
  "skills":{"data":[{"cwd":"/work","errors":[],"skills":[
   {"name":"plain","description":"Plain skill","enabled":false,"path":"/home/skills/plain/SKILL.md","scope":"user"},
   {"name":"local","description":"Repo skill","enabled":true,"path":"/work/.agents/skills/local/SKILL.md","scope":"repo"},
@@ -40,6 +44,172 @@ func nativeCurationClient(data string) NativeInventory {
 		_, err := io.WriteString(output, data)
 		return err
 	}}
+}
+
+func nativeOwnershipFixture(t *testing.T, change func(map[string]any)) string {
+	t.Helper()
+	var fixture map[string]any
+	if json.Unmarshal([]byte(nativeCurationFixture), &fixture) != nil {
+		t.Fatal("decode native ownership fixture")
+	}
+	change(fixture)
+	data, err := json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestNativeInventoryKeptPluginMCPNamesAtomicIncludingDisabled(t *testing.T) {
+	data := nativeOwnershipFixture(t, func(fixture map[string]any) {
+		details := fixture["pluginDetails"].(map[string]any)
+		details["one@market"].(map[string]any)["plugin"].(map[string]any)["mcpServers"] = []string{"bundle-two", "bundle-one"}
+		details["disabled@market"].(map[string]any)["plugin"].(map[string]any)["mcpServers"] = []string{"dormant"}
+	})
+	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(inventory)
+	var decoded struct {
+		Capabilities []struct {
+			ID         string
+			Kind       Kind
+			MCPServers []string `json:"mcp_servers"`
+		}
+	}
+	_ = json.Unmarshal(encoded, &decoded)
+	for _, capability := range decoded.Capabilities {
+		if capability.ID == "one@market" && !slices.Equal(capability.MCPServers, []string{"bundle-one", "bundle-two"}) {
+			t.Fatal("enabled plugin lost its declared MCP names")
+		}
+		if capability.ID == "disabled@market" && !slices.Equal(capability.MCPServers, []string{"dormant"}) {
+			t.Fatal("disabled plugin lost its declared MCP names")
+		}
+		if capability.Kind == MCPKind && slices.Contains([]string{"bundle-one", "bundle-two", "dormant"}, capability.ID) {
+			t.Fatal("bundled MCP became independently controllable")
+		}
+	}
+	for _, issue := range inventory.Issues {
+		if issue.Kind == PluginKind {
+			t.Fatalf("complete atomic plugin metadata reported a gap: %s", issue.Code)
+		}
+	}
+}
+
+func TestNativeInventoryPluginMCPFailuresWereLocalAndPrivate(t *testing.T) {
+	for _, scenario := range []string{"missing", "rejected", "missing-servers", "null-servers", "wrong-type", "duplicate-name", "wrong-id", "wrong-name"} {
+		t.Run(scenario, func(t *testing.T) {
+			data := nativeOwnershipFixture(t, func(fixture map[string]any) {
+				details := fixture["pluginDetails"].(map[string]any)
+				plugin := details["one@market"].(map[string]any)["plugin"].(map[string]any)
+				switch scenario {
+				case "missing":
+					delete(details, "one@market")
+				case "rejected":
+					details["one@market"] = map[string]any{"error": map[string]any{"message": "private-secret", "url": "https://private-endpoint"}}
+				case "missing-servers":
+					delete(plugin, "mcpServers")
+				case "null-servers":
+					plugin["mcpServers"] = nil
+				case "wrong-type":
+					plugin["mcpServers"] = []any{map[string]any{"env": "private-secret"}}
+				case "duplicate-name":
+					plugin["mcpServers"] = []string{"same", "same"}
+				case "wrong-id":
+					plugin["summary"].(map[string]any)["id"] = "different@market"
+				case "wrong-name":
+					plugin["summary"].(map[string]any)["name"] = "different"
+				}
+			})
+			inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+			if err != nil || len(inventory.Capabilities) != 10 {
+				t.Fatalf("plugin detail failure discarded the usable inventory: %v", err)
+			}
+			var pluginIssues []InventoryIssue
+			for _, issue := range inventory.Issues {
+				if issue.Kind == PluginKind {
+					pluginIssues = append(pluginIssues, issue)
+				}
+			}
+			if !reflect.DeepEqual(pluginIssues, []InventoryIssue{{Code: "plugin_mcp_ownership_unresolved", Kind: PluginKind, ID: "one@market"}}) {
+				t.Fatalf("plugin detail gap was not localised: %+v", pluginIssues)
+			}
+			encoded, _ := json.Marshal(inventory)
+			if strings.Contains(string(encoded), "private-secret") || strings.Contains(string(encoded), "private-endpoint") || strings.Contains(string(encoded), "/private/marketplace") {
+				t.Fatal("raw plugin detail or locator leaked into inventory")
+			}
+		})
+	}
+}
+
+func TestNativeInventoryResolvedSkillMCPToUniqueAtomicOwner(t *testing.T) {
+	for _, scenario := range []string{"unique-owner", "disabled-owner", "standalone", "two-owners", "standalone-conflict"} {
+		t.Run(scenario, func(t *testing.T) {
+			data := nativeOwnershipFixture(t, func(fixture map[string]any) {
+				details := fixture["pluginDetails"].(map[string]any)
+				one := details["one@market"].(map[string]any)["plugin"].(map[string]any)
+				disabled := details["disabled@market"].(map[string]any)["plugin"].(map[string]any)
+				dependency := "bundled"
+				switch scenario {
+				case "unique-owner":
+					one["mcpServers"] = []string{dependency}
+				case "disabled-owner":
+					disabled["mcpServers"] = []string{dependency}
+				case "standalone":
+					dependency = "active"
+				case "two-owners":
+					one["mcpServers"], disabled["mcpServers"] = []string{dependency}, []string{dependency}
+				case "standalone-conflict":
+					dependency = "active"
+					one["mcpServers"] = []string{dependency}
+				}
+				skills := fixture["skills"].(map[string]any)["data"].([]any)[0].(map[string]any)["skills"].([]any)
+				skills[0].(map[string]any)["dependencies"] = map[string]any{"tools": []any{map[string]any{"type": "mcp", "value": dependency}}}
+			})
+			inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var plain Capability
+			for _, capability := range inventory.Capabilities {
+				if capability.Kind == SkillKind && capability.NativeID == "plain" {
+					plain = capability
+				}
+			}
+			want := map[string][]string{"unique-owner": {"plugin:one@market"}, "disabled-owner": {"plugin:disabled@market"}, "standalone": {"mcp:active"}}
+			if !slices.Equal(plain.Dependencies, want[scenario]) {
+				t.Fatalf("wrong atomic dependency: %v", plain.Dependencies)
+			}
+			if scenario == "two-owners" || scenario == "standalone-conflict" {
+				if !slices.ContainsFunc(inventory.Issues, func(issue InventoryIssue) bool {
+					return issue.Kind == SkillKind && issue.ID == plain.ID && issue.Code == "skill_dependency_ambiguous"
+				}) {
+					t.Fatal("ambiguous bundled MCP dependency was guessed")
+				}
+			}
+		})
+	}
+}
+
+func TestNativeInventoryDetailReadQueueWasBoundedAndSkippedUninstalled(t *testing.T) {
+	var plugins []map[string]any
+	for index := 0; index < 130; index++ {
+		plugins = append(plugins, map[string]any{"id": "plugin-" + strconv.Itoa(index) + "@market", "name": "plugin-" + strconv.Itoa(index), "installed": true, "enabled": index%2 == 0})
+	}
+	plugins = append(plugins, map[string]any{"id": "uninstalled@market", "name": "uninstalled", "installed": false, "enabled": false})
+	raw, _ := json.Marshal(map[string]any{"marketplaces": []any{map[string]any{"name": "market", "path": "/private/market.json", "plugins": plugins}}})
+	requests := nativePluginDetailRequests(raw)
+	if len(requests) != 124 {
+		t.Fatalf("native detail read bound changed: %d", len(requests))
+	}
+	var previous string
+	for _, request := range requests {
+		if request.method != "plugin/read" || request.pluginID == "uninstalled@market" || previous != "" && request.pluginID <= previous {
+			t.Fatal("native detail queue was not deterministic metadata-only discovery")
+		}
+		previous = request.pluginID
+	}
 }
 
 func TestNativeInventoryIncludedDisabledMetadataAndPortableIDs(t *testing.T) {
@@ -300,7 +470,7 @@ func TestNativeInventoryPeerUsedOnlyReadMethodsAndClosedPipes(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("helper shell executable")
 	}
-	for _, scenario := range []string{"success", "partial", "malformed", "request-error", "wrong-id", "oversized", "inherited-stdout"} {
+	for _, scenario := range []string{"success", "remote-details", "detail-window", "detail-rejected", "detail-mismatch", "detail-not-object", "ambiguous-locator", "detail-hang", "detail-oversized", "partial", "malformed", "request-error", "wrong-id", "oversized", "inherited-stdout"} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
 			executable := filepath.Join(dir, "native codex")
@@ -324,20 +494,33 @@ func TestNativeInventoryPeerUsedOnlyReadMethodsAndClosedPipes(t *testing.T) {
 				}
 			})
 			timeout := 3 * time.Second
-			if scenario == "inherited-stdout" {
+			if scenario == "inherited-stdout" || scenario == "detail-hang" {
 				timeout = 500 * time.Millisecond
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			started := time.Now()
 			inventory, err := (NativeInventory{Executable: executable}).Snapshot(ctx, dir)
-			if scenario == "success" {
-				if err != nil || len(inventory.Capabilities) != 10 {
+			if slices.Contains([]string{"success", "remote-details", "detail-window", "detail-rejected", "detail-mismatch", "detail-not-object", "ambiguous-locator"}, scenario) {
+				wantCount := 10
+				if scenario == "detail-window" {
+					wantCount = 18
+				}
+				if err != nil || len(inventory.Capabilities) != wantCount {
 					t.Fatalf("native snapshot = %d capabilities, %v", len(inventory.Capabilities), err)
 				}
 				data, err := os.ReadFile(filepath.Join(dir, "eof"))
 				if err != nil || string(data) != "closed" {
 					t.Fatal("native child did not observe stdin EOF before completion")
+				}
+				if slices.Contains([]string{"detail-rejected", "detail-mismatch", "detail-not-object", "ambiguous-locator"}, scenario) {
+					if !slices.ContainsFunc(inventory.Issues, func(issue InventoryIssue) bool {
+						return issue.Code == "plugin_mcp_ownership_unresolved" && issue.ID == "one@market"
+					}) {
+						t.Fatal("native detail failure did not produce a local ownership gap")
+					}
+				} else if slices.ContainsFunc(inventory.Issues, func(issue InventoryIssue) bool { return issue.Kind == PluginKind }) {
+					t.Fatal("read-only detail protocol left complete plugin metadata unresolved")
 				}
 			} else if err == nil {
 				t.Fatal("invalid native child accepted")
@@ -349,6 +532,9 @@ func TestNativeInventoryPeerUsedOnlyReadMethodsAndClosedPipes(t *testing.T) {
 				if _, err := os.Stat(filepath.Join(dir, "holder-pid")); err != nil {
 					t.Fatal("inherited stdout fixture did not start")
 				}
+			}
+			if scenario == "detail-hang" && (!errors.Is(err, context.DeadlineExceeded) || time.Since(started) > 2*time.Second) {
+				t.Fatal("plugin detail read escaped the caller's cancellation bound")
 			}
 		})
 	}
@@ -412,6 +598,29 @@ func TestNativeInventoryPeerHelper(t *testing.T) {
 	fixture := strings.ReplaceAll(nativeCurationFixture, `"cwd":"/work"`, `"cwd":`+strconv.Quote(dir))
 	var response map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(fixture), &response)
+	if scenario == "remote-details" {
+		response["plugins"] = json.RawMessage(strings.Replace(string(response["plugins"]), `"path":"/private/marketplace.json"`, `"path":null`, 1))
+		for _, name := range []string{"one", "disabled"} {
+			response["plugins"] = json.RawMessage(strings.Replace(string(response["plugins"]), `"name":"`+name+`"`, `"name":"`+name+`","remotePluginId":"remote-`+name+`"`, 1))
+		}
+	}
+	if scenario == "ambiguous-locator" {
+		response["plugins"] = json.RawMessage(strings.Replace(string(response["plugins"]), `"name":"disabled"`, `"name":"one"`, 1))
+	}
+	if scenario == "detail-window" {
+		var plugins map[string]any
+		var details map[string]any
+		_ = json.Unmarshal(response["plugins"], &plugins)
+		_ = json.Unmarshal(response["pluginDetails"], &details)
+		marketplace := plugins["marketplaces"].([]any)[0].(map[string]any)
+		for index := 0; index < 8; index++ {
+			name := "extra-" + strconv.Itoa(index)
+			marketplace["plugins"] = append(marketplace["plugins"].([]any), map[string]any{"id": name + "@market", "name": name, "installed": true, "enabled": true})
+			details[name+"@market"] = map[string]any{"plugin": map[string]any{"summary": map[string]string{"id": name + "@market", "name": name}, "mcpServers": []string{}}}
+		}
+		response["plugins"], _ = json.Marshal(plugins)
+		response["pluginDetails"], _ = json.Marshal(details)
+	}
 	for index, method := range []string{"plugin/installed", "skills/list", "config/read"} {
 		request := read()
 		if request["method"] != method {
@@ -446,6 +655,70 @@ func TestNativeInventoryPeerHelper(t *testing.T) {
 		write(map[string]any{"id": id, "result": response[[]string{"plugins", "skills", "config"}[index]]})
 		if scenario == "wrong-id" && index == 2 {
 			os.Exit(0)
+		}
+	}
+	if scenario == "detail-window" {
+		var details map[string]json.RawMessage
+		_ = json.Unmarshal(response["pluginDetails"], &details)
+		// Refuse to answer until the bounded window arrives, then reply out of
+		// order. A serial reader or response-order assumption cannot pass.
+		for _, count := range []int{8, 2} {
+			var batch []map[string]any
+			for index := 0; index < count; index++ {
+				request := read()
+				params, ok := request["params"].(map[string]any)
+				if request["method"] != "plugin/read" || !ok || params["marketplacePath"] != "/private/marketplace.json" {
+					os.Exit(96)
+				}
+				batch = append(batch, request)
+			}
+			for index := len(batch) - 1; index >= 0; index-- {
+				request := batch[index]
+				name, _ := request["params"].(map[string]any)["pluginName"].(string)
+				write(map[string]any{"id": request["id"], "result": details[name+"@market"]})
+			}
+		}
+	} else if scenario != "ambiguous-locator" {
+		var details map[string]json.RawMessage
+		_ = json.Unmarshal(response["pluginDetails"], &details)
+		for _, name := range []string{"disabled", "one"} {
+			request := read()
+			params, ok := request["params"].(map[string]any)
+			requestedName := name
+			if scenario == "remote-details" {
+				requestedName = "remote-" + name
+			}
+			if request["method"] != "plugin/read" || !ok || params["pluginName"] != requestedName {
+				os.Exit(93)
+			}
+			if scenario == "remote-details" {
+				if params["remoteMarketplaceName"] != "market" || params["marketplacePath"] != nil {
+					os.Exit(94)
+				}
+			} else if params["marketplacePath"] != "/private/marketplace.json" || params["remoteMarketplaceName"] != nil {
+				os.Exit(95)
+			}
+			if name == "one" && scenario == "detail-hang" {
+				_, _ = io.Copy(io.Discard, reader)
+				os.Exit(0)
+			}
+			if name == "one" && scenario == "detail-oversized" {
+				_, _ = io.WriteString(os.Stdout, strings.Repeat(" ", 4<<20)+"\n")
+				_, _ = io.Copy(io.Discard, reader)
+				os.Exit(0)
+			}
+			if name == "one" && scenario == "detail-rejected" {
+				write(map[string]any{"id": request["id"], "error": map[string]any{"message": "private-secret"}})
+				continue
+			}
+			var result any = details[name+"@market"]
+			if name == "one" && scenario == "detail-mismatch" {
+				result = json.RawMessage(strings.Replace(string(details[name+"@market"]), `"id":"one@market"`, `"id":"wrong@market"`, 1))
+			}
+			if name == "one" && scenario == "detail-not-object" {
+				result = []any{}
+			}
+			write(map[string]any{"id": request["id"], "result": result})
 		}
 	}
 	if _, err := reader.ReadByte(); err != io.EOF {

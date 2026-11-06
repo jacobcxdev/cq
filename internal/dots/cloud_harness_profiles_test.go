@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -177,6 +178,7 @@ func TestCloudHarnessSelectiveModelRulesChangedNativeCapabilities(t *testing.T) 
 	f.start()
 	f.initialize()
 	id := f.startThread("glm-5.3", "/project")
+	f.completeStoredTurn(id)
 	f.request(3, "turn/start", map[string]any{"threadId": id, "model": "gpt-5.5"})
 	resumes := f.messages("thread/resume")
 	if len(resumes) != 1 {
@@ -189,6 +191,49 @@ func TestCloudHarnessSelectiveModelRulesChangedNativeCapabilities(t *testing.T) 
 	_ = json.Unmarshal(resumes[0]["params"], &params)
 	if params.Model != "gpt-5.5" || !bytes.Equal(params.Config["mcp_servers.first.enabled"], []byte("false")) || !bytes.Equal(params.Config["mcp_servers.second.enabled"], []byte("true")) {
 		t.Fatalf("model-specific native controls incorrect: %s", resumes[0]["params"])
+	}
+}
+
+func TestCloudHarnessSelectiveEmptyChatWaitedForDurableHistory(t *testing.T) {
+	for _, ephemeral := range []bool{false, true} {
+		t.Run(fmt.Sprint("ephemeral=", ephemeral), func(t *testing.T) {
+			f := newCloudHarnessSelectiveFixture(t)
+			f.start()
+			f.initialize()
+			response := f.request(2, "thread/start", map[string]any{"model": "glm-5.3", "cwd": "/project", "ephemeral": ephemeral})
+			id := cloudThreadID(response["result"])
+			f.waitEvent(id, "applied", "custom")
+			f.mu.Lock()
+			f.policy.Tasks = map[string]harness.Scope{id: {All: harness.Binding{Changes: harness.Changes{MCP: map[string]harness.Decision{"first": harness.Disabled, "second": harness.Enabled}}}}}
+			f.mu.Unlock()
+			if reply := f.request(3, "turn/start", map[string]any{"threadId": id}); len(reply["error"]) != 0 {
+				t.Fatal("pending first-turn change blocked the original chat")
+			}
+			f.waitEvent(id, "pending", "custom")
+			if len(f.messages("thread/unsubscribe")) != 0 || len(f.messages("thread/resume")) != 0 {
+				t.Fatal("empty chat was released before it had durable history")
+			}
+			_, _ = f.localOutput.Write([]byte(`{"method":"turn/completed","params":{"threadId":"` + id + `","turn":{"id":"first"}}}` + "\n"))
+			if ephemeral {
+				f.request(4, "turn/start", map[string]any{"threadId": id})
+				if len(f.messages("thread/unsubscribe")) != 0 {
+					t.Fatal("ephemeral chat was released after a completed turn")
+				}
+				return
+			}
+			deadline := time.NewTimer(3 * time.Second)
+			defer deadline.Stop()
+			for len(f.messages("thread/resume")) == 0 {
+				select {
+				case <-deadline.C:
+					t.Fatal("pending change was not applied after the first turn")
+				case <-time.After(time.Millisecond):
+				}
+			}
+			if len(f.messages("turn/start")) != 1 || len(f.messages("turn/interrupt")) != 0 {
+				t.Fatal("idle application replayed or interrupted the original turn")
+			}
+		})
 	}
 }
 
@@ -364,6 +409,7 @@ func TestCloudHarnessSelectiveManagedToUnmatchedModelRestoredThenSkippedInventor
 	f.start()
 	f.initialize()
 	id := f.startThread("glm-5.3", "/project")
+	f.completeStoredTurn(id)
 	f.waitEvent(id, "applied", "minimal")
 	if response := f.request(3, "turn/start", map[string]any{"threadId": id, "model": "gpt-5.5"}); len(response["error"]) != 0 {
 		t.Fatal("model transition did not restore baseline")
@@ -433,6 +479,7 @@ func TestCloudHarnessSelectiveWorkspaceMoveRebasedProjectDefaults(t *testing.T) 
 	f.start()
 	f.initialize()
 	id := f.startThread("gpt-5.5", "/A")
+	f.completeStoredTurn(id)
 	f.waitEvent(id, "applied", "minimal")
 	f.request(3, "thread/settings/update", map[string]any{"threadId": id, "cwd": "/B"})
 	waitB := func(profile harness.Profile) {

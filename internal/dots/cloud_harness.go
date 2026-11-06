@@ -49,6 +49,8 @@ type cloudHarnessThread struct {
 	pendingTurns         int
 	pendingSettings      int
 	completedTurnID      string
+	awaitingRollout      bool
+	ephemeral            bool
 	selection            harness.Selection
 	refresh              bool
 	failureKey           string
@@ -956,6 +958,20 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 			return nil
 		}
 	}
+	// Native thread/start has no durable rollout until its first turn finishes.
+	// Releasing that subscription would make both resume and rollback impossible.
+	// Ephemeral chats never acquire a durable rollout.
+	if snapshot.awaitingRollout || snapshot.ephemeral {
+		if snapshot.reportedPending != key {
+			h.mu.Lock()
+			if current := h.threads[id]; current != nil {
+				current.reportedPending = key
+			}
+			h.mu.Unlock()
+			return h.record(id, selection, "pending")
+		}
+		return nil
+	}
 	if err := h.record(id, selection, "prepared"); err != nil {
 		return err
 	}
@@ -1084,6 +1100,9 @@ func cloudHarnessActual(thread *cloudHarnessThread, result cloudMessage) {
 		thread.cwd = cwd
 	}
 	returned := cloudHarnessObject(result["thread"])
+	if raw, ok := returned["ephemeral"]; ok {
+		_ = json.Unmarshal(raw, &thread.ephemeral)
+	}
 	if model := cloudHarnessModel(returned); model != "" {
 		thread.model = model
 	}
@@ -1259,6 +1278,8 @@ func (h *cloudHarness) observe(raw []byte) bool {
 				}
 				thread.owned = true
 				if pending.method == "thread/start" {
+					thread.awaitingRollout = true
+					_ = json.Unmarshal(pending.params["ephemeral"], &thread.ephemeral)
 					thread.minimal = pending.minimal
 					thread.selection = pending.selection
 					thread.fullConfig = pending.fullConfig
@@ -1321,6 +1342,7 @@ func (h *cloudHarness) observe(raw []byte) bool {
 			thread.active = true
 		case "turn/completed":
 			thread.active = false
+			thread.awaitingRollout = false
 			thread.completedTurnID = cloudHarnessString(cloudHarnessObject(params["turn"]), "id")
 		case "thread/status/changed":
 			status := cloudHarnessObject(params["status"])
