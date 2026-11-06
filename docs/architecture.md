@@ -210,7 +210,15 @@ wait until its first turn completes: native Codex has no durable history to
 reload before then. Plugin exclusions still apply immediately through native
 settings; standalone MCP and skill configuration remains pending. Ephemeral
 chats retain that initial configuration because they cannot be reloaded from
-disk. Internal child creation has no independent
+disk. Another native subscriber can retain an existing chat's configuration
+even when unsubscribe and resume both succeed. CQ checks the chat's effective
+plugin feature and standalone MCP tools, resources and templates after reload.
+Retained or unverified controls produce a `partial` receipt and leave the chat
+usable. Skills have no independent per-chat readback; changed skill settings
+remain unverified unless an observed runtime transition confirms configuration
+reassembly. Removing a binding does not turn an unverified restoration into a
+successful one. CQ preserves the original baseline across partial plugin-only
+handoffs. Internal child creation has no independent
 model-specific first-turn hook. Model/workspace changes restore the captured native baseline
 and recalculate policy while retaining chat history and user edits. Existing
 catalogue text already in history is not removed. The embedded

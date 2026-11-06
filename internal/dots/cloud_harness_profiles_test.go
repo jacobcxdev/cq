@@ -550,26 +550,28 @@ func TestCloudHarnessSelectiveWorkspaceMoveRebasedProjectDefaults(t *testing.T) 
 	f.completeStoredTurn(id)
 	f.waitEvent(id, "applied", "minimal")
 	f.request(3, "thread/settings/update", map[string]any{"threadId": id, "cwd": "/B"})
-	waitB := func(profile harness.Profile) {
+	waitB := func(profile harness.Profile, state string) {
 		t.Helper()
 		deadline := time.NewTimer(3 * time.Second)
 		defer deadline.Stop()
 		for {
 			receipt, err := store.Load(id)
-			if err == nil && receipt.Cwd == "/B" && receipt.Profile == profile && receipt.State == "applied" {
+			if err == nil && receipt.Cwd == "/B" && receipt.Profile == profile && receipt.State == state {
 				return
 			}
 			select {
 			case <-deadline.C:
-				t.Fatalf("workspace B profile %s was not applied", profile)
+				t.Fatalf("workspace B profile %s did not reach %s", profile, state)
 			case <-time.After(time.Millisecond):
 			}
 		}
 	}
-	waitB(harness.Minimal)
+	// Both workspaces already expose no selected MCPs or plugins. No runtime
+	// transition can confirm that the changed skill paths were reassembled.
+	waitB(harness.Minimal, "partial")
 	f.setPolicy(harness.Policy{Version: 2, Enabled: true, Global: harness.Scope{All: harness.Binding{Profiles: []string{"full"}}}})
 	_, _ = f.localOutput.Write([]byte(`{"method":"thread/status/changed","params":{"threadId":"` + id + `","status":{"type":"idle"}}}` + "\n"))
-	waitB(harness.Full)
+	waitB(harness.Full, "applied")
 	resumes := f.messages("thread/resume")
 	if len(resumes) != 2 {
 		t.Fatalf("workspace move and Full restore made %d reloads", len(resumes))

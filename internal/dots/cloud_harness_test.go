@@ -23,13 +23,14 @@ type cloudHarnessFixture struct {
 	policy      harness.Policy
 	models      map[string]string
 	plugins     map[string][]string
+	configs     map[string]cloudMessage
 	globalModel string
 	next        int
 	onRequest   func(cloudMessage) (any, error, bool)
 }
 
 func newCloudHarnessFixture(t *testing.T) *cloudHarnessFixture {
-	f := &cloudHarnessFixture{cloudTestHarness: newCloudTestHarness(t), policy: harness.Policy{Version: 1, Enabled: true}, models: make(map[string]string), plugins: make(map[string][]string), globalModel: "glm-5.3"}
+	f := &cloudHarnessFixture{cloudTestHarness: newCloudTestHarness(t), policy: harness.Policy{Version: 1, Enabled: true}, models: make(map[string]string), plugins: make(map[string][]string), configs: make(map[string]cloudMessage), globalModel: "glm-5.3"}
 	f.deps.readHarnessPolicy = func() (harness.Policy, error) { f.mu.Lock(); defer f.mu.Unlock(); return f.policy, nil }
 	f.deps.harnessTimeout = 100 * time.Millisecond
 	f.deps.launch = func(_ context.Context, _ string, _ []string, _ []string, _ io.Writer) (*cloudLocal, error) {
@@ -73,12 +74,22 @@ func newCloudHarnessFixture(t *testing.T) *cloudHarnessFixture {
 						}
 					}
 					f.models[id] = model
+					f.configs[id] = cloudMessage{"mcp_servers.first.enabled": cloudHarnessRaw(true), "mcp_servers.second.enabled": cloudHarnessRaw(true)}
+					for key, value := range cloudHarnessObject(cloudHarnessRaw(params["config"])) {
+						f.configs[id][key] = value
+					}
 					var plugins []string
 					_ = json.Unmarshal(cloudHarnessRaw(params["disabledPluginIds"]), &plugins)
 					f.plugins[id] = plugins
 					result = map[string]any{"thread": map[string]any{"id": id, "cwd": params["cwd"]}, "model": model, "disabledPluginIds": f.plugins[id]}
 				case "thread/resume":
 					id, _ := params["threadId"].(string)
+					if f.configs[id] == nil {
+						f.configs[id] = cloudMessage{"mcp_servers.first.enabled": cloudHarnessRaw(true), "mcp_servers.second.enabled": cloudHarnessRaw(true)}
+					}
+					for key, value := range cloudHarnessObject(cloudHarnessRaw(params["config"])) {
+						f.configs[id][key] = value
+					}
 					model, _ := params["model"].(string)
 					if model == "" {
 						model = f.models[id]
@@ -95,6 +106,24 @@ func newCloudHarnessFixture(t *testing.T) *cloudHarnessFixture {
 					result = map[string]any{"thread": map[string]any{"id": id, "model": f.models[id], "cwd": "/project"}}
 				case "thread/unsubscribe":
 					result = map[string]any{"status": "unsubscribed"}
+				case "mcpServerStatus/list":
+					id, _ := params["threadId"].(string)
+					rows := make([]any, 0)
+					for key, value := range f.configs[id] {
+						if name, property, ok := cloudHarnessMCPPath(key); ok && property == "enabled" {
+							tools := map[string]any{}
+							status := "disabled"
+							if bytes.Equal(value, []byte("true")) {
+								tools["probe"] = map[string]any{}
+								status = "connected"
+							}
+							rows = append(rows, map[string]any{"name": name, "tools": tools, "resources": []any{}, "resourceTemplates": []any{}, "runtimeStatus": status})
+						}
+					}
+					result = map[string]any{"data": rows, "nextCursor": nil}
+				case "experimentalFeature/list":
+					id, _ := params["threadId"].(string)
+					result = map[string]any{"data": []any{map[string]any{"name": "plugins", "enabled": cloudHarnessBool(f.configs[id], "features.plugins", true)}}, "nextCursor": nil}
 				case "turn/start":
 					id, _ := params["threadId"].(string)
 					if model, ok := params["model"].(string); ok {
@@ -500,6 +529,163 @@ func TestCloudHarnessHandoffRestoresOnlyMatchingPluginBaseline(t *testing.T) {
 			receipt, err := store.Load(id)
 			if err != nil || len(receipt.BaselinePlugins) != 1 || receipt.BaselinePlugins[0] != "original@market" {
 				t.Fatal("handoff replaced original baseline")
+			}
+		})
+	}
+}
+
+type cloudHarnessHandoffDesktop struct{ fixture *cloudHarnessFixture }
+
+func (desktop cloudHarnessHandoffDesktop) Inspect(_ context.Context, id string) (harness.Snapshot, error) {
+	desktop.fixture.mu.Lock()
+	defer desktop.fixture.mu.Unlock()
+	model, ok := desktop.fixture.models[id]
+	if !ok {
+		return harness.Snapshot{}, os.ErrNotExist
+	}
+	return harness.Snapshot{ChatID: id, OwnerID: "22222222-2222-2222-2222-222222222222", Model: model, Cwd: "/project", DisabledPluginIDs: append([]string{}, desktop.fixture.plugins[id]...), PluginBaselineKnown: true, ReasoningEffortKnown: true}, nil
+}
+
+func (desktop cloudHarnessHandoffDesktop) ReadModel(ctx context.Context, id string) (harness.Snapshot, error) {
+	return desktop.Inspect(ctx, id)
+}
+
+func (desktop cloudHarnessHandoffDesktop) UpdatePlugins(_ context.Context, snapshot harness.Snapshot, ids []string) (bool, error) {
+	desktop.fixture.mu.Lock()
+	defer desktop.fixture.mu.Unlock()
+	if desktop.fixture.models[snapshot.ChatID] != snapshot.Model {
+		return false, nil
+	}
+	desktop.fixture.plugins[snapshot.ChatID] = append([]string{}, ids...)
+	return true, nil
+}
+
+type cloudHarnessHandoffInventory struct{ inventory harness.Inventory }
+
+func (inventory cloudHarnessHandoffInventory) Snapshot(context.Context, string) (harness.Inventory, error) {
+	return inventory.inventory, nil
+}
+
+func TestCloudHarnessPartialCLIApplyHandoffDidNotRecaptureItsExclusions(t *testing.T) {
+	f := newCloudHarnessFixture(t)
+	id := "11111111-1111-1111-1111-111111111111"
+	f.models[id], f.plugins[id] = "glm-5.3", []string{}
+	store := harness.Receipts{FS: fsutil.NewMemFS(), Dir: "/state/harness"}
+	if _, err := store.Load(id); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("fixture unexpectedly had a prior receipt: %v", err)
+	}
+	policy := harness.Policy{Version: 2, Enabled: true, Tasks: map[string]harness.Scope{id: {All: harness.Binding{Changes: harness.Changes{Default: harness.Disabled, Skills: map[string]harness.Decision{"user:one": harness.Enabled, "user:two": harness.Enabled}}}}}}
+	inventory := harness.Inventory{Capabilities: []harness.Capability{}}
+	for index := range 49 {
+		plugin := fmt.Sprintf("plugin-%02d@market", index)
+		inventory.Capabilities = append(inventory.Capabilities, harness.Capability{Kind: harness.PluginKind, ID: plugin, NativeID: plugin, Enabled: true, Available: true})
+	}
+	for _, skill := range []string{"one", "two", "extra"} {
+		inventory.Capabilities = append(inventory.Capabilities, harness.Capability{Kind: harness.SkillKind, ID: "user:" + skill, Path: "/skills/" + skill + "/SKILL.md", Enabled: true, Available: true})
+	}
+	// CLI apply runs before the launcher owns this existing chat. Plugin changes
+	// succeed, but standalone skill control needs the launcher and is partial.
+	controller := harness.NewController(func() (harness.Policy, error) { return policy, nil }, cloudHarnessHandoffDesktop{f}, store, nil)
+	controller.Inventory = cloudHarnessHandoffInventory{inventory}
+	if err := controller.Apply(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	partial, err := store.Load(id)
+	if err != nil || partial.Mode != "plugins" || partial.State != "partial" || len(partial.BaselinePlugins) != 0 || len(partial.AppliedPlugins) != 49 {
+		t.Fatalf("CLI did not produce the zero-baseline/current-49 handoff: %#v, %v", partial, err)
+	}
+	// Full inventory can discover another plugin; this must grow the applied
+	// exclusions to 50 without promoting the earlier 49 into the user baseline.
+	fullInventory := harness.Inventory{Capabilities: append([]harness.Capability{}, inventory.Capabilities...)}
+	fullInventory.Capabilities = append(fullInventory.Capabilities, harness.Capability{Kind: harness.PluginKind, ID: "later@market", NativeID: "later@market", Enabled: true, Available: true})
+	f.policy = policy
+	f.deps.harnessReceipts = store
+	f.deps.readHarnessInventory = func(string) (harness.Inventory, error) { return fullInventory, nil }
+	f.start()
+	f.initialize()
+	response := f.request(2, "thread/resume", map[string]any{"threadId": id, "cwd": "/project"})
+	if len(response["error"]) != 0 {
+		t.Fatalf("visible resume failed: %s", response["error"])
+	}
+	if response := f.request(3, "turn/start", map[string]any{"threadId": id}); len(response["error"]) != 0 {
+		t.Fatalf("launcher handoff failed: %s", response["error"])
+	}
+	f.waitEvent(id, "applied", "custom")
+	applied, err := store.Load(id)
+	if err != nil || applied.Mode != "full" || len(applied.BaselinePlugins) != 0 || len(applied.AppliedPlugins) != 50 {
+		t.Fatalf("launcher recaptured CQ exclusions as the original baseline: mode=%s state=%s baseline=%d applied=%d, %v", applied.Mode, applied.State, len(applied.BaselinePlugins), len(applied.AppliedPlugins), err)
+	}
+	f.completeStoredTurn(id)
+	f.setPolicy(harness.Policy{Version: 2, Enabled: true})
+	if response := f.request(4, "turn/start", map[string]any{"threadId": id}); len(response["error"]) != 0 {
+		t.Fatalf("unmanaged restoration failed: %s", response["error"])
+	}
+	f.waitEvent(id, "applied", "full")
+	f.mu.Lock()
+	remaining := append([]string{}, f.plugins[id]...)
+	f.mu.Unlock()
+	restored, err := store.Load(id)
+	if err != nil || len(remaining) != 0 || len(restored.BaselinePlugins) != 0 || len(restored.AppliedPlugins) != 0 {
+		t.Fatalf("removing scratch policy retained CQ exclusions: %v, %#v, %v", remaining, restored, err)
+	}
+}
+
+func TestCloudHarnessHandoffReceiptStatesRequireKnownMatchingPlugins(t *testing.T) {
+	for _, test := range []struct {
+		name, state    string
+		current        []string
+		known, restore bool
+	}{
+		{"applied current", "applied", []string{"cq@market"}, true, true},
+		{"partial applied current", "partial", []string{"cq@market"}, true, true},
+		{"partial original current", "partial", []string{"manual@market"}, true, true},
+		{"prepared pending current", "prepared", []string{"pending@market"}, true, true},
+		{"pending target current", "pending", []string{"pending@market"}, true, true},
+		{"partial cannot claim pending target", "partial", []string{"pending@market"}, true, false},
+		{"applied cannot claim pending target", "applied", []string{"pending@market"}, true, false},
+		{"partial manual delta", "partial", []string{"cq@market", "new-user-choice@market"}, true, false},
+		{"partial unknown baseline", "partial", []string{"cq@market"}, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			id := "11111111-1111-1111-1111-111111111111"
+			store := harness.Receipts{FS: fsutil.NewMemFS(), Dir: "/state/harness"}
+			lease, err := store.Acquire(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = store.Save(harness.Receipt{Version: 1, ChatID: id, Mode: "plugins", Profile: harness.Custom, Source: "task", State: test.state, BaselinePlugins: []string{"manual@market"}, AppliedPlugins: []string{"cq@market"}, PendingPlugins: []string{"pending@market"}})
+			_ = lease.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+			bridge := &cloudBridge{}
+			bridge.deps.harnessReceipts = store
+			bridge.deps.readHarnessPolicy = func() (harness.Policy, error) { return harness.Policy{Version: 2, Enabled: true}, nil }
+			h := newCloudHarness(bridge)
+			t.Cleanup(h.close)
+			thread := &cloudHarnessThread{id: id, owned: true, pluginsKnown: test.known, plugins: append([]string{}, test.current...), baseline: cloudMessage{"disabledPluginIds": cloudHarnessRaw(test.current)}}
+			h.threads[id] = thread
+			if err := h.acquire(id); err != nil {
+				t.Fatal(err)
+			}
+			var baseline []string
+			_ = json.Unmarshal(thread.baseline["disabledPluginIds"], &baseline)
+			if thread.restorePlugins != test.restore || thread.diverged == test.restore {
+				t.Fatalf("handoff restore=%t diverged=%t; want restore=%t", thread.restorePlugins, thread.diverged, test.restore)
+			}
+			wantBaseline := test.current
+			if test.restore {
+				wantBaseline = []string{"manual@market"}
+			}
+			if !cloudHarnessPluginEqual(baseline, wantBaseline) {
+				t.Fatalf("handoff changed an unowned or unknown baseline: %v, want %v", baseline, wantBaseline)
+			}
+			if !test.restore && thread.handoffReceipt == nil {
+				t.Fatal("divergence lost the original receipt")
+			}
+			preserved, err := store.Load(id)
+			if err != nil || preserved.State != test.state || !cloudHarnessPluginEqual(preserved.BaselinePlugins, []string{"manual@market"}) {
+				t.Fatalf("handoff modified receipt before a runtime change: %#v, %v", preserved, err)
 			}
 		})
 	}

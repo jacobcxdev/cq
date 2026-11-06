@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/harness"
 	"github.com/jacobcxdev/cq/internal/httputil"
@@ -691,8 +693,10 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			t.Fatal("late dependency selection did not attach the selected skill")
 		}
 		lateReceipt, err := receipts.Load(outsideGLM)
-		if err != nil || lateReceipt.State != "applied" || len(lateReceipt.Issues) != 0 || len(lateReceipt.Unsupported) != 0 {
-			t.Fatal("late native dependency closure was not completely applied")
+		// Provider input proves the selected skill arrived, but no standalone
+		// MCP or feature transition lets the runtime independently attest it.
+		if err != nil || lateReceipt.State != "partial" || !slices.Equal(lateReceipt.Issues, []string{"native_skill_runtime_unverified"}) || len(lateReceipt.Unsupported) != 0 {
+			t.Fatalf("late skill-only receipt overstated runtime proof: %#v, %v", lateReceipt, err)
 		}
 		emptyChat := startSelective("glm-5.3", filepath.Join(root, "minimal-work"))
 		if _, err := harness.Update(fsys, policyPath, func(policy *harness.Policy) error {
@@ -712,8 +716,8 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			t.Fatal("deferred empty-chat reload lost its first turn or dependent skill")
 		}
 		emptyReceipt, err := receipts.Load(emptyChat)
-		if err != nil || emptyReceipt.State != "applied" || len(emptyReceipt.Issues) != 0 || len(emptyReceipt.Unsupported) != 0 {
-			t.Fatal("deferred empty-chat dependency was not completely applied")
+		if err != nil || emptyReceipt.State != "partial" || !slices.Equal(emptyReceipt.Issues, []string{"native_skill_runtime_unverified"}) || len(emptyReceipt.Unsupported) != 0 {
+			t.Fatalf("deferred skill-only receipt overstated runtime proof: %#v, %v", emptyReceipt, err)
 		}
 		t.Logf("selective installed accepted: same-chat-reloads=%d task-sibling-reloads=0 workspace-sibling-reloads=%d outsider-reloads=0 plugin-MCP-dependency=verified custom-receipt=applied external-cloud-requests=0", resumes, workspaceSiblingResumes)
 		return
@@ -1052,4 +1056,305 @@ func TestHarnessInstalledMCPHelper(t *testing.T) {
 		_ = encoder.Encode(map[string]any{"jsonrpc": "2.0", "id": request.ID, "result": result})
 	}
 	os.Exit(0)
+}
+
+// Native subscriptions can retain an assembly despite a successful resume.
+type harnessInstalledSharedRPC struct {
+	t          *testing.T
+	c          *websocket.Conn
+	id, closed int
+}
+
+func (r *harnessInstalledSharedRPC) call(method string, params any) map[string]json.RawMessage {
+	r.t.Helper()
+	r.id++
+	if err := r.c.WriteJSON(map[string]any{"id": r.id, "method": method, "params": params}); err != nil {
+		r.t.Fatal("write fixture RPC")
+	}
+	for {
+		var v struct {
+			ID     int
+			Method string
+			Error  json.RawMessage
+			Result map[string]json.RawMessage
+		}
+		if err := r.c.ReadJSON(&v); err != nil {
+			r.t.Fatalf("fixture RPC %s read failed: %T", method, err)
+		}
+		if v.Method == "thread/closed" {
+			r.closed++
+		}
+		if v.ID != r.id {
+			continue
+		}
+		if len(v.Error) > 0 && string(v.Error) != "null" {
+			r.t.Fatalf("fixture RPC %s rejected", method)
+		}
+		return v.Result
+	}
+}
+func TestHarnessInstalledMultipleSubscriberRuntime(t *testing.T) {
+	if os.Getenv("CQ_DOTS_HARNESS_INSTALLED_ACCEPTANCE") != "1" {
+		t.Skip("opt-in native fixture")
+	}
+	if runtime.GOOS != "darwin" {
+		t.Skip("loopback sandbox")
+	}
+	if !filepath.IsAbs(os.Getenv("CQ_DOTS_HARNESS_INSTALLED_CODEX")) {
+		t.Fatal("installed native executable must be absolute")
+	}
+	for _, codeMode := range []bool{false, true} {
+		t.Run(fmt.Sprintf("code-mode-%t", codeMode), func(t *testing.T) {
+			root, err := os.MkdirTemp("/private/tmp", "cq-native-shared-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer os.RemoveAll(root)
+			for _, name := range []string{"home", "codex", "work", "tmp", "cache", "config", "data"} {
+				if err := os.Mkdir(filepath.Join(root, name), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write := func(name, text string) {
+				path := filepath.Join(root, name)
+				if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, []byte(text), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			write("codex/skills/qualification/SKILL.md", "---\nname: qualification\ndescription: CQ_QUALIFICATION_SKILL_MARKER\n---\nSynthetic isolated capability.\n")
+			observed := make(chan map[string]any, 32)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "POST" || r.URL.Path != "/responses" {
+					t.Error("unexpected fixture route")
+					http.Error(w, "route", 400)
+					return
+				}
+				raw, err := httputil.ReadBody(r.Body)
+				if err != nil {
+					t.Error("fixture request read")
+					return
+				}
+				var request map[string]any
+				if json.Unmarshal(raw, &request) != nil {
+					t.Error("fixture request shape")
+					return
+				}
+				observed <- request
+				item := map[string]any{"id": "qualification_reply", "type": "message", "role": "assistant", "status": "completed", "content": []any{map[string]any{"type": "output_text", "text": "CQ_QUALIFICATION_REPLY", "annotations": []any{}}}}
+				w.Header().Set("Content-Type", "text/event-stream")
+				for _, ev := range []any{map[string]any{"type": "response.created", "response": map[string]any{"id": "qualification_response", "object": "response", "status": "in_progress", "output": []any{}}}, map[string]any{"type": "response.output_item.done", "output_index": 0, "item": item}, map[string]any{"type": "response.completed", "response": map[string]any{"id": "qualification_response", "object": "response", "status": "completed", "output": []any{item}, "usage": map[string]int{"input_tokens": 32, "output_tokens": 1, "total_tokens": 33}}}} {
+					b, _ := json.Marshal(ev)
+					fmt.Fprintf(w, "data: %s\n\n", b)
+				}
+			}))
+			defer upstream.Close()
+			write("codex/config.toml", fmt.Sprintf("model = \"glm-5.3\"\nmodel_provider = \"fixture\"\napproval_policy = \"never\"\nsandbox_mode = \"read-only\"\ncli_auth_credentials_store = \"file\"\ncheck_for_update_on_startup = false\n[analytics]\nenabled = false\n[features]\nplugins = true\ncode_mode_host = %t\nenable_request_compression = false\n[model_providers.fixture]\nname = \"Synthetic fixture\"\nbase_url = %q\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n[mcp_servers.probe]\ncommand = %q\nargs = [\"-test.run=^TestHarnessInstalledMCPHelper$\"]\nstartup_timeout_sec = 5\n[mcp_servers.probe.env]\nCQ_HARNESS_INSTALLED_MCP_HELPER = \"1\"\n", codeMode, upstream.URL, os.Args[0]))
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			address := listener.Addr().String()
+			listener.Close()
+			profile := `(version 1) (allow default) (deny network*) (deny file-write*) (allow network-outbound (remote ip "localhost:*")) (allow network-bind (local ip "localhost:*")) (allow network-inbound (local ip "localhost:*")) (allow file-write* (literal "/dev/null")) (allow file-write* (subpath ` + fmt.Sprintf("%q", root) + `))`
+			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "/usr/bin/sandbox-exec", "-p", profile, os.Getenv("CQ_DOTS_HARNESS_INSTALLED_CODEX"), "app-server", "--listen", "ws://"+address, "--strict-config")
+			cmd.Dir = filepath.Join(root, "work")
+			cmd.Env = []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin", "LANG=C", "LC_ALL=C", "TERM=dumb", "CI=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "NO_PROXY=127.0.0.1,localhost"}
+			for k, v := range map[string]string{"HOME": "home", "CODEX_HOME": "codex", "TMPDIR": "tmp", "XDG_CACHE_HOME": "cache", "XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "data"} {
+				cmd.Env = append(cmd.Env, k+"="+filepath.Join(root, v))
+			}
+			cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+			if err := cmd.Start(); err != nil {
+				t.Fatal("fixture native launch")
+			}
+			defer func() { cmd.Process.Kill(); cmd.Wait() }()
+			dial := func() *harnessInstalledSharedRPC {
+				var c *websocket.Conn
+				var err error
+				for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(25 * time.Millisecond) {
+					c, _, err = websocket.DefaultDialer.Dial("ws://"+address, nil)
+					if err == nil {
+						break
+					}
+				}
+				if err != nil {
+					t.Fatal("fixture native connect")
+				}
+				c.SetReadDeadline(time.Now().Add(45 * time.Second))
+				r := &harnessInstalledSharedRPC{t: t, c: c}
+				r.call("initialize", map[string]any{"clientInfo": map[string]any{"name": "cq-qualification", "version": "1"}, "capabilities": map[string]any{"experimentalApi": true}})
+				c.WriteJSON(map[string]any{"method": "initialized"})
+				return r
+			}
+			a := dial()
+			defer a.c.Close()
+			b := dial()
+			defer b.c.Close()
+			threadIDForVerification := ""
+			bridge := &cloudBridge{ctx: ctx, deps: cloudStdioDependencies{harnessTimeout: time.Second}}
+			verification := &cloudHarness{b: bridge, prefix: "cq-installed-runtime/", calls: make(map[string]chan cloudMessage)}
+			bridge.local = &cloudLocal{input: cloudTestWriter{write: func(raw []byte) (int, error) {
+				var request cloudMessage
+				if json.Unmarshal(raw, &request) != nil || (request.method() != "mcpServerStatus/list" && request.method() != "experimentalFeature/list") {
+					t.Fatal("runtime verifier changed native operation")
+				}
+				result := a.call(request.method(), cloudHarnessObject(request["params"]))
+				verification.observe(cloudHarnessRaw(cloudMessage{"id": request["id"], "result": cloudHarnessRaw(result)}))
+				return len(raw), nil
+			}}}
+			verify := func(desired, previous cloudMessage, before map[string]cloudHarnessMCPRuntime, wantIssues []string, wantTransition bool) {
+				t.Helper()
+				issues, transition := verification.verifyMCPRuntime(threadIDForVerification, desired, previous, before)
+				if !cloudHarnessPluginEqual(issues, wantIssues) || transition != wantTransition {
+					t.Fatalf("runtime verification issues=%v transition=%t, want %v %t", issues, transition, wantIssues, wantTransition)
+				}
+			}
+
+			features := a.call("experimentalFeature/list", map[string]any{})
+			var featureRows []struct {
+				Name    string
+				Enabled bool
+			}
+			json.Unmarshal(features["data"], &featureRows)
+			featureFound := false
+			for _, f := range featureRows {
+				if f.Name == "code_mode_host" {
+					featureFound = true
+					if f.Enabled != codeMode {
+						t.Fatal("native code_mode_host did not match the fixture")
+					}
+					t.Logf("code_mode_host native enabled=%t requested=%t", f.Enabled, codeMode)
+				}
+			}
+			if !featureFound {
+				t.Fatal("native code_mode_host feature unavailable")
+			}
+			started := a.call("thread/start", map[string]any{"cwd": cmd.Dir, "model": "glm-5.3", "modelProvider": "fixture"})
+			var thread struct{ ID string }
+			json.Unmarshal(started["thread"], &thread)
+			if thread.ID == "" {
+				t.Fatal("fixture start identity")
+			}
+			threadIDForVerification = thread.ID
+			turn := func(label string) {
+				text := "CQ_QUALIFICATION_STEP_" + label
+				if label == "full-first" {
+					text = "CQ_QUALIFICATION_HISTORY"
+				}
+				a.call("turn/start", map[string]any{"threadId": thread.ID, "input": []any{map[string]any{"type": "text", "text": text}}})
+				for {
+					var ev struct {
+						Method string
+						Params json.RawMessage
+					}
+					if err := a.c.ReadJSON(&ev); err != nil {
+						t.Fatal("fixture turn notification")
+					}
+					if ev.Method == "turn/completed" {
+						break
+					}
+				}
+				request := <-observed
+				raw, _ := json.Marshal(request)
+				if !strings.Contains(string(raw), "CQ_QUALIFICATION_HISTORY") {
+					t.Fatal("same-ID reconfiguration lost original historical marker")
+				}
+				tools, _ := request["tools"].([]any)
+				t.Logf("%s native-provider tools=%d current-history-marker=%t skill-markers=%d", label, len(tools), strings.Contains(string(raw), "CQ_QUALIFICATION_HISTORY"), strings.Count(string(raw), "CQ_QUALIFICATION_SKILL_MARKER"))
+			}
+			status := func(label string, pluginsEnabled bool) bool {
+				v := a.call("mcpServerStatus/list", map[string]any{"threadId": thread.ID, "detail": "full"})
+				var data []struct {
+					Name              string
+					Tools             map[string]any
+					Resources         []json.RawMessage
+					ResourceTemplates []json.RawMessage
+					RuntimeStatus     *string
+					ToolsError        *string
+				}
+				json.Unmarshal(v["data"], &data)
+				has := false
+				tools := 0
+				for _, s := range data {
+					if s.Name == "probe" {
+						has = true
+						tools += len(s.Tools)
+						state := "absent"
+						if s.RuntimeStatus != nil {
+							state = *s.RuntimeStatus
+						}
+						t.Logf("%s native MCP state=%s tools_error_present=%t resources=%d templates=%d", label, state, s.ToolsError != nil && *s.ToolsError != "", len(s.Resources), len(s.ResourceTemplates))
+					}
+				}
+				actualPlugins, err := verification.readPluginRuntime(thread.ID)
+				if err != nil || actualPlugins != pluginsEnabled {
+					t.Fatal("thread plugin runtime did not match its actual assembly")
+				}
+				t.Logf("%s native thread plugins.enabled=%t via production runtime reader", label, actualPlugins)
+				t.Logf("%s mcp_probe=%t probe_tools=%d server_count=%d", label, has, tools, len(data))
+				return has && tools > 0
+			}
+			turn("full-first")
+			if !status("full-first", true) {
+				t.Fatal("full fixture MCP absent")
+			}
+			beforeFull, err := verification.readMCPRuntime(thread.ID)
+			if err != nil || beforeFull["probe"].Exposed != 1 {
+				t.Fatal("initial thread-scoped MCP count unavailable")
+			}
+			b.call("thread/resume", map[string]any{"threadId": thread.ID})
+			minimal := map[string]any{"skills.include_instructions": false, "features.plugins": false, "mcp_servers.probe.enabled": false}
+			unsub := a.call("thread/unsubscribe", map[string]any{"threadId": thread.ID})
+			var unsubStatus string
+			json.Unmarshal(unsub["status"], &unsubStatus)
+			t.Logf("primary unsubscribe with second subscriber: status=%s", unsubStatus)
+			loaded := func(label string) bool {
+				result := a.call("thread/loaded/list", map[string]any{})
+				var ids []string
+				json.Unmarshal(result["data"], &ids)
+				found := false
+				for _, id := range ids {
+					found = found || id == thread.ID
+				}
+				t.Logf("%s loaded=%t total_loaded=%d", label, found, len(ids))
+				return found
+			}
+			if !loaded("after-primary-unsubscribe-second-retained") {
+				t.Fatal("second subscriber did not retain loaded chat")
+			}
+			t.Logf("primary unsub closed-notifications=%d", a.closed)
+			a.call("thread/resume", map[string]any{"threadId": thread.ID, "config": minimal})
+			retained := status("second-subscriber-kept-loaded", true)
+			turn("second-subscriber-kept-loaded")
+			if !retained {
+				t.Fatal("second subscriber did not retain the prior assembly")
+			}
+			verify(cloudMessage{"mcp_servers.probe.enabled": cloudHarnessRaw(false)}, cloudMessage{"mcp_servers.probe.enabled": cloudHarnessRaw(true)}, beforeFull, []string{"native_mcp_runtime_retained:probe"}, false)
+			b.call("thread/unsubscribe", map[string]any{"threadId": thread.ID})
+			a.call("thread/unsubscribe", map[string]any{"threadId": thread.ID})
+			loaded("after-all-subscribers-release-before-resume")
+			t.Logf("both unsub closed-notifications primary=%d secondary=%d", a.closed, b.closed)
+			a.call("thread/resume", map[string]any{"threadId": thread.ID, "config": minimal})
+			if status("all-subscribers-released-minimal", false) {
+				t.Error("fully released minimal resume retained standalone MCP")
+			}
+			turn("all-subscribers-released-minimal")
+			verify(cloudMessage{"mcp_servers.probe.enabled": cloudHarnessRaw(false)}, cloudMessage{"mcp_servers.probe.enabled": cloudHarnessRaw(true)}, beforeFull, nil, true)
+			beforeMinimal, err := verification.readMCPRuntime(thread.ID)
+			if err != nil || beforeMinimal["probe"].Exposed != 0 {
+				t.Fatal("minimal thread-scoped MCP count unavailable")
+			}
+			a.call("thread/unsubscribe", map[string]any{"threadId": thread.ID})
+			a.call("thread/resume", map[string]any{"threadId": thread.ID, "config": map[string]any{"skills.include_instructions": true, "features.plugins": true, "mcp_servers.probe.enabled": true}})
+			if !status("sole-subscriber-full-restored", true) {
+				t.Error("fully released full restore lost standalone MCP")
+			}
+			turn("sole-subscriber-full-restored")
+			verify(cloudMessage{"mcp_servers.probe.enabled": cloudHarnessRaw(true)}, cloudMessage{"mcp_servers.probe.enabled": cloudHarnessRaw(false)}, beforeMinimal, nil, true)
+		})
+	}
 }
