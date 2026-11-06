@@ -182,6 +182,7 @@ cq codex dots board
 cq codex dots broadcast
 cq codex dots install
 cq codex dots list
+cq codex dots order
 cq codex dots prime
 cq codex dots start
 cq codex dots status

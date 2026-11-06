@@ -36,6 +36,28 @@ func TestDotsPreservedStockCLIExitStatus(t *testing.T) {
 	}
 }
 
+func TestDotsOrderParsedAndPreservedNamesWithoutLaunch(t *testing.T) {
+	var cli CLI
+	parser, err := kong.New(&cli, kong.Writers(io.Discard, io.Discard))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parser.Parse([]string{"codex", "dots", "order", "Pingy", "Null", "Ifrit", "Noelle", "Stack"}); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	runner := dotsTestRunner(home, func(_ context.Context, _ dots.Controller, request dots.Request) (map[string]any, error) {
+		if request.Operation != "order" || request.Target != `["Pingy","Null","Ifrit","Noelle","Stack"]` {
+			t.Fatalf("order request %#v", request)
+		}
+		return map[string]any{"saved": true}, nil
+	})
+	runner.baseURL = func() (string, error) { t.Fatal("ordering required launch configuration"); return "", nil }
+	if err := runner.execute(context.Background(), &CodexDotsCmd{Order: CodexDotsOrderCmd{Dots: []string{"Pingy", "Null", "Ifrit", "Noelle", "Stack"}}}, "order", false, io.Discard, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func dotsTestRunner(home string, run func(context.Context, dots.Controller, dots.Request) (map[string]any, error)) dotsRunner {
 	return dotsRunner{
 		home:       func() (string, error) { return home, nil },

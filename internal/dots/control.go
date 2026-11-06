@@ -153,6 +153,8 @@ func (c Controller) Execute(ctx context.Context, r Request) (map[string]any, err
 		return c.Sync(ctx, r.Watcher)
 	case "list":
 		return c.List(ctx, s)
+	case "order":
+		return c.setSidebarOrder(ctx, s, r.Target)
 	case "prime":
 		rows, err := NewAwareness(s, c.client(s), c.evaluator(s)).Prime(ctx, r.Target, r.All, true)
 		return map[string]any{"priming": rows}, err
