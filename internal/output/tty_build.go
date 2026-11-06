@@ -37,7 +37,7 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 		section := TTYSection{}
 		isFirst := true
 
-		for _, result := range pr.Results {
+		for _, result := range accountDisplayOrder(pr, nowEpoch) {
 			header, rows := buildResultBlock(result, pr.ID, nowEpoch, labelWidth)
 			if section.Header == "" {
 				section.Header = header

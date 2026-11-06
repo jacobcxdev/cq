@@ -34,6 +34,8 @@ For each provider/account, cq can show:
 - Codex proxy-eligible subset when discovery and routing eligibility differ;
 - cached/stale and error context.
 
+Codex account rows show the system account first, then higher account values, then higher known usage multipliers and matching tier labels, then the earliest relevant reset. Account value is the maximum value across all routing-pool memberships; a known account outside every pool has value zero. The relevant reset belongs to the shared window with the least remaining allowance, or a scoped window when no shared window exists. When several windows are exhausted, recovery uses their latest reset. Unknown values, multipliers and missing or expired limiting resets follow known ones; email and account ID break remaining ties. This ordering affects TTY display only, leaving JSON order and routing decisions unchanged.
+
 Gauge position uses the demand/supply ratio `rho`, with 0.95–1.05 on pace. Overburn severity uses the capacity deficit `1 - 1/rho`, with moderate/severe boundaries above 20%/40%; underburn uses surplus `1 - rho`, with boundaries above 30%/60%. Gap deadlines and projected waste are displayed metrics, not period-based severity buckets. An imminent-gap warning preserves the natural ratio-derived position.
 
 TTY icons require a [Nerd Font](https://www.nerdfonts.com/). Recommended: [`jacobcxdev/tap/liga-sf-mono-nerd-font`](https://github.com/jacobcxdev/homebrew-tap).

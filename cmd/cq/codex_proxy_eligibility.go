@@ -76,10 +76,14 @@ func addCodexProxyEligibility(report *app.Report, cfg *proxy.Config, accounts []
 	unrestricted := len(allowed) == 0
 
 	byAccountID := make(map[string]codexprov.RoutingAccount, len(accounts))
+	ambiguousAccountID := make(map[string]bool)
 	byEmail := make(map[string]codexprov.RoutingAccount, len(accounts))
 	duplicateEmail := make(map[string]bool)
 	for _, account := range accounts {
 		if account.AccountID != "" {
+			if previous, exists := byAccountID[account.AccountID]; exists && previous.Key != account.Key {
+				ambiguousAccountID[account.AccountID] = true
+			}
 			byAccountID[account.AccountID] = account
 		}
 		if account.Email != "" {
@@ -109,6 +113,34 @@ func addCodexProxyEligibility(report *app.Report, cfg *proxy.Config, accounts []
 	}
 	app.AddProxyEligibility(report, provider.Codex, resultEligible)
 
+	accountValues := make(map[codexprov.AccountKey]uint32, len(accounts))
+	if len(policies) > 0 {
+		for _, pool := range policies[0].Pools {
+			for _, member := range pool.Members {
+				accountValues[member] = max(accountValues[member], uint32(pool.Value))
+			}
+		}
+	}
+	for i := range report.Providers {
+		pr := &report.Providers[i]
+		if pr.ID != provider.Codex {
+			continue
+		}
+		pr.DisplayAccountValues = nil
+		pr.DisplayActiveAccounts = make(map[int]bool, len(pr.Results))
+		if len(policies) > 0 {
+			pr.DisplayAccountValues = make(map[int]uint32, len(pr.Results))
+		}
+		for index, result := range pr.Results {
+			account, found := accountForResult(result)
+			if found && !ambiguousAccountID[result.AccountID] {
+				pr.DisplayActiveAccounts[index] = account.Active
+				if len(policies) > 0 {
+					pr.DisplayAccountValues[index] = accountValues[account.Key]
+				}
+			}
+		}
+	}
 	if len(policies) == 0 {
 		return
 	}
