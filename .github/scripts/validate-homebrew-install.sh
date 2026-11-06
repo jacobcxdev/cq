@@ -164,7 +164,7 @@ with_previous_companion() (
     ruby - "$source_cask" "$local_root/$entry.json" <<'RUBY'
 require "json"
 source, destination = ARGV
-pins = File.read(source).scan(/pin = JSON\.parse\(<<~'JSON'\)\n(.*?)^\s*JSON$/m)
+pins = File.read(source).scan(/pin = JSON\.parse\(<<~(?:'JSON'|JSON)\)\n(.*?)^\s*JSON$/m)
 abort "missing or ambiguous reviewed native companion pin" unless pins.length == 1
 File.write(destination, JSON.generate(JSON.parse(pins.first.first)))
 RUBY
