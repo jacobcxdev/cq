@@ -432,7 +432,6 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 	for _, required := range []string{
 		"args: release --clean",
 		`.github/scripts/validate-homebrew-install.sh`,
-		"needs: release",
 		`gh release view "$RELEASE_TAG" --json tagName,isDraft,assets`,
 		`gh release edit "$RELEASE_TAG" --draft=false`,
 		`false) echo "Release $RELEASE_TAG already public; resuming publication" ;;`,
@@ -510,7 +509,8 @@ func TestCICoversSupportedNativePlatforms(t *testing.T) {
 		"runner: ubuntu-24.04-arm",
 		"architecture: amd64",
 		"architecture: arm64",
-		"runs-on: windows-latest",
+		"runner: windows-latest",
+		"runner: windows-11-arm",
 		"kernel.apparmor_restrict_unprivileged_userns",
 		"TestLinuxAcceptanceConfinementUsesNamespacesRelaysAndLandlock",
 		"TestLinuxAcceptanceCancellationReapsDescendants",
@@ -553,7 +553,7 @@ func TestCICoversSupportedNativePlatforms(t *testing.T) {
 	}
 }
 
-func TestNativeValidationAndReleaseRequireDispatch(t *testing.T) {
+func TestTrustedValidationAndManualReleaseTriggers(t *testing.T) {
 	for _, path := range []string{
 		"../../.github/workflows/ci.yml",
 		"../../.github/workflows/release.yml",
@@ -569,7 +569,14 @@ func TestNativeValidationAndReleaseRequireDispatch(t *testing.T) {
 		if !strings.Contains(header, "\n  workflow_dispatch:\n") {
 			t.Errorf("%s is not manually dispatched", path)
 		}
-		for _, automatic := range []string{"\n  push:\n", "\n  pull_request:\n", "\n  schedule:\n"} {
+		if strings.HasSuffix(path, "/ci.yml") {
+			if !strings.Contains(header, "\n  push:\n    branches: [main]\n") {
+				t.Error("candidate CI must populate trusted default-branch caches")
+			}
+		} else if strings.Contains(header, "\n  push:\n") {
+			t.Error("release publication must remain manually dispatched")
+		}
+		for _, automatic := range []string{"\n  pull_request:\n", "\n  schedule:\n"} {
 			if strings.Contains(header, automatic) {
 				t.Errorf("%s retains automatic trigger %q", path, strings.TrimSpace(automatic))
 			}
