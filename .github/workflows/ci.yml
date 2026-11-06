@@ -1,6 +1,8 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -18,7 +20,7 @@ jobs:
       contents: write # GitHub requires write access to inspect draft releases.
     steps:
       - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
       - name: Validate pinned native companion release
@@ -27,7 +29,7 @@ jobs:
         run: |
           go test -race -count=1 ./internal/tools/nativepackage
           .github/scripts/prepare-native-network.sh .github/native-network-release.json dist/native --allow-draft
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: native-network-cask
           path: dist/native/*
@@ -46,7 +48,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
@@ -97,7 +99,7 @@ jobs:
         env:
           GEMINI_ANTIGRAVITY_CLIENT_SECRET: validation
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ci-darwin-packages
           path: |
@@ -114,7 +116,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
@@ -142,12 +144,12 @@ jobs:
             grep -F -- "--- PASS: ${test_name} " "$test_log"
           done
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ci-darwin-packages
           path: dist
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-network-cask
           path: dist/homebrew/Casks
@@ -179,11 +181,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: ci-darwin-packages
           path: dist
@@ -191,7 +193,7 @@ jobs:
       - name: Update Homebrew
         run: brew update
 
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: native-network-cask
           path: dist/homebrew/Casks
@@ -241,7 +243,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
@@ -272,12 +274,23 @@ jobs:
           done
 
   windows:
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            architecture: amd64
+          - runner: windows-11-arm
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v6
+      - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
 
@@ -292,12 +305,17 @@ jobs:
       - run: .\cq-install.exe --help
       - run: go vet ./...
       - run: go test -race -count=1 ./internal/fsutil
+        if: matrix.architecture == 'amd64'
       - run: go test -race -count=1 ./internal/installer -run '^(TestWindows|TestInstallLock|TestInstaller)'
+        if: matrix.architecture == 'amd64'
       - run: go test -race -count=1 ./cmd/cq-install
+        if: matrix.architecture == 'amd64'
       - run: go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot)'
+        if: matrix.architecture == 'amd64'
         env:
           CQ_NATIVE_WINDOWS_SCHEDULER_TEST: "1"
       - run: go test -race -count=1 ./internal/provider/codex -run '^TestWindowsCredential'
+        if: matrix.architecture == 'amd64'
       - name: Validate per-user MSI install, upgrade, and uninstall
         shell: pwsh
         run: |
@@ -310,8 +328,8 @@ jobs:
           New-Item -ItemType Directory -Path $previousRoot, $currentRoot -Force | Out-Null
           go build -ldflags "-X main.version=0.0.1" -o (Join-Path $previousRoot "cq.exe") ./cmd/cq
           go build -ldflags "-X main.version=0.0.2" -o (Join-Path $currentRoot "cq.exe") ./cmd/cq
-          $previousMSI = Join-Path $packages "cq_0.0.1_windows_amd64.msi"
-          $currentMSI = Join-Path $packages "cq_0.0.2_windows_amd64.msi"
-          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $previousRoot "cq.exe") -Version 0.0.1 -Architecture amd64 -Output $previousMSI -Wix $wix
-          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $currentRoot "cq.exe") -Version 0.0.2 -Architecture amd64 -Output $currentMSI -Wix $wix
+          $previousMSI = Join-Path $packages "cq_0.0.1_windows_${{ matrix.architecture }}.msi"
+          $currentMSI = Join-Path $packages "cq_0.0.2_windows_${{ matrix.architecture }}.msi"
+          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $previousRoot "cq.exe") -Version 0.0.1 -Architecture ${{ matrix.architecture }} -Output $previousMSI -Wix $wix
+          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $currentRoot "cq.exe") -Version 0.0.2 -Architecture ${{ matrix.architecture }} -Output $currentMSI -Wix $wix
           .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion 0.0.2
