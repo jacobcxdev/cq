@@ -8,6 +8,8 @@ import (
 	"errors"
 	"path/filepath"
 	"slices"
+	"strings"
+	"unicode"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/harness"
@@ -38,8 +40,8 @@ func (h *cloudHarness) readPolicy(cwd string) (harness.Policy, error) {
 	return h.b.deps.readHarnessPolicy()
 }
 
-func cloudHarnessProfileState(plan *cloudHarnessProfilePlan) string {
-	if plan != nil && (len(plan.unsupported) > 0 || len(plan.issues) > 0) {
+func cloudHarnessProfileState(plan *cloudHarnessProfilePlan, runtimeIssues ...string) string {
+	if len(runtimeIssues) > 0 || (plan != nil && (len(plan.unsupported) > 0 || len(plan.issues) > 0)) {
 		return "partial"
 	}
 	return "applied"
@@ -291,4 +293,127 @@ func (h *cloudHarness) profilePlan(effective harness.Effective, native cloudMess
 	var excluded []string
 	_ = json.Unmarshal(snapshot.baseline["disabledPluginIds"], &excluded)
 	return cloudHarnessCompileProfile(effective, inventory, baseline, excluded), baseline, nil
+}
+
+type cloudHarnessMCPRuntime struct {
+	Exposed         int
+	Status          string
+	DiscoveryFailed bool
+}
+
+// Read the selected chat's runtime, not the globally configured inventory.
+// Disabled servers may remain as rows with empty capability catalogues.
+func (h *cloudHarness) readMCPRuntime(threadID string) (map[string]cloudHarnessMCPRuntime, error) {
+	unavailable := errors.New("native MCP runtime unavailable")
+	if threadID == "" {
+		return nil, unavailable
+	}
+	counts := make(map[string]cloudHarnessMCPRuntime)
+	seenCursors := make(map[string]bool)
+	cursor, totalBytes := "", 0
+	for page := 0; page < 4; page++ {
+		params := map[string]any{"threadId": threadID, "detail": "full", "limit": 100}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		result, err := h.call("mcpServerStatus/list", params)
+		if err != nil {
+			return nil, unavailable
+		}
+		totalBytes += 2
+		for key, raw := range result {
+			totalBytes += len(cloudHarnessRaw(key)) + len(raw) + 2
+		}
+		if totalBytes > 8<<20 {
+			return nil, unavailable
+		}
+		var rows *[]struct {
+			Name              string                      `json:"name"`
+			PluginID          *string                     `json:"pluginId"`
+			Tools             *map[string]json.RawMessage `json:"tools"`
+			Resources         *[]json.RawMessage          `json:"resources"`
+			ResourceTemplates *[]json.RawMessage          `json:"resourceTemplates"`
+			RuntimeStatus     string                      `json:"runtimeStatus"`
+			ToolsError        *string                     `json:"toolsError"`
+		}
+		if json.Unmarshal(result["data"], &rows) != nil || rows == nil || len(*rows) > 100 {
+			return nil, unavailable
+		}
+		for _, row := range *rows {
+			if row.Name == "" || len(row.Name) > 4096 || strings.TrimSpace(row.Name) != row.Name || strings.ContainsFunc(row.Name, unicode.IsControl) || row.Tools == nil || row.Resources == nil || row.ResourceTemplates == nil {
+				return nil, unavailable
+			}
+			if row.PluginID != nil && *row.PluginID != "" {
+				continue
+			}
+			if _, duplicate := counts[row.Name]; duplicate {
+				return nil, unavailable
+			}
+			counts[row.Name] = cloudHarnessMCPRuntime{Exposed: len(*row.Tools) + len(*row.Resources) + len(*row.ResourceTemplates), Status: row.RuntimeStatus, DiscoveryFailed: row.ToolsError != nil && *row.ToolsError != ""}
+		}
+		var next *string
+		if raw, present := result["nextCursor"]; !present || json.Unmarshal(raw, &next) != nil {
+			return nil, unavailable
+		}
+		if next == nil {
+			return counts, nil
+		}
+		if *next == "" || len(*next) > 4096 || seenCursors[*next] {
+			return nil, unavailable
+		}
+		cursor, seenCursors[*next] = *next, true
+	}
+	return nil, unavailable
+}
+
+// A successful resume can retain an existing assembly owned by another native
+// subscriber. Verify exclusions and explicit disabled-to-enabled restorations.
+// The transition result requires a valid pre-reload snapshot; already empty
+// catalogues cannot prove that a skill configuration was reassembled.
+func (h *cloudHarness) verifyMCPRuntime(threadID string, desired, previous cloudMessage, before map[string]cloudHarnessMCPRuntime) ([]string, bool) {
+	wanted := make(map[string]bool)
+	for key, raw := range desired {
+		name, property, ok := cloudHarnessMCPPath(key)
+		if !ok || property != "enabled" {
+			continue
+		}
+		raw = bytes.TrimSpace(raw)
+		if !bytes.Equal(raw, []byte("true")) && !bytes.Equal(raw, []byte("false")) {
+			return []string{"native_mcp_runtime_unverified"}, false
+		}
+		enabled := bytes.Equal(raw, []byte("true"))
+		if enabled {
+			if !bytes.Equal(bytes.TrimSpace(cloudHarnessConfigValue(previous, []string{"mcp_servers", name, "enabled"})), []byte("false")) {
+				continue
+			}
+		}
+		if prior, duplicate := wanted[name]; duplicate && prior != enabled {
+			return []string{"native_mcp_runtime_unverified"}, false
+		}
+		wanted[name] = enabled
+	}
+	if len(wanted) == 0 {
+		return nil, false
+	}
+	after, err := h.readMCPRuntime(threadID)
+	if err != nil {
+		return []string{"native_mcp_runtime_unverified"}, false
+	}
+	var issues []string
+	transition := false
+	for name, enabled := range wanted {
+		actual, exists := after[name]
+		prior, existed := before[name]
+		if exists && (actual.DiscoveryFailed || (actual.Status != "connected" && actual.Status != "disabled")) {
+			issues = append(issues, "native_mcp_runtime_unverified:"+name)
+		} else if !enabled && actual.Exposed > 0 {
+			issues = append(issues, "native_mcp_runtime_retained:"+name)
+		} else if enabled && (actual.Exposed == 0 || actual.Status != "connected") || !enabled && exists && actual.Status != "disabled" {
+			issues = append(issues, "native_mcp_runtime_unverified:"+name)
+		} else if before != nil && !prior.DiscoveryFailed && ((!enabled && prior.Status == "connected" && prior.Exposed > 0) || (enabled && (!existed || prior.Status == "disabled") && prior.Exposed == 0)) {
+			transition = true
+		}
+	}
+	slices.Sort(issues)
+	return issues, transition
 }

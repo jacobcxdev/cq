@@ -181,7 +181,7 @@ func writeWorkspaceFile(fsys fsutil.FileSystem, inspector fsutil.SecurePathInspe
 		return err
 	}
 	temporary := "." + name + "." + hex.EncodeToString(nonce[:]) + ".tmp"
-	file, err := directory.CreateExclusive(temporary, 0o644)
+	file, err := directory.CreateExclusive(temporary, 0o600)
 	if err != nil {
 		return err
 	}

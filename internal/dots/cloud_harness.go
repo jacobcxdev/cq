@@ -69,6 +69,8 @@ type cloudHarnessThread struct {
 	profileNeedsSettings bool
 	pendingProfile       *cloudHarnessProfilePlan
 	appliedPlugins       []string
+	runtimeIssues        []string
+	runtimeConfig        cloudMessage
 }
 
 type cloudHarnessRequest struct {
@@ -212,7 +214,7 @@ func (h *cloudHarness) acquire(id string) error {
 		return nil
 	}
 	thread.lease = lease
-	if err == nil && receipt.Mode == "plugins" && (receipt.State == "applied" || receipt.State == "prepared" || receipt.State == "pending") {
+	if err == nil && receipt.Mode == "plugins" && (receipt.State == "applied" || receipt.State == "partial" || receipt.State == "prepared" || receipt.State == "pending") {
 		matches := cloudHarnessPluginEqual(thread.plugins, receipt.AppliedPlugins) || cloudHarnessPluginEqual(thread.plugins, receipt.BaselinePlugins)
 		if receipt.State == "prepared" || receipt.State == "pending" {
 			matches = matches || cloudHarnessPluginEqual(thread.plugins, receipt.PendingPlugins)
@@ -240,7 +242,8 @@ func (h *cloudHarness) record(id string, selection harness.Selection, state stri
 	_ = json.Unmarshal(thread.baseline["disabledPluginIds"], &baseline)
 	plugins := slices.Clone(thread.plugins)
 	model, cwd := thread.model, thread.cwd
-	var unsupported, issues []string
+	var unsupported []string
+	issues := slices.Clone(thread.runtimeIssues)
 	var pendingPlugins []string
 	recordedPlan := thread.profilePlan
 	if thread.pendingProfile != nil {
@@ -248,10 +251,13 @@ func (h *cloudHarness) record(id string, selection harness.Selection, state stri
 	}
 	if recordedPlan != nil {
 		unsupported = slices.Clone(recordedPlan.unsupported)
-		issues = slices.Clone(recordedPlan.issues)
+		issues = append(issues, recordedPlan.issues...)
 		if state == "prepared" {
 			pendingPlugins = slices.Clone(recordedPlan.plugins)
 		}
+	}
+	if state == "applied" && len(thread.runtimeIssues) > 0 {
+		state = "partial"
 	}
 	h.mu.Unlock()
 	if store := h.b.deps.harnessReceipts; store != nil {
@@ -847,13 +853,14 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		return errors.New("native harness reload previously failed; profile was not applied")
 	}
 	if policy.Version != 2 && !snapshot.profileManaged && minimal == snapshot.minimal && !snapshot.restorePlugins && !contextChanged {
-		if selection.Managed && (snapshot.receiptState != "applied" || snapshot.selection != selection) {
-			return h.record(id, selection, "applied")
+		state := cloudHarnessProfileState(nil, snapshot.runtimeIssues...)
+		if selection.Managed && (snapshot.receiptState != state || snapshot.selection != selection) {
+			return h.record(id, selection, state)
 		}
 		return nil
 	}
 	if policy.Version == 2 && snapshot.profilePlan != nil && snapshot.profileFingerprint == selection.Fingerprint && !snapshot.profileRefresh && !snapshot.profileNeedsSettings && !snapshot.restorePlugins && !contextChanged {
-		state := cloudHarnessProfileState(snapshot.profilePlan)
+		state := cloudHarnessProfileState(snapshot.profilePlan, snapshot.runtimeIssues...)
 		if snapshot.receiptState != state || snapshot.selection != selection {
 			return h.record(id, selection, state)
 		}
@@ -953,7 +960,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 				current.pluginsKnown = true
 			}
 			h.mu.Unlock()
-			state := cloudHarnessProfileState(desiredPlan)
+			state := cloudHarnessProfileState(desiredPlan, snapshot.runtimeIssues...)
 			if snapshot.receiptState != state || snapshot.selection != selection || snapshot.profileRefresh || snapshot.profileNeedsSettings {
 				return h.record(id, selection, state)
 			}
@@ -998,6 +1005,10 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 	if err := h.record(id, selection, "prepared"); err != nil {
 		return err
 	}
+	// Resume can reuse an assembly retained by another native subscriber. Read
+	// its actual MCP catalogue before reload; RPC success alone proves nothing.
+	beforeRuntime, _ := h.readMCPRuntime(id)
+	beforePlugins, beforePluginsErr := h.readPluginRuntime(id)
 	// A native notification or an already forwarded turn can arrive while
 	// config/read is in flight. Recheck before releasing the subscription.
 	h.mu.Lock()
@@ -1041,6 +1052,12 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 	if err == nil && cloudThreadID(cloudHarnessRaw(result)) != id {
 		err = errors.New("native harness resumed a different chat")
 	}
+	var resumedPlugins bool
+	var resumedPluginsErr error
+	if err == nil {
+		// Observe the resumed assembly before replaying hot plugin settings.
+		resumedPlugins, resumedPluginsErr = h.readPluginRuntime(id)
+	}
 	if err == nil {
 		replay := cloudHarnessReplaySettings(snapshot, model, cwd)
 		if desiredPlan != nil {
@@ -1078,6 +1095,29 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		_ = h.record(id, selection, "failed")
 		return errors.New("native harness reload failed; profile was not applied")
 	}
+	previousConfig := snapshot.runtimeConfig
+	if previousConfig == nil {
+		previousConfig = snapshot.fullConfig
+	}
+	attemptedConfig := previousConfig
+	if snapshot.profilePlan != nil {
+		attemptedConfig = snapshot.profilePlan.config
+	} else if snapshot.minimal {
+		attemptedConfig = cloudHarnessMinimalConfig(nil, cloudHarnessRaw(snapshot.fullConfig))
+	}
+	desiredConfig := cloudHarnessObject(params["config"])
+	runtimeIssues, reassembled := h.verifyMCPRuntime(id, desiredConfig, attemptedConfig, beforeRuntime)
+	pluginsEnabled, pluginsErr := h.readPluginRuntime(id)
+	if pluginsErr != nil {
+		runtimeIssues = append(runtimeIssues, "native_plugin_runtime_unverified")
+	} else if pluginsEnabled != cloudHarnessBool(desiredConfig, "features.plugins", true) {
+		runtimeIssues = append(runtimeIssues, "native_plugin_runtime_retained")
+	} else if beforePluginsErr == nil && resumedPluginsErr == nil && beforePlugins != resumedPlugins && resumedPlugins == pluginsEnabled {
+		reassembled = true
+	}
+	if (cloudHarnessSkillsChanged(previousConfig, desiredConfig) || cloudHarnessSkillsChanged(attemptedConfig, desiredConfig) || slices.Contains(snapshot.runtimeIssues, "native_skill_runtime_unverified")) && !reassembled {
+		runtimeIssues = append(runtimeIssues, "native_skill_runtime_unverified")
+	}
 	h.mu.Lock()
 	if current := h.threads[id]; current != nil {
 		current.minimal = minimal
@@ -1094,6 +1134,10 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		current.profileRefresh = false
 		current.profileNeedsSettings = false
 		current.appliedPlugins = nil
+		current.runtimeIssues = runtimeIssues
+		if len(runtimeIssues) == 0 {
+			current.runtimeConfig = cloudHarnessClone(desiredConfig)
+		}
 		cloudHarnessActual(current, result)
 		if desiredPlan != nil {
 			current.plugins = slices.Clone(desiredPlan.plugins)
@@ -1107,7 +1151,27 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		}
 	}
 	h.mu.Unlock()
-	return h.record(id, selection, cloudHarnessProfileState(desiredPlan))
+	return h.record(id, selection, cloudHarnessProfileState(desiredPlan, runtimeIssues...))
+}
+
+// Skills have no thread-scoped readback API. A changed MCP runtime can witness
+// the same configuration reassembly; otherwise the skill edit is unverified.
+func cloudHarnessSkillsChanged(previous, desired cloudMessage) bool {
+	if cloudHarnessBool(previous, "skills.include_instructions", true) != cloudHarnessBool(desired, "skills.include_instructions", true) {
+		return true
+	}
+	before, after := cloudHarnessSkillSettings(previous["skills.config"]), cloudHarnessSkillSettings(desired["skills.config"])
+	for path, setting := range after {
+		if cloudHarnessBool(setting, "enabled", true) != cloudHarnessBool(before[path], "enabled", true) {
+			return true
+		}
+	}
+	for path, setting := range before {
+		if _, exists := after[path]; !exists && !cloudHarnessBool(setting, "enabled", true) {
+			return true
+		}
+	}
+	return false
 }
 
 func cloudHarnessActual(thread *cloudHarnessThread, result cloudMessage) {
@@ -1312,6 +1376,11 @@ func (h *cloudHarness) observe(raw []byte) bool {
 					thread.profilePlan = pending.profilePlan
 					thread.profileManaged = pending.profilePlan != nil
 					thread.profileFingerprint = pending.selection.Fingerprint
+					if pending.profilePlan != nil {
+						thread.runtimeConfig = cloudHarnessClone(pending.profilePlan.config)
+					} else if pending.minimal {
+						thread.runtimeConfig = cloudHarnessMinimalConfig(nil, cloudHarnessRaw(pending.fullConfig))
+					}
 				}
 				cloudHarnessActual(thread, result)
 				cloudHarnessCaptureSettings(thread, pending.params, false)

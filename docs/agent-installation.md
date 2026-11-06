@@ -80,14 +80,17 @@ leaf help for exact arguments before making changes.
 | **"Use or schedule my Z.ai reset cards deliberately."** | Choose an exact account/card/window or a fixed schedule. Weekly cards can affect both weekly and five-hour quota; Codex reset semantics differ. | `cq zai resets`; [Z.ai cards](usage.md#zai-coding-plan). Providers' credits are not interchangeable; Z.ai schedules are fixed, not adaptive. |
 | **"Manage my ZCode subscription, Start offers and billing route."** | Inspect supported provider offers/cards and explicitly choose the account/route used by compatible Codex clients. | `cq zai zcode`, `cq zai route`; [Z.ai setup](usage.md#zai-coding-plan). Start never silently switches to paid quota; standard API keys and Coding Plan keys have different billing. |
 | **"Start eligible usage windows before my next substantial task."** | Optional Codex/Z.ai priming sends a minimal real request to start a dormant window. It uses inference quota, not reset credits, and does not increase allowance. | `cq proxy prime`, `cq zai prime`; [priming](usage.md#pins-defaults-and-priming), [Z.ai](usage.md#zai-coding-plan). Honour provider-specific timing and restart rules. |
-| **"Give this chat only the tools and instructions it needs."** | Codex harness profiles select optional plugins, MCP servers and skills without changing chat identity/history. `minimal` reduces optional capabilities; `full` restores the native baseline. | `cq codex harness inventory`, `profile`, `bind`, `explain`, `status`; [profiles](usage.md#harness-capability-profiles). Saving a definition is not proof it is applied. |
+| **"Give this chat only the tools and instructions it needs."** | Codex harness profiles select optional plugins, MCP servers and skills without changing chat identity/history. `minimal` requests reduced capabilities; `full` requests native baseline restoration. | `cq codex harness inventory`, `profile`, `bind`, `explain`, `status`; [profiles](usage.md#harness-capability-profiles). Saving a definition is not proof it is applied. |
 | **"Use different tool sets per project/model, and share them."** | Bind ordered profiles at chat/project/global scope, optionally by model/family; export/import stable definitions and portable project rules. A CQ curation skill helps an agent build profiles from inventory. | `cq codex harness skill install`, scoped `bind`, `export`, `import`; [scope/sharing](usage.md#harness-capability-profiles). Plugin bundles can own MCP dependencies; use inventory IDs rather than guessing. |
 | **"Try reducing request size where compression is compatible."** | Optional Headroom integration supports cache-oriented or token-oriented compression. It needs a separately compatible Python/Headroom installation; CQ does not install it. | [Existing compression integration](configuration.md#optional-request-compression). Advanced optional feature; verify compatibility/benefit rather than promising savings or fresh third-party qualification. |
 
 For harness profiles, distinguish enforcement paths. Normal ChatGPT launching
 can apply plugin exclusions after CQ observes a request; first-turn application
 is not guaranteed, and standalone MCP/skill catalogues remain available. The CQ
-launcher adds broader standalone MCP and fresh skill-catalogue controls. Core
+launcher adds broader standalone MCP and fresh skill-catalogue controls. Another
+native subscriber can retain the previous configuration despite a successful
+reload. Retained or unverified changes, including restoration, remain `partial`;
+check the application receipt before claiming success. Core
 tools/project instructions remain, historical context is not erased, and native
 subagents inherit their parent's capability configuration. Do not promise an
 independent model-specific first-turn policy for an internally spawned child.
