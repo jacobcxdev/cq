@@ -15,16 +15,17 @@ import (
 // NativeBindings records semantic exports discovered from an application
 // snapshot. Names are identifiers, never JavaScript supplied by configuration.
 type NativeBindings struct {
-	API             string `json:"api"`
-	Account         string `json:"account"`
-	User            string `json:"user"`
-	Ready           string `json:"ready"`
-	Cache           string `json:"cache"`
-	Executor        string `json:"executor"`
-	BusAsset        string `json:"bus_asset"`
-	Bus             string `json:"bus"`
-	ProfileQuery    string `json:"profile_query,omitempty"`
-	ProfileRecovery string `json:"profile_recovery,omitempty"`
+	Rspack          *NativeRspackBindings `json:"rspack,omitempty"`
+	API             string                `json:"api"`
+	Account         string                `json:"account"`
+	User            string                `json:"user"`
+	Ready           string                `json:"ready"`
+	Cache           string                `json:"cache"`
+	Executor        string                `json:"executor"`
+	BusAsset        string                `json:"bus_asset"`
+	Bus             string                `json:"bus"`
+	ProfileQuery    string                `json:"profile_query,omitempty"`
+	ProfileRecovery string                `json:"profile_recovery,omitempty"`
 }
 
 const jsIdentifier = `[A-Za-z_$][A-Za-z0-9_$]*`
@@ -41,6 +42,12 @@ func (b NativeBindings) validate() error {
 		if !jsIdentifierPattern.MatchString(b.ProfileQuery) || !jsIdentifierPattern.MatchString(b.ProfileRecovery) {
 			return errors.New("invalid native profile recovery binding")
 		}
+	}
+	if b.Rspack != nil {
+		if !rspackAssetPattern.MatchString(b.BusAsset) || strings.Contains(b.BusAsset, "/") || b.Bus != "CQBus" {
+			return errors.New("invalid native message bus runtime")
+		}
+		return b.Rspack.validate()
 	}
 	if !modulePattern.MatchString(b.BusAsset) || !strings.HasPrefix(b.BusAsset, "app-shared-") {
 		return errors.New("invalid native message bus asset")
@@ -88,7 +95,7 @@ func readNativeModules(path string) (map[string]string, error) {
 	assets := root.Files["webview"].Files["assets"].Files
 	modules := map[string]string{}
 	for name, entry := range assets {
-		if !modulePattern.MatchString(name) {
+		if !modulePattern.MatchString(name) || !strings.HasPrefix(name, "app-") {
 			continue
 		}
 		if len(modules) >= 64 || entry.Unpacked || entry.Link != "" || entry.Size < 1 || entry.Size > 32<<20 {
@@ -105,7 +112,23 @@ func readNativeModules(path string) (map[string]string, error) {
 		modules[name] = string(data)
 	}
 	if len(modules) == 0 {
-		return nil, errors.New("native renderer modules unavailable")
+		modules, err = readNativeRspackModules(f, assets, dataStart, info.Size())
+		if err != nil {
+			return nil, err
+		}
+		entry, exists := root.Files["webview"].Files["index.html"]
+		if exists {
+			offset, parseErr := strconv.ParseInt(entry.Offset, 10, 64)
+			if entry.Unpacked || entry.Link != "" || entry.Size < 1 || entry.Size > 2<<20 || parseErr != nil || offset < 0 || offset > info.Size()-dataStart || entry.Size > info.Size()-dataStart-offset {
+				return nil, errors.New("renderer entry document invalid")
+			}
+			data := make([]byte, entry.Size)
+			if _, err := f.ReadAt(data, dataStart+offset); err != nil {
+				return nil, errors.New("renderer entry document unavailable")
+			}
+			modules["index.html"] = string(data)
+		}
+		return modules, nil
 	}
 	return modules, nil
 }
@@ -335,6 +358,11 @@ func resolveNativeInitial(source string) (*NativeBindings, error) {
 }
 
 func resolveNativeBindings(modules map[string]string) (string, *NativeBindings, error) {
+	for _, source := range modules {
+		if strings.Contains(source, "__webpack_require__") && strings.Contains(source, "__rspack_esm") {
+			return resolveNativeRspack(modules)
+		}
+	}
 	names := make([]string, 0, len(modules))
 	for name := range modules {
 		names = append(names, name)

@@ -178,12 +178,8 @@ func ValidateInstallLocation(options InstallOptions) (string, error) {
 
 // AppCheck checks the discovered application snapshot without changing its signed bundle.
 func AppCheck(settings *Settings) error {
-	info, err := readAppPlist(filepath.Join(settings.AppPath, "Contents", "Info.plist"))
-	if err != nil {
+	if _, err := readAppPlist(filepath.Join(settings.AppPath, "Contents", "Info.plist")); err != nil {
 		return err
-	}
-	if info["CFBundleShortVersionString"] != settings.AppVersion || info["CFBundleVersion"] != settings.AppBuild {
-		return fmt.Errorf("Native app version differs from configured pin")
 	}
 	file, err := os.Open(filepath.Join(settings.AppPath, "Contents", "Resources", "app.asar"))
 	if err != nil {
