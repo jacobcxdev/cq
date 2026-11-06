@@ -2,7 +2,7 @@
 
 `cq` checks AI subscription quota, manages accounts and routes compatible local clients through Claude, Codex and Z.ai. Gemini quota comes from Antigravity. On macOS, CQ can also help you access Dots before regional rollout through a US WireGuard profile, or bring existing Dots from multiple accounts into one ChatGPT sidebar.
 
-**Installing with an AI agent?** Give it the [agent installation guide](docs/agent-installation.md) before it changes anything. The guide covers package ownership, setup choices, macOS approvals and verification of the requested outcome.
+**For users and installation agents:** start with the [agent setup and feature guide](docs/agent-installation.md). **Agents: read that guide before installing or changing configuration.** Explain the relevant capabilities, help the user choose, then configure and verify their chosen setup. Users can send their agent this repository link; the guide covers desktop apps and CLIs, account routing, optional features and native ChatGPT integrations.
 
 ![cq output](assets/screenshot.png)
 
@@ -129,13 +129,18 @@ These commands inspect service/runtime health. Verify a real request from the cl
 
 | I want to… | Read |
 |---|---|
-| Check quota, add/switch accounts or read JSON | [Usage guide](docs/usage.md) |
-| Connect Claude Code or Codex to account routing | [Client setup](docs/usage.md#connecting-a-client) |
-| Configure pools, pins, reserve, resets or priming | [Routing and automation](docs/usage.md#local-proxy) |
-| Select optional plugins, MCP servers and skills for a chat | [Harness profiles](docs/usage.md#harness-capability-profiles) |
-| Publish models or add an overlay | [Model registry](docs/usage.md#model-registry) |
+| Find useful features and let an agent configure them with me | [Agent setup and feature guide](docs/agent-installation.md) |
+| See remaining quota, reset times and whether my accounts will last | [Quota reports](docs/usage.md#quota-checks-and-output) and [accounts](docs/usage.md#accounts-and-authentication) |
+| Keep working across accounts in ChatGPT Desktop, Codex CLI or Claude Code | [Client setup](docs/usage.md#connecting-a-client) and [quota-aware routing](docs/usage.md#client-routing) |
+| Keep selected chats within an account group or preserve specialised capacity | [Pools and session bindings](docs/usage.md#capability-policy-and-session-pools), [Cyber access](docs/usage.md#cyber-aware-routing) |
+| Keep spare Codex quota for my system account, phone or other clients | [System account reserve](docs/usage.md#system-account-reserve) |
+| Use banked resets before expiry or schedule them with my approval | [Codex resets](docs/usage.md#codex) and [Z.ai reset cards](docs/usage.md#zai-coding-plan) |
+| Start eligible usage windows earlier instead of waiting for my first task | [Codex priming](docs/usage.md#pins-defaults-and-priming) and [Z.ai priming](docs/usage.md#zai-coding-plan) |
+| Give each chat, project or model a suitable plugin/MCP/skill set | [Harness profiles](docs/usage.md#harness-capability-profiles) |
+| Use available models, including supported Z.ai models in Codex, without maintaining picker entries by hand | [Model registry](docs/usage.md#model-registry) and [Z.ai setup](docs/usage.md#zai-coding-plan) |
 | Access my primary Dot before Dots is available in my region | Use a **US WireGuard profile** with [native ChatGPT routing](docs/configuration.md#native-chatgpt-network-routing). Normal ChatGPT launches work; the multi-account adapter is not required. |
 | Use Dots from several accounts in one ChatGPT sidebar | Install [multi-account Dots](docs/dots.md) and launch through CQ. Secondary Dots must already be onboarded; add US WireGuard routing too if regional access requires it. |
+| Let Dots coordinate, send them one announcement or share one local message board | [Dot setup and relay](docs/dots.md#setup-and-manual-reminders), [broadcast](docs/dots.md#broadcast), [message board](docs/dots.md#shared-message-board) |
 | Show CQ's routed account availability in normal ChatGPT launches | [Usage response adaptation](docs/configuration.md#native-chatgpt-network-routing), a separate opt-in with certificate trust. |
 | Find settings, paths, environment variables and examples | [Configuration reference](docs/configuration.md) |
 | Diagnose login, quota, routing, upgrade or app failures | [Troubleshooting](docs/troubleshooting.md) |
