@@ -51,7 +51,11 @@ The provider must interpret admission decisions as follows:
 - `block`: call `TransparentFlowAdmission.refuse`; do not permit direct fallback.
 
 Once a selected flow has been accepted, broker, tunnel or forwarding errors must
-close it. Returning `false` on those failures would bypass CQ. The source hint is
+close the affected transport. A failed UDP destination channel is retired without
+closing healthy siblings in the same flow. A later datagram can open a new channel
+through the same admission and routing policy; uncertain sends are not replayed.
+Flow-level errors and cancellation still close the whole flow.
+Returning `false` on those failures would bypass CQ. The source hint is
 only a prefilter; it cannot authorise a flow without audit-token validation.
 
 Run admission tests with:
