@@ -21,6 +21,9 @@ const (
 	codexIssuer       = "https://auth.openai.com"
 	codexPort         = 1455
 	codexCallbackPath = "/auth/callback"
+	// OpenAI can issue opaque codes longer than 512 bytes, including for
+	// managed accounts. Keep a defensive bound without truncating those codes.
+	maxCodexAuthorizationCodeBytes = 16 * 1024
 )
 
 // codexScopes returns the OAuth scopes for Codex login.
@@ -60,39 +63,8 @@ func CodexLogin(ctx context.Context, client httputil.Doer) (*CodexTokenResponse,
 	codeCh := make(chan string, 1)
 	errCh := make(chan error, 1)
 
-	var accepted sync.Once
-	mux := http.NewServeMux()
-	mux.HandleFunc(codexCallbackPath, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-
-		if r.URL.Query().Get("state") != state {
-			fmt.Fprintf(w, "<html><body><h2>Login failed</h2><p>Invalid state parameter.</p></body></html>")
-			return
-		}
-		code := r.URL.Query().Get("code")
-		if code == "" {
-			fmt.Fprintf(w, "<html><body><h2>Login failed</h2><p>No authorization code received.</p></body></html>")
-			return
-		}
-		if len(code) > 512 || !validOAuthCode.MatchString(code) {
-			fmt.Fprintf(w, "<html><body><h2>Login failed</h2><p>Invalid authorization code.</p></body></html>")
-			return
-		}
-
-		sent := false
-		accepted.Do(func() {
-			codeCh <- code
-			sent = true
-		})
-		if sent {
-			fmt.Fprintf(w, "<html><body><h2>Login successful!</h2><p>You can close this tab.</p><script>try{window.open('','_self','');window.close()}catch(e){}</script></body></html>")
-		} else {
-			fmt.Fprintf(w, "<html><body><p>You can close this tab.</p></body></html>")
-		}
-	})
-
 	server := &http.Server{
-		Handler:           mux,
+		Handler:           codexCallbackHandler(state, codeCh),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
@@ -139,6 +111,41 @@ func CodexLogin(ctx context.Context, client httputil.Doer) (*CodexTokenResponse,
 
 	claims := DecodeCodexClaims(tokens.IDToken)
 	return tokens, &claims, nil
+}
+
+func codexCallbackHandler(state string, codeCh chan<- string) http.Handler {
+	var accepted sync.Once
+	mux := http.NewServeMux()
+	mux.HandleFunc(codexCallbackPath, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+		if r.URL.Query().Get("state") != state {
+			fmt.Fprintf(w, "<html><body><h2>Login failed</h2><p>Invalid state parameter.</p></body></html>")
+			return
+		}
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			fmt.Fprintf(w, "<html><body><h2>Login failed</h2><p>No authorization code received.</p></body></html>")
+			return
+		}
+		if len(code) > maxCodexAuthorizationCodeBytes || !validOAuthCode.MatchString(code) {
+			fmt.Fprintf(w, "<html><body><h2>Login failed</h2><p>Invalid authorization code.</p></body></html>")
+			return
+		}
+
+		sent := false
+		accepted.Do(func() {
+			codeCh <- code
+			sent = true
+		})
+		if sent {
+			fmt.Fprintf(w, "<html><body><h2>Login successful!</h2><p>You can close this tab.</p><script>try{window.open('','_self','');window.close()}catch(e){}</script></body></html>")
+		} else {
+			fmt.Fprintf(w, "<html><body><p>You can close this tab.</p></body></html>")
+		}
+	})
+
+	return mux
 }
 
 func buildCodexAuthorizeURL(challenge, state string, port int) string {
