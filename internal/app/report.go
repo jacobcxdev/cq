@@ -60,6 +60,12 @@ type ProviderReport struct {
 	Aggregate        *AggregateReport        `json:"aggregate,omitempty"`
 	ProxyEligibility *ProxyEligibilityReport `json:"proxy_eligibility,omitempty"`
 	ProxyPools       []ProxyPoolReport       `json:"proxy_pools,omitempty"`
+
+	// DisplayAccountValues maps result indexes to known pool values. It is
+	// presentation metadata, not routing input or part of the JSON report.
+	DisplayAccountValues map[int]uint32 `json:"-"`
+	// DisplayActiveAccounts carries fresh credential defaults for cached rows.
+	DisplayActiveAccounts map[int]bool `json:"-"`
 }
 
 type ProviderAvailabilityState string
