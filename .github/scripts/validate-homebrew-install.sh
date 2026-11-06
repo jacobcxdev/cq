@@ -175,7 +175,7 @@ RUBY
   selected_cask="$(brew --repository jacobcxdev/tap)/Casks/cq-network.rb"
   cmp "$current_native_cask" "$selected_cask"
   candidate_digest=$(jq -er .sha256 "$local_root/current.json")
-  [[ "$(shasum -a 256 "$current_native_archive" | awk '{print $1}')" == "$candidate_digest" ]]
+  [[ "$(shasum -a 256 "$current_native_archive" | awk '{print $1}')" == "$candidate_digest" ]] || { echo "candidate native archive differs from reviewed checksum" >&2; exit 1; }
   # A staged native release may still be private. Seed the normal reviewed URL's
   # download cache with its already-verified ZIP; Homebrew still checks SHA-256.
   candidate_cache=$(brew --cache --cask jacobcxdev/tap/cq-network)
@@ -190,7 +190,7 @@ RUBY
   tag=$(jq -er .tag "$local_root/previous-info.json")
   asset_id=$(jq -er .asset_id "$local_root/previous-info.json")
   release_api=$(gh release view "$tag" --repo jacobcxdev/cq --json apiUrl --jq .apiUrl)
-  [[ "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]]
+  [[ "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]] || { echo "predecessor release API differs from expected repository" >&2; exit 1; }
   gh api "${release_api#https://api.github.com/}" >"$local_root/release.json"
   gh api "repos/jacobcxdev/cq/releases/assets/$asset_id" --header 'Accept: application/octet-stream' >"$local_root/previous.zip"
   "$nativepackage_executable" verify "$local_root/previous.json" "$local_root/previous.zip" "$local_root/release.json"
@@ -200,7 +200,21 @@ RUBY
   requirement='anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "K2648T24P4"'
   /usr/bin/codesign --verify --deep --strict --all-architectures "-R=$requirement and identifier \"dev.jacobcx.cq.network\"" "$app"
   /usr/bin/codesign --verify --strict --all-architectures "-R=$requirement and identifier \"dev.jacobcx.cq.network.proxy\"" "$provider"
-  /usr/bin/xcrun stapler validate "$app"
+  # Match native-package preparation's bounded retry for Apple's ticket service.
+  for attempt in 1 2 3; do
+    if /usr/bin/xcrun stapler validate "$app" >"$local_root/stapler-validation.log" 2>&1; then
+      cat "$local_root/stapler-validation.log"
+      break
+    else
+      validation_status=$?
+    fi
+    cat "$local_root/stapler-validation.log" >&2
+    if [[ "$validation_status" -ne 68 || "$attempt" -eq 3 ]] || ! /usr/bin/grep -Fq 'NSURLErrorDomain Code=-1005' "$local_root/stapler-validation.log"; then
+      exit "$validation_status"
+    fi
+    echo "Apple ticket connection lost; retrying validation ($attempt/3)." >&2
+    sleep 2
+  done
   /usr/sbin/spctl --assess --type execute "$app"
   "$nativepackage_executable" cask "$local_root/previous.json" "$local_root/cq-network.rb"
   trap 'result=$?; cp "$current_native_cask" "$selected_cask" || result=1; exit "$result"' EXIT

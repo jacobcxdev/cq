@@ -58,19 +58,35 @@ cat >"$root/bin/gh" <<'SH'
 set -euo pipefail
 root=$CQ_COMPANION_TEST_ROOT
 case "$*" in
-  'release view cq-network-v0.41.8 --repo jacobcxdev/cq --json apiUrl --jq .apiUrl') echo https://api.github.com/repos/jacobcxdev/cq/releases/18 ;;
-  'api repos/jacobcxdev/cq/releases/18') cat "$root/release-18.json" ;;
+  'release view cq-network-v0.41.8 --repo jacobcxdev/cq --json apiUrl --jq .apiUrl') echo "${CQ_COMPANION_TEST_RELEASE_API:-https://api.github.com/repos/jacobcxdev/cq/releases/18}" ;;
+  'api repos/jacobcxdev/cq/releases/18'|'api repos/other/cq/releases/18') cat "$root/release-18.json" ;;
   'api repos/jacobcxdev/cq/releases/assets/18 --header Accept: application/octet-stream') cat "$root/0.41.8.zip" ;;
   *) echo "unexpected gh call: $*" >&2; exit 1 ;;
 esac
 SH
-for command in ditto codesign xcrun spctl; do
+for command in ditto codesign spctl; do
   cat >"$root/bin/$command" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
 [[ "$(basename "$0")" != codesign || ! -f "$CQ_COMPANION_TEST_ROOT/reject-signature" ]]
 SH
 done
+cat >"$root/bin/xcrun" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+root=$CQ_COMPANION_TEST_ROOT
+count=0
+[[ ! -f "$root/ticket-count" ]] || count=$(cat "$root/ticket-count")
+count=$((count + 1))
+echo "$count" >"$root/ticket-count"
+case "${CQ_COMPANION_TEST_TICKET:-ok}" in
+  transient)
+    if [[ "$count" -le 2 ]]; then echo 'NSURLErrorDomain Code=-1005' >&2; exit 68; fi ;;
+  persistent) echo 'NSURLErrorDomain Code=-1005' >&2; exit 68 ;;
+  unrelated) echo 'unrelated ticket lookup failure' >&2; exit 68 ;;
+  invalid) echo 'invalid stapled ticket' >&2; exit 65 ;;
+esac
+SH
 chmod +x "$root/bin/"*
 export PATH="$root/bin:$PATH"
 export CI=true
@@ -93,12 +109,14 @@ install_unchanged_cq() {
 reset_case() {
   cp "$root/current-native.rb" "$root/tap/Casks/cq-network.rb"
   echo 0.41.9 >"$root/installed"
-  rm -f "$root/events" "$root/reject-install" "$root/reject-cq" "$root/reject-signature"
+  rm -f "$root/events" "$root/reject-install" "$root/reject-cq" "$root/reject-signature" "$root/ticket-count"
 }
 assert_restored() { cmp "$root/current-native.rb" "$root/tap/Casks/cq-network.rb"; }
 export root temporary_root nativepackage_executable previous_cask current_cask current_native_cask current_native_archive
 export -f install_previous_cq install_unchanged_cq
-run_setup() { bash -e -c 'source "$CQ_COMPANION_TEST_ROOT/function.sh"; with_previous_companion "$1"' fixture "${1:-install_previous_cq}"; }
+# Use the shell under test; expansion belongs to that child.
+# shellcheck disable=SC2016
+run_setup() { "$BASH" -e -c 'source "$CQ_COMPANION_TEST_ROOT/function.sh"; with_previous_companion "$1"' fixture "${1:-install_previous_cq}"; }
 reset_case
 run_setup
 assert_restored
@@ -110,6 +128,21 @@ run_setup install_unchanged_cq
 assert_restored
 [[ ! -f "$root/events" ]]
 previous_cask="$root/0.41.8.rb"
+reset_case
+CQ_COMPANION_TEST_TICKET=transient run_setup >"$root/error" 2>&1
+assert_restored
+[[ "$(cat "$root/ticket-count")" == 3 ]]
+for failure in persistent unrelated invalid; do
+  reset_case
+  if CQ_COMPANION_TEST_TICKET=$failure run_setup >"$root/error" 2>&1; then
+    echo "accepted failed ticket validation: $failure" >&2; exit 1
+  fi
+  assert_restored
+  expected=1
+  if [[ "$failure" == persistent ]]; then expected=3; fi
+  [[ "$(cat "$root/ticket-count")" == "$expected" ]]
+  [[ ! -f "$root/events" ]]
+done
 for failure in install cq signature; do
   reset_case
   touch "$root/reject-$failure"
@@ -134,6 +167,11 @@ fi
 assert_restored
 [[ ! -f "$root/events" ]]
 cp "$root/release-original.json" "$root/release-18.json"
+if CQ_COMPANION_TEST_RELEASE_API=https://api.github.com/repos/other/cq/releases/18 run_setup >"$root/error" 2>&1; then
+  echo "accepted predecessor API outside expected repository" >&2; exit 1
+fi
+assert_restored
+[[ ! -f "$root/events" ]]
 if CI=false run_setup >"$root/error" 2>&1; then
   echo "accepted companion setup outside disposable CI" >&2; exit 1
 fi
