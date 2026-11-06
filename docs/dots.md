@@ -2,6 +2,15 @@
 
 [Getting started](../README.md) · [Other client integrations](usage.md#connecting-a-client) · [Troubleshooting](troubleshooting.md#native-network-and-dots)
 
+Use this integration to bring existing Dots from several accounts into one
+ChatGPT sidebar and coordinate between them. Secondary Dots must already be
+onboarded; CQ does not add secondary onboarding slots. If you only need access
+to your primary Dot before regional rollout, use a **US WireGuard profile**
+with [native ChatGPT routing](configuration.md#native-chatgpt-network-routing)
+instead. The multi-account adapter is not required for that single-Dot use case.
+Primary onboarding remains OpenAI's normal native or web flow; the combined
+catalogue requires the system Dot to be onboarded before it starts.
+
 `cq codex dots` defaults to the normal native app, using its existing profile, local tasks and signed-in account. Existing account-owned Dots share that app's sidebar. The packaged CQ binary includes the Go controller and runtime; installation creates private adapter state and loopback certificates. Python, pip and virtual environments are not needed. It uses the installed app bundle without patching or re-signing it. Account credential sources and CQ services remain unchanged.
 
 Native installation creates `~/Applications/ChatGPT via CQ.app` from the controller bundled in CQ. Launch it through Raycast, Spotlight or Finder for new sessions, or run `cq codex dots start`. Both routes preserve OpenAI's original app signature and use the existing profile. CQ sets `OPENAI_BASE_URL` to its configured local proxy even when `~/.codex/config.toml` contains no CQ entry. Direct launches of OpenAI's original app bypass the adapter. CQ does not quit an already-running normal app. Installation and account changes report `restart_required` until the user quits it and starts it through CQ. The launcher reports that instruction instead of silently opening an unmanaged app.
@@ -14,7 +23,25 @@ This remains an optional macOS feature built on private native endpoints. Live q
 
 ## Install
 
-Sign in to the accounts you want to use with `cq codex login`, and onboard their Dots through the normal native or web UI before discovery.
+Sign in to the accounts you want to use with `cq codex login`, and onboard their Dots through the normal native or web UI before discovery. Each account has its own primary Dot; CQ presents it as a secondary Dot when that account is not the native app's system account. Adding an account to CQ does not onboard its Dot.
+
+For an account without an onboarded Dot, choose one of these routes:
+
+- **Browser:** sign in to that account at ChatGPT in a separate browser profile
+  or private window, then complete its normal Dot setup. This preserves the
+  desktop app's current account. CQ Network routes ChatGPT app traffic, not
+  browser traffic; if onboarding is region-restricted, the browser needs its
+  own suitable US connection. A private window separates sign-ins but does not
+  change the browser's region.
+- **Desktop:** at a suitable break in active work, quit ChatGPT and open the
+  original ChatGPT app **without the multi-account adapter**, rather than
+  `ChatGPT via CQ`. Sign out and sign in to the secondary account, complete its
+  normal primary Dot setup, then sign back in to the original system account
+  and quit the app. CQ Network can remain enabled for US routing throughout.
+  Use the app's own sign-in flow; changing CQ's routing selection is not a
+  native ChatGPT account switch. Then sync CQ and reopen through CQ as described
+  below. Do not change native accounts inside an already-adapted session: its
+  catalogue and ownership bindings belong to the original system account.
 
 ```sh
 cq codex dots install
@@ -23,6 +50,13 @@ cq codex dots status
 ```
 
 Installation stages a private copy of the Go CQ executable, discovers existing Dots, then starts the normal app when it is not already running. The signed-in system account must have an onboarded Dot before the combined catalogue can start. If discovery finds no onboarded Dots, installation keeps account discovery running without starting the app; onboard the system Dot, then run `cq codex dots sync`.
+
+If CQ is already installed when you finish onboarding another account, run
+`cq codex dots sync`. When it reports `restart_required`, quit ChatGPT at a
+suitable break and reopen **ChatGPT via CQ**, or run `cq codex dots start` after
+quitting. The new account's Dot can then join the combined sidebar. Do not
+restart from the original app icon and assume the multi-account adapter is
+active; normal launching and the CQ launcher are separate paths.
 
 For disposable research, use `cq codex dots install --mode isolated`. Only that mode creates a separate app-data directory and Codex home. If its fresh window shows welcome or role onboarding, complete that native flow through the role stage. There is no supported Skip for that stage. The window stays open while CQ setup messages and the relay pause; the watcher resumes them once the native workspace is ready. Existing installations without a mode retain their isolated behaviour until explicitly reinstalled.
 
