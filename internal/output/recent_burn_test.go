@@ -39,7 +39,7 @@ func TestRecentBurnETAFlowsFromHistoryToAccountAndAggregate(t *testing.T) {
 		clock.now = now.Add(time.Duration(i-2) * 30 * time.Minute)
 		source.results = nil
 		for _, account := range []string{"one", "two", "three"} {
-			source.results = append(source.results, quota.Result{AccountID: account, Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
+			source.results = append(source.results, quota.Result{AccountID: account, Plan: "plus", Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
 				quota.Window7Day: {RemainingPct: pct, ResetAtUnix: now.Unix() + 44*3600},
 			}})
 		}

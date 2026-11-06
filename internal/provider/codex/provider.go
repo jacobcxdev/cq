@@ -165,7 +165,15 @@ func sameLogicalInventoryAccount(logical LogicalAccount, account logicalInventor
 		identity.AccountID == account.accountID && identity.UserID == account.userID
 }
 
-func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccount, inventory CredentialInventory, secrets ExactSecretResolver, broker CredentialRefreshBroker, now time.Time) quota.Result {
+func (p *Provider) fetchLogicalAccount(ctx context.Context, logical LogicalAccount, inventory CredentialInventory, secrets ExactSecretResolver, broker CredentialRefreshBroker, now time.Time) (result quota.Result) {
+	defer func() {
+		if result.Plan == "" {
+			result.Plan = logical.Identity.PlanType
+			if result.RateLimitTier == "" {
+				result.RateLimitTier = rateLimitTierForPlan(logical.Identity.PlanType, now)
+			}
+		}
+	}()
 	if !logical.Routable {
 		return noTokenResult(logical)
 	}
@@ -398,10 +406,11 @@ func (p *Provider) DiscoverAccounts(ctx context.Context) ([]provider.Account, er
 	out := make([]provider.Account, len(inventory.Accounts))
 	for i, logical := range inventory.Accounts {
 		out[i] = provider.Account{
-			AccountID: logical.Identity.AccountID,
-			Email:     logical.Identity.Email,
-			Label:     logical.Identity.PlanType,
-			Active:    logical.Active,
+			AccountID:     logical.Identity.AccountID,
+			Email:         logical.Identity.Email,
+			Label:         logical.Identity.PlanType,
+			RateLimitTier: rateLimitTierForPlan(logical.Identity.PlanType, time.Now()),
+			Active:        logical.Active,
 		}
 	}
 	return out, nil
@@ -435,7 +444,15 @@ func (p *Provider) RoutingAccounts(ctx context.Context) ([]RoutingAccount, error
 
 // fetchAccount fetches quota for one concrete candidate. Refresh decisions
 // stay at the logical-account broker boundary; this method never mutates auth.
-func (p *Provider) fetchAccount(ctx context.Context, acct CodexAccount) quota.Result {
+func (p *Provider) fetchAccount(ctx context.Context, acct CodexAccount) (result quota.Result) {
+	defer func() {
+		if result.Plan == "" {
+			result.Plan = acct.PlanType
+			if result.RateLimitTier == "" {
+				result.RateLimitTier = rateLimitTierForPlan(acct.PlanType, nowFunc())
+			}
+		}
+	}()
 	if acct.AccessToken == "" {
 		r := quota.ErrorResult("no_token", "no token", 0)
 		r.Email = acct.Email

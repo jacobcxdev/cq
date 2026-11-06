@@ -10,9 +10,30 @@ import (
 	"github.com/jacobcxdev/cq/internal/aggregate"
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/provider"
+	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
 	"github.com/muesli/termenv"
 )
+
+func TestBuildTTYModelCodexBusinessPremium(t *testing.T) {
+	result := codexprov.ParseUsageObservation([]byte(`{
+		"plan_type":"self_serve_business_prolite",
+		"rate_limit":{"primary_window":{"used_percent":10,"limit_window_seconds":604800}}
+	}`), "member@example.com", "account").Result
+	model := BuildTTYModel(app.Report{Providers: []app.ProviderReport{{
+		ID: provider.Codex, Results: []quota.Result{result},
+	}}}, time.Unix(1000, 0))
+	if len(model.Sections) != 1 {
+		t.Fatalf("sections = %d, want 1", len(model.Sections))
+	}
+	header := model.Sections[0].Header
+	if !strings.Contains(header, "business premium") || !strings.Contains(header, "member@example.com") {
+		t.Fatalf("missing business account label: %s", header)
+	}
+	if strings.Contains(header, "self_serve_business") || !strings.Contains(header, "5x") || strings.Contains(header, "10x") {
+		t.Fatalf("raw slug or incorrect multiplier in header: %s", header)
+	}
+}
 
 func TestBuildTTYModel_SingleProvider(t *testing.T) {
 	now := time.Unix(1000, 0)
@@ -650,6 +671,18 @@ func TestHeaderVisibleWidth(t *testing.T) {
 			r:    quota.Result{Plan: "max", Email: "a@b.com"},
 			id:   provider.Claude,
 			want: 12 + 1 + len("max") + 3 + len("a@b.com"),
+		},
+		{
+			name: "Codex canonical business label",
+			r:    quota.Result{Plan: "self_serve_business_prolite"},
+			id:   provider.Codex,
+			want: 12 + 1 + len("business premium 5x"),
+		},
+		{
+			name: "Codex unknown business variant",
+			r:    quota.Result{Plan: "self_serve_business_promax"},
+			id:   provider.Codex,
+			want: 12 + 1 + len("self_serve_business_promax"),
 		},
 	}
 	for _, tt := range tests {

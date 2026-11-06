@@ -119,40 +119,42 @@ func (a *Accounts) ProviderID() provider.ID { return provider.Codex }
 
 // Discover returns all known Codex accounts.
 func (a *Accounts) Discover(ctx context.Context) ([]provider.Account, error) {
+	now := time.Now()
+	if a.Now != nil {
+		now = a.Now()
+	}
 	if a.Inventory != nil {
 		inventory, err := a.Inventory.List(ctx)
 		if err != nil {
 			return nil, err
 		}
-		now := time.Now()
-		if a.Now != nil {
-			now = a.Now()
-		}
-		return projectVisibleProviderAccounts(ProjectVisibleAccounts(inventory, now)), nil
+		return projectVisibleProviderAccounts(ProjectVisibleAccounts(inventory, now), now), nil
 	}
 	accts := DiscoverAccounts(a.FS)
 	out := make([]provider.Account, len(accts))
 	for i, acct := range accts {
 		out[i] = provider.Account{
-			AccountID: acct.AccountID,
-			Email:     acct.Email,
-			Label:     acct.PlanType,
-			Active:    acct.IsActive,
-			SwitchID:  acct.Email,
+			AccountID:     acct.AccountID,
+			Email:         acct.Email,
+			Label:         acct.PlanType,
+			RateLimitTier: rateLimitTierForPlan(acct.PlanType, now),
+			Active:        acct.IsActive,
+			SwitchID:      acct.Email,
 		}
 	}
 	return out, nil
 }
 
-func projectVisibleProviderAccounts(accounts []ResetAccount) []provider.Account {
+func projectVisibleProviderAccounts(accounts []ResetAccount, now time.Time) []provider.Account {
 	out := make([]provider.Account, len(accounts))
 	for i, account := range accounts {
 		out[i] = provider.Account{
-			AccountID: account.AccountID,
-			Email:     account.Email,
-			Label:     account.PlanType,
-			Active:    account.Active,
-			SwitchID:  account.Email,
+			AccountID:     account.AccountID,
+			Email:         account.Email,
+			Label:         account.PlanType,
+			RateLimitTier: rateLimitTierForPlan(account.PlanType, now),
+			Active:        account.Active,
+			SwitchID:      account.Email,
 		}
 	}
 	return out
@@ -250,6 +252,7 @@ func providerAccount(logical LogicalAccount, active bool) provider.Account {
 	return provider.Account{
 		AccountID: logical.Identity.AccountID, Email: logical.Identity.Email,
 		Label: logical.Identity.PlanType, Active: active, SwitchID: logical.Identity.Email,
+		RateLimitTier: rateLimitTierForPlan(logical.Identity.PlanType, time.Now()),
 	}
 }
 
