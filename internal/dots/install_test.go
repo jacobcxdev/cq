@@ -341,13 +341,13 @@ func TestInstallationRejectsProtectedRootsAndAccountReplacementBeforeWrites(t *t
 	}
 }
 
-func TestAppCheckRejectsVersionAndRendererChanges(t *testing.T) {
+func TestAppCheckAcceptedMetadataChangesAndRejectedRendererChanges(t *testing.T) {
 	options, pin := installationFixture(t)
 	pin.AppBuild = "another"
-	if err := AppCheck(&pin); err == nil || !strings.Contains(err.Error(), "version") {
-		t.Fatalf("version accepted: %v", err)
+	pin.AppVersion = "future-version"
+	if err := AppCheck(&pin); err != nil {
+		t.Fatalf("unchanged renderer rejected after metadata update: %v", err)
 	}
-	pin.AppBuild = "42"
 	if err := os.WriteFile(filepath.Join(options.App, "Contents", "Resources", "app.asar"), []byte("changed"), 0o600); err != nil {
 		t.Fatal(err)
 	}

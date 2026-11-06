@@ -38,6 +38,9 @@ func TestStatusRejectsUnqualifiedUpdateBeforeRendererAccess(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(s.AppPath, "Contents", "Info.plist"), launcherPlist(map[string]string{"CFBundleShortVersionString": "unreviewed", "CFBundleVersion": "99999"}), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(s.AppPath, "Contents", "Resources", "app.asar"), []byte("unreviewed renderer"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := c.Status(context.Background()); err == nil || !strings.Contains(err.Error(), "build 99999") || !strings.Contains(err.Error(), "compatibility check failed") {
 		t.Fatalf("missing compatibility diagnostic: %v", err)
 	}
@@ -49,6 +52,7 @@ func TestAppPinRefreshPreservesInstallationAndRequiresRelaunch(t *testing.T) {
 	updated.ModuleAsset = "app-initial-updated.js"
 	s.AppBuild = "previous"
 	s.ModuleAsset = "app-initial-previous.js"
+	s.ASARSHA256 = strings.Repeat("0", 64)
 	if err := SaveJSON(filepath.Join(c.Root, "settings.json"), s); err != nil {
 		t.Fatal(err)
 	}

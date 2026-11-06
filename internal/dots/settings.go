@@ -64,7 +64,7 @@ func (s Settings) MarshalJSON() ([]byte, error) {
 
 var aliasPattern = regexp.MustCompile(`^[0-9a-f]{8}$`)
 var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
-var modulePattern = regexp.MustCompile(`^app-(?:shared|initial)-[A-Za-z0-9_-]+\.js$`)
+var modulePattern = regexp.MustCompile(`^(?:app-(?:shared|initial)-[A-Za-z0-9_-]+|[0-9]+\.[a-f0-9]{1,64})\.js$`)
 
 func validText(value string, limit int) bool {
 	if value == "" || !utf8.ValidString(value) || utf8.RuneCountInString(value) > limit {

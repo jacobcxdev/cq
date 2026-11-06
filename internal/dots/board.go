@@ -82,6 +82,10 @@ func (b *Board) request(ctx context.Context, method string, params map[string]an
 		asset, export = "app-shared-7815d5a1a42a.js", "zRt"
 	}
 	expression := strings.NewReplacer("BUS_ASSET", nativeJSON("app://-/assets/"+asset), "BUS_EXPORT", export, "BOARD_METHOD", nativeJSON(method), "BOARD_PARAMS", nativeJSON(params)).Replace(boardRequestJS)
+	if bindings := b.settings.NativeBindings; bindings != nil && bindings.Rspack != nil {
+		module := "import(" + nativeJSON("app://-/assets/"+asset) + ")"
+		expression = strings.Replace(expression, module, nativeRspackImport(module, bindings.Rspack), 1)
+	}
 	value, e := nativeOne(ctx, b.native, expression)
 	if e != nil {
 		return nil, e

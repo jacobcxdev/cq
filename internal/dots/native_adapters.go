@@ -32,6 +32,10 @@ var nativeMatchingReplyJS string
 func nativeJSON(v any) string { data, _ := json.Marshal(v); return string(data) }
 func nativeAsset(source string, s *Settings) string {
 	source = strings.ReplaceAll(source, "MODULE_ASSET_PLACEHOLDER", s.ModuleAsset)
+	if s.NativeBindings != nil && s.NativeBindings.Rspack != nil {
+		module := "import('app://-/assets/" + s.ModuleAsset + "')"
+		return strings.Replace(source, module, nativeRspackImport(module, s.NativeBindings.Rspack), 1)
+	}
 	var bindings string
 	if b := s.NativeBindings; b != nil {
 		bindings = "Ymr:m." + b.API + ",GMr:m." + b.Account + ",XMr:m." + b.User + ",JMr:m." + b.Ready + ",Lpr:m." + b.Cache + ",VAn:m." + b.Executor + ",CQNativeOwnedReads:true"
@@ -52,6 +56,17 @@ func nativeAsset(source string, s *Settings) string {
 		source = strings.Replace(source, module, module+".then(m=>({...m,"+bindings+"}))", 1)
 	}
 	return source
+}
+
+// Resolve only statically qualified exports already registered by the app.
+// Missing chunks fail explicitly instead of loading unrelated app features.
+func nativeRspackImport(module string, b *NativeRspackBindings) string {
+	bindings := map[string]NativeRspackExport{
+		"Ymr": b.API, "GMr": b.Account, "XMr": b.User, "JMr": b.Ready,
+		"Lpr": b.Cache, "VAn": b.Executor, "CQProfileQuery": b.ProfileQuery,
+		"CQProfileRecovery": b.ProfileRecovery, "CQBus": b.Bus,
+	}
+	return module + `.then(m=>{const r=m.__webpack_require__;if(typeof r!=='function'||!r.m)throw Error('Native module runtime unavailable');const out={CQNativeOwnedReads:true};for(const [key,ref] of Object.entries(` + nativeJSON(bindings) + `)){if(!Object.prototype.hasOwnProperty.call(r.m,ref.module))throw Error('Native module not registered');const value=r(ref.module)[ref.export];if(value==null)throw Error('Native module export unavailable');out[key]=value;}return out;})`
 }
 func nativeOne(ctx context.Context, e NativeEvaluator, expression string) (any, error) {
 	if single, ok := e.(interface {

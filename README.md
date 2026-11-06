@@ -1114,8 +1114,13 @@ cq zai zcode status
 profile, tasks and signed-in account. Dots discovered from your CQ accounts
 share that app's sidebar. CQ runs its Go adapter from a separate private directory
 alongside installation state and loopback certificates. It does not patch or
-re-sign the installed app bundle. Native app qualification is version-pinned;
-unsupported app updates fail before launch.
+re-sign the installed app bundle. CQ discovers the installed renderer's API,
+account ownership, messaging cache, executor and message bus contracts from its
+content. Version and build numbers are descriptive metadata, not compatibility
+gates. Compatible rebuilt renderers are rediscovered automatically; changed or
+ambiguous contracts stop adapter startup. Both Vite and Rspack layouts are
+supported. A changed renderer snapshot can require relaunching ChatGPT when
+convenient, but a version bump alone does not require a new CQ release.
 
 CQ automatically rechecks cached access denials for active, configured Dots
 through their owner's native profile query. A successful check restores the
