@@ -24,6 +24,12 @@ type cloudHarnessReceiptStore interface {
 	Save(harness.Receipt) error
 }
 
+type cloudHarnessGatewayTransport interface {
+	Write(string, []byte) error
+	ResumeParams(string, string) cloudMessage
+	ResumeSources(string) []string
+}
+
 // The launcher owns the native connection. Config is changed only at an idle
 // boundary, by releasing and immediately resuming that same subscription.
 type cloudHarness struct {
@@ -36,6 +42,7 @@ type cloudHarness struct {
 	prefix   string
 	sequence uint64
 	wake     chan struct{}
+	gateway  cloudHarnessGatewayTransport
 }
 
 type cloudHarnessThread struct {
@@ -46,9 +53,14 @@ type cloudHarnessThread struct {
 	fullConfigCwd        string
 	minimal              bool
 	active, owned        bool
+	subscriptions        map[string]bool
+	sourceEpoch          uint64
+	lastAttemptEpoch     uint64
 	pendingTurns         int
 	pendingSettings      int
 	completedTurnID      string
+	activeTurnID         string
+	activityRevision     uint64
 	awaitingRollout      bool
 	ephemeral            bool
 	selection            harness.Selection
@@ -333,6 +345,11 @@ func cloudHarnessRequestedModel(params cloudMessage) string {
 // prepare runs on the input goroutine, never on the native output reader. Native
 // responses continue flowing while a private config/reload RPC is in flight.
 func (h *cloudHarness) prepare(request cloudMessage, raw []byte) ([]byte, error) {
+	return h.prepareFrom("stdio", request, raw)
+}
+
+// A remote-control client has its own native subscription and request-ID space.
+func (h *cloudHarness) prepareFrom(source string, request cloudMessage, raw []byte) ([]byte, error) {
 	if h == nil {
 		return raw, nil
 	}
@@ -358,7 +375,7 @@ func (h *cloudHarness) prepare(request cloudMessage, raw []byte) ([]byte, error)
 		if model != "" && !strings.HasPrefix(strings.ToLower(model), "glm-") && (err != nil || policy.Version != 2) {
 			pending.selection = harness.Selection{Profile: harness.Full, Source: "model"}
 			h.mu.Lock()
-			h.requests[cloudHarnessID(request["id"])] = pending
+			h.requests[cloudHarnessRequestKey(source, request["id"])] = pending
 			h.mu.Unlock()
 			return raw, nil
 		}
@@ -433,7 +450,7 @@ func (h *cloudHarness) prepare(request cloudMessage, raw []byte) ([]byte, error)
 			thread.pendingTurns++
 		}
 	}
-	h.requests[cloudHarnessID(request["id"])] = pending
+	h.requests[cloudHarnessRequestKey(source, request["id"])] = pending
 	if method == "thread/settings/update" {
 		if thread := h.threads[cloudThreadID(request["params"])]; thread != nil {
 			thread.pendingSettings++
@@ -672,6 +689,10 @@ func (h *cloudHarness) refresh(id string) error {
 	h.mu.Lock()
 	thread := h.threads[id]
 	needed := thread != nil && thread.owned && thread.refresh
+	var revision uint64
+	if thread != nil {
+		revision = thread.activityRevision
+	}
 	h.mu.Unlock()
 	if !needed {
 		return nil
@@ -688,8 +709,16 @@ func (h *cloudHarness) refresh(id string) error {
 	}
 	h.mu.Lock()
 	if thread = h.threads[id]; thread != nil {
-		cloudHarnessActual(thread, result)
-		thread.refresh = false
+		current := thread.activityRevision == revision
+		if current && cloudHarnessString(cloudHarnessObject(cloudHarnessObject(result["thread"])["status"]), "type") == "idle" {
+			if thread.activeTurnID != "" {
+				thread.completedTurnID = thread.activeTurnID
+				thread.activeTurnID = ""
+				thread.activityRevision++
+			}
+		}
+		cloudHarnessActualWithActivity(thread, result, current)
+		thread.refresh = !current
 	}
 	h.mu.Unlock()
 	return nil
@@ -735,6 +764,10 @@ func cloudHarnessMinimalConfig(native cloudMessage, original json.RawMessage) cl
 }
 
 func (h *cloudHarness) call(method string, params any) (cloudMessage, error) {
+	return h.callOn("stdio", method, params)
+}
+
+func (h *cloudHarness) callOn(source, method string, params any) (cloudMessage, error) {
 	if err := h.b.ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -755,6 +788,12 @@ func (h *cloudHarness) call(method string, params any) (cloudMessage, error) {
 	defer func() { h.mu.Lock(); delete(h.calls, key); h.mu.Unlock() }()
 	raw := append(cloudHarnessRaw(map[string]any{"id": id, "method": method, "params": params}), '\n')
 	err := func() error {
+		if source != "stdio" {
+			if h.gateway == nil {
+				return errors.New("native gateway unavailable")
+			}
+			return h.gateway.Write(source, raw)
+		}
 		h.b.localWrite.Lock()
 		defer h.b.localWrite.Unlock()
 		if writer, ok := h.b.local.input.(interface{ SetWriteDeadline(time.Time) error }); ok {
@@ -801,6 +840,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 	snapshot.baseline = cloudHarnessClone(thread.baseline)
 	snapshot.settings = cloudHarnessClone(thread.settings)
 	h.mu.Unlock()
+	retryRuntime := len(snapshot.runtimeIssues) > 0 && snapshot.sourceEpoch != snapshot.lastAttemptEpoch
 	if model == "" {
 		model = snapshot.model
 	}
@@ -815,15 +855,15 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		h.event(id, snapshot.selection, "failed")
 		return errors.New("harness policy unavailable")
 	}
-	if policy.Version != 2 && !snapshot.minimal && !snapshot.profileManaged && !snapshot.restorePlugins && !strings.HasPrefix(strings.ToLower(model), "glm-") {
+	if policy.Version != 2 && !snapshot.minimal && !snapshot.profileManaged && !snapshot.restorePlugins && !strings.HasPrefix(strings.ToLower(model), "glm-") && !retryRuntime {
 		return nil
 	}
 	selection := policy.Resolve(model, cwd, id)
-	if !selection.Managed && !snapshot.profileManaged && !snapshot.minimal && !snapshot.restorePlugins {
+	if !selection.Managed && !snapshot.profileManaged && !snapshot.minimal && !snapshot.restorePlugins && !retryRuntime {
 		return nil
 	}
 	contextChanged := snapshot.fullConfig != nil && snapshot.fullConfigCwd != cwd
-	if !policy.Enabled && !snapshot.minimal && !snapshot.profileManaged && !snapshot.restorePlugins {
+	if !policy.Enabled && !snapshot.minimal && !snapshot.profileManaged && !snapshot.restorePlugins && !retryRuntime {
 		return nil
 	}
 	if err := h.acquire(id); err != nil {
@@ -834,6 +874,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 	snapshot.baseline = cloudHarnessClone(h.threads[id].baseline)
 	snapshot.settings = cloudHarnessClone(h.threads[id].settings)
 	h.mu.Unlock()
+	retryRuntime = len(snapshot.runtimeIssues) > 0 && snapshot.sourceEpoch != snapshot.lastAttemptEpoch
 	if snapshot.diverged {
 		if snapshot.receiptState != "diverged" && snapshot.handoffReceipt != nil {
 			receipt := *snapshot.handoffReceipt
@@ -848,18 +889,18 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		return errors.New("chat plugin choices changed; harness baseline was left untouched")
 	}
 	minimal := selection.Managed && selection.Profile == harness.Minimal
-	key := string(cloudHarnessRaw(policy)) + "\n" + model + "\n" + cwd + "\n" + string(cloudHarnessRaw(selection))
+	key := string(cloudHarnessRaw(policy)) + "\n" + model + "\n" + cwd + "\n" + string(cloudHarnessRaw(selection)) + "\n" + strconv.FormatUint(snapshot.sourceEpoch, 10)
 	if snapshot.failureKey == key {
 		return errors.New("native harness reload previously failed; profile was not applied")
 	}
-	if policy.Version != 2 && !snapshot.profileManaged && minimal == snapshot.minimal && !snapshot.restorePlugins && !contextChanged {
+	if policy.Version != 2 && !snapshot.profileManaged && minimal == snapshot.minimal && !snapshot.restorePlugins && !contextChanged && !retryRuntime {
 		state := cloudHarnessProfileState(nil, snapshot.runtimeIssues...)
 		if selection.Managed && (snapshot.receiptState != state || snapshot.selection != selection) {
 			return h.record(id, selection, state)
 		}
 		return nil
 	}
-	if policy.Version == 2 && snapshot.profilePlan != nil && snapshot.profileFingerprint == selection.Fingerprint && !snapshot.profileRefresh && !snapshot.profileNeedsSettings && !snapshot.restorePlugins && !contextChanged {
+	if policy.Version == 2 && snapshot.profilePlan != nil && snapshot.profileFingerprint == selection.Fingerprint && !snapshot.profileRefresh && !snapshot.profileNeedsSettings && !snapshot.restorePlugins && !contextChanged && !retryRuntime {
 		state := cloudHarnessProfileState(snapshot.profilePlan, snapshot.runtimeIssues...)
 		if snapshot.receiptState != state || snapshot.selection != selection {
 			return h.record(id, selection, state)
@@ -937,7 +978,8 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 			return h.reconcile(id, requestedModel, requestedCwd)
 		}
 		snapshot = latest
-		if snapshot.profilePlan != nil && snapshot.profilePlan.key == desiredPlan.key && !snapshot.restorePlugins {
+		retryRuntime = len(snapshot.runtimeIssues) > 0 && snapshot.sourceEpoch != snapshot.lastAttemptEpoch
+		if snapshot.profilePlan != nil && snapshot.profilePlan.key == desiredPlan.key && !snapshot.restorePlugins && !retryRuntime {
 			if snapshot.profileNeedsSettings {
 				if err := h.record(id, selection, "prepared"); err != nil {
 					return err
@@ -1038,8 +1080,9 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 	} else if minimal {
 		params["config"] = cloudHarnessRaw(cloudHarnessMinimalConfig(native, snapshot.baseline["config"]))
 	}
-	unsubscribed, err := h.call("thread/unsubscribe", map[string]string{"threadId": id})
-	if err != nil || cloudHarnessString(unsubscribed, "status") != "unsubscribed" {
+	attemptEpoch := snapshot.sourceEpoch
+	primary, restoreSubscriptions, err := h.suspendSubscriptions(id)
+	if err != nil {
 		h.mu.Lock()
 		if current := h.threads[id]; current != nil {
 			current.failureKey = key
@@ -1048,7 +1091,8 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		_ = h.record(id, selection, "failed")
 		return errors.New("native harness could not release this chat subscription")
 	}
-	result, err := h.call("thread/resume", params)
+	defer func() { _ = restoreSubscriptions(primary) }()
+	result, err := h.callOn(primary, "thread/resume", params)
 	if err == nil && cloudThreadID(cloudHarnessRaw(result)) != id {
 		err = errors.New("native harness resumed a different chat")
 	}
@@ -1065,17 +1109,26 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		}
 		_, err = h.call("thread/settings/update", replay)
 	}
+	if err == nil {
+		err = restoreSubscriptions(primary)
+	}
 	if err != nil {
 		rollback := cloudHarnessResumeParams(snapshot, snapshot.model, snapshot.cwd)
-		// A failed settings update may follow a successful minimal resume. A
-		// loaded resume would ignore rollback config, so release it once more.
-		_, _ = h.call("thread/unsubscribe", map[string]string{"threadId": id})
-		rollbackResult, rollbackErr := h.call("thread/resume", rollback)
+		// Rollback must also release background owners of the attempted config.
+		rollbackPrimary, rollbackRestore, rollbackErr := h.suspendSubscriptions(id)
+		var rollbackResult cloudMessage
+		if rollbackErr == nil {
+			primary, restoreSubscriptions = rollbackPrimary, rollbackRestore
+			rollbackResult, rollbackErr = h.callOn(primary, "thread/resume", rollback)
+		}
 		if rollbackErr == nil && cloudThreadID(cloudHarnessRaw(rollbackResult)) != id {
 			rollbackErr = errors.New("native harness rollback changed chat identity")
 		}
 		if rollbackErr == nil {
 			_, rollbackErr = h.call("thread/settings/update", cloudHarnessReplaySettings(snapshot, snapshot.model, snapshot.cwd))
+		}
+		if rollbackErr == nil {
+			rollbackErr = restoreSubscriptions(primary)
 		}
 		h.mu.Lock()
 		if current := h.threads[id]; current != nil {
@@ -1135,6 +1188,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		current.profileNeedsSettings = false
 		current.appliedPlugins = nil
 		current.runtimeIssues = runtimeIssues
+		current.lastAttemptEpoch = attemptEpoch
 		if len(runtimeIssues) == 0 {
 			current.runtimeConfig = cloudHarnessClone(desiredConfig)
 		}
@@ -1175,6 +1229,22 @@ func cloudHarnessSkillsChanged(previous, desired cloudMessage) bool {
 }
 
 func cloudHarnessActual(thread *cloudHarnessThread, result cloudMessage) {
+	cloudHarnessActualWithActivity(thread, result, true)
+}
+
+func cloudHarnessObserved(thread *cloudHarnessThread, result cloudMessage, source string) {
+	primary := cloudHarnessActivitySource(thread, source)
+	if !primary && thread.subscriptions[source] {
+		status := cloudHarnessString(cloudHarnessObject(cloudHarnessObject(result["thread"])["status"]), "type")
+		if status == "active" {
+			cloudHarnessStatus(thread, status)
+			thread.refresh = true
+		}
+	}
+	cloudHarnessActualWithActivity(thread, result, primary)
+}
+
+func cloudHarnessActualWithActivity(thread *cloudHarnessThread, result cloudMessage, activity bool) {
 	if plugins, ok := result["disabledPluginIds"]; ok {
 		var decoded []string
 		if json.Unmarshal(plugins, &decoded) == nil {
@@ -1199,11 +1269,10 @@ func cloudHarnessActual(thread *cloudHarnessThread, result cloudMessage) {
 		thread.cwd = cwd
 	}
 	status := cloudHarnessString(cloudHarnessObject(returned["status"]), "type")
-	if status == "active" {
-		thread.active = true
-	} else if status == "idle" {
-		thread.active = false
+	if !activity {
+		return
 	}
+	cloudHarnessStatus(thread, status)
 }
 
 // Current settings are distinct from the original harness config. Only accepted
@@ -1302,6 +1371,84 @@ func cloudHarnessReplaySettings(snapshot cloudHarnessThread, model, cwd string) 
 }
 
 func (h *cloudHarness) observe(raw []byte) bool {
+	return h.observeFrom("stdio", raw)
+}
+
+func cloudHarnessRequestKey(source string, id json.RawMessage) string {
+	if source == "stdio" {
+		return cloudHarnessID(id)
+	}
+	return source + "\x00" + cloudHarnessID(id)
+}
+
+// The caller holds h.mu. An existing unlabelled owner is the stdio connection.
+func cloudHarnessSubscription(thread *cloudHarnessThread, source string, subscribed bool) {
+	if thread.subscriptions == nil {
+		thread.subscriptions = make(map[string]bool)
+		if thread.owned {
+			thread.subscriptions["stdio"] = true
+		}
+	}
+	if thread.subscriptions[source] != subscribed {
+		thread.sourceEpoch++
+		thread.activityRevision++
+		if thread.active || len(thread.runtimeIssues) != 0 || thread.failureKey != "" {
+			thread.refresh = true
+		}
+	}
+	if subscribed {
+		thread.subscriptions[source] = true
+	} else {
+		delete(thread.subscriptions, source)
+	}
+	thread.owned = len(thread.subscriptions) != 0
+}
+
+// A retained native subscription survives relay disconnects. Retry failed
+// assembly only after its existing source has a concrete writer again.
+func (h *cloudHarness) gatewayRecovered(source string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	changed := false
+	for _, thread := range h.threads {
+		candidate := h.gateway != nil && slices.Contains(h.gateway.ResumeSources(thread.id), source)
+		if thread.subscriptions[source] || candidate {
+			thread.sourceEpoch++
+			thread.activityRevision++
+			thread.refresh = true
+			changed = true
+		}
+	}
+	h.mu.Unlock()
+	if changed {
+		h.signal()
+	}
+}
+
+// A large resume response can be chunked and remain opaque. Its original
+// request still identifies a possible owner; unsubscribe verifies membership.
+func (h *cloudHarness) gatewayCandidateChanged(id string) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	thread := h.threads[id]
+	changed := thread != nil && thread.owned
+	if changed {
+		thread.sourceEpoch++
+		if len(thread.runtimeIssues) != 0 || thread.failureKey != "" {
+			thread.refresh = true
+		}
+	}
+	h.mu.Unlock()
+	if changed {
+		h.signal()
+	}
+}
+
+func (h *cloudHarness) observeFrom(source string, raw []byte) bool {
 	if h == nil {
 		return false
 	}
@@ -1332,9 +1479,14 @@ func (h *cloudHarness) observe(raw []byte) bool {
 		h.mu.Unlock()
 		return true
 	}
-	pending, found := h.requests[id]
+	requestKey := cloudHarnessRequestKey(source, message["id"])
+	var pending cloudHarnessRequest
+	found := false
+	if message.method() == "" && (hasResult || hasError) {
+		pending, found = h.requests[requestKey]
+	}
 	if found {
-		delete(h.requests, id)
+		delete(h.requests, requestKey)
 	}
 	failed := len(message["error"]) > 0 && !bytes.Equal(bytes.TrimSpace(message["error"]), []byte("null"))
 	if found && pending.method == "turn/start" {
@@ -1365,7 +1517,7 @@ func (h *cloudHarness) observe(raw []byte) bool {
 						thread.baseline[key] = bytes.Clone(value)
 					}
 				}
-				thread.owned = true
+				cloudHarnessSubscription(thread, source, true)
 				if pending.method == "thread/start" {
 					thread.awaitingRollout = true
 					_ = json.Unmarshal(pending.params["ephemeral"], &thread.ephemeral)
@@ -1382,7 +1534,7 @@ func (h *cloudHarness) observe(raw []byte) bool {
 						thread.runtimeConfig = cloudHarnessMinimalConfig(nil, cloudHarnessRaw(pending.fullConfig))
 					}
 				}
-				cloudHarnessActual(thread, result)
+				cloudHarnessObserved(thread, result, source)
 				cloudHarnessCaptureSettings(thread, pending.params, false)
 				cloudHarnessCaptureSettings(thread, result, true)
 				if plugin, ok := result["disabledPluginIds"]; ok {
@@ -1401,8 +1553,20 @@ func (h *cloudHarness) observe(raw []byte) bool {
 				turn := cloudHarnessObject(result["turn"])
 				turnID := cloudHarnessString(turn, "id")
 				status := cloudHarnessString(turn, "status")
-				thread.active = status != "completed" && status != "interrupted" && status != "failed" && (turnID == "" || turnID != thread.completedTurnID)
-				cloudHarnessActual(thread, result)
+				if cloudHarnessActivitySource(thread, source) || (status != "completed" && status != "interrupted" && status != "failed") {
+					if thread.activeTurnID != "" && thread.activeTurnID != turnID {
+						thread.activityRevision++
+						thread.refresh = true
+					} else if status == "completed" || status == "interrupted" || status == "failed" {
+						cloudHarnessTurnCompleted(thread, turnID)
+					} else {
+						cloudHarnessTurnStarted(thread, turnID)
+						if !cloudHarnessActivitySource(thread, source) {
+							thread.refresh = true
+						}
+					}
+				}
+				cloudHarnessObserved(thread, result, source)
 				cloudHarnessCaptureSettings(thread, pending.params, false)
 				cloudHarnessCaptureSettings(thread, result, true)
 				if cloudHarnessModel(result) == "" && (thread.profileManaged || thread.minimal || strings.HasPrefix(strings.ToLower(thread.model), "glm-") || strings.HasPrefix(strings.ToLower(cloudHarnessRequestedModel(pending.params)), "glm-")) {
@@ -1414,7 +1578,7 @@ func (h *cloudHarness) observe(raw []byte) bool {
 			}
 		case "thread/settings/update":
 			if thread != nil {
-				cloudHarnessActual(thread, result)
+				cloudHarnessObserved(thread, result, source)
 				cloudHarnessCaptureSettings(thread, pending.params, false)
 				cloudHarnessCaptureSettings(thread, result, true)
 				thread.refresh = true
@@ -1422,8 +1586,13 @@ func (h *cloudHarness) observe(raw []byte) bool {
 					cloudHarnessManualPlugins(thread, plugin)
 				}
 			}
-		case "thread/unsubscribe", "thread/archive":
+		case "thread/unsubscribe":
 			if thread != nil {
+				cloudHarnessSubscription(thread, source, false)
+			}
+		case "thread/archive":
+			if thread != nil {
+				thread.subscriptions = nil
 				thread.owned = false
 			}
 		}
@@ -1433,21 +1602,31 @@ func (h *cloudHarness) observe(raw []byte) bool {
 	if thread := h.threads[threadID]; thread != nil {
 		switch message.method() {
 		case "turn/started":
-			thread.active = true
+			if cloudHarnessActivitySource(thread, source) {
+				cloudHarnessTurnStarted(thread, cloudHarnessString(cloudHarnessObject(params["turn"]), "id"))
+			} else if thread.subscriptions[source] {
+				turnID := cloudHarnessString(cloudHarnessObject(params["turn"]), "id")
+				thread.activityRevision++
+				if thread.activeTurnID == "" || thread.activeTurnID == turnID {
+					cloudHarnessTurnStarted(thread, turnID)
+				}
+				thread.refresh = true
+			}
 		case "turn/completed":
-			thread.active = false
-			thread.awaitingRollout = false
-			thread.completedTurnID = cloudHarnessString(cloudHarnessObject(params["turn"]), "id")
+			if cloudHarnessActivitySource(thread, source) {
+				cloudHarnessTurnCompleted(thread, cloudHarnessString(cloudHarnessObject(params["turn"]), "id"))
+			}
 		case "thread/status/changed":
 			status := cloudHarnessObject(params["status"])
 			kind := cloudHarnessString(status, "type")
-			if kind == "idle" {
-				thread.active = false
-			} else if kind == "active" {
-				thread.active = true
+			if cloudHarnessActivitySource(thread, source) {
+				cloudHarnessStatus(thread, kind)
+			} else if thread.subscriptions[source] && kind == "active" {
+				cloudHarnessStatus(thread, kind)
+				thread.refresh = true
 			}
 		}
-		cloudHarnessActual(thread, params)
+		cloudHarnessObserved(thread, params, source)
 		if message.method() == "thread/settings/updated" {
 			cloudHarnessActual(thread, cloudHarnessObject(params["threadSettings"]))
 			cloudHarnessCaptureSettings(thread, cloudHarnessObject(params["threadSettings"]), true)
