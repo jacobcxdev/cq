@@ -4,13 +4,84 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func TestCodexCallbackAcceptsLongCodes(t *testing.T) {
+	for _, length := range []int{32, 512, 513, 1200, 16 * 1024} {
+		t.Run(fmt.Sprintf("%d_bytes", length), func(t *testing.T) {
+			code := "ac.2." + strings.Repeat("A", length-5)
+			codeCh := make(chan string, 1)
+			handler := codexCallbackHandler("test-state", codeCh)
+			query := url.Values{"state": {"test-state"}, "code": {code}, "scope": {codexScopes()}}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, codexCallbackPath+"?"+query.Encode(), nil))
+			select {
+			case got := <-codeCh:
+				if got != code {
+					t.Fatal("callback altered the authorization code")
+				}
+			default:
+				t.Fatalf("callback rejected %d-byte authorization code", length)
+			}
+			if !strings.Contains(response.Body.String(), "Login successful!") {
+				t.Fatal("callback did not show success")
+			}
+			// A duplicate must not enqueue another token exchange.
+			handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, codexCallbackPath+"?"+query.Encode(), nil))
+			select {
+			case <-codeCh:
+				t.Fatal("duplicate callback accepted")
+			default:
+			}
+		})
+	}
+}
+
+func TestCodexCallbackRejectsInvalidInputWithoutConsumingAttempt(t *testing.T) {
+	for _, tt := range []struct {
+		name, state, code string
+	}{
+		{"wrong_state", "wrong-state", "valid-code"},
+		{"missing_code", "test-state", ""},
+		{"oversized_code", "test-state", strings.Repeat("A", 16*1024+1)},
+		{"spaces", "test-state", "invalid code"},
+		{"html", "test-state", "<script>"},
+		{"control_character", "test-state", "code\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			codeCh := make(chan string, 1)
+			handler := codexCallbackHandler("test-state", codeCh)
+			query := url.Values{"state": {tt.state}, "code": {tt.code}}
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, codexCallbackPath+"?"+query.Encode(), nil))
+			if !strings.Contains(response.Body.String(), "Login failed") {
+				t.Fatal("invalid callback did not show failure")
+			}
+			select {
+			case <-codeCh:
+				t.Fatal("invalid callback accepted")
+			default:
+			}
+			handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, codexCallbackPath+"?state=test-state&code=valid-code", nil))
+			select {
+			case got := <-codeCh:
+				if got != "valid-code" {
+					t.Fatal("callback altered the authorization code")
+				}
+			default:
+				t.Fatal("invalid callback consumed the login attempt")
+			}
+		})
+	}
+}
 
 func TestBuildCodexAuthorizeURL(t *testing.T) {
 	url := buildCodexAuthorizeURL("test-challenge", "test-state", 1455)
