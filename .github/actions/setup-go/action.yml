@@ -31,10 +31,18 @@ runs:
         } >> "$GITHUB_ENV"
 
     - name: Cache Go modules
+      id: modules
       uses: actions/cache@v5
       with:
         path: ${{ steps.paths.outputs.module-cache }}
-        key: cq-go-modules-v1-${{ runner.os }}-${{ steps.paths.outputs.image }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles(inputs.go-version-file, '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum') }}
+        key: cq-go-modules-v2-${{ runner.os }}-${{ steps.paths.outputs.image }}-${{ runner.arch }}-${{ steps.go.outputs.go-version }}-${{ hashFiles(inputs.go-version-file, '**/go.mod', '**/go.sum', '**/go.work', '**/go.work.sum') }}
+
+    # The first cache writer may only build a standard-library-only tool.
+    # Populate the dependency graph before publishing an immutable snapshot.
+    - name: Download Go modules on a cache miss
+      if: steps.modules.outputs.cache-hit != 'true'
+      shell: bash
+      run: go mod download
 
     - name: Cache Go compiler outputs
       uses: actions/cache@v5
