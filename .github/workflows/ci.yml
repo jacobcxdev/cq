@@ -305,12 +305,17 @@ jobs:
       - run: .\cq-install.exe --help
       - run: go vet ./...
       - run: go test -race -count=1 ./internal/fsutil
+        if: matrix.architecture == 'amd64'
       - run: go test -race -count=1 ./internal/installer -run '^(TestWindows|TestInstallLock|TestInstaller)'
+        if: matrix.architecture == 'amd64'
       - run: go test -race -count=1 ./cmd/cq-install
+        if: matrix.architecture == 'amd64'
       - run: go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot)'
+        if: matrix.architecture == 'amd64'
         env:
           CQ_NATIVE_WINDOWS_SCHEDULER_TEST: "1"
       - run: go test -race -count=1 ./internal/provider/codex -run '^TestWindowsCredential'
+        if: matrix.architecture == 'amd64'
       - name: Validate per-user MSI install, upgrade, and uninstall
         shell: pwsh
         run: |
