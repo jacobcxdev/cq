@@ -4,10 +4,19 @@ import Darwin
 import Foundation
 import NetworkExtension
 
+protocol UDPBridgeFlow: AnyObject {
+    func open(withLocalEndpoint localEndpoint: NWHostEndpoint?, completionHandler: @escaping @Sendable (Error?) -> Void)
+    func readDatagrams(completionHandler: @escaping ([Data]?, [NWEndpoint]?, Error?) -> Void)
+    func writeDatagrams(_ datagrams: [Data], sentBy remoteEndpoints: [NWEndpoint], completionHandler: @escaping @Sendable (Error?) -> Void)
+    func closeReadWithError(_ error: Error?)
+    func closeWriteWithError(_ error: Error?)
+}
+
+extension NEAppProxyUDPFlow: UDPBridgeFlow {}
+
 final class UDPBridge: FlowBridge {
-    private let flow: NEAppProxyUDPFlow
-    private let uid: uid_t
-    private let registry: BrokerSessionRegistry
+    private let flow: UDPBridgeFlow
+    private let openTunnel: (String, @escaping (FileHandle?, NSError?) -> Void) -> Void
     private let destinations: AdmittedFlowDestinationPolicy
     private let finished: () -> Void
     private let queue = DispatchQueue(label: "dev.jacobcx.cq.network.udp")
@@ -16,9 +25,17 @@ final class UDPBridge: FlowBridge {
     private var closed = false
     private var idle: DispatchWorkItem?
 
-    init(flow: NEAppProxyUDPFlow, uid: uid_t, registry: BrokerSessionRegistry,
+    convenience init(flow: NEAppProxyUDPFlow, uid: uid_t, registry: BrokerSessionRegistry,
          destinations: AdmittedFlowDestinationPolicy, finished: @escaping () -> Void) {
-        self.flow = flow; self.uid = uid; self.registry = registry
+        self.init(flow: flow, destinations: destinations, openTunnel: { target, completion in
+            registry.open(uid: uid, network: "udp", target: target, completion: completion)
+        }, finished: finished)
+    }
+
+    init(flow: UDPBridgeFlow, destinations: AdmittedFlowDestinationPolicy,
+         openTunnel: @escaping (String, @escaping (FileHandle?, NSError?) -> Void) -> Void,
+         finished: @escaping () -> Void) {
+        self.flow = flow; self.openTunnel = openTunnel
         self.destinations = destinations; self.finished = finished
     }
 
@@ -62,8 +79,9 @@ final class UDPBridge: FlowBridge {
         guard route != .block else { close(); return }
         func write(_ channel: Channel) {
             channel.transport.write(channel.framed ? frame : datagrams[index]) { error in
-                guard error == nil else { self.close(); return }
-                self.touch()
+                guard !self.closed else { return }
+                if error == nil { self.touch() }
+                else { self.retire(channel, endpoint: endpoint) }
                 self.send(datagrams, endpoints: endpoints, index: index + 1)
             }
         }
@@ -79,7 +97,7 @@ final class UDPBridge: FlowBridge {
             } catch { close() }
             return
         }
-        registry.open(uid: uid, network: "udp", target: target) { handle, error in
+        openTunnel(target) { handle, error in
             self.queue.async {
                 guard !self.closed, error == nil, let handle else { try? handle?.close(); self.close(); return }
                 let channel = Channel(transport: FDChannel(handle: handle, queue: self.queue), framed: true)
@@ -91,22 +109,37 @@ final class UDPBridge: FlowBridge {
     }
 
     private func readTunnel(_ channel: Channel, endpoint: NWHostEndpoint) {
-        guard !closed else { return }
+        guard !closed, let target = tunnelTarget(endpoint),
+              channels[target]?.transport === channel.transport else { return }
         if !channel.framed {
             channel.transport.readSome(maximum: 65_536) { datagram, error in
-                guard !self.closed, error == nil, let datagram, datagram.count <= DatagramCodec.maximumSize else { self.close(); return }
+                guard !self.closed else { return }
+                guard error == nil, let datagram, datagram.count <= DatagramCodec.maximumSize else {
+                    self.retire(channel, endpoint: endpoint); return
+                }
                 self.receive(datagram, channel: channel, endpoint: endpoint)
             }
             return
         }
         channel.transport.readExactly(2) { prefix, error in
-            guard !self.closed, error == nil, let prefix,
-                  let size = try? DatagramCodec.payloadSize(prefix) else { self.close(); return }
+            guard !self.closed else { return }
+            guard error == nil, let prefix, let size = try? DatagramCodec.payloadSize(prefix) else {
+                self.retire(channel, endpoint: endpoint); return
+            }
             channel.transport.readExactly(size) { datagram, error in
-                guard !self.closed, error == nil, let datagram else { self.close(); return }
+                guard !self.closed else { return }
+                guard error == nil, let datagram else { self.retire(channel, endpoint: endpoint); return }
                 self.receive(datagram, channel: channel, endpoint: endpoint)
             }
         }
+    }
+
+    private func retire(_ channel: Channel, endpoint: NWHostEndpoint) {
+        guard let target = tunnelTarget(endpoint), channels[target]?.transport === channel.transport else { return }
+        // A broker's per-destination idle expiry must not tear down active
+        // siblings. Remove before closing: close can complete pending callbacks.
+        channels.removeValue(forKey: target)
+        channel.transport.close()
     }
 
     private func receive(_ datagram: Data, channel: Channel, endpoint: NWHostEndpoint) {
