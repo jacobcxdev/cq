@@ -183,11 +183,10 @@ filesystem; a cross-filesystem move can degrade to a copy.
 
 Keep user guidance in `README.md` and maintained `docs/` pages. Keep package
 ownership rules in the applicable `AGENTS.md`; `CLAUDE.md` imports the root rules.
-Implementation checklists and task evidence belong in ignored
-`docs/superpowers/`, rather than the published documentation tree. Transfer
-current product and maintainer contracts into maintained guides before
-untracking a plan. The frozen [proxy reference](docs/reference/README.md) remains
-tracked because verification consumes its exact bytes.
+Implementation plans and review evidence remain local and ignored. Transfer
+current product and maintainer contracts into published guides before
+untracking a plan. Build and verification tools must use current source and
+tests without depending on local planning or historical review documents.
 
 Use normal reviewed commits for repository hygiene. Preserve local planning
 copies when removing them from tracking; ignore rules alone do not untrack

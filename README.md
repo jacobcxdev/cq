@@ -355,7 +355,7 @@ go vet ./...
 go test -race -count=1 ./...
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for changes and review, [architecture](docs/architecture.md) for implementation boundaries, and [release operations](docs/releases.md) for publication and installed-traffic qualification. The frozen [routing authority reference](docs/reference/README.md) is a specialist protocol contract.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for changes and review, [architecture](docs/architecture.md) for implementation boundaries, and [release operations](docs/releases.md) for publication and installed-traffic qualification.
 
 ## Licence
 

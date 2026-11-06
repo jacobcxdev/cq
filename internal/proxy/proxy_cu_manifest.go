@@ -41,7 +41,13 @@ var (
 	decimalPattern               = regexp.MustCompile(`^(?:0|[1-9][0-9]*)$`)
 )
 
-const frozenReviewAggregateSHA256 = "3b227af5077cbaab1ad1f29444549062bad5c343baa1d15e254a1994fe2850be"
+// These V1 identities still bind retained signed release records. They do not
+// require a repository blueprint, review document or construction runner.
+const (
+	frozenBlueprintSHA256       = "bd8bdff9a8ce4582d0a66e847c74f5e69744651de457ba8e6847e0fcda678f38"
+	frozenReviewBaseline        = "9fe30df8d4101f69084d6487740ed324a5d0b59d"
+	frozenReviewAggregateSHA256 = "3b227af5077cbaab1ad1f29444549062bad5c343baa1d15e254a1994fe2850be"
+)
 
 // CUManifestV1 is the closed manifest header shared by every construction
 // unit. Unit-specific test selections are added after the header validates.
@@ -64,10 +70,10 @@ type CUTestPackageV1 struct {
 	MinimumPassCount int      `json:"minimum_pass_count"`
 }
 
-// CanonicalCUManifestV1 returns the exact checked-in manifest bytes for one
-// construction unit. A later unit remains unavailable until it adds a
-// non-empty exact selection here.
-func CanonicalCUManifestV1(cuID string) ([]byte, error) {
+// legacyCUManifestV1 reproduces historical manifest bytes for signed V1
+// evidence. Its test names describe the original construction baseline, not
+// a current runnable test selection. Unknown units remain unavailable.
+func legacyCUManifestV1(cuID string) ([]byte, error) {
 	if cuID == "CU-2" {
 		return canonicalCU2ManifestV1()
 	}
@@ -2133,7 +2139,7 @@ func verifyAvailableConstructionUnitEvidenceV1(reports []CUReportV1, evidence []
 		return fmt.Errorf("retained CU evidence cardinality mismatch")
 	}
 	for index, report := range reports {
-		canonical, err := CanonicalCUManifestV1(report.CUID)
+		canonical, err := legacyCUManifestV1(report.CUID)
 		if err != nil {
 			return fmt.Errorf("feature inactive: %s verification manifest is unavailable", report.CUID)
 		}
@@ -3309,10 +3315,9 @@ func ExecutionResultDigestV1(exitCode int32, terminationReason string, stdout, s
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-// VerificationManifestDigestV1 digests the exact canonical checked-in
-// manifest bytes for one construction unit.
+// VerificationManifestDigestV1 digests the exact retained V1 manifest bytes.
 func VerificationManifestDigestV1(cuID string) (string, error) {
-	manifest, err := CanonicalCUManifestV1(cuID)
+	manifest, err := legacyCUManifestV1(cuID)
 	if err != nil {
 		return "", err
 	}
