@@ -21,6 +21,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/provider/grok"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
 	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/quota"
@@ -93,7 +94,9 @@ type Server struct {
 	Selector        ClaudeSelector
 	Discover        ClaudeDiscoverer
 	Transport       http.RoundTripper
-	// Z.ai uses separate credentials and transport from Codex accounts.
+	// Subscription providers retain their own credential authority.
+	GrokAuthority    grok.Authority
+	grokBindings     grokStateBindings
 	ZAIAPIKey        func() (string, error)
 	ZAIAccounts      func() ([]zaiprov.Account, error)
 	ZAIQuota         func() []quota.Result
@@ -714,6 +717,12 @@ func (s *Server) handleCodexResponsesRoute(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", fmt.Sprintf("%s only supports POST", codexResponsesPath))
 		return
 	}
+	if s.serveSubscriptionThroughNativeAdmission(w, r, false) {
+		return
+	}
+	if handled, _ := s.tryHandleGrok(w, r); handled {
+		return
+	}
 	if handled, _ := s.tryHandleZAI(w, r); handled {
 		return
 	}
@@ -729,6 +738,12 @@ func (s *Server) handleLegacyCodexResponsesRoute(w http.ResponseWriter, r *http.
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", fmt.Sprintf("%s only supports POST or websocket upgrade", legacyCodexResponsesPath))
+		return
+	}
+	if s.serveSubscriptionThroughNativeAdmission(w, r, false) {
+		return
+	}
+	if handled, _ := s.tryHandleGrok(w, r); handled {
 		return
 	}
 	if handled, _ := s.tryHandleZAI(w, r); handled {
@@ -1277,18 +1292,19 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		writeError(w, statusCode, "invalid_request_error", "Codex WebSocket request requires HTTP")
 		return
 	}
+	grokEnabled := s.GrokAuthority != nil || s.hasGrokCatalog()
 	zaiEnabled := s.hasZAICatalog()
 	if !zaiEnabled && (s.ZAIAPIKey != nil || s.ZAIAccounts != nil) {
 		key, keyErr := s.zaiKey()
 		zaiEnabled = keyErr == nil && key != ""
 	}
-	if webSocketEnforcing && s.CodexWebSocketBroker == nil && !zaiEnabled {
+	if webSocketEnforcing && s.CodexWebSocketBroker == nil && !zaiEnabled && !grokEnabled {
 		statusCode = http.StatusServiceUnavailable
 		diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing unavailable")
 		writeError(w, http.StatusServiceUnavailable, "api_error", "Codex WebSocket routing unavailable")
 		return
 	}
-	if !webSocketEnforcing && !zaiEnabled {
+	if !webSocketEnforcing && !zaiEnabled && !grokEnabled {
 		if router, executor := s.codexWebSocketRouting(); router == nil || executor == nil {
 			statusCode = http.StatusServiceUnavailable
 			diagError = diagnosticsErrorCode("api_error", "no codex accounts configured")
@@ -1297,7 +1313,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	upstreamURL := ""
-	if !webSocketEnforcing && !zaiEnabled {
+	if !webSocketEnforcing && !zaiEnabled && !grokEnabled {
 		var err error
 		upstreamURL, err = codexAppServerWebSocketURL(s.Config.CodexUpstream)
 		if err != nil {
@@ -1327,7 +1343,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	var firstKind int
 	var firstFrame []byte
-	if zaiEnabled || s.HarnessObserver != nil {
+	if zaiEnabled || grokEnabled || s.HarnessObserver != nil {
 		var upgrade <-chan struct{}
 		if s.runtimeUpgrade != nil {
 			upgrade = s.runtimeUpgrade.PauseSignal()
@@ -1364,6 +1380,13 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		if firstKind == websocket.TextMessage && RouteModelWithCatalog(extractCodexWebSocketFrameModel(firstFrame), s.Catalog) == ProviderGrok {
+			diagnosticsProvider, routeKind = "grok", "grok_subscription_websocket"
+			if err := s.serveGrokWebSocket(r.Context(), clientConn, r.Header, firstKind, firstFrame); err != nil {
+				_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "Grok subscription unavailable"), time.Now().Add(time.Second))
+			}
+			return
+		}
 		if firstKind == websocket.TextMessage && RouteModelWithCatalog(extractCodexWebSocketFrameModel(firstFrame), s.Catalog) == ProviderZAI {
 			diagnosticsProvider = "zai"
 			routeKind = "zai_native_websocket"
@@ -1386,7 +1409,9 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		var brokerErr error
 		if firstFrame != nil {
 			if broker, ok := s.CodexWebSocketBroker.(initialCodexWebSocketRoutingHandler); ok {
-				brokerErr = broker.ServeInitial(brokerContext, clientConn, r.Header, firstKind, firstFrame, func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) != ProviderZAI })
+				brokerErr = broker.ServeInitial(brokerContext, clientConn, r.Header, firstKind, firstFrame, func(model string) bool {
+					return RouteModelWithCatalog(model, s.Catalog) != ProviderZAI && RouteModelWithCatalog(model, s.Catalog) != ProviderGrok
+				})
 			} else {
 				brokerErr = errors.New("Codex WebSocket initial-frame routing unavailable")
 			}
@@ -1490,8 +1515,10 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		restored, _, err := normaliseCQCompactionInput(body, s.cqCompactionToken())
 		return restored, err
 	}}
-	if zaiEnabled {
-		boundRelay.acceptsModel = func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) != ProviderZAI }
+	if zaiEnabled || grokEnabled {
+		boundRelay.acceptsModel = func(model string) bool {
+			return RouteModelWithCatalog(model, s.Catalog) != ProviderZAI && RouteModelWithCatalog(model, s.Catalog) != ProviderGrok
+		}
 	}
 	downstreamRelay = boundRelay
 	relayErr := relayWebSocketPairGuarded(r.Context(), downstreamRelay, upstreamConn, func(fromClient bool, messageType int, message []byte) {
@@ -1852,8 +1879,12 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 			fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=%s\n",
 				r.Method, r.URL.Path, routeModel, providerName(routeProvider))
 		}
-		if routeProvider == ProviderZAI {
-			writeError(w, http.StatusBadRequest, "invalid_request_error", "Z.ai models require the Responses endpoint")
+		if routeProvider == ProviderZAI || routeProvider == ProviderGrok {
+			name := "Z.ai"
+			if routeProvider == ProviderGrok {
+				name = "Grok"
+			}
+			writeError(w, http.StatusBadRequest, "invalid_request_error", name+" models require the Responses endpoint")
 			return
 		}
 		if routeProvider == ProviderCodex {
@@ -2048,6 +2079,8 @@ func providerName(provider Provider) string {
 	switch provider {
 	case ProviderZAI:
 		return "zai"
+	case ProviderGrok:
+		return "grok"
 	case ProviderCodex:
 		return "codex"
 	default:

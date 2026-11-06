@@ -251,7 +251,7 @@ WireGuard keys in another VPN client.
 | `CLAUDE_CONFIG_DIR` | `~/.claude` | Listing fallback and compatibility capability-cache path. Registry publication still uses `~/.claude/cache`; credential discovery remains separate. |
 | `CODEX_HOME` | `~/.codex` | Native client/version discovery and read-only native model-cache fallback before CQ's own registry cache exists. CQ does not publish to the native entitlement cache; credential discovery still uses `~/.codex`. |
 | `ANTHROPIC_BASE_URL` | unset | Client-side setting to point compatible clients at CQ. |
-| `ZAI_API_KEY` | unset | Exclusive per-process override of all saved Z.ai accounts; do not put its value in shell history or logs. |
+| `ZAI_API_KEY` | unset | Selects one account; a saved OAuth account wins when the exact key's ownership was verified. Otherwise uses only this key. Never put its value in shell history or logs. |
 | `CODEX_THREAD_ID` | unset | Validated current chat identity for harness `--chat current`; CQ does not search transcripts to infer it. |
 | `OPENAI_BASE_URL` | unset | Native-client routing input; the Dots launcher sets it to CQ. This is separate from the native network extension. |
 
@@ -326,7 +326,7 @@ A portable export envelope is `{"version":1,"name":"review","definition":{"descr
 
 | File | User contract |
 |---|---|
-| Configuration `zai.json` | Private API keys and browser-account references. Use login/switch/remove/route; do not copy raw OAuth credentials into it. `ZAI_API_KEY` exclusively overrides saved accounts for that process. |
+| Configuration `zai.json` | Private API keys, browser-account references and verified opaque key aliases. Use login/switch/remove/route; do not copy raw OAuth credentials into it. `ZAI_API_KEY` selects one account, preferring verified same-account OAuth. |
 | Encrypted ZCode session store and device identity | Browser-login material and stable device registration. Keep its private key material with the configuration during an authorised migration. PATs/signing material remain in memory. |
 | Configuration `models.json` | User overlays managed by `models overlay`; provider IDs are `anthropic`, `codex`, `zai`, distinct from quota ID `claude`. |
 | Codex managed account registry / credential journal | Coordinator-owned account identity and refresh/removal records. Do not edit to bypass uncertain outcomes or change ownership. |
@@ -341,3 +341,17 @@ Unix secret files use mode `0600` and private directories `0700`; WireGuard and 
 The overlay file is a versioned object: `{"version":1,"models":[]}`. Use `models overlay add --provider PROVIDER --id MODEL [--clone-from NATIVE_MODEL]` to create it and `remove` / `prune` to maintain it. Supported providers are `anthropic`, `codex` and `zai`.
 
 Each model entry requires `provider` and `id`. Optional public fields are `aliases` (string array), `display_name`, `description`, `context_window`, `max_context_window`, `max_output_tokens`, `visibility`, `priority`, `source`, `clone_from`, `inferred_from` and `raw` provider JSON. `source` is `native` or `overlay`; an omitted source in an overlay file becomes `overlay`. Preserve downloaded `raw` metadata rather than inventing capabilities. Cross-provider duplicate model IDs, compared case-insensitively, are rejected. Cloning copies metadata for an upstream-supported alias; it does not establish provider availability, pricing or entitlement. The CLI and registry infer provider-specific metadata where supported, so prefer those commands to hand-editing a client cache.
+
+## Grok credentials and CodexBar sources
+
+Grok subscription sessions use CQ-owned `grok-accounts.json` and
+`grok-accounts.key` in the configuration root. Both are private files; retain the
+key with the encrypted store. Public xAI API keys and purchased balances are not
+configuration options. Use `cq grok login` for browser authentication.
+
+CodexBar provider discovery honors `CODEXBAR_CONFIG`, then its supported XDG/home
+configuration paths. A current provider configuration takes precedence over
+legacy token files, including explicit absence. Reads do not change permissions,
+active source accounts or credential ownership. Unsupported regional/team Z.ai
+key scopes are not routed through the personal/global endpoint. See
+[provider setup and qualification](usage.md#grok-subscriptions).

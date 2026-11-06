@@ -180,7 +180,7 @@ Run `cq zai login` to sign in through ZCode's browser OAuth flow. A completed lo
 
 For API-key authentication, run `cq zai login --api-key` and paste a Personal Coding Plan API key into the hidden prompt. Repeat for each subscription. Create the key under **API Keys → Personal Coding Plan**; Standard API Keys use separate billing. CQ validates quota access before saving the key in the CQ configuration directory's `zai.json` (default `~/.config/cq/zai.json` on macOS/Linux), using mode `0600` in a private directory. Quota access alone does not prove inference access; `cq zai prime now` checks whether an eligible dormant window can be started. Existing single-key files remain supported. Saved accounts also work for the background proxy service; new accounts and preferred-account changes apply on the next request without restarting CQ.
 
-`ZAI_API_KEY` remains an exclusive override: when set in a process's environment, that process uses only that key. Remove the override to use the saved account pool. For scripts, `cq zai login --api-key-stdin` reads the key from standard input without putting it in command arguments.
+`ZAI_API_KEY` selects one account for that process. If its exact key has already been verified as belonging to a saved OAuth account, CQ uses that OAuth account; otherwise it uses only the supplied key. Remove the override to use the saved account pool. For scripts, `cq zai login --api-key-stdin` reads the key from standard input without putting it in command arguments.
 
 CQ supports individual Coding Plan subscriptions through Z.ai's global endpoint. Group plans and regional endpoints are not configured separately.
 
@@ -194,9 +194,10 @@ cq zai remove --api-keys           # Remove stored API-key entries after browser
 cq --refresh check zai
 cq models refresh
 cq models list --provider zai
+cq models list --provider grok
 ```
 
-After saving replacement browser logins, `cq zai remove --api-keys` removes all stored API-key entries while retaining browser accounts and their relative preference order. It requires a saved browser login and makes no provider requests. API keys cannot reliably identify which browser account replaces them, so CQ never deletes them merely because another account signs in. An environment `ZAI_API_KEY` override is separate from stored entries and remains under the caller's control.
+Browser login replaces only CQ-owned keys whose full value is verified against the OAuth account's personal projects. Unproved keys remain separate. For explicit bulk cleanup, `cq zai remove --api-keys` removes all stored API-key entries while retaining browser accounts and their relative preference order. It requires a saved browser login and makes no provider requests. An environment `ZAI_API_KEY` value remains under the caller's control; CQ never edits the environment or CodexBar's source.
 
 Choose a saved account's billing route explicitly. New browser logins default to `zcode`, the paid Coding Plan gateway; `zcode-start` uses that OAuth account's separate Start Plan token pool. Start Plan access stays on the preferred account and never silently falls back to paid quota. Existing API-key accounts retain their saved route; `responses` is the original API-key route. Route changes apply on the next request.
 
@@ -727,7 +728,7 @@ The running proxy refreshes upstream models every five minutes. Each Codex fetch
 
 Registry refresh merges provider sources with local overlays, validates entries, and publishes:
 
-- CQ-owned native Codex/Z.ai registry metadata at `model-registry.json` beneath the CQ cache root;
+- CQ-owned native Codex/Z.ai/Grok registry metadata at `model-registry.json` beneath the CQ cache root;
 - Claude Code capability cache at `~/.claude/cache/model-capabilities.json` when Anthropic entries are present;
 - managed Claude Code picker entries in `~/.claude.json`.
 
@@ -745,3 +746,116 @@ Proxy endpoints also expose model metadata and authenticated registry refresh/sn
 ## Command and operation reference
 
 The [complete command index](../README.md#complete-command-index) is checked against the public command tree. Use leaf help, for example `cq zai resets use --help`, for argument selectors and confirmation flags. The [release guide](releases.md) covers advanced installed validation, canary, candidate lifecycle, operation recovery and legacy endpoint transitions. Current [routing-policy types and validation](../internal/proxy/routing_policy_store.go) define the implemented policy format.
+
+## Grok subscriptions
+
+```bash
+cq grok login
+cq grok login --label Personal --no-activate
+cq grok accounts
+cq grok switch ACCOUNT
+cq grok remove ACCOUNT
+cq check grok
+cq --json check grok
+cq models list --provider grok
+cq grok resets list
+cq grok resets list ACCOUNT
+```
+
+Grok uses browser OAuth and the Grok Build subscription service. CQ stores its
+own login in encrypted `grok-accounts.json` under the private CQ configuration
+directory. Its adjacent private key file is required to read that store. Normal
+refresh renews only CQ-owned sessions. Login, preference changes and removal do
+not modify Grok Build or CodexBar state. An uncertain rotating-token exchange
+requires reauthentication rather than replaying the consumed refresh token.
+
+The provider reports included subscription usage and the actual reset period.
+Purchased credit, top-ups, public xAI API keys and monetary reporting are outside
+CQ's scope. Unknown plan capacity is excluded from weighted aggregates. New and
+legacy plan names are retained rather than assigned guessed multipliers.
+
+CodexBar's configured Grok bearer credentials are discovered dynamically and
+verified against the subscription profile. A CQ-owned OAuth login takes priority
+for the same verified user/principal/team. Borrowed credentials are never adopted,
+renewed, switched or removed. Cookies, public API keys and unverified bearer
+records remain visible as unavailable sources; they are not silently promoted to
+subscription inference. A broken external source is shown separately and does
+not hide healthy CQ-owned accounts.
+
+Model routing currently requires an explicit native Responses backend and known
+context in the authenticated catalogue. The adapter translates supported Codex
+custom/namespaced tools to functions, restores their identities in results and
+streams, and shares CQ's HTTP/SSE/WebSocket machinery. Function descriptions
+retain custom grammar instructions; Grok does not thereby enforce that grammar.
+Non-Responses models are not advertised as supported. CQ compacts through a
+subscription Responses summary request and seals the result using the same CQ
+state format as Z.ai. The subscription service does not expose the public API's
+standalone compaction endpoint. No separately billed API fallback is used.
+
+Native continuation response IDs and opaque state are bound to their producing
+account and model in the current process. CQ retains the original native
+reasoning container to undo client serialization changes; ciphertext stays
+unchanged. This cache has an entry limit and a byte limit. After eviction or a
+worker restart, unknown native opaque state
+requires a fresh conversation with full readable input. CQ does not replay an
+uncertain admitted inference request or fall back to separately billed API access.
+CQ-owned summary state remains readable while its local proxy token is retained.
+It reads included quota before dispatch and does not enable extra usage settings;
+the provider still controls accounting between that read and the request.
+
+`resets list` reads reward counts and expiry dates without exposing redemption
+identifiers or consuming rewards. No reset redemption or scheduling is implemented.
+Endpoint acceptance and entitlement are account-dependent; an unavailable read
+is not reported as zero rewards.
+
+Live qualification on 6 November 2026 verified browser login, rotating renewal,
+included quota and the account-specific model catalogue on a GrokPro subscription.
+With app-bundled Codex `0.167.0-alpha.3.2`, each model below completed local tools
+before and after CQ compaction, two compactions in one conversation, and exact
+recall of a marker and the changed file token on both transports.
+
+| Model | HTTP | WebSocket |
+| --- | --- | --- |
+| `grok-4.7` | Passed | Passed |
+| `grok-4.7-build-fast` | Passed | Passed |
+| `grok-4.6` | Passed | Passed |
+| `grok-4.5` | Passed | Passed |
+
+Qualification covers these model IDs and client version on a personal GrokPro
+subscription. Near-exhaustion and provider extra-usage behavior remain
+unqualified.
+
+The opt-in `TestGrokLiveSubscriptionLogin` check uses an isolated profile and performs
+login/profile/quota/catalogue reads only. Set `CQ_GROK_LIVE_LOGIN=1` and an absolute
+`CQ_GROK_LIVE_CONFIG`, then run it with `go test -race -count=1 -v ./cmd/cq -run
+'^TestGrokLiveSubscriptionLogin$'`. It does not run inference or change billing.
+`TestGrokLiveSavedSubscription` reuses a saved profile for read-only checks when
+`CQ_GROK_LIVE_SAVED=1`. The separate
+`TestGrokLiveInstalledToolsCompactionAndContinuation` proxy test requires
+`CQ_GROK_LIVE_TEST=1` and spends subscription quota through an isolated listener.
+`CQ_GROK_LIVE_MODEL` selects an entitled model; its default is the first eligible
+catalogue entry. The installed client receives only a temporary loopback token.
+
+### CodexBar Z.ai discovery
+
+CQ also reads personal/global Z.ai Coding Plan keys configured in CodexBar.
+`ZAI_API_KEY` selects only its corresponding account, preferring a saved OAuth
+account when exact ownership was previously verified. Otherwise CQ-owned entries
+precede borrowed entries; exact duplicate keys keep CQ ownership. Borrowed
+credentials never enter CQ's write/removal paths, and their source is shown by
+`cq zai accounts`.
+
+Browser login verifies existing subscription keys against the OAuth account's
+personal projects. A full key match replaces the CQ-owned key with OAuth and
+records an opaque alias to suppress any borrowed duplicate. CodexBar's key stays
+in CodexBar. This reconciliation runs during explicit browser login; existing
+OAuth accounts gain aliases on their next login. Removing the OAuth login makes
+borrowed keys visible again. A later login with an already verified key retains
+the OAuth account.
+
+If ownership reads fail, CQ saves the browser login, preserves existing keys and
+reports the limitation. Ambiguous keys and keys belonging to different accounts
+remain separate. CQ does not delete keys by matching a label,
+email or key prefix. Explicit local key cleanup remains available through the
+existing `cq zai remove --api-keys` command after a saved browser login; it is
+not an automatic same-account upgrade and never modifies CodexBar.

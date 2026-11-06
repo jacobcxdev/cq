@@ -28,6 +28,7 @@ Commands:
   codex       Manage Codex accounts and validation
   gemini      Show Gemini account
   zai         Manage Z.ai Coding Plan accounts
+  grok        Manage Grok subscription accounts
   refresh     Refresh stored OAuth tokens
   agent       Manage the background refresh agent
   service     Manage complete background service lifecycle
@@ -36,6 +37,22 @@ Commands:
   operation   Inspect or recover a durable proxy operation
 
 Run "cq <command> --help" for more information on a command.
+`,
+	"grok": `Usage: cq grok <command>
+
+Manage Grok subscription accounts. Public pay-as-you-go API keys are not supported.
+
+Commands:
+  grok login        Sign in through the browser
+  grok accounts     List CQ and discovered CodexBar accounts
+  grok switch       Choose CQ's preferred account
+  grok remove       Remove a CQ-owned login
+  grok resets list  Read reset reward inventory without consuming it
+
+Verified OAuth identity takes priority over duplicate borrowed credentials.
+CodexBar accounts remain owned by CodexBar. Unverified cookies are reported as
+unavailable and are not used for inference. Model routing currently requires a
+native Responses backend in the account's catalogue.
 `,
 	"codex": `Usage: cq codex <command>
 
@@ -212,7 +229,7 @@ After consumption, fresh upstream usage supplies the current reset dates.
 	"codex canary":   "Usage: cq codex canary start|status|stop\n",
 	"refresh": `Usage: cq refresh
 
-Refresh stored OAuth tokens for Claude and Codex before they expire.
+Refresh stored OAuth tokens for Claude, Codex and Grok before they expire.
 
 Use this before long sessions or from the background agent. Expired Claude
 accounts may require interactive reauth from a terminal.
