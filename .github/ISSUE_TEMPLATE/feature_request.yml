@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest an improvement to CQ.
+labels: [enhancement, needs-triage]
+assignees: [jacobcxdev]
+body:
+  - type: markdown
+    attributes:
+      value: This issue is public. Do not include credentials, private prompts or raw logs.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed improvement
+      description: Describe the behaviour you would like and any alternatives you considered.
+    validations:
+      required: true

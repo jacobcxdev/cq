@@ -1,5 +1,7 @@
 name: Bug report
 description: Report a CQ failure with minimal, reviewed diagnostics.
+labels: [bug, needs-triage]
+assignees: [jacobcxdev]
 body:
   - type: markdown
     attributes:

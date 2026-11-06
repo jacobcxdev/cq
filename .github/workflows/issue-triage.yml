@@ -1,0 +1,48 @@
+name: Issue triage
+
+on:
+  issues:
+    types: [opened, reopened]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Existing open issue to send through triage
+        required: true
+        type: string
+
+permissions:
+  issues: write
+
+concurrency:
+  group: issue-triage-${{ github.event.issue.number || inputs.issue_number }}
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Queue issue and assign an owner
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8, Node24
+        env:
+          ISSUE_NUMBER: ${{ github.event.issue.number || inputs.issue_number }}
+        with:
+          script: |
+            const input = process.env.ISSUE_NUMBER;
+            const issue_number = Number(input);
+            if (!/^[1-9][0-9]*$/.test(input) || !Number.isSafeInteger(issue_number)) {
+              throw new Error('issue_number must be a positive integer');
+            }
+            const target = { ...context.repo, issue_number };
+            const { data: issue } = await github.rest.issues.get(target);
+            if (issue.pull_request) {
+              throw new Error('Pull requests do not enter issue triage');
+            }
+            if (issue.state !== 'open') {
+              core.info('Closed issue skipped');
+              return;
+            }
+            await github.rest.issues.addLabels({ ...target, labels: ['needs-triage'] });
+            if (issue.assignees.length === 0) {
+              await github.rest.issues.addAssignees({ ...target, assignees: ['jacobcxdev'] });
+            }
