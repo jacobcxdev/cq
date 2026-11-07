@@ -19,7 +19,33 @@ case "$1 $2" in
     fi
     touch "$CQ_WINGET_TEST_ROOT/viewed" ;;
   'api repos/jacobcxdev/winget-pkgs/git/ref/heads/cq-0.47.3') cat "$CQ_WINGET_TEST_ROOT/fork-head" ;;
-  'api --paginate') cat "$CQ_WINGET_TEST_ROOT/comments.json" ;;
+  'api repos/microsoft/winget-pkgs/pulls/42')
+    if [[ -f "$CQ_WINGET_TEST_ROOT/policy-read" && -f "$CQ_WINGET_TEST_ROOT/policy-after.json" ]]; then
+      cat "$CQ_WINGET_TEST_ROOT/policy-after.json"
+    else
+      cat "$CQ_WINGET_TEST_ROOT/policy.json"
+    fi
+    touch "$CQ_WINGET_TEST_ROOT/policy-read" ;;
+  'api --paginate')
+    case "$4" in
+      */comments) cat "$CQ_WINGET_TEST_ROOT/comments.json" ;;
+      */events) cat "$CQ_WINGET_TEST_ROOT/events.json" ;;
+      *) exit 2 ;;
+    esac ;;
+  'api repos/microsoft/winget-pkgs/issues/comments/123')
+    if [[ -f "$CQ_WINGET_TEST_ROOT/comment-current.json" ]]; then
+      cat "$CQ_WINGET_TEST_ROOT/comment-current.json"
+    else
+      jq 'flatten | .[] | select(.id == 123)' "$CQ_WINGET_TEST_ROOT/comments.json"
+    fi ;;
+  'api --method')
+    [[ $# == 6 && "$3" == PATCH && "$4" == repos/microsoft/winget-pkgs/issues/comments/123 && "$5" == --input ]]
+    cat "$6" >"$CQ_WINGET_TEST_ROOT/edited"
+    jq --slurpfile edit "$6" 'map(map(if .id == 123 then .body=$edit[0].body | .updated_at="2026-11-07T17:01:00Z" else . end))' \
+      "$CQ_WINGET_TEST_ROOT/comments.json" >"$CQ_WINGET_TEST_ROOT/comments-next.json"
+    mv "$CQ_WINGET_TEST_ROOT/comments-next.json" "$CQ_WINGET_TEST_ROOT/comments.json"
+    jq 'flatten | .[] | select(.id == 123)' "$CQ_WINGET_TEST_ROOT/comments.json"
+    echo edit >>"$CQ_WINGET_TEST_ROOT/writes" ;;
   'api repos/microsoft/winget-pkgs/contents/manifests/j/jacobcxdev/cq/0.47.3') test -f "$CQ_WINGET_TEST_ROOT/published" ;;
   'pr comment')
     [[ $# == 7 && "$3" == 42 && "$4" == --repo && "$5" == microsoft/winget-pkgs && "$6" == --body-file ]]
@@ -28,7 +54,11 @@ case "$1 $2" in
   *) exit 2 ;;
 esac
 SH
-chmod +x "$root/bin/gh"
+cat >"$root/bin/sleep" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$CQ_WINGET_TEST_ROOT/sleeps"
+SH
+chmod +x "$root/bin/gh" "$root/bin/sleep"
 export CQ_WINGET_TEST_ROOT="$root" GH_TOKEN=fixture RELEASE_TAG=v0.47.3
 export PATH="$root/bin:$PATH"
 agreement='@microsoft-github-policy-service agree company="JacobCX Development Ltd."'
@@ -43,11 +73,13 @@ jq -n '{number:42,state:"OPEN",title:"New version: jacobcxdev.cq version 0.47.3"
     {path:"manifests/j/jacobcxdev/cq/0.47.3/jacobcxdev.cq.yaml"}]}' >"$root/current.json"
 jq '[.]' "$root/current.json" >"$root/prs.json"
 printf '[[]]\n' >"$root/comments.json"
+printf '[[]]\n' >"$root/events.json"
+printf '{"number":42,"state":"open","author":"jacobcxdev","author_association":"CONTRIBUTOR","labels":[]}\n' >"$root/policy.json"
 
 # New and already-existing submissions use the same guarded, idempotent step.
 bash "$script"
 [[ "$(cat "$root/posted")" == "$agreement" ]]
-jq -n --arg body "$agreement" '[[{user:{login:"jacobcxdev"},body:($body+"\n")}]]' >"$root/comments.json"
+jq -n --arg body "$agreement" '[[{id:123,user:{login:"jacobcxdev"},body:($body+"\n"),created_at:"2026-11-07T16:00:00Z",updated_at:"2026-11-07T16:00:00Z",issue_url:"https://api.github.com/repos/microsoft/winget-pkgs/issues/42"}]]' >"$root/comments.json"
 bash "$script"
 [[ "$(cat "$root/writes")" == 42 ]]
 
@@ -104,4 +136,83 @@ bash "$script"
 [[ ! -e "$root/writes" ]]
 if RELEASE_TAG=v0.47.3-rc bash "$script" >"$root/error" 2>&1; then exit 1; fi
 [[ ! -e "$root/writes" ]]
-echo 'WinGet CLA checks passed: author, repository, version, files, idempotency and invalid targets.'
+# The upstream label can arrive after the author agreement. Replay the same
+# comment through a genuine edit, once per label generation, without another post.
+rm -f "$root/published" "$root/writes" "$root/policy-read" "$root/sleeps"
+jq '[.]' "$root/current.json" >"$root/prs.json"
+jq '.author_association="NONE" | .labels=["Needs-CLA"]' "$root/policy.json" >"$root/policy-next.json"
+mv "$root/policy-next.json" "$root/policy.json"
+printf '[[{"id":99,"event":"labeled","label":{"name":"Needs-CLA"},"created_at":"2026-11-07T17:00:00Z"}]]\n' >"$root/events.json"
+jq -n --arg body "$agreement" '[[{id:123,user:{login:"jacobcxdev"},body:($body+"\n"),created_at:"2026-11-07T16:00:00Z",updated_at:"2026-11-07T16:00:00Z",issue_url:"https://api.github.com/repos/microsoft/winget-pkgs/issues/42"}]]' >"$root/comments.json"
+bash "$script"
+[[ "$(cat "$root/writes")" == edit ]]
+jq -e --arg body "$agreement" '.body == ($body+"\n\n")' "$root/edited" >/dev/null
+bash "$script"
+[[ "$(cat "$root/writes")" == edit ]]
+
+# A new label generation permits one more edit, toggling the trailing blank line.
+jq '.[0][0].created_at="2026-11-07T17:02:00Z"' "$root/events.json" >"$root/events-next.json"
+mv "$root/events-next.json" "$root/events.json"
+# The fake server must advance updated_at beyond the new label for this edit.
+sed -i.bak 's/2026-11-07T17:01:00Z/2026-11-07T17:03:00Z/g' "$root/bin/gh"
+bash "$script"
+[[ "$(wc -l <"$root/writes" | tr -d ' ')" == 2 ]]
+jq -e --arg body "$agreement" '.body == ($body+"\n")' "$root/edited" >/dev/null
+bash "$script"
+[[ "$(wc -l <"$root/writes" | tr -d ' ')" == 2 ]]
+
+# Once the opening label has been cleared, a first-time author rerun is a no-op.
+rm -f "$root/sleeps"
+jq '.labels=[]' "$root/policy.json" >"$root/policy-next.json"
+mv "$root/policy-next.json" "$root/policy.json"
+jq '.[0] += [{id:100,event:"unlabeled",label:{name:"Needs-CLA"},created_at:"2026-11-07T17:04:00Z"}]' "$root/events.json" >"$root/events-next.json"
+mv "$root/events-next.json" "$root/events.json"
+bash "$script"
+[[ "$(wc -l <"$root/writes" | tr -d ' ')" == 2 && ! -e "$root/sleeps" ]]
+# Reset the event fixture to represent a pending first opening, not a cleared label.
+printf '[[]]\n' >"$root/events.json"
+
+# Wait for initial label processing for every association used by the upstream rule.
+for association in NONE FIRST_TIMER FIRST_TIME_CONTRIBUTOR; do
+  rm -f "$root/writes" "$root/policy-read" "$root/sleeps"
+  printf '[[]]\n' >"$root/comments.json"
+  jq --arg association "$association" '.author_association=$association | .labels=[]' "$root/policy.json" >"$root/policy-next.json"
+  mv "$root/policy-next.json" "$root/policy.json"
+  jq '.labels=["Needs-CLA"]' "$root/policy.json" >"$root/policy-after.json"
+  bash "$script"
+  [[ "$(cat "$root/writes")" == 42 && -s "$root/sleeps" ]]
+done
+rm "$root/policy-after.json"
+rm -f "$root/writes" "$root/policy-read" "$root/sleeps"
+if bash "$script" >"$root/error" 2>&1; then exit 1; fi
+[[ ! -e "$root/writes" && "$(wc -l <"$root/sleeps" | tr -d ' ')" == 23 ]]
+grep -F 'timed out waiting for initial Needs-CLA' "$root/error" >/dev/null
+
+# Malformed association, event and comment metadata cannot authorise an edit.
+jq '.labels=["Needs-CLA"]' "$root/policy.json" >"$root/policy-next.json"
+mv "$root/policy-next.json" "$root/policy.json"
+jq -n --arg body "$agreement" '[[{id:123,user:{login:"jacobcxdev"},body:$body,created_at:"2026-11-07T16:00:00Z",updated_at:"2026-11-07T16:00:00Z",issue_url:"https://api.github.com/repos/microsoft/winget-pkgs/issues/42"}]]' >"$root/comments.json"
+printf '[[{"id":99,"event":"labeled","label":{"name":"Needs-CLA"},"created_at":"2026-11-07T17:00:00Z"}]]\n' >"$root/events.json"
+cp "$root/events.json" "$root/events-valid.json"
+for invalid in 'not JSON' '{}' '[[]]' '[[{"id":99,"event":"labeled","label":{"name":"Needs-CLA"},"created_at":"invalid"}]]'; do
+  printf '%s\n' "$invalid" >"$root/events.json"
+  if bash "$script" >"$root/error" 2>&1; then exit 1; fi
+  [[ ! -e "$root/writes" ]]
+done
+cp "$root/events-valid.json" "$root/events.json"
+cp "$root/comments.json" "$root/comments-valid.json"
+for mutation in '.[0][0].id=null' '.[0][0].updated_at="invalid"' '.[0][0].issue_url="https://api.github.com/repos/other/winget-pkgs/issues/42"'; do
+  jq "$mutation" "$root/comments-valid.json" >"$root/comments.json"
+  if bash "$script" >"$root/error" 2>&1; then exit 1; fi
+  [[ ! -e "$root/writes" ]]
+done
+cp "$root/comments-valid.json" "$root/comments.json"
+jq '.[0][0] | .body="changed"' "$root/comments.json" >"$root/comment-current.json"
+if bash "$script" >"$root/error" 2>&1; then exit 1; fi
+[[ ! -e "$root/writes" ]]
+rm "$root/comment-current.json"
+jq '.author_association=null' "$root/policy.json" >"$root/policy-next.json"
+mv "$root/policy-next.json" "$root/policy.json"
+if bash "$script" >"$root/error" 2>&1; then exit 1; fi
+[[ ! -e "$root/writes" ]]
+echo 'WinGet CLA checks passed: identity, head, exact dedupe, label ordering, replay and invalid metadata.'
