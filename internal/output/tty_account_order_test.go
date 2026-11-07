@@ -53,7 +53,7 @@ func TestCodexDisplayOrderUsesValueThenTierThenReset(t *testing.T) {
 	}
 }
 
-func TestCodexDisplayResetUsesLimitingSharedWindow(t *testing.T) {
+func TestAccountDisplayResetUsesLimitingSharedWindow(t *testing.T) {
 	now := time.Unix(1_800_000_000, 0)
 	window := func(pct int, hours int64) quota.Window {
 		return quota.Window{RemainingPct: pct, ResetAtUnix: now.Add(time.Duration(hours) * time.Hour).Unix()}
@@ -77,17 +77,86 @@ func TestCodexDisplayResetUsesLimitingSharedWindow(t *testing.T) {
 		{"invalid percentage does not limit", map[quota.WindowName]quota.Window{quota.Window5Hour: window(-1, 1), quota.Window7Day: window(10, 72)}, map[quota.WindowName]quota.Window{quota.Window7Day: window(10, 24)}, []string{"b@example.com", "a@example.com"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			rows := []quota.Result{{Email: "b@example.com", Plan: "pro", Status: quota.StatusOK, Windows: tc.b}, {Email: "a@example.com", Plan: "pro", Status: quota.StatusOK, Windows: tc.a}}
-			model := BuildTTYModel(app.Report{Providers: []app.ProviderReport{{ID: provider.Codex, Results: rows}}}, now)
-			assertAccountHeaderOrder(t, model, tc.want)
+			for _, id := range []provider.ID{provider.Claude, provider.Codex, provider.Gemini, provider.ZAI, provider.Grok} {
+				t.Run(string(id), func(t *testing.T) {
+					rows := []quota.Result{{Email: "b@example.com", Plan: "pro", Status: quota.StatusOK, Windows: tc.b}, {Email: "a@example.com", Plan: "pro", Status: quota.StatusOK, Windows: tc.a}}
+					model := BuildTTYModel(app.Report{Providers: []app.ProviderReport{{ID: id, Results: rows}}}, now)
+					assertAccountHeaderOrder(t, model, tc.want)
+				})
+			}
 		})
 	}
 }
 
-func TestAccountDisplayOrderLeavesOtherProvidersUnchanged(t *testing.T) {
-	rows := []quota.Result{{Email: "z@example.com", Tier: "pro", Status: quota.StatusOK}, {Email: "a@example.com", Tier: "max", Status: quota.StatusOK}}
-	model := BuildTTYModel(app.Report{Providers: []app.ProviderReport{{ID: provider.Claude, Results: rows}}}, time.Unix(1_800_000_000, 0))
-	assertAccountHeaderOrder(t, model, []string{"z@example.com", "a@example.com"})
+func TestAccountDisplayOrderAppliesAcrossProviders(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	for _, id := range []provider.ID{provider.Claude, provider.Codex, provider.Gemini, provider.ZAI, provider.Grok} {
+		t.Run(string(id), func(t *testing.T) {
+			rows := []quota.Result{
+				{Email: "low@example.com", Plan: "same", RateLimitTier: "reported_1x"},
+				{Email: "late@example.com", Plan: "same", RateLimitTier: "reported_20x"},
+				{Email: "current@example.com", Plan: "same", Active: true},
+				{Email: "early@example.com", Plan: "same", RateLimitTier: "reported_20x"},
+				{Email: "unknown@example.com", Plan: "same", RateLimitTier: "custom"},
+				{Email: "pool@example.com", Plan: "same", RateLimitTier: "reported_1x"},
+			}
+			for i := range rows {
+				rows[i].Status = quota.StatusOK
+				rows[i].Windows = map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 50, ResetAtUnix: now.Add(12 * time.Hour).Unix()}}
+			}
+			rows[3].Windows[quota.Window7Day] = quota.Window{RemainingPct: 50, ResetAtUnix: now.Add(time.Hour).Unix()}
+			report := app.Report{Providers: []app.ProviderReport{{ID: id, Results: rows, DisplayAccountValues: map[int]uint32{0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 10}}}}
+			before, err := json.Marshal(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertAccountHeaderOrder(t, BuildTTYModel(report, now), []string{"current@example.com", "pool@example.com", "early@example.com", "late@example.com", "low@example.com", "unknown@example.com"})
+			after, err := json.Marshal(report)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("TTY sorting changed source report or JSON order")
+			}
+		})
+	}
+}
+
+func TestAccountDisplayOrderUsesProviderSpecificTiers(t *testing.T) {
+	for _, tc := range []struct {
+		id   provider.ID
+		rows []quota.Result
+		want []string
+	}{
+		{provider.Claude, []quota.Result{
+			{AccountID: "pro", Plan: "pro", RateLimitTier: "default_claude_max_1x"},
+			{AccountID: "max5", Plan: "max", RateLimitTier: "default_claude_max_5x"},
+			{AccountID: "max20", Plan: "max", RateLimitTier: "default_claude_max_20x"},
+			{AccountID: "unknown", Plan: "max", RateLimitTier: "unfamiliar"},
+		}, []string{"max20", "max5", "pro", "unknown"}},
+		{provider.Claude, []quota.Result{
+			{AccountID: "z", Tier: "PRO"}, {AccountID: "a", Plan: "pro"},
+			{AccountID: "max", Tier: "max"},
+		}, []string{"max", "a", "z"}},
+		{provider.ZAI, []quota.Result{
+			{AccountID: "start", Plan: "ZCode Start"}, {AccountID: "pro", Plan: "Pro"},
+			{AccountID: "lite", Plan: "Lite"}, {AccountID: "max", Plan: "Max"},
+		}, []string{"lite", "max", "pro", "start"}},
+		{provider.Grok, []quota.Result{
+			{AccountID: "pro", Plan: "SuperGrokPro"}, {AccountID: "base", Plan: "SuperGrok"},
+			{AccountID: "heavy", Plan: "SuperGrok Heavy"},
+		}, []string{"base", "heavy", "pro"}},
+		{provider.Gemini, []quota.Result{{AccountID: "only", Tier: "Antigravity", Active: true}}, []string{"only"}},
+	} {
+		t.Run(string(tc.id), func(t *testing.T) {
+			got := accountDisplayOrder(app.ProviderReport{ID: tc.id, Results: tc.rows}, 1_800_000_000)
+			for i, want := range tc.want {
+				if got[i].AccountID != want {
+					t.Errorf("row %d = %q, want %q", i, got[i].AccountID, want)
+				}
+			}
+		})
+	}
 }
 
 func TestCodexDisplayOrderGroupsEqualCapacityTiersAndIdentity(t *testing.T) {
