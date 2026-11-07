@@ -74,7 +74,7 @@ function Invoke-MSI {
     }
     if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
         if (Test-Path -LiteralPath $Log -PathType Leaf) {
-            Get-Content -LiteralPath $Log -Tail 160 | Write-Error
+            Get-Content -LiteralPath $Log -Tail 160 | Write-Error -ErrorAction Continue
         }
         throw "msiexec $Action failed with exit code $($process.ExitCode)"
     }
@@ -230,7 +230,35 @@ function Invoke-StandardUserMSIValidation {
     $process = $null
     $outputTask = $null
     $errorTask = $null
+    # Hosted Windows Server images block unmanaged per-user MSI installs. Allow
+    # that installation type only for this disposable VM test, without elevating
+    # the child, and preserve the original policy for restoration and evidence.
+    $policyPath = "SOFTWARE\Policies\Microsoft\Windows\Installer"
+    $policyKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($policyPath, $true)
+    $policyKeyExisted = $null -ne $policyKey
+    $policyValueExisted = $policyKeyExisted -and $policyKey.GetValueNames() -contains "DisableMSI"
+    $previousPolicyValue = $null
+    if ($policyValueExisted) {
+        if ($policyKey.GetValueKind("DisableMSI") -ne [Microsoft.Win32.RegistryValueKind]::DWord) {
+            $policyKey.Dispose()
+            $password.Dispose()
+            throw "unexpected DisableMSI registry type; refusing qualification policy override"
+        }
+        $previousPolicyValue = $policyKey.GetValue("DisableMSI")
+    }
+    $policyChanged = $false
+    $policyEvidence = [ordered]@{
+        registry_key_existed = $policyKeyExisted
+        value_existed = $policyValueExisted
+        original_disable_msi = $previousPolicyValue
+        qualification_disable_msi = 0
+        restored = $false
+    }
     try {
+        if (-not $policyKey) { $policyKey = [Microsoft.Win32.Registry]::LocalMachine.CreateSubKey($policyPath) }
+        $policyKey.SetValue("DisableMSI", 0, [Microsoft.Win32.RegistryValueKind]::DWord)
+        $policyChanged = $true
+        $policyEvidence | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $EvidenceRoot "installer-policy.json")
         $qualificationUser = New-LocalUser -Name $qualificationName -Password $password -PasswordNeverExpires
         $users = Get-LocalGroup -SID "S-1-5-32-545"
         Add-LocalGroupMember -Group $users -Member $qualificationUser
@@ -247,6 +275,23 @@ function Invoke-StandardUserMSIValidation {
         $childEvidence = Join-Path $qualificationRoot "evidence"
         Copy-Item -LiteralPath $PSCommandPath -Destination $childScript
         Copy-Item -LiteralPath $CurrentMSI -Destination $childMSI
+        # Retain the exact package executable: a failed MSI rolls back its installed copy.
+        $extractionRoot = Join-Path $qualificationRoot "extracted"
+        $extractionLog = Join-Path $EvidenceRoot "extract-current.log"
+        $extraction = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/a", ('"' + $childMSI + '"'), "/qn", "/norestart",
+            ('TARGETDIR="' + $extractionRoot + '"'), "/l*v", ('"' + $extractionLog + '"')) -PassThru
+        try {
+            if (-not $extraction.WaitForExit(60000)) {
+                $extraction.Kill($true)
+                $extraction.WaitForExit()
+                throw "MSI diagnostic extraction exceeded one minute"
+            }
+            if ($extraction.ExitCode -ne 0) { throw "MSI diagnostic extraction failed with exit code $($extraction.ExitCode)" }
+        }
+        finally { $extraction.Dispose() }
+        $extractedExecutables = @(Get-ChildItem -LiteralPath $extractionRoot -Filter "cq.exe" -File -Recurse)
+        if ($extractedExecutables.Count -ne 1) { throw "MSI diagnostic extraction must contain exactly one CQ executable" }
+        Copy-Item -LiteralPath $extractedExecutables[0].FullName -Destination (Join-Path $qualificationRoot "cq.exe")
         $start = [Diagnostics.ProcessStartInfo]::new()
         $start.FileName = (Get-Process -Id $PID).Path
         $start.UseShellExecute = $false
@@ -282,37 +327,68 @@ function Invoke-StandardUserMSIValidation {
         }
     }
     finally {
-        if ($process -and -not $process.HasExited) {
-            $process.Kill($true)
-            $process.WaitForExit()
+        try {
+            if ($process -and -not $process.HasExited) {
+                $process.Kill($true)
+                $process.WaitForExit()
+            }
+            if ($outputTask) { [IO.File]::WriteAllText((Join-Path $EvidenceRoot "stdout.log"), $outputTask.GetAwaiter().GetResult()) }
+            if ($errorTask) { [IO.File]::WriteAllText((Join-Path $EvidenceRoot "stderr.log"), $errorTask.GetAwaiter().GetResult()) }
+            if (Test-Path -LiteralPath (Join-Path $qualificationRoot "evidence")) {
+                Copy-Item -Path (Join-Path $qualificationRoot "evidence\*") -Destination $EvidenceRoot -Force
+            }
+            if ($qualificationUser) {
+                foreach ($name in @("Proxy", "Refresh")) {
+                    $task = Get-ScheduledTask -TaskPath "\cq\" -TaskName $name -ErrorAction SilentlyContinue
+                    if ($task -and $task.Principal.UserId -in @($qualificationUser.SID.Value, "$env:COMPUTERNAME\$qualificationName")) {
+                        Stop-ScheduledTask -InputObject $task -ErrorAction SilentlyContinue
+                        Unregister-ScheduledTask -InputObject $task -Confirm:$false
+                    }
+                }
+                if (@(Get-ScheduledTask -TaskPath "\cq\" -ErrorAction SilentlyContinue).Count -eq 0) {
+                    Remove-CQTasks
+                }
+                Get-CimInstance Win32_Process -Filter "Name = 'cq.exe'" | ForEach-Object {
+                    if ((Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid).Sid -eq $qualificationUser.SID.Value) {
+                        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $qualificationUser.SID.Value -and -not $_.Loaded } | Remove-CimInstance
+                Remove-LocalUser -SID $qualificationUser.SID
+            }
+            $password.Dispose()
+            if ($process) { $process.Dispose() }
+            if (Test-Path -LiteralPath $qualificationRoot) { Remove-Item -LiteralPath $qualificationRoot -Recurse -Force }
         }
-        if ($outputTask) { [IO.File]::WriteAllText((Join-Path $EvidenceRoot "stdout.log"), $outputTask.GetAwaiter().GetResult()) }
-        if ($errorTask) { [IO.File]::WriteAllText((Join-Path $EvidenceRoot "stderr.log"), $errorTask.GetAwaiter().GetResult()) }
-        if (Test-Path -LiteralPath (Join-Path $qualificationRoot "evidence")) {
-            Copy-Item -Path (Join-Path $qualificationRoot "evidence\*") -Destination $EvidenceRoot -Force
-        }
-        if ($qualificationUser) {
-            foreach ($name in @("Proxy", "Refresh")) {
-                $task = Get-ScheduledTask -TaskPath "\cq\" -TaskName $name -ErrorAction SilentlyContinue
-                if ($task -and $task.Principal.UserId -in @($qualificationUser.SID.Value, "$env:COMPUTERNAME\$qualificationName")) {
-                    Stop-ScheduledTask -InputObject $task -ErrorAction SilentlyContinue
-                    Unregister-ScheduledTask -InputObject $task -Confirm:$false
+        finally {
+            if ($policyKey) {
+                try {
+                    if ($policyChanged) {
+                        if ($policyValueExisted) {
+                            $policyKey.SetValue("DisableMSI", $previousPolicyValue, [Microsoft.Win32.RegistryValueKind]::DWord)
+                        }
+                        else {
+                            $policyKey.DeleteValue("DisableMSI", $false)
+                        }
+                        $restoredValueExisted = $policyKey.GetValueNames() -contains "DisableMSI"
+                        $policyEvidence.restored = $restoredValueExisted -eq $policyValueExisted -and
+                            (-not $policyValueExisted -or $policyKey.GetValue("DisableMSI") -eq $previousPolicyValue)
+                        if (-not $policyEvidence.restored) { throw "DisableMSI policy restoration differs" }
+                        $policyEvidence | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $EvidenceRoot "installer-policy.json")
+                    }
+                }
+                finally {
+                    $policyKey.Dispose()
+                }
+                if (-not $policyKeyExisted) {
+                    # Do not remove a key which acquired unrelated values during qualification.
+                    $restoredKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($policyPath)
+                    $emptyKey = $restoredKey.ValueCount -eq 0 -and $restoredKey.SubKeyCount -eq 0
+                    $restoredKey.Dispose()
+                    if ($emptyKey) { [Microsoft.Win32.Registry]::LocalMachine.DeleteSubKey($policyPath) }
                 }
             }
-            if (@(Get-ScheduledTask -TaskPath "\cq\" -ErrorAction SilentlyContinue).Count -eq 0) {
-                Remove-CQTasks
-            }
-            Get-CimInstance Win32_Process -Filter "Name = 'cq.exe'" | ForEach-Object {
-                if ((Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid).Sid -eq $qualificationUser.SID.Value) {
-                    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-                }
-            }
-            Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $qualificationUser.SID.Value -and -not $_.Loaded } | Remove-CimInstance
-            Remove-LocalUser -SID $qualificationUser.SID
         }
-        $password.Dispose()
-        if ($process) { $process.Dispose() }
-        if (Test-Path -LiteralPath $qualificationRoot) { Remove-Item -LiteralPath $qualificationRoot -Recurse -Force }
     }
 }
 
@@ -325,7 +401,8 @@ if ($StandardUserChild) {
     New-Item -ItemType Directory -Path $EvidenceRoot, $temporaryRoot -Force | Out-Null
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $administrator = [Security.Principal.WindowsPrincipal]::new($identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    @{ sid = $identity.User.Value; administrator = $administrator; interactive = [Environment]::UserInteractive; version = $CurrentVersion } |
+    @{ sid = $identity.User.Value; administrator = $administrator; interactive = [Environment]::UserInteractive;
+        session_id = (Get-Process -Id $PID).SessionId; authentication_type = $identity.AuthenticationType; version = $CurrentVersion } |
         ConvertTo-Json | Set-Content -LiteralPath (Join-Path $EvidenceRoot "identity.json")
     if ($administrator) { throw "qualification child is elevated; refusing installer test" }
     if (-not [Environment]::UserInteractive) { throw "qualification child has no interactive window station" }
@@ -334,6 +411,53 @@ if ($StandardUserChild) {
         $status = Wait-ServiceStatus -Version $CurrentVersion
         @{ owner = $status.owner; proxy_running = $status.proxy.running; proxy_healthy = $status.proxy.healthy; refresh_healthy = $status.refresh.healthy } |
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $EvidenceRoot "service.json")
+    }
+    catch {
+        $installationFailure = $_
+        # Diagnose the same package as the same standard user after MSI rollback.
+        # Record only command output and owned task state; never read credentials.
+        try {
+            $diagnosticCQ = Join-Path $PSScriptRoot "cq.exe"
+            $diagnosticVersion = (& $diagnosticCQ --version).TrimStart("v")
+            if ($diagnosticVersion -ne $CurrentVersion) { throw "MSI diagnostic executable version differs" }
+            foreach ($probe in @(
+                @{ name = "interactive-session"; executable = (Join-Path $env:SystemRoot "System32\query.exe"); arguments = @("user", $env:USERNAME); seconds = 10 },
+                @{ name = "service-install"; arguments = @("service", "install", "--owner=winget"); seconds = 120 },
+                @{ name = "service-status"; arguments = @("service", "status", "--json"); seconds = 30 },
+                @{ name = "foreground-proxy"; arguments = @("proxy", "start"); seconds = 15 }
+            )) {
+                $probeExecutablePath = if ($probe.ContainsKey("executable")) { $probe.executable } else { $diagnosticCQ }
+                $diagnostic = Start-Process -FilePath $probeExecutablePath -ArgumentList $probe.arguments -PassThru `
+                    -RedirectStandardOutput (Join-Path $EvidenceRoot ($probe.name + ".stdout.log")) `
+                    -RedirectStandardError (Join-Path $EvidenceRoot ($probe.name + ".stderr.log"))
+                $deadline = [DateTime]::UtcNow.AddSeconds($probe.seconds)
+                try {
+                    while (-not $diagnostic.WaitForExit(2000) -and [DateTime]::UtcNow -lt $deadline) {
+                        foreach ($name in @("Proxy", "Refresh")) {
+                            $task = Get-ScheduledTask -TaskPath $taskPath -TaskName $name -ErrorAction SilentlyContinue
+                            if ($task) {
+                                $info = Get-ScheduledTaskInfo -InputObject $task
+                                @{ probe = $probe.name; task = $name; state = [string]$task.State; principal = $task.Principal.UserId;
+                                    logon_type = [string]$task.Principal.LogonType; last_result = $info.LastTaskResult } |
+                                    ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $EvidenceRoot "diagnostic-tasks.jsonl")
+                            }
+                        }
+                    }
+                    $timedOut = -not $diagnostic.HasExited
+                    if ($timedOut) { $diagnostic.Kill($true); $diagnostic.WaitForExit() }
+                    @{ probe = $probe.name; exit_code = $diagnostic.ExitCode; timed_out = $timedOut } |
+                        ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $EvidenceRoot "diagnostic-results.jsonl")
+                }
+                finally {
+                    if (-not $diagnostic.HasExited) { $diagnostic.Kill($true); $diagnostic.WaitForExit() }
+                    $diagnostic.Dispose()
+                }
+            }
+        }
+        catch {
+            $_.Exception.Message | Set-Content -LiteralPath (Join-Path $EvidenceRoot "diagnostic-error.txt")
+        }
+        throw $installationFailure
     }
     finally {
         if (Test-Path -LiteralPath $installedCQ) {

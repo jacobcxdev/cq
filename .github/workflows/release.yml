@@ -483,6 +483,29 @@ jobs:
           $currentMSI = Join-Path $root "cq_${version}_windows_${architecture}.msi"
           .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion $version
 
+      - name: Validate staged MSI under a standard user
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          $architecture = switch ($env:PROCESSOR_ARCHITECTURE) {
+            "AMD64" { "amd64" }
+            "ARM64" { "arm64" }
+            default { throw "unsupported Windows architecture $env:PROCESSOR_ARCHITECTURE" }
+          }
+          $msi = Join-Path $env:RUNNER_TEMP "windows-msi-validation\cq_${version}_windows_${architecture}.msi"
+          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $msi -CurrentMSI $msi -PreviousVersion $version -CurrentVersion $version -StandardUser -EvidenceRoot (Join-Path $env:RUNNER_TEMP "cq-msi-standard-release-evidence")
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-standard-release-${{ matrix.runner }}
+          path: ${{ runner.temp }}/cq-msi-standard-release-evidence/*
+          if-no-files-found: ignore
+          retention-days: 7
+
   linux-install:
     needs: publish
     runs-on: ubuntu-24.04-arm
