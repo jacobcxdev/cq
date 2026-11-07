@@ -204,6 +204,17 @@ resolves a skill's
 MCP dependency to the owning plugin when unambiguous. A missing or ambiguous
 owner remains an explicit dependency issue rather than a guessed relationship.
 
+Cached plugin skills can remain enabled after their marketplace registration is
+removed. When native skills identify an owner missing from the catalogue, CQ
+checks the exact plugin ID and cache source, then asks the native SDK to inspect
+that bundle through a private temporary local catalogue. Native parsing supplies
+MCP and app dependencies; CQ does not match display names or substitute another
+marketplace's same-name plugin. The original project's disabled plugin settings
+remain authoritative. User marketplace configuration and cached bundles stay
+unchanged, and temporary catalogues are removed after the native child exits.
+Ambiguous identities, missing directory-link support or failed lookups retain
+explicit unresolved ownership instead of inventing a relationship.
+
 `profile save NAME --file FILE` accepts both a bare definition and the versioned
 document emitted by `profile show --json` or `export`. The explicit save name
 takes precedence over the document name. `import` uses the document name unless

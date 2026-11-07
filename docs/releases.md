@@ -116,6 +116,15 @@ The post-publication checks can fail after GitHub/Homebrew publication. Report
 which channels are already public and the exact failed stage. Do not describe a
 partially published attempt as either an unpublished draft or completed delivery.
 
+Windows CI also qualifies the candidate MSI under a disposable standard user,
+retaining the account identity, verbose MSI logs, exit codes and service readback.
+The CI workflow's optional `standard_user_release` dispatch input repeats this
+check against an exact published version, such as `0.47.3`. Identity or window
+station precondition failures are separate from installer failures. This check
+does not establish equivalence with WinGet's Sandbox, ShellExecute or downloaded
+file handling. WinGet submission posts the authorised contributor agreement once
+after verifying the current owned PR and its version files and head.
+
 ## Toolchain and package configuration
 
 GoReleaser v2 builds `cmd/cq` for Darwin, Linux and Windows, each in AMD64 and
