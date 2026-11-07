@@ -295,7 +295,7 @@ var probeDownload = regexp.MustCompile(`^/backend-api/files/download/[A-Za-z0-9_
 var probeActivity = regexp.MustCompile(`^/backend-api/tbo/[^/]+/activity/stream$`)
 var probeComputers = regexp.MustCompile(`^/backend-api/tbo/([^/]+)/computers$`)
 var probeFileInfo = regexp.MustCompile(`^/backend-api/messaging/rooms/[^/]+/files/[^/]+$`)
-var probeVoiceOperation = regexp.MustCompile(`^/backend-api/tbo/[A-Za-z0-9_-]{1,256}/voice/calls(?:/rtc_[A-Za-z0-9_-]{1,252}/(?:attach|refresh|stop))?$`)
+var probeVoiceOperation = regexp.MustCompile(`^/backend-api/tbo/[A-Za-z0-9_~-]{1,256}/voice/calls(?:/rtc_[A-Za-z0-9_-]{1,252}/(?:attach|refresh|stop))?$`)
 
 func probeVoice(r *http.Request, body []byte) bool {
 	if r.Method != http.MethodPost || r.URL.RawQuery != "" || r.URL.Fragment != "" || !probeVoiceOperation.MatchString(r.URL.EscapedPath()) {
