@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"slices"
 	"strconv"
 	"time"
 	"unicode"
@@ -234,6 +235,8 @@ func providerFetched(fetched map[provider.ID][]quota.Result) map[string][]quota.
 // buildReport is a pure function that assembles a Report from fetched results.
 // Any provider with 2+ usable results gets aggregate computation.
 func buildReport(now time.Time, ordered []provider.ID, fetched map[provider.ID][]quota.Result, burnRates history.BurnRates) Report {
+	ordered = slices.Clone(ordered)
+	slices.Sort(ordered)
 	report := Report{
 		GeneratedAt: now,
 		Providers:   make([]ProviderReport, 0, len(ordered)),
