@@ -846,6 +846,12 @@ jobs:
             --title "New version: jacobcxdev.cq version $version" \
             --body "Published CQ $version MSI installers for x64 and ARM64."
 
+      - name: Ensure WinGet contributor agreement
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: bash .github/scripts/ensure-winget-cla.sh
+
       - name: Close superseded CQ WinGet candidates
         env:
           GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}

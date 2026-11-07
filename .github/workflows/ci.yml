@@ -269,6 +269,8 @@ jobs:
 
       - run: go build ./...
       - run: go vet ./...
+      - name: Validate WinGet contributor agreement automation
+        run: bash .github/scripts/test-ensure-winget-cla.sh
       - name: Run full race suite and require native transport gates
         shell: bash
         run: |

@@ -50,7 +50,7 @@ function Invoke-MSI {
     $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $arguments -Wait -PassThru
     if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
         if (Test-Path -LiteralPath $Log -PathType Leaf) {
-            Get-Content -LiteralPath $Log -Tail 160 | Write-Error
+            Get-Content -LiteralPath $Log -Tail 160 | Write-Error -ErrorAction Continue
         }
         throw "msiexec $Action failed with exit code $($process.ExitCode)"
     }

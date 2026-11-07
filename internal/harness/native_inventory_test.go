@@ -2,6 +2,7 @@ package harness
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -604,6 +605,84 @@ func TestNativeInventoryPeerUsedOnlyReadMethodsAndClosedPipes(t *testing.T) {
 	}
 }
 
+func TestNativeInventoryRecoveredCachedPluginOwners(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("helper shell executable")
+	}
+	for _, scenario := range []string{"enabled", "disabled", "project-disabled", "rejected", "wrong-id", "wrong-source", "duplicate", "uninstalled", "hang"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			source := filepath.Join(dir, "plugins", "cache", "local-market", "cached", "1.0.0")
+			if err := os.MkdirAll(filepath.Join(source, "skills", "tooling"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(source, "skills", "tooling", "SKILL.md"), []byte("Synthetic cached skill"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			binary, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			executable := filepath.Join(dir, "native codex")
+			if err := os.WriteFile(executable, []byte("#!/bin/sh\nexec \"$CQ_TEST_NATIVE_INVENTORY_BINARY\" -test.run=^TestNativeInventoryPeerHelper$ -- \"$@\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CQ_TEST_NATIVE_INVENTORY_BINARY", binary)
+			t.Setenv("CQ_TEST_NATIVE_INVENTORY_SCENARIO", "cached-owner-"+scenario)
+			t.Setenv("CQ_TEST_NATIVE_INVENTORY_DIR", dir)
+			client := NativeInventory{Executable: executable}
+			if scenario == "hang" {
+				client.Run = func(ctx context.Context, executable, cwd string, output io.Writer) error {
+					ctx, cancel := context.WithTimeoutCause(ctx, 500*time.Millisecond, errNativeInventoryBudget)
+					defer cancel()
+					return runNativeCurationInventory(ctx, executable, cwd, output)
+				}
+			}
+			inventory, err := client.Snapshot(context.Background(), dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var owner, skill *Capability
+			for index := range inventory.Capabilities {
+				capability := &inventory.Capabilities[index]
+				if capability.Kind == PluginKind && capability.ID == "cached@local-market" {
+					owner = capability
+				}
+				if capability.ID == "plugin:cached@local-market:cached:tooling" {
+					skill = capability
+				}
+			}
+			resolved := scenario == "enabled" || scenario == "disabled" || scenario == "project-disabled"
+			if (owner != nil) != resolved || skill == nil {
+				t.Fatalf("cached ownership resolution = owner %v, skill %v", owner, skill)
+			}
+			if resolved {
+				if owner.Enabled != (scenario == "enabled") || owner.Available != (scenario == "enabled") || skill.Available != (scenario == "enabled") {
+					t.Fatal("cached discovery ignored native enablement")
+				}
+				if !slices.Equal(owner.MCPServers, []string{"cached-mcp"}) || !slices.Equal(owner.AppIDs, []string{"asdk_cached_app"}) || !slices.Equal(skill.Dependencies, []string{"plugin:cached@local-market"}) {
+					t.Fatal("native dependency metadata lost during cached discovery")
+				}
+			} else if !slices.ContainsFunc(inventory.Issues, func(issue InventoryIssue) bool {
+				return issue.Code == "skill_plugin_unresolved" && issue.ID == skill.ID
+			}) {
+				t.Fatal("unresolved cached owner was silently accepted")
+			}
+			root, err := os.ReadFile(filepath.Join(dir, "recovery-root"))
+			if err != nil {
+				t.Fatal("native cached discovery was never requested")
+			}
+			if _, err := os.Stat(string(root)); !os.IsNotExist(err) {
+				t.Fatal("private recovery directory survived completion")
+			}
+			encoded, _ := json.Marshal(inventory)
+			if bytes.Contains(encoded, root) || bytes.Contains(encoded, []byte("private-secret")) {
+				t.Fatal("temporary metadata escaped into public inventory")
+			}
+		})
+	}
+}
+
 func TestNativeInventoryDetailBudgetKeptCompletedMetadata(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("helper shell executable")
@@ -759,6 +838,19 @@ func TestNativeInventoryPeerHelper(t *testing.T) {
 	fixture := strings.ReplaceAll(nativeCurationFixture, `"cwd":"/work"`, `"cwd":`+strconv.Quote(dir))
 	var response map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(fixture), &response)
+	if strings.HasPrefix(scenario, "cached-owner-") {
+		var skills map[string]any
+		_ = json.Unmarshal(response["skills"], &skills)
+		entry := skills["data"].([]any)[0].(map[string]any)
+		entry["skills"] = append(entry["skills"].([]any), map[string]any{"name": "cached:tooling", "description": "Cached plugin skill", "enabled": true, "scope": "user", "pluginId": "cached@local-market", "path": filepath.Join(dir, "plugins", "cache", "local-market", "cached", "1.0.0", "skills", "tooling", "SKILL.md")})
+		response["skills"], _ = json.Marshal(skills)
+		if scenario == "cached-owner-project-disabled" {
+			var config map[string]any
+			_ = json.Unmarshal(response["config"], &config)
+			config["config"].(map[string]any)["plugins"] = map[string]any{"cached@local-market": map[string]any{"enabled": false}}
+			response["config"], _ = json.Marshal(config)
+		}
+	}
 	if scenario == "invalid-core-detail-hang" {
 		response["config"] = json.RawMessage(`{"config":{},"layers":[]}`)
 	}
@@ -846,6 +938,78 @@ func TestNativeInventoryPeerHelper(t *testing.T) {
 				write(map[string]any{"id": request["id"], "result": details[name+"@market"]})
 			}
 		}
+	} else if strings.HasPrefix(scenario, "cached-owner-") {
+		var details map[string]json.RawMessage
+		_ = json.Unmarshal(response["pluginDetails"], &details)
+		marketplacePath := ""
+		for {
+			line, err := reader.ReadBytes('\n')
+			if err == io.EOF {
+				break
+			}
+			var request map[string]any
+			if err != nil || json.Unmarshal(line, &request) != nil {
+				os.Exit(98)
+			}
+			params, _ := request["params"].(map[string]any)
+			if request["method"] == "plugin/installed" {
+				cwds, _ := params["cwds"].([]any)
+				if len(cwds) != 1 || cwds[0] == dir {
+					os.Exit(99)
+				}
+				root, _ := cwds[0].(string)
+				_ = os.WriteFile(filepath.Join(dir, "recovery-root"), []byte(root), 0o600)
+				marketplacePath = filepath.Join(root, ".claude-plugin", "marketplace.json")
+				if _, err := os.Stat(marketplacePath); err != nil {
+					os.Exit(100)
+				}
+				if scenario == "cached-owner-hang" {
+					continue
+				}
+				if scenario == "cached-owner-rejected" {
+					write(map[string]any{"id": request["id"], "error": map[string]any{"message": "private-secret"}})
+					continue
+				}
+				manifest, err := os.ReadFile(marketplacePath)
+				var descriptor struct {
+					Plugins []struct{ Source string }
+				}
+				if err != nil || json.Unmarshal(manifest, &descriptor) != nil || len(descriptor.Plugins) != 1 {
+					os.Exit(103)
+				}
+				source := descriptor.Plugins[0].Source
+				if !filepath.IsAbs(source) {
+					source = filepath.Join(root, source)
+				}
+				plugin := map[string]any{"id": "cached@local-market", "name": "cached", "installed": scenario != "cached-owner-uninstalled", "enabled": scenario != "cached-owner-disabled", "availability": "AVAILABLE", "source": map[string]any{"type": "local", "path": source}}
+				if scenario == "cached-owner-wrong-id" {
+					plugin["id"] = "cached@another-market"
+				}
+				if scenario == "cached-owner-wrong-source" {
+					plugin["source"] = map[string]any{"type": "local", "path": dir}
+				}
+				plugins := []any{plugin}
+				if scenario == "cached-owner-duplicate" {
+					plugins = append(plugins, plugin)
+				}
+				write(map[string]any{"id": request["id"], "result": map[string]any{"marketplaceLoadErrors": []any{}, "marketplaces": []any{map[string]any{"name": "local-market", "path": marketplacePath, "plugins": plugins}}}})
+				continue
+			}
+			name, _ := params["pluginName"].(string)
+			if request["method"] != "plugin/read" {
+				os.Exit(101)
+			}
+			if name == "cached" {
+				if params["marketplacePath"] != marketplacePath {
+					os.Exit(102)
+				}
+				write(map[string]any{"id": request["id"], "result": map[string]any{"plugin": map[string]any{"summary": map[string]any{"id": "cached@local-market", "name": "cached"}, "mcpServers": []string{"cached-mcp"}, "apps": []any{map[string]any{"id": "asdk_cached_app"}}}}})
+			} else {
+				write(map[string]any{"id": request["id"], "result": details[name+"@market"]})
+			}
+		}
+		_ = os.WriteFile(filepath.Join(dir, "eof"), []byte("closed"), 0o600)
+		os.Exit(0)
 	} else if scenario != "ambiguous-locator" {
 		var details map[string]json.RawMessage
 		_ = json.Unmarshal(response["pluginDetails"], &details)

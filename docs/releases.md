@@ -116,6 +116,12 @@ The post-publication checks can fail after GitHub/Homebrew publication. Report
 which channels are already public and the exact failed stage. Do not describe a
 partially published attempt as either an unpublished draft or completed delivery.
 
+WinGet submission posts the authorised contributor agreement once after verifying
+the current owned PR, its version files and head. The existing Windows lifecycle
+gates do not establish equivalence with WinGet's Sandbox, ShellExecute or
+downloaded file handling. Inspect the community PR's actual failed check before
+attributing an installation failure to its URL or package.
+
 ## Toolchain and package configuration
 
 GoReleaser v2 builds `cmd/cq` for Darwin, Linux and Windows, each in AMD64 and
