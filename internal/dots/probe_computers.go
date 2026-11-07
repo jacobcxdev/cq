@@ -2,11 +2,90 @@ package dots
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"net/url"
 	"regexp"
 )
 
 var probeComputerOperation = regexp.MustCompile(`^/backend-api/tbo/([^/]+)/computers/([^/]+)/(connect|connect-and-replace|disconnect)$`)
+var probeComputerRemoval = regexp.MustCompile(`^/backend-api/computers/([A-Za-z0-9_-]{1,128})$`)
+
+// Computer removal has no profile ID in its URL. Resolve it from fresh, raw
+// owner lists, not projected installation IDs or the selected sidebar row.
+func (p *Probe) computerRemovalOwner(ctx context.Context, path string, headers http.Header, f *CatalogueFixture) (*Account, error) {
+	match := probeComputerRemoval.FindStringSubmatch(path)
+	if match == nil || f == nil {
+		return nil, fmt.Errorf("computer ownership unavailable")
+	}
+	if _, err := p.validateFixture(f); err != nil {
+		return nil, err
+	}
+	accounts := []Account{}
+	profiles := map[string][]string{}
+	for _, profile := range f.Profiles {
+		id := probeString(profile["id"])
+		owner, err := p.resourceOwner("/backend-api/tbo/"+url.PathEscape(id), f)
+		if err != nil || owner == nil {
+			return nil, fmt.Errorf("computer profile ownership unavailable")
+		}
+		if len(profiles[owner.Alias]) == 0 {
+			accounts = append(accounts, *owner)
+		}
+		profiles[owner.Alias] = append(profiles[owner.Alias], id)
+	}
+	results := p.collectOwnerResults(ctx, accounts, func(ctx context.Context, owner Account) (any, error) {
+		matches := 0
+		for _, profile := range profiles[owner.Alias] {
+			value, err := p.options.Catalogue.Get(ctx, owner, "/backend-api/tbo/"+url.PathEscape(profile)+"/computers", headers)
+			if err != nil {
+				return nil, err
+			}
+			computers, ok := value["computers"].([]any)
+			if !ok {
+				return nil, fmt.Errorf("computer list unavailable")
+			}
+			for _, item := range computers {
+				computer, ok := item.(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("computer list invalid")
+				}
+				if computer["environment_id"] != match[1] {
+					continue
+				}
+				if computer["kind"] != "user" || computer["can_delete"] != true {
+					return nil, fmt.Errorf("computer is not removable")
+				}
+				matches++
+			}
+		}
+		return matches, nil
+	}, true)
+	var selected *Account
+	for _, account := range accounts {
+		result, ok := results[account.Alias]
+		count, valid := result.value.(int)
+		if !ok || result.err != nil || !valid || count > 1 {
+			return nil, fmt.Errorf("computer ownership could not be verified")
+		}
+		if count == 0 {
+			continue
+		}
+		if selected != nil {
+			return nil, fmt.Errorf("computer owner collision")
+		}
+		selected = &account
+	}
+	if selected == nil {
+		return nil, fmt.Errorf("computer is not listed")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.fixture != f {
+		return nil, fmt.Errorf("computer ownership changed")
+	}
+	return selected, nil
+}
 
 func probeComputerTarget(ctx context.Context, s *Settings, c *CatalogueClient, path string, body []byte, f *CatalogueFixture) (string, error) {
 	parsed, err := url.Parse(path)

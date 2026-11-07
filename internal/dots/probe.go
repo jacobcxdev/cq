@@ -473,7 +473,8 @@ func (p *Probe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secondary := owner != nil && owner.Alias != p.settings.SystemAlias
-	inspected := (r.Method == "GET" && (path == "/backend-api/tbo" || path == "/backend-api/celsius/ws/user" || path == "/backend-api/ios/attestation_challenge")) || ((r.Method == "GET" || r.Method == "POST") && strings.HasSuffix(path, "/wham/statsig/bootstrap"))
+	computerRemoval := native && r.Method == "DELETE" && strings.HasPrefix(path, "/backend-api/computers/")
+	inspected := computerRemoval || (r.Method == "GET" && (path == "/backend-api/tbo" || path == "/backend-api/celsius/ws/user" || path == "/backend-api/ios/attestation_challenge")) || ((r.Method == "GET" || r.Method == "POST") && strings.HasSuffix(path, "/wham/statsig/bootstrap"))
 	passthrough := native && !secondary && !inspected && path != "/probe/state"
 	upload := native && secondary && r.Method == "POST" && r.URL.RawQuery == "" && probeUpload.MatchString(path) && ((strings.HasSuffix(path, "/uploads") && strings.EqualFold(strings.TrimSpace(strings.Split(r.Header.Get("Content-Type"), ";")[0]), "application/json")) || (!strings.HasSuffix(path, "/uploads") && strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "multipart/form-data;")))
 	if len(r.Header.Values("Content-Length")) > 1 || len(r.TransferEncoding) > 0 && (!passthrough || len(r.TransferEncoding) != 1 || r.TransferEncoding[0] != "chunked" || r.ContentLength >= 0) {
@@ -533,6 +534,19 @@ func (p *Probe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.forward(w, r, owner)
 		return
 	}
+	if computerRemoval {
+		if !probeComputerRemoval.MatchString(path) || r.URL.RawQuery != "" || r.URL.Fragment != "" || len(body) != 0 {
+			w.WriteHeader(400)
+			return
+		}
+		owner, err = p.computerRemovalOwner(r.Context(), path, r.Header, fixture)
+		if err != nil {
+			p.event(map[string]any{"operation": "computer_removal", "error_type": "ownership", "submitted": false})
+			probeError(w, 409, "Computer ownership unavailable; no removal submitted")
+			return
+		}
+		secondary = owner.Alias != p.settings.SystemAlias
+	}
 	if !native && r.Method == "POST" && (path == "/backend-api/cloud-aeons/primary/reboot" || path == "/backend-api/flora/cca/executor") {
 		if path == "/backend-api/flora/cca/executor" {
 			if _, err := os.Stat(filepath.Join(p.settings.RuntimeRoot, "native-secondary-executor.enabled")); err == nil && r.URL.RawQuery == "" {
@@ -565,7 +579,7 @@ func (p *Probe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	allowed := r.Method == "GET" || runtimeOwner != nil || message || receipt || watch || (r.Method == "POST" && (strings.HasSuffix(path, "/wham/statsig/bootstrap") || path == "/backend-api/devicecheck"))
 	if native {
-		allowed = !secondary || r.Method == "GET" || r.Method == "HEAD" || runtimeOwner != nil || message || receipt || watch || name || target != "" || upload || voice
+		allowed = !secondary || r.Method == "GET" || r.Method == "HEAD" || runtimeOwner != nil || message || receipt || watch || name || target != "" || upload || voice || computerRemoval
 	}
 	if !allowed {
 		p.event(map[string]any{"method": r.Method, "path": path, "blocked": true})

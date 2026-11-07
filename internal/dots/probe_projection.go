@@ -237,29 +237,43 @@ type probeOwnerResult struct {
 }
 
 func (p *Probe) ownerResults(ctx context.Context, accounts []Account, operation func(context.Context, Account) (any, error)) map[string]probeOwnerResult {
+	return p.collectOwnerResults(ctx, accounts, operation, false)
+}
+
+func (p *Probe) collectOwnerResults(ctx context.Context, accounts []Account, operation func(context.Context, Account) (any, error), waitForCapacity bool) map[string]probeOwnerResult {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	results := make(chan probeOwnerResult, len(accounts))
 	pending := map[string]bool{}
 	completed := map[string]probeOwnerResult{}
 	for _, account := range accounts {
-		select {
-		case p.workers <- struct{}{}:
-			pending[account.Alias] = true
-			go func(account Account) {
-				defer func() { <-p.workers }()
-				result := probeOwnerResult{alias: account.Alias}
-				defer func() {
-					if recover() != nil {
-						result.err = fmt.Errorf("owner worker panic")
-					}
-					results <- result
-				}()
-				result.value, result.err = operation(ctx, account)
-			}(account)
-		default:
-			completed[account.Alias] = probeOwnerResult{alias: account.Alias, err: fmt.Errorf("owner workers unavailable")}
+		if waitForCapacity {
+			select {
+			case p.workers <- struct{}{}:
+			case <-ctx.Done():
+				completed[account.Alias] = probeOwnerResult{alias: account.Alias, err: fmt.Errorf("owner deadline exceeded")}
+				continue
+			}
+		} else {
+			select {
+			case p.workers <- struct{}{}:
+			default:
+				completed[account.Alias] = probeOwnerResult{alias: account.Alias, err: fmt.Errorf("owner workers unavailable")}
+				continue
+			}
 		}
+		pending[account.Alias] = true
+		go func(account Account) {
+			defer func() { <-p.workers }()
+			result := probeOwnerResult{alias: account.Alias}
+			defer func() {
+				if recover() != nil {
+					result.err = fmt.Errorf("owner worker panic")
+				}
+				results <- result
+			}()
+			result.value, result.err = operation(ctx, account)
+		}(account)
 	}
 	for len(pending) > 0 {
 		select {
