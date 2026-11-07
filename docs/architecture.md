@@ -29,9 +29,10 @@ Development checks are in [CONTRIBUTING](../CONTRIBUTING.md); delivery gates are
 
 The reporting path has two phases: fetch provider results, then build/render a
 report. `Runner.BuildReport` starts selected providers concurrently and recovers
-panics at the external-call boundary. Claude and Codex support multiple
-accounts; Gemini uses one Antigravity account; Z.ai supports multiple accounts
-and account-specific quota surfaces. Each provider returns classified
+panics at the external-call boundary. Claude, Codex, Z.ai and Grok support multiple
+accounts; Gemini uses one Antigravity account. Z.ai has account-specific quota
+surfaces, while Grok reports included subscription quota over its actual period.
+Each provider returns classified
 `quota.Result` errors rather than exposing credential material or raw responses.
 Independent account/profile/usage work can run concurrently, with recovery in
 each goroutine that calls external or injected code.
@@ -45,6 +46,11 @@ warning preserves the natural position. The historical sustainability value
 remains in JSON for compatibility. Window names
 include duration-backed and bucket-scoped windows as well as daily model pools;
 do not assume every provider has only `5h` and `7d`.
+
+TTY account rows share the active/value/tier/reset hierarchy across all five
+providers; the renderer sorts a private view without changing report/JSON or
+routing order. Provider-specific capacity rules remain separate: unknown Grok
+weights do not become guessed aggregate capacity. See [report ordering](usage.md#tty-report).
 
 ## Credential ownership
 

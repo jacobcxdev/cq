@@ -67,6 +67,17 @@ an unambiguous visible default. Synthetic checks use their reviewed fixtures;
 they do not establish real model availability. Changing the source, client or
 other material validation inputs invalidates evidence that depends on them.
 
+## Provider-specific qualification
+
+The live Codex validator establishes Codex routing behaviour, not Grok subscription
+compatibility. For Grok-affecting changes, use the separate authorised
+[Grok checks and dated qualification matrix](usage.md#grok-subscriptions).
+Record the tested account/plan, client version, exact model IDs, transports and
+remaining gaps. Login and read-only quota/catalogue checks do not prove inference,
+tools or compaction; the inference checks spend subscription quota. Reuse dated
+evidence only while its relevant source/client/account inputs remain applicable.
+Do not extend those results to other models, plans, billing modes or clients.
+
 ## Tag and dispatch
 
 After the current-main and qualification gates pass, create a signed annotated
