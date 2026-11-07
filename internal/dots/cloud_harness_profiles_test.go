@@ -52,6 +52,63 @@ func TestCloudHarnessSelectivePlanKeptOnlySelectedCapabilities(t *testing.T) {
 	}
 }
 
+func TestCloudHarnessSelectivePlanSkippedInactiveMCP(t *testing.T) {
+	inventory := harness.Inventory{Capabilities: []harness.Capability{
+		{Kind: harness.MCPKind, ID: "live", NativeID: "live", Enabled: true, Available: true},
+		{Kind: harness.MCPKind, ID: "disabled", NativeID: "disabled", Available: true},
+		{Kind: harness.MCPKind, ID: "inactive", NativeID: "inactive"},
+	}}
+	for _, decision := range []harness.Decision{harness.Disabled, harness.Inherit, harness.Enabled} {
+		t.Run(string(decision), func(t *testing.T) {
+			effective := harness.Effective{Changes: harness.Changes{Default: decision}}
+			plan := cloudHarnessCompileProfile(effective, inventory, nil, nil)
+			if _, exists := plan.config["mcp_servers.inactive.enabled"]; exists {
+				// An inactive layer supplies no transport to the live config.
+				// Even enabled=false would create an invalid native definition.
+				t.Fatal("inactive MCP was materialised without a transport")
+			}
+			for _, name := range []string{"live", "disabled"} {
+				if _, exists := plan.config[cloudHarnessMCPKey(name, "enabled")]; !exists {
+					t.Fatalf("active MCP definition %q lost its per-chat control", name)
+				}
+			}
+			if decision == harness.Enabled && !slices.Contains(plan.issues, "unavailable:mcp:inactive") {
+				t.Fatal("request to enable an inactive MCP lost its availability issue")
+			}
+		})
+	}
+}
+
+func TestCloudHarnessMCPInlineOverrideKeptSelection(t *testing.T) {
+	for _, key := range []string{"mcp_servers.node_repl", `mcp_servers."node_repl"`, "mcp_servers"} {
+		for _, enabled := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/%t", key, enabled), func(t *testing.T) {
+				server := cloudMessage{"command": cloudHarnessRaw("/native/node"), "enabled": cloudHarnessRaw(!enabled)}
+				raw := cloudHarnessRaw(server)
+				if key == "mcp_servers" {
+					raw = cloudHarnessRaw(cloudMessage{"node_repl": raw})
+				}
+				baseline := cloudMessage{key: raw}
+				decision := harness.Disabled
+				if enabled {
+					decision = harness.Enabled
+				}
+				plan := cloudHarnessCompileProfile(harness.Effective{Changes: harness.Changes{MCP: map[string]harness.Decision{"node_repl": decision}}}, harness.Inventory{Capabilities: []harness.Capability{{Kind: harness.MCPKind, ID: "node_repl", NativeID: "node_repl", Available: true}}}, baseline, nil)
+				actual := cloudHarnessObject(plan.config[key])
+				if key == "mcp_servers" {
+					actual = cloudHarnessObject(actual["node_repl"])
+				}
+				if cloudHarnessBool(actual, "enabled", !enabled) != enabled || cloudHarnessBool(plan.config, "mcp_servers.node_repl.enabled", !enabled) != enabled {
+					t.Fatal("whole-server and enabled overrides disagreed")
+				}
+				if !bytes.Equal(actual["command"], server["command"]) || !bytes.Equal(baseline[key], raw) {
+					t.Fatal("MCP selection changed transport or caller baseline")
+				}
+			})
+		}
+	}
+}
+
 func cloudHarnessSelectiveInventory() harness.Inventory {
 	return harness.Inventory{Capabilities: []harness.Capability{
 		{Kind: harness.PluginKind, ID: "keep@market", NativeID: "keep@market", Enabled: true, Available: true},

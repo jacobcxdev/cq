@@ -226,7 +226,11 @@ func (h *cloudHarness) acquire(id string) error {
 		return nil
 	}
 	thread.lease = lease
-	if err == nil && receipt.Mode == "plugins" && (receipt.State == "applied" || receipt.State == "partial" || receipt.State == "prepared" || receipt.State == "pending") {
+	recoverable := receipt.State == "applied" || receipt.State == "partial" || receipt.State == "prepared" || receipt.State == "pending"
+	// Full-mode plugin choices survive the broker. Even a failed assembly can
+	// have applied exclusions before its cold resume failed.
+	recoverable = recoverable || (receipt.Mode == "full" && receipt.State == "failed")
+	if err == nil && (receipt.Mode == "plugins" || receipt.Mode == "full") && recoverable {
 		matches := cloudHarnessPluginEqual(thread.plugins, receipt.AppliedPlugins) || cloudHarnessPluginEqual(thread.plugins, receipt.BaselinePlugins)
 		if receipt.State == "prepared" || receipt.State == "pending" {
 			matches = matches || cloudHarnessPluginEqual(thread.plugins, receipt.PendingPlugins)
@@ -577,6 +581,35 @@ func cloudHarnessMCPKey(name, property string) string {
 	return key
 }
 
+// Desktop can supply a whole-server table in the same override map. Keep its
+// enabled flag consistent with the leaf override, irrespective of native map order.
+func cloudHarnessSetMCPEnabled(config cloudMessage, name string, enabled bool) {
+	for key, raw := range config {
+		if key == "mcp_servers" {
+			servers := cloudHarnessObject(raw)
+			if server, present := servers[name]; present {
+				definition := cloudHarnessObject(server)
+				definition["enabled"] = cloudHarnessRaw(enabled)
+				servers[name] = cloudHarnessRaw(definition)
+				config[key] = cloudHarnessRaw(servers)
+			}
+			continue
+		}
+		server, property, ok := cloudHarnessMCPPath(key)
+		if !ok || server != name {
+			continue
+		}
+		if property == "" {
+			definition := cloudHarnessObject(raw)
+			definition["enabled"] = cloudHarnessRaw(enabled)
+			config[key] = cloudHarnessRaw(definition)
+		} else if property == "enabled" {
+			delete(config, key)
+		}
+	}
+	config[cloudHarnessMCPKey(name, "enabled")] = cloudHarnessRaw(enabled)
+}
+
 // The merged native values include effective MCP enabled defaults. Raw layers
 // cover additional server definitions; origins select the winning layer when
 // typed config omits a setting. Conflicting un-attributed values fail closed.
@@ -685,7 +718,11 @@ func (h *cloudHarness) baselineConfig(native cloudMessage, originalRaw json.RawM
 		if !found {
 			value = true
 		} // Native skills/MCP enabled defaults.
-		restore[key] = cloudHarnessRaw(value)
+		if len(path) == 3 && path[0] == "mcp_servers" {
+			cloudHarnessSetMCPEnabled(restore, path[1], value)
+		} else {
+			restore[key] = cloudHarnessRaw(value)
+		}
 	}
 	if err := cloudHarnessBaselineApps(native, original, restore); err != nil {
 		return nil, err
@@ -766,8 +803,7 @@ func cloudHarnessMinimalConfig(native cloudMessage, original json.RawMessage) cl
 	for name := range names {
 		// Config overrides use TOML dotted paths. Quote each server name so a
 		// name containing a dot cannot select a different configuration path.
-		key := cloudHarnessMCPKey(name, "enabled")
-		config[key] = json.RawMessage("false")
+		cloudHarnessSetMCPEnabled(config, name, false)
 	}
 	return config
 }

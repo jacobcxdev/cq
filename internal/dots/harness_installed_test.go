@@ -37,6 +37,48 @@ func TestHarnessInstalledChatCapabilityIsolation(t *testing.T) {
 	t.Run("selective-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true, true) })
 }
 
+func TestHarnessInstalledInactiveMCPOverrides(t *testing.T) {
+	if os.Getenv("CQ_DOTS_HARNESS_INSTALLED_ACCEPTANCE") != "1" || runtime.GOOS != "darwin" {
+		t.Skip("requires opt-in installed macOS acceptance")
+	}
+	client := os.Getenv("CQ_DOTS_HARNESS_INSTALLED_CODEX")
+	if !filepath.IsAbs(client) {
+		t.Fatal("CQ_DOTS_HARNESS_INSTALLED_CODEX must name the native executable")
+	}
+	root := t.TempDir()
+	env := []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "NO_PROXY=127.0.0.1,localhost", "CI=1"}
+	for key, name := range map[string]string{"HOME": "home", "CODEX_HOME": "codex", "XDG_CONFIG_HOME": "config", "XDG_CACHE_HOME": "cache", "XDG_DATA_HOME": "data", "TMPDIR": "tmp"} {
+		path := filepath.Join(root, name)
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		env = append(env, key+"="+path)
+	}
+	config := "cli_auth_credentials_store = \"file\"\n[mcp_servers.live]\ncommand = \"/usr/bin/false\"\n[mcp_servers.disabled]\ncommand = \"/usr/bin/false\"\nenabled = false\n"
+	if err := os.WriteFile(filepath.Join(root, "codex", "config.toml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inventory := harness.Inventory{Capabilities: []harness.Capability{
+		{Kind: harness.MCPKind, ID: "live", NativeID: "live", Enabled: true, Available: true},
+		{Kind: harness.MCPKind, ID: "disabled", NativeID: "disabled", Available: true},
+		{Kind: harness.MCPKind, ID: "inactive", NativeID: "inactive"},
+	}}
+	plan := cloudHarnessCompileProfile(harness.Effective{Changes: harness.Changes{Default: harness.Disabled}}, inventory, nil, nil)
+	args := []string{"app-server", "--stdio", "--strict-config"}
+	for key, value := range plan.config {
+		if strings.HasPrefix(key, "mcp_servers.") {
+			args = append(args, "-c", key+"="+string(value))
+		}
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "/usr/bin/sandbox-exec", append([]string{"-p", "(version 1) (allow default) (deny network*)", client}, args...)...)
+	command.Dir, command.Env = root, env
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("native SDK rejected inactive-MCP profile: %v\n%s", err, output)
+	}
+}
+
 func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, selective bool) {
 	if os.Getenv("CQ_DOTS_HARNESS_INSTALLED_ACCEPTANCE") != "1" {
 		t.Skip("set CQ_DOTS_HARNESS_INSTALLED_ACCEPTANCE=1 for isolated installed acceptance")
@@ -543,6 +585,27 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 				}
 			}
 		}
+		assertAppsGate := func(chatID string, wanted bool) {
+			t.Helper()
+			var result struct {
+				Data []struct {
+					Name    string
+					Enabled bool
+				}
+			}
+			if json.Unmarshal(rpc.call("experimentalFeature/list", map[string]any{"threadId": chatID, "limit": 1000}), &result) != nil {
+				t.Fatal("native Apps feature response was invalid")
+			}
+			for _, feature := range result.Data {
+				if feature.Name == "apps" {
+					if feature.Enabled != wanted {
+						t.Fatalf("native Apps gate=%t, want %t", feature.Enabled, wanted)
+					}
+					return
+				}
+			}
+			t.Fatal("native Apps gate was absent")
+		}
 		outside := startSelective("gpt-5.5", filepath.Join(root, "minimal-work"))
 		outsideFirst := turn("selective-global-all-model-design-denials", outside, "Synthetic global design denials", nil)
 		assertSelective("global-gpt", outsideFirst, true, false, true, false)
@@ -681,6 +744,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		if err != nil || dependencyReceipt.State != "applied" || len(dependencyReceipt.Issues) != 0 || len(dependencyReceipt.Unsupported) != 0 {
 			t.Fatal("native dependency closure was not completely applied")
 		}
+		assertAppsGate(outsideGLM, true)
 		if _, err := harness.Update(fsys, policyPath, func(policy *harness.Policy) error {
 			policy.Tasks[outsideGLM] = harness.Scope{All: harness.Binding{Changes: harness.Changes{Reset: true, Default: harness.Disabled, Skills: map[string]harness.Decision{"user:bundle-dependent": harness.Enabled}}}}
 			return nil
@@ -693,10 +757,11 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			t.Fatal("late dependency selection did not attach the selected skill")
 		}
 		lateReceipt, err := receipts.Load(outsideGLM)
-		// Provider input proves the selected skill arrived, but no standalone
-		// MCP or feature transition lets the runtime independently attest it.
-		if err != nil || lateReceipt.State != "partial" || !slices.Equal(lateReceipt.Issues, []string{"native_skill_runtime_unverified"}) || len(lateReceipt.Unsupported) != 0 {
-			t.Fatalf("late skill-only receipt overstated runtime proof: %#v, %v", lateReceipt, err)
+		// Reset also disables unowned Apps, so its feature transition independently
+		// witnesses the configuration rebuild which attached this skill.
+		assertAppsGate(outsideGLM, false)
+		if err != nil || lateReceipt.State != "applied" || len(lateReceipt.Issues) != 0 || len(lateReceipt.Unsupported) != 0 {
+			t.Fatalf("Apps transition did not attest the late skill configuration: %#v, %v", lateReceipt, err)
 		}
 		emptyChat := startSelective("glm-5.3", filepath.Join(root, "minimal-work"))
 		if _, err := harness.Update(fsys, policyPath, func(policy *harness.Policy) error {
@@ -705,6 +770,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		}); err != nil {
 			t.Fatal(err)
 		}
+		assertAppsGate(emptyChat, true)
 		emptyFirst := turn("selective-empty-chat-kept-subscription", emptyChat, "CQ_HARNESS_FIRST_USER", nil)
 		assertSelective("empty-chat-plugin-settings", emptyFirst, false, false, true, false)
 		if emptyFirst.Markers["dependency"] != 0 {
@@ -716,8 +782,9 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			t.Fatal("deferred empty-chat reload lost its first turn or dependent skill")
 		}
 		emptyReceipt, err := receipts.Load(emptyChat)
-		if err != nil || emptyReceipt.State != "partial" || !slices.Equal(emptyReceipt.Issues, []string{"native_skill_runtime_unverified"}) || len(emptyReceipt.Unsupported) != 0 {
-			t.Fatalf("deferred skill-only receipt overstated runtime proof: %#v, %v", emptyReceipt, err)
+		assertAppsGate(emptyChat, false)
+		if err != nil || emptyReceipt.State != "applied" || len(emptyReceipt.Issues) != 0 || len(emptyReceipt.Unsupported) != 0 {
+			t.Fatalf("Apps transition did not attest the deferred skill configuration: %#v, %v", emptyReceipt, err)
 		}
 		t.Logf("selective installed accepted: same-chat-reloads=%d task-sibling-reloads=0 workspace-sibling-reloads=%d outsider-reloads=0 plugin-MCP-dependency=verified custom-receipt=applied external-cloud-requests=0", resumes, workspaceSiblingResumes)
 		return

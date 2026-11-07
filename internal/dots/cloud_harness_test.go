@@ -646,61 +646,94 @@ func TestCloudHarnessPartialCLIApplyHandoffDidNotRecaptureItsExclusions(t *testi
 }
 
 func TestCloudHarnessHandoffReceiptStatesRequireKnownMatchingPlugins(t *testing.T) {
-	for _, test := range []struct {
-		name, state    string
-		current        []string
-		known, restore bool
-	}{
-		{"applied current", "applied", []string{"cq@market"}, true, true},
-		{"partial applied current", "partial", []string{"cq@market"}, true, true},
-		{"partial original current", "partial", []string{"manual@market"}, true, true},
-		{"prepared pending current", "prepared", []string{"pending@market"}, true, true},
-		{"pending target current", "pending", []string{"pending@market"}, true, true},
-		{"partial cannot claim pending target", "partial", []string{"pending@market"}, true, false},
-		{"applied cannot claim pending target", "applied", []string{"pending@market"}, true, false},
-		{"partial manual delta", "partial", []string{"cq@market", "new-user-choice@market"}, true, false},
-		{"partial unknown baseline", "partial", []string{"cq@market"}, false, false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
+	for _, mode := range []string{"plugins", "full"} {
+		for _, test := range []struct {
+			name, state    string
+			current        []string
+			known, restore bool
+		}{
+			{"applied current", "applied", []string{"cq@market"}, true, true},
+			{"partial applied current", "partial", []string{"cq@market"}, true, true},
+			{"partial original current", "partial", []string{"manual@market"}, true, true},
+			{"prepared pending current", "prepared", []string{"pending@market"}, true, true},
+			{"pending target current", "pending", []string{"pending@market"}, true, true},
+			{"partial cannot claim pending target", "partial", []string{"pending@market"}, true, false},
+			{"applied cannot claim pending target", "applied", []string{"pending@market"}, true, false},
+			{"partial manual delta", "partial", []string{"cq@market", "new-user-choice@market"}, true, false},
+			{"partial unknown baseline", "partial", []string{"cq@market"}, false, false},
+		} {
+			t.Run(mode+"/"+test.name, func(t *testing.T) {
+				id := "11111111-1111-1111-1111-111111111111"
+				store := harness.Receipts{FS: fsutil.NewMemFS(), Dir: "/state/harness"}
+				lease, err := store.Acquire(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				err = store.Save(harness.Receipt{Version: 1, ChatID: id, Mode: mode, Profile: harness.Custom, Source: "task", State: test.state, BaselinePlugins: []string{"manual@market"}, AppliedPlugins: []string{"cq@market"}, PendingPlugins: []string{"pending@market"}})
+				_ = lease.Close()
+				if err != nil {
+					t.Fatal(err)
+				}
+				bridge := &cloudBridge{}
+				bridge.deps.harnessReceipts = store
+				bridge.deps.readHarnessPolicy = func() (harness.Policy, error) { return harness.Policy{Version: 2, Enabled: true}, nil }
+				h := newCloudHarness(bridge)
+				t.Cleanup(h.close)
+				thread := &cloudHarnessThread{id: id, owned: true, pluginsKnown: test.known, plugins: append([]string{}, test.current...), baseline: cloudMessage{"disabledPluginIds": cloudHarnessRaw(test.current)}}
+				h.threads[id] = thread
+				if err := h.acquire(id); err != nil {
+					t.Fatal(err)
+				}
+				var baseline []string
+				_ = json.Unmarshal(thread.baseline["disabledPluginIds"], &baseline)
+				if thread.restorePlugins != test.restore || thread.diverged == test.restore {
+					t.Fatalf("handoff restore=%t diverged=%t; want restore=%t", thread.restorePlugins, thread.diverged, test.restore)
+				}
+				wantBaseline := test.current
+				if test.restore {
+					wantBaseline = []string{"manual@market"}
+				}
+				if !cloudHarnessPluginEqual(baseline, wantBaseline) {
+					t.Fatalf("handoff changed an unowned or unknown baseline: %v, want %v", baseline, wantBaseline)
+				}
+				if !test.restore && thread.handoffReceipt == nil {
+					t.Fatal("divergence lost the original receipt")
+				}
+				preserved, err := store.Load(id)
+				if err != nil || preserved.State != test.state || !cloudHarnessPluginEqual(preserved.BaselinePlugins, []string{"manual@market"}) {
+					t.Fatalf("handoff modified receipt before a runtime change: %#v, %v", preserved, err)
+				}
+			})
+		}
+	}
+}
+
+func TestCloudHarnessFullModeRestartKeptPluginBaseline(t *testing.T) {
+	for _, state := range []string{"applied", "partial", "prepared", "pending", "failed"} {
+		t.Run(state, func(t *testing.T) {
 			id := "11111111-1111-1111-1111-111111111111"
 			store := harness.Receipts{FS: fsutil.NewMemFS(), Dir: "/state/harness"}
 			lease, err := store.Acquire(id)
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = store.Save(harness.Receipt{Version: 1, ChatID: id, Mode: "plugins", Profile: harness.Custom, Source: "task", State: test.state, BaselinePlugins: []string{"manual@market"}, AppliedPlugins: []string{"cq@market"}, PendingPlugins: []string{"pending@market"}})
+			err = store.Save(harness.Receipt{Version: 1, ChatID: id, Mode: "full", Profile: harness.Custom, Source: "task", State: state, BaselinePlugins: []string{"manual@market"}, AppliedPlugins: []string{"cq@market"}})
 			_ = lease.Close()
 			if err != nil {
 				t.Fatal(err)
 			}
-			bridge := &cloudBridge{}
-			bridge.deps.harnessReceipts = store
-			bridge.deps.readHarnessPolicy = func() (harness.Policy, error) { return harness.Policy{Version: 2, Enabled: true}, nil }
+			bridge := &cloudBridge{deps: cloudStdioDependencies{harnessReceipts: store, readHarnessPolicy: func() (harness.Policy, error) { return harness.Policy{}, nil }}}
 			h := newCloudHarness(bridge)
 			t.Cleanup(h.close)
-			thread := &cloudHarnessThread{id: id, owned: true, pluginsKnown: test.known, plugins: append([]string{}, test.current...), baseline: cloudMessage{"disabledPluginIds": cloudHarnessRaw(test.current)}}
+			thread := &cloudHarnessThread{id: id, owned: true, pluginsKnown: true, plugins: []string{"cq@market"}, baseline: cloudMessage{"disabledPluginIds": cloudHarnessRaw([]string{"cq@market"})}}
 			h.threads[id] = thread
 			if err := h.acquire(id); err != nil {
 				t.Fatal(err)
 			}
 			var baseline []string
 			_ = json.Unmarshal(thread.baseline["disabledPluginIds"], &baseline)
-			if thread.restorePlugins != test.restore || thread.diverged == test.restore {
-				t.Fatalf("handoff restore=%t diverged=%t; want restore=%t", thread.restorePlugins, thread.diverged, test.restore)
-			}
-			wantBaseline := test.current
-			if test.restore {
-				wantBaseline = []string{"manual@market"}
-			}
-			if !cloudHarnessPluginEqual(baseline, wantBaseline) {
-				t.Fatalf("handoff changed an unowned or unknown baseline: %v, want %v", baseline, wantBaseline)
-			}
-			if !test.restore && thread.handoffReceipt == nil {
-				t.Fatal("divergence lost the original receipt")
-			}
-			preserved, err := store.Load(id)
-			if err != nil || preserved.State != test.state || !cloudHarnessPluginEqual(preserved.BaselinePlugins, []string{"manual@market"}) {
-				t.Fatalf("handoff modified receipt before a runtime change: %#v, %v", preserved, err)
+			if !thread.restorePlugins || !cloudHarnessPluginEqual(baseline, []string{"manual@market"}) {
+				t.Fatal("restarted full-mode broker recaptured its own exclusions as the baseline")
 			}
 		})
 	}

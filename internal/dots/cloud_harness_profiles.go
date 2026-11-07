@@ -182,7 +182,12 @@ func cloudHarnessCompileProfile(effective harness.Effective, inventory harness.I
 				plan.unsupported = append(plan.unsupported, "mcp:"+capability.ID)
 				continue
 			}
-			plan.config[cloudHarnessMCPKey(capability.NativeID, "enabled")] = cloudHarnessRaw(wanted)
+			// Inactive layers remain discoverable, but supply no live transport.
+			// Adding even enabled=false would create an invalid server definition.
+			if !capability.Available {
+				continue
+			}
+			cloudHarnessSetMCPEnabled(plan.config, capability.NativeID, wanted)
 		case harness.SkillKind:
 			if !filepath.IsAbs(capability.Path) || filepath.Base(capability.Path) != "SKILL.md" {
 				plan.unsupported = append(plan.unsupported, "skill:"+capability.ID)
