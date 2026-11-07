@@ -26,6 +26,43 @@ func (g cloudHarnessSourceGateway) ResumeSources(id string) []string {
 	return nil
 }
 
+func TestCloudHarnessPrivateResumeRequestedMetadataOnly(t *testing.T) {
+	for _, source := range []string{"stdio", "gateway/target"} {
+		t.Run(source, func(t *testing.T) {
+			h := &cloudHarness{b: &cloudBridge{ctx: context.Background()}, calls: make(map[string]chan cloudMessage), prefix: "cq-harness/test/"}
+			original := cloudMessage{
+				"threadId":              cloudHarnessRaw("target"),
+				"excludeTurns":          cloudHarnessRaw(false),
+				"initialTurnsPage":      cloudHarnessRaw(map[string]any{"limit": 20, "itemsView": "full"}),
+				"history":               cloudHarnessRaw([]string{"must-not-replay"}),
+				"path":                  cloudHarnessRaw("must-not-replace-history"),
+				"experimentalRawEvents": cloudHarnessRaw(true),
+			}
+			before := cloudHarnessClone(original)
+			write := func(gotSource string, raw []byte) error {
+				request := cloudHarnessObject(raw)
+				params := cloudHarnessObject(request["params"])
+				if gotSource != source || cloudHarnessString(params, "threadId") != "target" || string(params["excludeTurns"]) != "true" || params["initialTurnsPage"] != nil || params["history"] != nil || params["path"] != nil {
+					t.Fatal("private resume requested history instead of metadata")
+				}
+				if string(params["experimentalRawEvents"]) != "true" {
+					t.Fatal("private resume lost unrelated subscription options")
+				}
+				h.observeFrom(source, cloudHarnessRaw(map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]string{"id": "target"}}}))
+				return nil
+			}
+			h.gateway = cloudHarnessSourceGateway{write: write}
+			h.b.local = &cloudLocal{input: cloudTestWriter{write: func(raw []byte) (int, error) { return len(raw), write("stdio", raw) }}}
+			if _, err := h.callOn(source, "thread/resume", original); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(original, before) {
+				t.Fatal("private resume changed original client options")
+			}
+		})
+	}
+}
+
 func TestCloudHarnessSuspendedOnlyTargetSubscriptions(t *testing.T) {
 	h := &cloudHarness{b: &cloudBridge{ctx: context.Background()}, threads: map[string]*cloudHarnessThread{
 		"target":  {owned: true, subscriptions: map[string]bool{"gateway/target": true, "stdio": true}},

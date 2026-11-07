@@ -644,8 +644,8 @@ func TestHarnessInstalledGatewayReload(t *testing.T) {
 				t.Logf("LIVE CHILD %s id=%s parent=%s preserved", label, childID, target)
 			}
 			childState("before-reload")
-			resumed := b.call("thread/resume", map[string]any{"threadId": target, "excludeTurns": false})
-			if cloudThreadID(cloudHarnessRaw(resumed)) != target || !strings.Contains(string(cloudHarnessRaw(resumed)), longHistory) || b.chunkedReplies.Load() != 1 || b.chunks.Load() < 2 || b.chunkedBytes.Load() <= 150*1024 {
+			resumed := b.call("thread/resume", map[string]any{"threadId": target, "excludeTurns": false, "initialTurnsPage": map[string]any{"limit": 20, "itemsView": "full"}})
+			if cloudThreadID(cloudHarnessRaw(resumed)) != target || !strings.Contains(string(cloudHarnessRaw(resumed)), longHistory) || len(cloudHarnessObject(resumed["initialTurnsPage"])) == 0 || b.chunkedReplies.Load() != 1 || b.chunks.Load() < 2 || b.chunkedBytes.Load() <= 150*1024 {
 				t.Fatal("native full-history resume did not produce a verified large chunked response")
 			}
 			t.Logf("NATIVE LONG HISTORY chunks=%d message-bytes=%d same-id=%s", b.chunks.Load(), b.chunkedBytes.Load(), target)
@@ -660,6 +660,7 @@ func TestHarnessInstalledGatewayReload(t *testing.T) {
 			if string(gateway.ResumeParams(source, target)["excludeTurns"]) != "false" {
 				t.Fatal("gateway lost full-history resume candidate metadata")
 			}
+			originalPage := string(gateway.ResumeParams(source, target)["initialTurnsPage"])
 			a.call("thread/goal/set", map[string]any{"threadId": target, "objective": "CQ_SYNTHETIC_PAUSED_GOAL", "status": "paused", "tokenBudget": 10000, "origin": "user"})
 			beforeGoal := a.call("thread/goal/get", map[string]any{"threadId": target})["goal"]
 			b.call("turn/start", map[string]any{"threadId": sibling, "input": []any{map[string]any{"type": "text", "text": "CQ_QUALIFICATION_SIBLING_HOLD"}}})
@@ -718,6 +719,9 @@ func TestHarnessInstalledGatewayReload(t *testing.T) {
 			reconcile(false, "restored-full")
 			turn(target, "restored-full", true, true)
 			b.turnCompleted(target)
+			if string(gateway.ResumeParams(source, target)["initialTurnsPage"]) != originalPage {
+				t.Fatal("private reload changed the original backend pagination request")
+			}
 			siblingOnce.Do(func() { close(siblingRelease) })
 			b.turnCompleted(sibling)
 			a.turnCompleted(sibling)

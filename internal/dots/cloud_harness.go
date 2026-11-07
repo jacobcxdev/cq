@@ -791,6 +791,16 @@ func (h *cloudHarness) callOn(source, method string, params any) (cloudMessage, 
 	// The nonce plus issued sequence identifies late replies without retaining
 	// an ever-growing table of completed calls.
 	defer func() { h.mu.Lock(); delete(h.calls, key); h.mu.Unlock() }()
+	if method == "thread/resume" {
+		// excludeTurns does not suppress a requested initial history page.
+		// Private resumes restore subscriptions without replaying history.
+		metadata := cloudHarnessObject(cloudHarnessRaw(params))
+		metadata["excludeTurns"] = cloudHarnessRaw(true)
+		for _, field := range []string{"initialTurnsPage", "history", "path"} {
+			delete(metadata, field)
+		}
+		params = metadata
+	}
 	raw := append(cloudHarnessRaw(map[string]any{"id": id, "method": method, "params": params}), '\n')
 	err := func() error {
 		if source != "stdio" {
