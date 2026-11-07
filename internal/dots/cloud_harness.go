@@ -687,6 +687,9 @@ func (h *cloudHarness) baselineConfig(native cloudMessage, originalRaw json.RawM
 		} // Native skills/MCP enabled defaults.
 		restore[key] = cloudHarnessRaw(value)
 	}
+	if err := cloudHarnessBaselineApps(native, original, restore); err != nil {
+		return nil, err
+	}
 	return restore, nil
 }
 
@@ -759,6 +762,7 @@ func cloudHarnessMinimalConfig(native cloudMessage, original json.RawMessage) cl
 	}
 	config["skills.include_instructions"] = json.RawMessage("false")
 	config["features.plugins"] = json.RawMessage("false")
+	cloudHarnessCompileApps(harness.Effective{Changes: harness.Changes{Default: harness.Disabled}}, harness.Inventory{}, harness.CapabilitySelection{}, config, config)
 	for name := range names {
 		// Config overrides use TOML dotted paths. Quote each server name so a
 		// name containing a dot cannot select a different configuration path.
@@ -1075,10 +1079,33 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 	if err := h.record(id, selection, "prepared"); err != nil {
 		return err
 	}
-	// Resume can reuse an assembly retained by another native subscriber. Read
-	// its actual MCP catalogue before reload; RPC success alone proves nothing.
-	beforeRuntime, _ := h.readMCPRuntime(id)
+	previousConfig := snapshot.runtimeConfig
+	if previousConfig == nil {
+		previousConfig = snapshot.fullConfig
+	}
+	attemptedConfig := previousConfig
+	if snapshot.profilePlan != nil {
+		attemptedConfig = snapshot.profilePlan.config
+	} else if snapshot.minimal {
+		attemptedConfig = cloudHarnessMinimalConfig(nil, cloudHarnessRaw(snapshot.fullConfig))
+	}
+	desiredConfig := cloudHarnessObject(snapshot.baseline["config"])
+	if snapshot.fullConfig != nil {
+		desiredConfig = snapshot.fullConfig
+	}
+	if desiredPlan != nil {
+		desiredConfig = desiredPlan.config
+	} else if minimal {
+		desiredConfig = cloudHarnessMinimalConfig(native, snapshot.baseline["config"])
+	}
+	// Read only changing MCPs through their selected thread connections. Broad
+	// discovery can start unrelated servers and does not attest this assembly.
+	var beforeRuntime map[string]cloudHarnessMCPRuntime
+	if targets, valid := cloudHarnessMCPVerificationTargets(desiredConfig, attemptedConfig); valid {
+		beforeRuntime, _ = h.readMCPRuntime(id, targets)
+	}
 	beforePlugins, beforePluginsErr := h.readPluginRuntime(id)
+	beforeApps, beforeAppsErr := h.readAppsRuntime(id)
 	// A native notification or an already forwarded turn can arrive while
 	// config/read is in flight. Recheck before releasing the subscription.
 	h.mu.Lock()
@@ -1126,9 +1153,12 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 	}
 	var resumedPlugins bool
 	var resumedPluginsErr error
+	var resumedApps bool
+	var resumedAppsErr error
 	if err == nil {
 		// Observe the resumed assembly before replaying hot plugin settings.
 		resumedPlugins, resumedPluginsErr = h.readPluginRuntime(id)
+		resumedApps, resumedAppsErr = h.readAppsRuntime(id)
 	}
 	if err == nil {
 		replay := cloudHarnessReplaySettings(snapshot, model, cwd)
@@ -1176,17 +1206,6 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		_ = h.record(id, selection, "failed")
 		return errors.New("native harness reload failed; profile was not applied")
 	}
-	previousConfig := snapshot.runtimeConfig
-	if previousConfig == nil {
-		previousConfig = snapshot.fullConfig
-	}
-	attemptedConfig := previousConfig
-	if snapshot.profilePlan != nil {
-		attemptedConfig = snapshot.profilePlan.config
-	} else if snapshot.minimal {
-		attemptedConfig = cloudHarnessMinimalConfig(nil, cloudHarnessRaw(snapshot.fullConfig))
-	}
-	desiredConfig := cloudHarnessObject(params["config"])
 	runtimeIssues, reassembled := h.verifyMCPRuntime(id, desiredConfig, attemptedConfig, beforeRuntime)
 	pluginsEnabled, pluginsErr := h.readPluginRuntime(id)
 	if pluginsErr != nil {
@@ -1195,6 +1214,17 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		runtimeIssues = append(runtimeIssues, "native_plugin_runtime_retained")
 	} else if beforePluginsErr == nil && resumedPluginsErr == nil && beforePlugins != resumedPlugins && resumedPlugins == pluginsEnabled {
 		reassembled = true
+	}
+	appsEnabled, appsErr := h.readAppsRuntime(id)
+	if appsErr != nil {
+		runtimeIssues = append(runtimeIssues, "native_app_runtime_unverified")
+	} else if appsEnabled != cloudHarnessBool(desiredConfig, "features.apps", true) {
+		runtimeIssues = append(runtimeIssues, "native_app_runtime_retained")
+	} else if beforeAppsErr == nil && resumedAppsErr == nil && beforeApps != resumedApps && resumedApps == appsEnabled {
+		reassembled = true
+	}
+	if appsErr == nil && appsEnabled && (cloudHarnessAppsChanged(previousConfig, desiredConfig) || cloudHarnessAppsChanged(attemptedConfig, desiredConfig) || slices.Contains(snapshot.runtimeIssues, "native_app_selection_unverified")) && !reassembled {
+		runtimeIssues = append(runtimeIssues, "native_app_selection_unverified")
 	}
 	if (cloudHarnessSkillsChanged(previousConfig, desiredConfig) || cloudHarnessSkillsChanged(attemptedConfig, desiredConfig) || slices.Contains(snapshot.runtimeIssues, "native_skill_runtime_unverified")) && !reassembled {
 		runtimeIssues = append(runtimeIssues, "native_skill_runtime_unverified")

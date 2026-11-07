@@ -16,7 +16,7 @@ func TestCloudHarnessRetainedMCPAssemblyWasNotFullyApplied(t *testing.T) {
 	// Another subscriber keeps the original assembly alive. Native accepts
 	// unsubscribe/resume but still exposes the MCP tool that CQ deselected.
 	f.onRequest = func(request cloudMessage) (any, error, bool) {
-		if request.method() == "mcpServerStatus/list" {
+		if request.method() == "mcpServerStatus/list" && cloudHarnessString(cloudHarnessObject(request["params"]), "serverName") == "first" {
 			return map[string]any{"data": []any{map[string]any{"name": "first", "tools": map[string]any{"probe": map[string]any{}}, "resources": []any{}, "resourceTemplates": []any{}, "runtimeStatus": "connected"}}, "nextCursor": nil}, nil, true
 		}
 		return nil, nil, false
@@ -122,5 +122,43 @@ func TestCloudHarnessRetainedPluginFeaturePreventedFullRestoration(t *testing.T)
 	receipt, err = store.Load(id)
 	if err != nil || receipt.State != "partial" || !slices.Contains(receipt.Issues, "native_plugin_runtime_retained") {
 		t.Fatalf("retained disabled plugin feature was reported as restored: %#v, %v", receipt, err)
+	}
+}
+
+func TestCloudHarnessReloadVerifiedOnlySelectedMCPConnections(t *testing.T) {
+	f := newCloudHarnessSelectiveFixture(t)
+	f.policy.Global = harness.Scope{}
+	store := harness.Receipts{FS: fsutil.NewMemFS(), Dir: "/state/harness"}
+	f.deps.harnessReceipts = store
+	f.start()
+	f.initialize()
+	id := f.startThread("gpt-5.5", "/project")
+	f.completeStoredTurn(id)
+	var selected []string
+	f.mu.Lock()
+	f.onRequest = func(request cloudMessage) (any, error, bool) {
+		if request.method() != "mcpServerStatus/list" {
+			return nil, nil, false
+		}
+		name := cloudHarnessString(cloudHarnessObject(request["params"]), "serverName")
+		selected = append(selected, name)
+		if name != "first" {
+			return nil, nil, true
+		}
+		status, tools := "disabled", map[string]any{}
+		if cloudHarnessBool(f.configs[id], "mcp_servers.first.enabled", true) {
+			status = "connected"
+			tools["probe"] = map[string]any{}
+		}
+		return map[string]any{"data": []any{map[string]any{"name": "first", "tools": tools, "resources": []any{}, "resourceTemplates": []any{}, "runtimeStatus": status}}, "nextCursor": nil}, nil, true
+	}
+	f.mu.Unlock()
+	f.setPolicy(harness.Policy{Version: 2, Enabled: true, Tasks: map[string]harness.Scope{id: {All: harness.Binding{Changes: harness.Changes{MCP: map[string]harness.Decision{"first": harness.Disabled}}}}}})
+	if reply := f.request(3, "turn/start", map[string]any{"threadId": id}); len(reply["error"]) != 0 {
+		t.Fatalf("selected MCP edit blocked chat: %s", reply["error"])
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.State != "applied" || len(selected) != 2 || selected[0] != "first" || selected[1] != "first" {
+		t.Fatalf("pre/post verification escaped selected connection: receipt=%s issues=%v queries=%v err=%v", receipt.State, receipt.Issues, selected, err)
 	}
 }

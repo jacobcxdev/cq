@@ -110,9 +110,10 @@ func newCloudHarnessFixture(t *testing.T) *cloudHarnessFixture {
 					result = map[string]any{"status": "unsubscribed"}
 				case "mcpServerStatus/list":
 					id, _ := params["threadId"].(string)
+					selected, _ := params["serverName"].(string)
 					rows := make([]any, 0)
 					for key, value := range f.configs[id] {
-						if name, property, ok := cloudHarnessMCPPath(key); ok && property == "enabled" {
+						if name, property, ok := cloudHarnessMCPPath(key); ok && property == "enabled" && (selected == "" || name == selected) {
 							tools := map[string]any{}
 							status := "disabled"
 							if bytes.Equal(value, []byte("true")) {
@@ -125,7 +126,7 @@ func newCloudHarnessFixture(t *testing.T) *cloudHarnessFixture {
 					result = map[string]any{"data": rows, "nextCursor": nil}
 				case "experimentalFeature/list":
 					id, _ := params["threadId"].(string)
-					result = map[string]any{"data": []any{map[string]any{"name": "plugins", "enabled": cloudHarnessBool(f.configs[id], "features.plugins", true)}}, "nextCursor": nil}
+					result = map[string]any{"data": []any{map[string]any{"name": "plugins", "enabled": cloudHarnessBool(f.configs[id], "features.plugins", true)}, map[string]any{"name": "apps", "enabled": cloudHarnessBool(f.configs[id], "features.apps", true)}}, "nextCursor": nil}
 				case "turn/start":
 					id, _ := params["threadId"].(string)
 					if model, ok := params["model"].(string); ok {

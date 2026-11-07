@@ -140,7 +140,7 @@ func requestedDecision(effective Effective, kind Kind, id string) Decision {
 }
 
 func applicationIssueRelevant(effective Effective, entry InventoryIssue, selection CapabilitySelection) bool {
-	if entry.Code == "plugin_mcp_ownership_unresolved" {
+	if entry.Code == "plugin_mcp_ownership_unresolved" || entry.Code == "plugin_app_ownership_unresolved" {
 		changed := len(effective.Changes.Plugins)+len(effective.Changes.MCP)+len(effective.Changes.Skills) > 0 || (effective.Changes.Default != "" && effective.Changes.Default != Inherit)
 		return changed && entry.Kind == PluginKind && entry.ID != "" && selection.Wants(PluginKind, entry.ID)
 	}

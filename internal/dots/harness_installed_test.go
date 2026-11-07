@@ -1302,7 +1302,7 @@ func TestHarnessInstalledMultipleSubscriberRuntime(t *testing.T) {
 			if !status("full-first", true) {
 				t.Fatal("full fixture MCP absent")
 			}
-			beforeFull, err := verification.readMCPRuntime(thread.ID)
+			beforeFull, err := verification.readMCPRuntime(thread.ID, map[string]bool{"probe": false})
 			if err != nil || beforeFull["probe"].Exposed != 1 {
 				t.Fatal("initial thread-scoped MCP count unavailable")
 			}
@@ -1344,7 +1344,7 @@ func TestHarnessInstalledMultipleSubscriberRuntime(t *testing.T) {
 			}
 			turn("all-subscribers-released-minimal")
 			verify(cloudMessage{"mcp_servers.probe.enabled": cloudHarnessRaw(false)}, cloudMessage{"mcp_servers.probe.enabled": cloudHarnessRaw(true)}, beforeFull, nil, true)
-			beforeMinimal, err := verification.readMCPRuntime(thread.ID)
+			beforeMinimal, err := verification.readMCPRuntime(thread.ID, map[string]bool{"probe": false})
 			if err != nil || beforeMinimal["probe"].Exposed != 0 {
 				t.Fatal("minimal thread-scoped MCP count unavailable")
 			}

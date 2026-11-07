@@ -111,3 +111,11 @@ func TestCapabilitySelectionRespectsNativeCoreDisableAndSupportedSources(t *test
 		}
 	}
 }
+
+func TestCapabilitySelectionReportedInheritedPluginAppOwnershipGap(t *testing.T) {
+	inventory := Inventory{Capabilities: []Capability{{Kind: PluginKind, ID: "owner", Enabled: true, Available: true}}, Issues: []InventoryIssue{{Code: "plugin_app_ownership_unresolved", Kind: PluginKind, ID: "owner"}}}
+	selected := SelectCapabilities(Effective{Changes: Changes{MCP: map[string]Decision{"*": Disabled}}}, inventory, nil)
+	if !slices.Contains(selected.Issues, "plugin_app_ownership_unresolved:plugin:owner") {
+		t.Fatalf("inherited selected plugin app gap was not reported: %v", selected.Issues)
+	}
+}

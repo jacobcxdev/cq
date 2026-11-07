@@ -127,6 +127,36 @@ func nativePluginMCPServers(raw json.RawMessage, expected nativePluginMetadata) 
 	return servers, true
 }
 
+// App ownership remains part of the atomic plugin capability. Only stable app
+// IDs are retained; app account, authentication and tool metadata stay native.
+func nativePluginAppIDs(raw json.RawMessage, expected nativePluginMetadata) ([]string, bool) {
+	var detail struct {
+		Plugin *struct {
+			Summary *struct{ ID, Name string } `json:"summary"`
+			Apps    *[]struct {
+				ID string `json:"id"`
+			} `json:"apps"`
+		} `json:"plugin"`
+	}
+	if json.Unmarshal(raw, &detail) != nil || detail.Plugin == nil || detail.Plugin.Summary == nil || detail.Plugin.Apps == nil || detail.Plugin.Summary.ID != expected.ID || detail.Plugin.Summary.Name != expected.Name {
+		return nil, false
+	}
+	ids := make([]string, 0, len(*detail.Plugin.Apps))
+	for _, app := range *detail.Plugin.Apps {
+		if !inventoryIdentifier(app.ID) || app.ID == "_default" {
+			return nil, false
+		}
+		ids = append(ids, app.ID)
+	}
+	sort.Strings(ids)
+	for index := 1; index < len(ids); index++ {
+		if ids[index] == ids[index-1] {
+			return nil, false
+		}
+	}
+	return ids, true
+}
+
 type nativeInventoryConfigLayer struct {
 	Config         map[string]json.RawMessage `json:"config"`
 	Name           json.RawMessage            `json:"name"`
@@ -195,6 +225,10 @@ func decodeNativeInventory(data []byte, cwd string) (Inventory, error) {
 				capability.MCPServers, known = nativePluginMCPServers(response.PluginDetails[plugin.ID], plugin)
 				if !known {
 					issue("plugin_mcp_ownership_unresolved", PluginKind, plugin.ID)
+				}
+				capability.AppIDs, known = nativePluginAppIDs(response.PluginDetails[plugin.ID], plugin)
+				if !known {
+					issue("plugin_app_ownership_unresolved", PluginKind, plugin.ID)
 				}
 				for _, server := range capability.MCPServers {
 					mcpOwners[server] = append(mcpOwners[server], plugin.ID)

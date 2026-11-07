@@ -198,6 +198,7 @@ func cloudHarnessCompileProfile(effective harness.Effective, inventory harness.I
 			anySkill = anySkill || wanted
 		}
 	}
+	cloudHarnessCompileApps(effective, inventory, selected, baseline, plan.config)
 	plan.config["features.plugins"] = cloudHarnessRaw(anyPlugin || effective.Choose(harness.PluginKind, "*", pluginsEnabled))
 	plan.config["skills.include_instructions"] = cloudHarnessRaw(anySkill || effective.Choose(harness.SkillKind, "*", skillsIncluded))
 	paths := make([]string, 0, len(skills))
@@ -301,76 +302,88 @@ type cloudHarnessMCPRuntime struct {
 	DiscoveryFailed bool
 }
 
-// Read the selected chat's runtime, not the globally configured inventory.
-// Disabled servers may remain as rows with empty capability catalogues.
-func (h *cloudHarness) readMCPRuntime(threadID string) (map[string]cloudHarnessMCPRuntime, error) {
+// Read selected servers through the chat's existing connections. Broad native
+// discovery can start unrelated servers. Disabled rows may have empty catalogues.
+func (h *cloudHarness) readMCPRuntime(threadID string, wanted map[string]bool) (map[string]cloudHarnessMCPRuntime, error) {
 	unavailable := errors.New("native MCP runtime unavailable")
-	if threadID == "" {
+	if threadID == "" || len(wanted) > 400 {
 		return nil, unavailable
 	}
 	counts := make(map[string]cloudHarnessMCPRuntime)
-	seenCursors := make(map[string]bool)
-	cursor, totalBytes := "", 0
-	for page := 0; page < 4; page++ {
-		params := map[string]any{"threadId": threadID, "detail": "full", "limit": 100}
-		if cursor != "" {
-			params["cursor"] = cursor
-		}
-		result, err := h.call("mcpServerStatus/list", params)
-		if err != nil {
+	names := make([]string, 0, len(wanted))
+	for name := range wanted {
+		if name == "" || len(name) > 4096 || strings.TrimSpace(name) != name || strings.ContainsFunc(name, unicode.IsControl) {
 			return nil, unavailable
 		}
-		totalBytes += 2
-		for key, raw := range result {
-			totalBytes += len(cloudHarnessRaw(key)) + len(raw) + 2
-		}
-		if totalBytes > 8<<20 {
-			return nil, unavailable
-		}
-		var rows *[]struct {
-			Name              string                      `json:"name"`
-			PluginID          *string                     `json:"pluginId"`
-			Tools             *map[string]json.RawMessage `json:"tools"`
-			Resources         *[]json.RawMessage          `json:"resources"`
-			ResourceTemplates *[]json.RawMessage          `json:"resourceTemplates"`
-			RuntimeStatus     string                      `json:"runtimeStatus"`
-			ToolsError        *string                     `json:"toolsError"`
-		}
-		if json.Unmarshal(result["data"], &rows) != nil || rows == nil || len(*rows) > 100 {
-			return nil, unavailable
-		}
-		for _, row := range *rows {
-			if row.Name == "" || len(row.Name) > 4096 || strings.TrimSpace(row.Name) != row.Name || strings.ContainsFunc(row.Name, unicode.IsControl) || row.Tools == nil || row.Resources == nil || row.ResourceTemplates == nil {
-				return nil, unavailable
-			}
-			if row.PluginID != nil && *row.PluginID != "" {
-				continue
-			}
-			if _, duplicate := counts[row.Name]; duplicate {
-				return nil, unavailable
-			}
-			counts[row.Name] = cloudHarnessMCPRuntime{Exposed: len(*row.Tools) + len(*row.Resources) + len(*row.ResourceTemplates), Status: row.RuntimeStatus, DiscoveryFailed: row.ToolsError != nil && *row.ToolsError != ""}
-		}
-		var next *string
-		if raw, present := result["nextCursor"]; !present || json.Unmarshal(raw, &next) != nil {
-			return nil, unavailable
-		}
-		if next == nil {
-			return counts, nil
-		}
-		if *next == "" || len(*next) > 4096 || seenCursors[*next] {
-			return nil, unavailable
-		}
-		cursor, seenCursors[*next] = *next, true
+		names = append(names, name)
 	}
-	return nil, unavailable
+	slices.Sort(names)
+	totalBytes := 0
+	for _, name := range names {
+		seenCursors := make(map[string]bool)
+		cursor, complete := "", false
+		for page := 0; page < 4; page++ {
+			params := map[string]any{"threadId": threadID, "serverName": name, "detail": "full", "limit": 100}
+			if cursor != "" {
+				params["cursor"] = cursor
+			}
+			result, err := h.call("mcpServerStatus/list", params)
+			if err != nil {
+				return nil, unavailable
+			}
+			totalBytes += 2
+			for key, raw := range result {
+				totalBytes += len(cloudHarnessRaw(key)) + len(raw) + 2
+			}
+			if totalBytes > 8<<20 {
+				return nil, unavailable
+			}
+			var rows *[]struct {
+				Name              string                      `json:"name"`
+				PluginID          *string                     `json:"pluginId"`
+				Tools             *map[string]json.RawMessage `json:"tools"`
+				Resources         *[]json.RawMessage          `json:"resources"`
+				ResourceTemplates *[]json.RawMessage          `json:"resourceTemplates"`
+				RuntimeStatus     string                      `json:"runtimeStatus"`
+				ToolsError        *string                     `json:"toolsError"`
+			}
+			if json.Unmarshal(result["data"], &rows) != nil || rows == nil || len(*rows) > 100 {
+				return nil, unavailable
+			}
+			for _, row := range *rows {
+				if row.Name != name || row.Tools == nil || row.Resources == nil || row.ResourceTemplates == nil {
+					return nil, unavailable
+				}
+				if row.PluginID != nil && *row.PluginID != "" {
+					continue
+				}
+				if _, duplicate := counts[row.Name]; duplicate {
+					return nil, unavailable
+				}
+				counts[row.Name] = cloudHarnessMCPRuntime{Exposed: len(*row.Tools) + len(*row.Resources) + len(*row.ResourceTemplates), Status: row.RuntimeStatus, DiscoveryFailed: row.ToolsError != nil && *row.ToolsError != ""}
+			}
+			var next *string
+			if raw, present := result["nextCursor"]; !present || json.Unmarshal(raw, &next) != nil {
+				return nil, unavailable
+			}
+			if next == nil {
+				complete = true
+				break
+			}
+			if *next == "" || len(*next) > 4096 || seenCursors[*next] {
+				return nil, unavailable
+			}
+			cursor, seenCursors[*next] = *next, true
+		}
+		if !complete {
+			return nil, unavailable
+		}
+	}
+	return counts, nil
 }
 
-// A successful resume can retain an existing assembly owned by another native
-// subscriber. Verify exclusions and explicit disabled-to-enabled restorations.
-// The transition result requires a valid pre-reload snapshot; already empty
-// catalogues cannot prove that a skill configuration was reassembled.
-func (h *cloudHarness) verifyMCPRuntime(threadID string, desired, previous cloudMessage, before map[string]cloudHarnessMCPRuntime) ([]string, bool) {
+// Only exclusions and explicit disabled-to-enabled restorations need readback.
+func cloudHarnessMCPVerificationTargets(desired, previous cloudMessage) (map[string]bool, bool) {
 	wanted := make(map[string]bool)
 	for key, raw := range desired {
 		name, property, ok := cloudHarnessMCPPath(key)
@@ -379,7 +392,7 @@ func (h *cloudHarness) verifyMCPRuntime(threadID string, desired, previous cloud
 		}
 		raw = bytes.TrimSpace(raw)
 		if !bytes.Equal(raw, []byte("true")) && !bytes.Equal(raw, []byte("false")) {
-			return []string{"native_mcp_runtime_unverified"}, false
+			return nil, false
 		}
 		enabled := bytes.Equal(raw, []byte("true"))
 		if enabled {
@@ -388,14 +401,25 @@ func (h *cloudHarness) verifyMCPRuntime(threadID string, desired, previous cloud
 			}
 		}
 		if prior, duplicate := wanted[name]; duplicate && prior != enabled {
-			return []string{"native_mcp_runtime_unverified"}, false
+			return nil, false
 		}
 		wanted[name] = enabled
+	}
+	return wanted, true
+}
+
+// A successful resume can retain an existing assembly owned by another native
+// subscriber. The transition requires a valid pre-reload snapshot; already empty
+// catalogues cannot prove that a skill configuration was reassembled.
+func (h *cloudHarness) verifyMCPRuntime(threadID string, desired, previous cloudMessage, before map[string]cloudHarnessMCPRuntime) ([]string, bool) {
+	wanted, valid := cloudHarnessMCPVerificationTargets(desired, previous)
+	if !valid {
+		return []string{"native_mcp_runtime_unverified"}, false
 	}
 	if len(wanted) == 0 {
 		return nil, false
 	}
-	after, err := h.readMCPRuntime(threadID)
+	after, err := h.readMCPRuntime(threadID, wanted)
 	if err != nil {
 		return []string{"native_mcp_runtime_unverified"}, false
 	}

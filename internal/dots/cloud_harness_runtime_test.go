@@ -20,7 +20,7 @@ func cloudHarnessRuntimeFixture(t *testing.T, respond func(cloudMessage) any) *c
 			t.Fatal("runtime verification used an unexpected native operation")
 		}
 		params := cloudHarnessObject(request["params"])
-		if cloudHarnessString(params, "threadId") != "chat" || cloudHarnessString(params, "detail") != "full" || string(params["limit"]) != "100" {
+		if cloudHarnessString(params, "threadId") != "chat" || cloudHarnessString(params, "serverName") == "" || cloudHarnessString(params, "detail") != "full" || string(params["limit"]) != "100" {
 			t.Fatal("runtime verification was not bounded to the selected chat")
 		}
 		result := respond(params)
@@ -38,16 +38,24 @@ func TestCloudHarnessRuntimeReadCountedStandaloneToolsAcrossPages(t *testing.T) 
 	calls := 0
 	h := cloudHarnessRuntimeFixture(t, func(params cloudMessage) any {
 		calls++
-		if calls == 1 {
-			return map[string]any{"data": json.RawMessage(`[{"name":"disabled","tools":{},"resources":[],"resourceTemplates":[],"runtimeStatus":"disabled"},{"name":"probe","pluginId":"bundle@market","tools":{"bundled":{}},"resources":[],"resourceTemplates":[],"runtimeStatus":"connected"}]`), "nextCursor": "next"}
+		switch cloudHarnessString(params, "serverName") {
+		case "disabled":
+			if calls == 1 {
+				return map[string]any{"data": []any{}, "nextCursor": "next"}
+			}
+			if cloudHarnessString(params, "cursor") != "next" {
+				t.Fatal("runtime cursor was not preserved")
+			}
+			return map[string]any{"data": json.RawMessage(`[{"name":"disabled","tools":{},"resources":[],"resourceTemplates":[],"runtimeStatus":"disabled"}]`), "nextCursor": nil}
+		case "probe.with.dot":
+			return map[string]any{"data": json.RawMessage(`[{"name":"probe.with.dot","tools":{"one":{},"two":{}},"resources":[{}],"resourceTemplates":[{}],"runtimeStatus":"connected"}]`), "nextCursor": nil}
+		default:
+			t.Fatal("runtime reader selected an unrelated server")
 		}
-		if cloudHarnessString(params, "cursor") != "next" {
-			t.Fatal("runtime cursor was not preserved")
-		}
-		return map[string]any{"data": json.RawMessage(`[{"name":"probe.with.dot","tools":{"one":{},"two":{}},"resources":[{}],"resourceTemplates":[{}],"runtimeStatus":"connected"}]`), "nextCursor": nil}
+		return nil
 	})
-	got, err := h.readMCPRuntime("chat")
-	if err != nil || !reflect.DeepEqual(got, map[string]cloudHarnessMCPRuntime{"disabled": {Status: "disabled"}, "probe.with.dot": {Exposed: 4, Status: "connected"}}) || calls != 2 {
+	got, err := h.readMCPRuntime("chat", map[string]bool{"disabled": false, "probe.with.dot": false})
+	if err != nil || !reflect.DeepEqual(got, map[string]cloudHarnessMCPRuntime{"disabled": {Status: "disabled"}, "probe.with.dot": {Exposed: 4, Status: "connected"}}) || calls != 3 {
 		t.Fatalf("runtime counts = %v, err=%v, calls=%d", got, err, calls)
 	}
 }
@@ -59,6 +67,7 @@ func TestCloudHarnessRuntimeRejectedIncompleteOrUnboundedMetadata(t *testing.T) 
 	}{
 		{"rejected", nil}, {"missing data", map[string]any{}}, {"null data", map[string]any{"data": nil}},
 		{"missing cursor", map[string]any{"data": []any{}}},
+		{"unexpected named server", map[string]any{"data": json.RawMessage(`[{"name":"unrelated","tools":{},"resources":[],"resourceTemplates":[],"runtimeStatus":"disabled"}]`)}},
 		{"missing tools", map[string]any{"data": json.RawMessage(`[{"name":"probe","resources":[],"resourceTemplates":[],"runtimeStatus":"disabled"}]`)}},
 		{"null tools", map[string]any{"data": json.RawMessage(`[{"name":"probe","tools":null,"resources":[],"resourceTemplates":[],"runtimeStatus":"disabled"}]`)}},
 		{"array tools", map[string]any{"data": json.RawMessage(`[{"name":"probe","tools":[],"resources":[],"resourceTemplates":[],"runtimeStatus":"disabled"}]`)}},
@@ -77,7 +86,7 @@ func TestCloudHarnessRuntimeRejectedIncompleteOrUnboundedMetadata(t *testing.T) 
 				}
 			}
 			h := cloudHarnessRuntimeFixture(t, func(cloudMessage) any { return test.result })
-			got, err := h.readMCPRuntime("chat")
+			got, err := h.readMCPRuntime("chat", map[string]bool{"probe": false})
 			if err == nil || got != nil || strings.Contains(err.Error(), "private-secret") {
 				t.Fatalf("unsafe runtime result: %v %v", got, err)
 			}
@@ -94,7 +103,7 @@ func TestCloudHarnessRuntimeRejectedIncompleteOrUnboundedMetadata(t *testing.T) 
 				}
 				return map[string]any{"data": []any{}, "nextCursor": cursor}
 			})
-			if _, err := h.readMCPRuntime("chat"); err == nil || calls > 4 {
+			if _, err := h.readMCPRuntime("chat", map[string]bool{"probe": false}); err == nil || calls > 4 {
 				t.Fatalf("unbounded pages: calls=%d err=%v", calls, err)
 			}
 		})
@@ -103,7 +112,7 @@ func TestCloudHarnessRuntimeRejectedIncompleteOrUnboundedMetadata(t *testing.T) 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	h.b.ctx = ctx
-	if _, err := h.readMCPRuntime("chat"); err == nil {
+	if _, err := h.readMCPRuntime("chat", map[string]bool{"probe": false}); err == nil {
 		t.Fatal("cancelled runtime read succeeded")
 	}
 }
@@ -159,5 +168,43 @@ func TestCloudHarnessRuntimeVerifiedExclusionsRestorationAndAssemblyTransition(t
 		if !reflect.DeepEqual(issues, []string{"native_mcp_runtime_unverified"}) || changed {
 			t.Fatalf("invalid desired flag: %v %t", issues, changed)
 		}
+	}
+}
+
+func TestCloudHarnessRuntimeVerificationSelectedOnlyChangedServers(t *testing.T) {
+	calls := 0
+	h := cloudHarnessRuntimeFixture(t, func(params cloudMessage) any {
+		calls++
+		if cloudHarnessString(params, "serverName") != "probe" {
+			return nil
+		}
+		return map[string]any{"data": json.RawMessage(`[{"name":"probe","tools":{},"resources":[],"resourceTemplates":[],"runtimeStatus":"disabled"}]`), "nextCursor": nil}
+	})
+	desired := cloudMessage{"mcp_servers.probe.enabled": cloudHarnessRaw(false), "mcp_servers.unrelated.enabled": cloudHarnessRaw(true)}
+	previous := cloudMessage{"mcp_servers.probe.enabled": cloudHarnessRaw(true), "mcp_servers.unrelated.enabled": cloudHarnessRaw(true)}
+	issues, changed := h.verifyMCPRuntime("chat", desired, previous, map[string]cloudHarnessMCPRuntime{"probe": {Exposed: 1, Status: "connected"}})
+	if len(issues) != 0 || !changed || calls != 1 {
+		t.Fatalf("selected verification = %v %v; calls=%d", issues, changed, calls)
+	}
+}
+
+func TestCloudHarnessRuntimeBoundedSelectedServers(t *testing.T) {
+	oversized := make(map[string]bool, 401)
+	for i := 0; i < 401; i++ {
+		oversized[fmt.Sprint(i)] = false
+	}
+	for _, wanted := range []map[string]bool{{"": false}, {"probe\n": false}, {strings.Repeat("x", 4097): false}, oversized} {
+		h := cloudHarnessRuntimeFixture(t, func(cloudMessage) any { t.Fatal("invalid server selection reached native"); return nil })
+		if _, err := h.readMCPRuntime("chat", wanted); err == nil {
+			t.Fatal("invalid server selection was accepted")
+		}
+	}
+	calls := 0
+	h := cloudHarnessRuntimeFixture(t, func(params cloudMessage) any {
+		calls++
+		return map[string]any{"data": []any{map[string]any{"name": cloudHarnessString(params, "serverName"), "tools": map[string]any{}, "resources": []any{}, "resourceTemplates": []any{}}}, "nextCursor": nil, "unknown": strings.Repeat("x", 4<<20)}
+	})
+	if _, err := h.readMCPRuntime("chat", map[string]bool{"first": false, "second": false}); err == nil || calls != 2 {
+		t.Fatalf("aggregate metadata bound lost: calls=%d err=%v", calls, err)
 	}
 }
