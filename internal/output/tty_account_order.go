@@ -11,7 +11,7 @@ import (
 
 // accountDisplayOrder leaves the report and its routing-independent JSON order intact.
 func accountDisplayOrder(pr app.ProviderReport, nowEpoch int64) []quota.Result {
-	if pr.ID != provider.Codex || len(pr.Results) < 2 {
+	if len(pr.Results) < 2 {
 		return pr.Results
 	}
 	type row struct {
@@ -31,13 +31,17 @@ func accountDisplayOrder(pr app.ProviderReport, nowEpoch int64) []quota.Result {
 		if !activeKnown {
 			active = result.Active
 		}
-		multiplier, multiplierKnown := provider.CodexUsageMultiplier(result.Plan, result.RateLimitTier)
+		multiplier, multiplierKnown := quota.ParseMultiplier(result.RateLimitTier)
 		plan := result.Plan
 		if plan == "" {
 			plan = result.Tier
 		}
+		if pr.ID == provider.Codex {
+			multiplier, multiplierKnown = provider.CodexUsageMultiplier(result.Plan, result.RateLimitTier)
+			plan = provider.CodexPlanLabel(plan)
+		}
 		rows[i] = row{result, active, value, known, multiplier, multiplierKnown,
-			strings.ToLower(provider.CodexPlanLabel(plan)), accountDisplayReset(result, nowEpoch)}
+			strings.ToLower(plan), accountDisplayReset(result, nowEpoch)}
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
 		a, b := rows[i], rows[j]
