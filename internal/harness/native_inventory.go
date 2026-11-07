@@ -5,17 +5,22 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 const nativeCurationLimit = 8 << 20
+
+var errNativeInventoryBudget = errors.New("native inventory budget exceeded")
 
 // NativeInventory reads all native capability metadata independently of chat
 // exclusions. Run, when injected, writes the combined plugins/skills/config
@@ -29,14 +34,19 @@ func (client NativeInventory) Snapshot(ctx context.Context, cwd string) (Invento
 	if !filepath.IsAbs(cwd) || filepath.Clean(cwd) != cwd {
 		return Inventory{}, fmt.Errorf("inventory project must be absolute and clean")
 	}
-	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	caller := ctx
+	ctx, cancel := context.WithTimeoutCause(ctx, 20*time.Second, errNativeInventoryBudget)
 	defer cancel()
 	run := client.Run
 	if run == nil {
 		run = runNativeCurationInventory
 	}
 	output := &nativeCurationOutput{}
-	if err := run(ctx, client.Executable, cwd, output); err != nil {
+	runErr := run(ctx, client.Executable, cwd, output)
+	if err := caller.Err(); err != nil {
+		return Inventory{}, fmt.Errorf("native capability inventory unavailable: %w", err)
+	}
+	if runErr != nil {
 		if ctx.Err() != nil {
 			return Inventory{}, fmt.Errorf("native capability inventory unavailable: %w", ctx.Err())
 		}
@@ -758,6 +768,15 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 	}
 	command := exec.CommandContext(ctx, executable, "app-server", "--stdio", "--strict-config")
 	command.Dir, command.Stderr, command.WaitDelay = cwd, io.Discard, time.Second
+	var killed atomic.Bool
+	cancelProcess := command.Cancel
+	command.Cancel = func() error {
+		err := cancelProcess()
+		if err == nil {
+			killed.Store(true)
+		}
+		return err
+	}
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return err
@@ -903,13 +922,22 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 			return err
 		}
 	}
-	if scanner.Err() != nil || !complete {
+	// Only CQ's own budget may leave independent details unresolved. The core
+	// envelope is still decoded and validated, and missing details retain their
+	// normal per-plugin ownership issues.
+	detailBudget := !complete && phase == 5 && len(pendingDetails) > 0 &&
+		errors.Is(context.Cause(ctx), errNativeInventoryBudget) &&
+		(scanner.Err() == nil || errors.Is(scanner.Err(), os.ErrClosed))
+	if (scanner.Err() != nil || !complete) && !detailBudget {
 		return fmt.Errorf("incomplete native inventory protocol")
 	}
 	err = command.Wait()
 	waited = true
 	if err != nil {
-		return err
+		var exitError *exec.ExitError
+		if !detailBudget || !killed.Load() || (!errors.As(err, &exitError) && !errors.Is(err, ctx.Err())) {
+			return err
+		}
 	}
 	responses["pluginDetails"], err = json.Marshal(details)
 	if err != nil {
