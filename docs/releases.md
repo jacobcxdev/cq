@@ -116,8 +116,11 @@ The post-publication checks can fail after GitHub/Homebrew publication. Report
 which channels are already public and the exact failed stage. Do not describe a
 partially published attempt as either an unpublished draft or completed delivery.
 
-WinGet submission posts the authorised contributor agreement once after verifying
-the current owned PR, its version files and head. The existing Windows lifecycle
+WinGet submission waits for the initial contributor-label policy, then posts the
+authorised agreement once after verifying the current owned PR, its version files
+and head. If a label appeared after an existing agreement, CQ replays that exact
+agreement by editing its trailing whitespace; it preserves one comment and avoids
+repeating an edit while the bot is processing it. The existing Windows lifecycle
 gates do not establish equivalence with WinGet's Sandbox, ShellExecute or
 downloaded file handling. Inspect the community PR's actual failed check before
 attributing an installation failure to its URL or package.
