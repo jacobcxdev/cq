@@ -222,7 +222,9 @@ chunked; native unsubscribe results establish which candidates were subscribed.
 Other chats and spawned children retain their subscriptions. Gateway reconnects
 preserve logical ownership; replayed traffic cannot repeat preparation or clear
 a newer active turn. Completion or idle notices from a secondary connection
-request fresh native status without clearing the activity guard directly. Pending
+request fresh native status without clearing the activity guard directly. A new
+turn also refreshes cached activity when application is pending and no submitted
+turn or settings request remains outstanding. Pending
 application events report activity, outstanding request counts and rollout guards
 without recording message content. CQ checks the chat's effective
 plugin feature and standalone MCP tools, resources and templates after reload.

@@ -435,6 +435,11 @@ func (h *cloudHarness) prepareFrom(source string, request cloudMessage, raw []by
 		h.mu.Lock()
 		if thread := h.threads[id]; thread != nil {
 			thread.profileRefresh = true
+			// A new turn can arrive before the previous completion notice.
+			// Recheck pending policy against native state before dispatch.
+			if thread.owned && thread.active && thread.receiptState == "pending" && thread.pendingTurns == 0 && thread.pendingSettings == 0 {
+				thread.refresh = true
+			}
 		}
 		h.mu.Unlock()
 		if err := h.refresh(id); err != nil {

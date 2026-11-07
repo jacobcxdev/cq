@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/jacobcxdev/cq/internal/harness"
 )
 
 func TestCloudHarnessFreshReadRespectedNewerActivity(t *testing.T) {
@@ -176,6 +178,44 @@ func TestCloudHarnessSecondaryIdleInvalidatedInFlightActiveRead(t *testing.T) {
 			}
 			if reads != 2 || thread.active || thread.refresh {
 				t.Fatal("fresh native idle read did not release the active guard")
+			}
+		})
+	}
+}
+
+func TestCloudHarnessPendingTurnRefreshedCachedActivity(t *testing.T) {
+	for _, tc := range []struct {
+		name, receipt, native    string
+		pending, settings, reads int
+		active                   bool
+	}{
+		{name: "pending-native-idle", receipt: "pending", native: "idle", reads: 1},
+		{name: "pending-native-active", receipt: "pending", native: "active", reads: 1, active: true},
+		{name: "ordinary-turn", receipt: "applied", native: "idle", active: true},
+		{name: "outstanding-turn", receipt: "pending", native: "idle", pending: 1, active: true},
+		{name: "outstanding-settings", receipt: "pending", native: "idle", settings: 1, active: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			thread := &cloudHarnessThread{id: "chat", owned: true, model: "gpt-6.1-sol", active: true, activeTurnID: "old", receiptState: tc.receipt, pendingTurns: tc.pending, pendingSettings: tc.settings}
+			h := &cloudHarness{b: &cloudBridge{ctx: context.Background(), deps: cloudStdioDependencies{readHarnessPolicy: func() (harness.Policy, error) {
+				return harness.Policy{Version: 1}, nil
+			}}}, threads: map[string]*cloudHarnessThread{"chat": thread}, requests: make(map[string]cloudHarnessRequest), calls: make(map[string]chan cloudMessage), prefix: "cq-harness/activity/"}
+			reads := 0
+			h.b.local = &cloudLocal{input: cloudTestWriter{write: func(raw []byte) (int, error) {
+				reads++
+				if thread.pendingTurns != tc.pending {
+					t.Fatal("activity read happened after admitting the new turn")
+				}
+				request := cloudHarnessObject(raw)
+				h.observe(cloudHarnessRaw(map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]any{"id": "chat", "model": "gpt-6.1-sol", "status": map[string]string{"type": tc.native}}}}))
+				return len(raw), nil
+			}}}
+			request := cloudHarnessObject([]byte(`{"id":7,"method":"turn/start","params":{"threadId":"chat"}}`))
+			if _, err := h.prepare(request, cloudHarnessRaw(request)); err != nil {
+				t.Fatal(err)
+			}
+			if reads != tc.reads || thread.active != tc.active || thread.pendingTurns != tc.pending+1 {
+				t.Fatalf("dispatch did not refresh pending activity: reads=%d active=%v pending=%d", reads, thread.active, thread.pendingTurns)
 			}
 		})
 	}
