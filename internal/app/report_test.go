@@ -85,16 +85,20 @@ func TestAddProxyEligibilityKeepsDiscoveredAndEligibleAggregatesDistinct(t *test
 	}
 }
 
-func TestBuildReportPreservesOrder(t *testing.T) {
+func TestBuildReportAlphabetisesProvidersWithoutMutatingRequest(t *testing.T) {
 	now := time.Unix(1000, 0)
-	order := []provider.ID{provider.Gemini, provider.Claude, provider.Codex}
+	order := []provider.ID{provider.ZAI, provider.Grok, provider.Gemini, provider.Codex, provider.Claude}
+	original := append([]provider.ID(nil), order...)
 	fetched := map[provider.ID][]quota.Result{
 		provider.Claude: {{Status: quota.StatusOK}},
 		provider.Codex:  {{Status: quota.StatusOK}},
 		provider.Gemini: {{Status: quota.StatusOK}},
 	}
 	r := buildReport(now, order, fetched, nil)
-	for i, id := range order {
+	for i, id := range []provider.ID{provider.Claude, provider.Codex, provider.Gemini, provider.Grok, provider.ZAI} {
+		if order[i] != original[i] {
+			t.Fatalf("request order mutated: %v", order)
+		}
 		if r.Providers[i].ID != id {
 			t.Errorf("provider[%d] = %q, want %q", i, r.Providers[i].ID, id)
 		}

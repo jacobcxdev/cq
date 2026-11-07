@@ -703,6 +703,7 @@ func TestProviderIcon(t *testing.T) {
 		{provider.Claude, "\u273B"},
 		{provider.Codex, "\uF120"},
 		{provider.Gemini, "\uF51B"},
+		{provider.Grok, "𝕏"},
 		{provider.ID("unknown"), "\u25CF"},
 		{provider.ID(""), "\u25CF"},
 	}

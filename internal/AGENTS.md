@@ -32,5 +32,5 @@ Additional domains are described in [the architecture guide](../docs/architectur
 | `userdirs/` | Platform config, state, cache, runtime and log roots |
 | `tools/` | Release/package/installed-client verification tools |
 
-Provider IDs include `claude`, `codex`, `gemini` and `zai`. Keep account ownership,
+Provider IDs include `claude`, `codex`, `gemini`, `zai` and `grok`. Keep account ownership,
 routing eligibility, native discovery identity and runtime activation separate.
