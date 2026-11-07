@@ -791,10 +791,14 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 		return err
 	}
 	waited := false
+	var cached *nativeCachedPluginRecovery
 	defer func() {
 		if !waited {
 			_ = command.Process.Kill()
 			_ = command.Wait()
+		}
+		if cached != nil {
+			cached.close()
 		}
 	}()
 	cancellationDone := make(chan struct{})
@@ -824,7 +828,19 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 	details := make(map[string]json.RawMessage)
 	nextDetail := 3
 	pendingDetails := make(map[string]nativeCurationRequest)
-	// Remote details are independent metadata reads. Keep a fixed window so
+	detailRequests := make(map[string]bool)
+	appendDetails := func() {
+		for _, request := range nativePluginDetailRequests(responses["plugins"]) {
+			if len(requests) == 127 {
+				break
+			}
+			if !detailRequests[request.pluginID] {
+				detailRequests[request.pluginID] = true
+				requests = append(requests, request)
+			}
+		}
+	}
+	// Plugin metadata reads are independent. Keep a fixed window so
 	// installed catalogues fit the existing deadline without an unbounded fanout.
 	sendDetails := func() error {
 		for nextDetail < len(requests) && len(pendingDetails) < 8 {
@@ -868,7 +884,14 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 			failed := len(message.Error) > 0 && !bytes.Equal(bytes.TrimSpace(message.Error), []byte("null"))
 			result := bytes.TrimSpace(message.Result)
 			if !failed && len(result) > 0 && result[0] == '{' {
-				details[request.pluginID] = append(json.RawMessage(nil), message.Result...)
+				if request.name == "cachedPlugins" {
+					if merged, ok := cached.merge(responses["plugins"], message.Result); ok {
+						responses["plugins"] = merged
+						appendDetails()
+					}
+				} else {
+					details[request.pluginID] = append(json.RawMessage(nil), message.Result...)
+				}
 			}
 			if err := sendDetails(); err != nil {
 				return err
@@ -900,12 +923,23 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 		} else {
 			request := requests[phase-2]
 			responses[request.name] = append(json.RawMessage(nil), message.Result...)
-			if request.name == "plugins" {
-				requests = append(requests, nativePluginDetailRequests(message.Result)...)
-			}
 		}
 		phase++
 		if phase == 5 {
+			appendDetails()
+			if len(requests) < 127 {
+				// Skills can outlive a marketplace registration. Recover exact
+				// cached owners through native metadata rather than aliases.
+				cached, _ = discoverNativeCachedPlugins(responses["plugins"], responses["skills"], responses["config"], cwd)
+				if cached != nil {
+					for _, request := range cached.requests {
+						if len(requests) == 127 {
+							break
+						}
+						requests = append(requests, request)
+					}
+				}
+			}
 			if err := sendDetails(); err != nil {
 				return err
 			}

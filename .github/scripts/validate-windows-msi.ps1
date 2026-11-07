@@ -12,11 +12,30 @@ param(
     [string]$CurrentVersion,
 
     [ValidateRange(1024, 65535)]
-    [int]$Port = 19280
+    [int]$Port = 19280,
+
+    [switch]$StandardUser,
+
+    [switch]$StandardUserChild,
+
+    [string]$EvidenceRoot
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+
+if ($StandardUserChild) {
+    # The launcher supplies explicit OS settings only, never CI credentials. Restore
+    # this new user's profile variables from Windows after loading its profile.
+    $env:USERPROFILE = [Environment]::GetFolderPath("UserProfile")
+    $env:APPDATA = [Environment]::GetFolderPath("ApplicationData")
+    $env:LOCALAPPDATA = [Environment]::GetFolderPath("LocalApplicationData")
+    $env:USERNAME = [Environment]::UserName
+    $env:USERDOMAIN = [Environment]::UserDomainName
+    $env:TEMP = Join-Path $env:LOCALAPPDATA "Temp"
+    $env:TMP = $env:TEMP
+    New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
+}
 
 $taskPath = "\cq\"
 $proxyTask = "\cq\Proxy"
@@ -48,6 +67,11 @@ function Invoke-MSI {
     $verb = if ($Action -eq "install") { "/i" } else { "/x" }
     $arguments = @($verb, ('"' + $Path + '"'), "/qn", "/norestart", "/l*v", ('"' + $Log + '"'))
     $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $arguments -Wait -PassThru
+    if ($EvidenceRoot) {
+        New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+        @{ action = $Action; exit_code = $process.ExitCode; log = [IO.Path]::GetFileName($Log) } |
+            ConvertTo-Json -Compress | Add-Content -LiteralPath (Join-Path $EvidenceRoot "msi-results.jsonl")
+    }
     if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
         if (Test-Path -LiteralPath $Log -PathType Leaf) {
             Get-Content -LiteralPath $Log -Tail 160 | Write-Error
@@ -178,6 +202,148 @@ function Remove-CQTasks {
     }
     catch {
     }
+}
+
+function Invoke-StandardUserMSIValidation {
+    if ($env:GITHUB_ACTIONS -ne "true") {
+        throw "standard-user qualification is restricted to a disposable GitHub Actions VM"
+    }
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw "standard-user qualification launcher requires an administrator on a disposable CI VM"
+    }
+    if (-not $EvidenceRoot) {
+        throw "standard-user qualification requires an evidence directory"
+    }
+    if (@(Get-ScheduledTask -TaskPath "\cq\" -ErrorAction SilentlyContinue).Count -ne 0) {
+        throw "refusing standard-user qualification while CQ tasks already exist"
+    }
+    New-Item -ItemType Directory -Path $EvidenceRoot -Force | Out-Null
+    $qualificationRoot = Join-Path $env:PUBLIC ("cq-msi-standard-" + [Guid]::NewGuid().ToString("N"))
+    $qualificationName = "cqmsi_" + [Guid]::NewGuid().ToString("N").Substring(0, 12)
+    $passwordBytes = [byte[]]::new(24)
+    [Security.Cryptography.RandomNumberGenerator]::Fill($passwordBytes)
+    $password = ConvertTo-SecureString ("Aa9!" + [Convert]::ToBase64String($passwordBytes)) -AsPlainText -Force
+    [Array]::Clear($passwordBytes, 0, $passwordBytes.Length)
+    $qualificationUser = $null
+    $process = $null
+    $outputTask = $null
+    $errorTask = $null
+    try {
+        $qualificationUser = New-LocalUser -Name $qualificationName -Password $password -PasswordNeverExpires
+        $users = Get-LocalGroup -SID "S-1-5-32-545"
+        Add-LocalGroupMember -Group $users -Member $qualificationUser
+        $administrators = Get-LocalGroup -SID "S-1-5-32-544"
+        if (@(Get-LocalGroupMember -Group $administrators | Where-Object { $_.SID -eq $qualificationUser.SID }).Count -ne 0) {
+            throw "qualification account unexpectedly belongs to Administrators"
+        }
+        New-Item -ItemType Directory -Path $qualificationRoot -Force | Out-Null
+        $security = [Security.AccessControl.DirectorySecurity]::new()
+        $security.SetSecurityDescriptorSddlForm("O:$($identity.User.Value)G:$($identity.User.Value)D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;$($identity.User.Value))(A;OICI;FA;;;$($qualificationUser.SID.Value))")
+        Set-Acl -LiteralPath $qualificationRoot -AclObject $security
+        $childScript = Join-Path $qualificationRoot "validate-windows-msi.ps1"
+        $childMSI = Join-Path $qualificationRoot "current.msi"
+        $childEvidence = Join-Path $qualificationRoot "evidence"
+        Copy-Item -LiteralPath $PSCommandPath -Destination $childScript
+        Copy-Item -LiteralPath $CurrentMSI -Destination $childMSI
+        $start = [Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = (Get-Process -Id $PID).Path
+        $start.UseShellExecute = $false
+        $start.LoadUserProfile = $true
+        $start.UserName = $qualificationName
+        $start.Domain = $env:COMPUTERNAME
+        $start.Password = $password
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $start.WorkingDirectory = $qualificationRoot
+        $start.Environment.Clear()
+        foreach ($name in @("SystemRoot", "WINDIR", "COMSPEC", "PATH", "PATHEXT", "COMPUTERNAME", "ProgramData", "ProgramFiles", "ProgramFiles(x86)", "CommonProgramFiles", "CommonProgramFiles(x86)")) {
+            $value = [Environment]::GetEnvironmentVariable($name, "Machine")
+            if (-not $value) { $value = [Environment]::GetEnvironmentVariable($name, "Process") }
+            if ($value) { $start.Environment[$name] = $value }
+        }
+        foreach ($argument in @("-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $childScript,
+            "-PreviousMSI", $childMSI, "-CurrentMSI", $childMSI, "-PreviousVersion", $CurrentVersion,
+            "-CurrentVersion", $CurrentVersion, "-StandardUserChild", "-EvidenceRoot", $childEvidence)) {
+            $start.ArgumentList.Add($argument)
+        }
+        $process = [Diagnostics.Process]::Start($start)
+        $outputTask = $process.StandardOutput.ReadToEndAsync()
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(600000)) {
+            $process.Kill($true)
+            $process.WaitForExit()
+            throw "standard-user MSI qualification exceeded ten minutes"
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "standard-user MSI qualification failed with exit code $($process.ExitCode); inspect retained evidence"
+        }
+    }
+    finally {
+        if ($process -and -not $process.HasExited) {
+            $process.Kill($true)
+            $process.WaitForExit()
+        }
+        if ($outputTask) { [IO.File]::WriteAllText((Join-Path $EvidenceRoot "stdout.log"), $outputTask.GetAwaiter().GetResult()) }
+        if ($errorTask) { [IO.File]::WriteAllText((Join-Path $EvidenceRoot "stderr.log"), $errorTask.GetAwaiter().GetResult()) }
+        if (Test-Path -LiteralPath (Join-Path $qualificationRoot "evidence")) {
+            Copy-Item -Path (Join-Path $qualificationRoot "evidence\*") -Destination $EvidenceRoot -Force
+        }
+        if ($qualificationUser) {
+            foreach ($name in @("Proxy", "Refresh")) {
+                $task = Get-ScheduledTask -TaskPath "\cq\" -TaskName $name -ErrorAction SilentlyContinue
+                if ($task -and $task.Principal.UserId -in @($qualificationUser.SID.Value, "$env:COMPUTERNAME\$qualificationName")) {
+                    Stop-ScheduledTask -InputObject $task -ErrorAction SilentlyContinue
+                    Unregister-ScheduledTask -InputObject $task -Confirm:$false
+                }
+            }
+            if (@(Get-ScheduledTask -TaskPath "\cq\" -ErrorAction SilentlyContinue).Count -eq 0) {
+                Remove-CQTasks
+            }
+            Get-CimInstance Win32_Process -Filter "Name = 'cq.exe'" | ForEach-Object {
+                if ((Invoke-CimMethod -InputObject $_ -MethodName GetOwnerSid).Sid -eq $qualificationUser.SID.Value) {
+                    Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+                }
+            }
+            Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $qualificationUser.SID.Value -and -not $_.Loaded } | Remove-CimInstance
+            Remove-LocalUser -SID $qualificationUser.SID
+        }
+        $password.Dispose()
+        if ($process) { $process.Dispose() }
+        if (Test-Path -LiteralPath $qualificationRoot) { Remove-Item -LiteralPath $qualificationRoot -Recurse -Force }
+    }
+}
+
+if ($StandardUser) {
+    Invoke-StandardUserMSIValidation
+    return
+}
+
+if ($StandardUserChild) {
+    New-Item -ItemType Directory -Path $EvidenceRoot, $temporaryRoot -Force | Out-Null
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $administrator = [Security.Principal.WindowsPrincipal]::new($identity).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    @{ sid = $identity.User.Value; administrator = $administrator; interactive = [Environment]::UserInteractive; version = $CurrentVersion } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $EvidenceRoot "identity.json")
+    if ($administrator) { throw "qualification child is elevated; refusing installer test" }
+    if (-not [Environment]::UserInteractive) { throw "qualification child has no interactive window station" }
+    try {
+        Invoke-MSI -Action install -Path $CurrentMSI -Log (Join-Path $temporaryRoot "install-current.log")
+        $status = Wait-ServiceStatus -Version $CurrentVersion
+        @{ owner = $status.owner; proxy_running = $status.proxy.running; proxy_healthy = $status.proxy.healthy; refresh_healthy = $status.refresh.healthy } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $EvidenceRoot "service.json")
+    }
+    finally {
+        if (Test-Path -LiteralPath $installedCQ) {
+            try { Invoke-MSI -Action uninstall -Path $CurrentMSI -Log (Join-Path $temporaryRoot "uninstall-current.log") }
+            catch { Write-Warning "standard-user uninstall failed; outer disposable-user cleanup will run" }
+        }
+        Get-ChildItem -LiteralPath $temporaryRoot -Filter "*.log" | Copy-Item -Destination $EvidenceRoot -Force
+        Remove-Item -LiteralPath $temporaryRoot -Recurse -Force
+    }
+    return
 }
 
 try {
