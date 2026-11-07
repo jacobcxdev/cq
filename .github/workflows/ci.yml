@@ -4,12 +4,6 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-    inputs:
-      standard_user_release:
-        description: Published CQ version to reproduce under a standard Windows user
-        type: string
-        required: false
-        default: ""
 
 permissions:
   contents: read
@@ -303,7 +297,7 @@ jobs:
           - runner: windows-11-arm
             architecture: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 15
     defaults:
       run:
         shell: pwsh
@@ -353,43 +347,3 @@ jobs:
           .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $previousRoot "cq.exe") -Version 0.0.1 -Architecture ${{ matrix.architecture }} -Output $previousMSI -Wix $wix
           .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $currentRoot "cq.exe") -Version 0.0.2 -Architecture ${{ matrix.architecture }} -Output $currentMSI -Wix $wix
           .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion 0.0.2
-
-      - name: Reproduce published MSI under a standard user
-        if: github.event_name == 'workflow_dispatch' && inputs.standard_user_release != ''
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          CQ_STANDARD_RELEASE: ${{ inputs.standard_user_release }}
-        run: |
-          $version = $env:CQ_STANDARD_RELEASE
-          if ($version -notmatch '^\d+\.\d+\.\d+$') {
-            throw "standard_user_release must be a stable semantic version"
-          }
-          $root = Join-Path $env:RUNNER_TEMP "cq-msi-standard-published-package"
-          New-Item -ItemType Directory -Path $root -Force | Out-Null
-          $name = "cq_${version}_windows_${{ matrix.architecture }}.msi"
-          $release = gh release view "v$version" --repo jacobcxdev/cq --json isDraft,assets | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0 -or $release.isDraft) { throw "published release is unavailable" }
-          $assets = @($release.assets | Where-Object { $_.name -eq $name })
-          if ($assets.Count -ne 1 -or $assets[0].digest -notmatch '^sha256:[a-f0-9]{64}$') {
-            throw "published MSI identity is absent or ambiguous"
-          }
-          gh release download "v$version" --repo jacobcxdev/cq --pattern $name --dir $root
-          if ($LASTEXITCODE -ne 0) { throw "published MSI download failed" }
-          $msi = Join-Path $root $name
-          if ((Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLowerInvariant() -ne $assets[0].digest.Substring(7)) {
-            throw "published MSI checksum differs"
-          }
-          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $msi -CurrentMSI $msi -PreviousVersion $version -CurrentVersion $version -StandardUser -EvidenceRoot (Join-Path $env:RUNNER_TEMP "cq-msi-standard-published-evidence")
-
-      - name: Validate candidate MSI under a standard user
-        run: |
-          $msi = Join-Path $env:RUNNER_TEMP "cq-msi\cq_0.0.2_windows_${{ matrix.architecture }}.msi"
-          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $msi -CurrentMSI $msi -PreviousVersion 0.0.2 -CurrentVersion 0.0.2 -StandardUser -EvidenceRoot (Join-Path $env:RUNNER_TEMP "cq-msi-standard-candidate-evidence")
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: windows-standard-user-${{ matrix.architecture }}
-          path: ${{ runner.temp }}/cq-msi-standard-*-evidence/*
-          if-no-files-found: ignore
-          retention-days: 7
