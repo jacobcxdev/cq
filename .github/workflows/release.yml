@@ -30,6 +30,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
@@ -114,8 +116,8 @@ jobs:
 
   draft-build:
     needs: [validate-codex, native-network]
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
+    runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
         with:
@@ -144,6 +146,30 @@ jobs:
       - name: Bind reviewed native companion to the CQ Cask
         run: echo "CQ_NATIVE_NETWORK_PIN=$(jq -c . .github/native-network-release.json)" >> "$GITHUB_ENV"
 
+      - name: Bind published stable changelog baseline
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          previous_tag=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1000 --json tagName |
+            jq -er 'map(.tagName | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last')
+          git rev-parse --verify "refs/tags/$previous_tag^{commit}" >/dev/null
+          git merge-base --is-ancestor "$previous_tag" HEAD
+          echo "GORELEASER_PREVIOUS_TAG=$previous_tag" >> "$GITHUB_ENV"
+
+      - name: Require the staged parent draft before uploading
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_api=$(gh release view "$GITHUB_REF_NAME" --json apiUrl --jq .apiUrl)
+          [[ "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]]
+          release=$(gh api "${release_api#https://api.github.com/}")
+          test "$(jq -r .tag_name <<<"$release")" = "$GITHUB_REF_NAME"
+          test "$(jq -r .draft <<<"$release")" = true
+          test "$(jq -r .target_commitish <<<"$release")" = "$GITHUB_SHA"
+          test "$(jq -r .name <<<"$release")" = "$GITHUB_REF_NAME"
+
       - name: Build draft release
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -154,12 +180,32 @@ jobs:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-network-cask
+          path: dist/native
+
+      - name: Assemble and verify shared-version macOS bundles
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
+          native_zip="dist/native/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' .github/native-network-release.json)"
+          test "$(shasum -a 256 "$native_zip" | awk '{print $1}')" = "$(jq -r .sha256 .github/native-network-release.json)"
+          /usr/bin/ditto -x -k "$native_zip" "$RUNNER_TEMP/native-unpacked"
+          .github/scripts/package-macos-bundles.sh "${GITHUB_REF_NAME#v}" dist .github/native-network-release.json "$RUNNER_TEMP/native-unpacked/CQNetwork.app"
+          gh release upload "$GITHUB_REF_NAME" dist/cq_*_darwin_*_bundle.tar.gz dist/macos-bundles.json dist/checksums.txt --clobber
+          cp "$native_zip" dist/
+
       - uses: actions/upload-artifact@v7
         with:
           name: release-homebrew-inputs
           path: |
             dist/cq_*_darwin_*.tar.gz
-            dist/homebrew/Casks/cq.rb
+            dist/CQNetwork_*_universal.zip
+            dist/bundled-native-network.json
+            dist/homebrew/Casks/*.rb
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -170,6 +216,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: ./.github/actions/setup-go
         with:
@@ -180,16 +228,17 @@ jobs:
           name: release-homebrew-inputs
           path: dist
 
-      - uses: actions/download-artifact@v8
-        with:
-          name: native-network-cask
-          path: dist/homebrew/Casks
-
       - name: Update Homebrew
         run: brew update
 
       - name: Install verified native companion dependency for packaging tests
-        run: .github/scripts/install-native-network-validation.sh dist/homebrew/Casks/cq-network.rb dist/homebrew/Casks/CQNetwork_*_universal.zip
+        run: |
+          case "$(uname -m)" in
+            arm64) architecture=arm64 ;;
+            x86_64) architecture=amd64 ;;
+            *) exit 1 ;;
+          esac
+          .github/scripts/install-native-network-validation.sh dist/homebrew/Casks/cq-network.rb "dist/cq_${GITHUB_REF_NAME#v}_darwin_${architecture}_bundle.tar.gz"
 
       - name: Format draft Homebrew Cask
         run: |
@@ -198,8 +247,8 @@ jobs:
       - name: Validate Homebrew Cask quarantine handling
         run: |
           case "$(uname -m)" in
-            arm64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_arm64.tar.gz' -print -quit)" ;;
-            x86_64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_amd64.tar.gz' -print -quit)" ;;
+            arm64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_arm64_bundle.tar.gz' -print -quit)" ;;
+            x86_64) archive="$(find "$PWD/dist" -maxdepth 1 -name 'cq_*_darwin_amd64_bundle.tar.gz' -print -quit)" ;;
             *) echo "unsupported macOS architecture" >&2; exit 1 ;;
           esac
           test -n "$archive"
@@ -228,20 +277,22 @@ jobs:
           esac
           previous_root="$RUNNER_TEMP/cq-homebrew-previous"
           mkdir -p "$previous_root"
-          gh release download "$previous_tag" \
-            --pattern "cq_${previous_version}_darwin_${architecture}.tar.gz" \
-            --dir "$previous_root"
           gh api repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb \
             --jq .content | base64 --decode >"$previous_root/cq.rb"
+          previous_archive="cq_${previous_version}_darwin_${architecture}.tar.gz"
+          if grep -Eq '^ *url ".*darwin_.*_bundle.tar.gz"' "$previous_root/cq.rb"; then
+            previous_archive="cq_${previous_version}_darwin_${architecture}_bundle.tar.gz"
+          fi
+          gh release download "$previous_tag" --pattern "$previous_archive" --dir "$previous_root"
           .github/scripts/validate-homebrew-install.sh \
             "$previous_root/cq.rb" \
-            "$previous_root/cq_${previous_version}_darwin_${architecture}.tar.gz" \
+            "$previous_root/$previous_archive" \
             "$previous_version" \
             "$PWD/dist/homebrew/Casks/cq.rb" \
-            "$PWD/dist/cq_${current_version}_darwin_${architecture}.tar.gz" \
+            "$PWD/dist/cq_${current_version}_darwin_${architecture}_bundle.tar.gz" \
             "$current_version" \
             "$PWD/dist/homebrew/Casks/cq-network.rb" \
-            "$PWD/dist/homebrew/Casks/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' .github/native-network-release.json)"
+            "$PWD/dist/cq_${current_version}_darwin_${architecture}_bundle.tar.gz"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -362,6 +413,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "WinGet manifest validation failed"
           }
+          $publicationState = gh release view $env:RELEASE_TAG --json isDraft | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $publicationState.isDraft -ne $true) {
+            throw "refusing to replace assets on a published release"
+          }
           gh release upload $env:RELEASE_TAG @msiPaths $checksums --clobber
           if ($LASTEXITCODE -ne 0) {
             throw "failed to publish Windows MSI assets"
@@ -465,6 +520,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: ./.github/actions/setup-go
         with:
@@ -475,17 +532,30 @@ jobs:
           name: homebrew-cask
           path: ${{ runner.temp }}/homebrew-cask
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-homebrew-inputs
+          path: dist
+
       - name: Update Homebrew
         run: brew update
 
-      - name: Require the reviewed native asset to be public before publishing packages
+      - name: Verify the complete parent draft before publishing packages
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          native_info=$(go run ./internal/tools/nativepackage info .github/native-network-release.json)
-          native_tag=$(jq -er .tag <<<"$native_info")
-          gh api "repos/jacobcxdev/cq/releases/tags/$native_tag" >"$RUNNER_TEMP/native-release.json"
-          go run ./internal/tools/nativepackage published .github/native-network-release.json "$RUNNER_TEMP/native-release.json"
+          set -euo pipefail
+          release_api=$(gh release view "$GITHUB_REF_NAME" --json apiUrl --jq .apiUrl)
+          [[ "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]]
+          gh api "${release_api#https://api.github.com/}" >"$RUNNER_TEMP/native-release.json"
+          native_zip="dist/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' .github/native-network-release.json)"
+          go run ./internal/tools/nativepackage verify .github/native-network-release.json "$native_zip" "$RUNNER_TEMP/native-release.json" --allow-draft
+          case "$(uname -m)" in
+            arm64) architecture=arm64 ;;
+            x86_64) architecture=amd64 ;;
+            *) exit 1 ;;
+          esac
+          go run ./internal/tools/nativepackage verify-install dist/bundled-native-network.json "dist/cq_${GITHUB_REF_NAME#v}_darwin_${architecture}_bundle.tar.gz" "$RUNNER_TEMP/native-release.json" --allow-draft
 
       - name: Publish complete release and Homebrew Cask
         env:
@@ -498,7 +568,7 @@ jobs:
           test -f "$cask"
           release="$(gh release view "$RELEASE_TAG" --json tagName,isDraft,assets)"
           test "$(jq -r '.tagName' <<<"$release")" = "$RELEASE_TAG"
-          test "$(jq '.assets | length' <<<"$release")" -ge 9
+          test "$(jq '.assets | length' <<<"$release")" -ge 14
           draft="$(jq -r '.isDraft' <<<"$release")"
           case "$draft" in
             true) gh release edit "$RELEASE_TAG" --draft=false ;;
@@ -506,8 +576,8 @@ jobs:
             *) echo "release draft state is invalid: $draft" >&2; exit 1 ;;
           esac
 
-          # Publish the verified dependency first. Native releases are pinned
-          # independently, so Go-only releases leave its bytes unchanged.
+          # Both receipts select the same shared-version bundle. Publish the
+          # verified dependency first to preserve Homebrew upgrade ownership.
           for token in cq-network cq; do
             cask="$RUNNER_TEMP/homebrew-cask/$token.rb"
             test -f "$cask"
@@ -550,8 +620,11 @@ jobs:
           test "$(jq -r '.tag_name' <<<"$release")" = "$RELEASE_TAG"
           test "$(jq -r '.draft' <<<"$release")" = "false"
           grep -q '^## Changelog$' <<<"$(jq -r '.body' <<<"$release")"
-          test "$(jq '.assets | length' <<<"$release")" -ge 9
+          test "$(jq '.assets | length' <<<"$release")" -ge 14
           version="${RELEASE_TAG#v}"
+          test "$(jq -r .target_commitish <<<"$release")" = "$GITHUB_SHA"
+          printf '%s\n' "$release" >"$RUNNER_TEMP/published-release.json"
+          go run ./internal/tools/nativepackage published dist/bundled-native-network.json "$RUNNER_TEMP/published-release.json"
           for arch in amd64 arm64; do
             verification_dir="$RUNNER_TEMP/cq-darwin-${arch}"
             mkdir -p "$verification_dir"
@@ -559,6 +632,10 @@ jobs:
             gh release download "$RELEASE_TAG" --pattern "$archive" --dir "$verification_dir"
             tar -xzf "$verification_dir/$archive" -C "$verification_dir"
             go version -m "${verification_dir}/cq" | grep -F "github.com/jacobcxdev/cq/cmd/cq"
+            bundle="cq_${version}_darwin_${arch}_bundle.tar.gz"
+            gh release download "$RELEASE_TAG" --pattern "$bundle" --dir "$verification_dir"
+            expected=$(jq -er --arg arch "$arch" '.bundles[$arch].sha256' dist/bundled-native-network.json)
+            test "$(shasum -a 256 "$verification_dir/$bundle" | awk '{print $1}')" = "$expected"
           done
 
   windows-deployed:

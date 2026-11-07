@@ -20,6 +20,8 @@ jobs:
       contents: write # GitHub requires write access to inspect draft releases.
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
@@ -128,6 +130,8 @@ jobs:
 
       - name: Verify companion upgrade and rollback
         run: |
+          /bin/bash .github/scripts/test-macos-bundle.sh
+          /bin/bash .github/scripts/test-package-macos-bundles.sh
           /bin/bash .github/scripts/test-homebrew-install-companion.sh
           go test -race -count=1 ./cmd/cq -run '^TestHomebrewCompanionReconciliation$'
 
@@ -182,6 +186,8 @@ jobs:
       CURRENT_VERSION: ${{ needs.packages.outputs.current_version }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - uses: ./.github/actions/setup-go
         with:
@@ -218,14 +224,16 @@ jobs:
           esac
           previous_root="$RUNNER_TEMP/cq-homebrew-previous"
           mkdir -p "$previous_root"
-          gh release download "$PREVIOUS_TAG" \
-            --pattern "cq_${PREVIOUS_VERSION}_darwin_${architecture}.tar.gz" \
-            --dir "$previous_root"
           gh api repos/jacobcxdev/homebrew-tap/contents/Casks/cq.rb \
             --jq .content | base64 --decode >"$previous_root/cq.rb"
+          previous_archive="cq_${PREVIOUS_VERSION}_darwin_${architecture}.tar.gz"
+          if grep -Eq '^ *url ".*darwin_.*_bundle.tar.gz"' "$previous_root/cq.rb"; then
+            previous_archive="cq_${PREVIOUS_VERSION}_darwin_${architecture}_bundle.tar.gz"
+          fi
+          gh release download "$PREVIOUS_TAG" --pattern "$previous_archive" --dir "$previous_root"
           .github/scripts/validate-homebrew-install.sh \
             "$previous_root/cq.rb" \
-            "$previous_root/cq_${PREVIOUS_VERSION}_darwin_${architecture}.tar.gz" \
+            "$previous_root/$previous_archive" \
             "$PREVIOUS_VERSION" \
             "$PWD/dist/homebrew/Casks/cq.rb" \
             "$PWD/dist/cq_${CURRENT_VERSION}_darwin_${architecture}.tar.gz" \

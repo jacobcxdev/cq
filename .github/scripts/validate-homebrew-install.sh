@@ -174,10 +174,10 @@ RUBY
   cmp "$local_root/expected-current.rb" "$current_native_cask"
   selected_cask="$(brew --repository jacobcxdev/tap)/Casks/cq-network.rb"
   cmp "$current_native_cask" "$selected_cask"
-  candidate_digest=$(jq -er .sha256 "$local_root/current.json")
+  candidate_digest=$(jq -er .install_sha256 "$local_root/current-info.json")
   [[ "$(shasum -a 256 "$current_native_archive" | awk '{print $1}')" == "$candidate_digest" ]] || { echo "candidate native archive differs from reviewed checksum" >&2; exit 1; }
   # A staged native release may still be private. Seed the normal reviewed URL's
-  # download cache with its already-verified ZIP; Homebrew still checks SHA-256.
+  # download cache with its verified install archive; Homebrew still checks SHA-256.
   candidate_cache=$(brew --cache --cask jacobcxdev/tap/cq-network)
   mkdir -p "$(dirname "$candidate_cache")"
   cache_stage=$(mktemp "${candidate_cache}.XXXXXX")
@@ -192,9 +192,18 @@ RUBY
   release_api=$(gh release view "$tag" --repo jacobcxdev/cq --json apiUrl --jq .apiUrl)
   [[ "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]] || { echo "predecessor release API differs from expected repository" >&2; exit 1; }
   gh api "${release_api#https://api.github.com/}" >"$local_root/release.json"
-  gh api "repos/jacobcxdev/cq/releases/assets/$asset_id" --header 'Accept: application/octet-stream' >"$local_root/previous.zip"
-  "$nativepackage_executable" verify "$local_root/previous.json" "$local_root/previous.zip" "$local_root/release.json"
-  /usr/bin/ditto -x -k "$local_root/previous.zip" "$local_root/unpacked"
+  if jq -e 'has("bundles")' "$local_root/previous.json" >/dev/null; then
+    install_url=$(jq -er .install_url "$local_root/previous-info.json")
+    asset_id=$(jq -er --arg url "$install_url" '[.assets[] | select(.browser_download_url == $url)] | if length == 1 and (.[0].id | type == "number" and . > 0 and floor == .) then .[0].id else error("predecessor install asset is absent or ambiguous") end' "$local_root/release.json")
+    gh api "repos/jacobcxdev/cq/releases/assets/$asset_id" --header 'Accept: application/octet-stream' >"$local_root/previous.tar.gz"
+    "$nativepackage_executable" verify-install "$local_root/previous.json" "$local_root/previous.tar.gz" "$local_root/release.json"
+    mkdir -p "$local_root/unpacked"
+    /usr/bin/tar -xzf "$local_root/previous.tar.gz" -C "$local_root/unpacked"
+  else
+    gh api "repos/jacobcxdev/cq/releases/assets/$asset_id" --header 'Accept: application/octet-stream' >"$local_root/previous.zip"
+    "$nativepackage_executable" verify "$local_root/previous.json" "$local_root/previous.zip" "$local_root/release.json"
+    /usr/bin/ditto -x -k "$local_root/previous.zip" "$local_root/unpacked"
+  fi
   app="$local_root/unpacked/CQNetwork.app"
   provider="$app/Contents/Library/SystemExtensions/dev.jacobcx.cq.network.proxy.systemextension"
   requirement='anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "K2648T24P4"'

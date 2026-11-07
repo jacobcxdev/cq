@@ -18,6 +18,7 @@ asset_id=$(jq -er .asset_id "$temporary/info.json")
 version=$(jq -er .version "$temporary/info.json")
 source_commit=$(jq -er .source_commit "$temporary/info.json")
 minimum_macos=$(jq -er .minimum_macos "$temporary/info.json")
+schema_version=$(jq -er .schema_version "$temporary/info.json")
 # Go-only releases may reuse a native pin, but changed native sources may not.
 git fetch --no-tags origin "$source_commit"
 [[ "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" == "$source_commit" ]]
@@ -29,7 +30,25 @@ if [[ "$(git rev-parse --verify "$source_commit:native/macos-network")" != "$(gi
   echo "native sources differ from the pinned companion; sign and pin a new native release" >&2
   exit 1
 fi
-release_api=$(gh release view "$tag" --repo jacobcxdev/cq --json apiUrl --jq .apiUrl)
+if [[ "${schema_version:-1}" == 2 ]]; then
+  "$temporary/nativepackage" verify-source "$manifest" "$(git rev-parse --verify 'HEAD^{commit}')"
+fi
+release_api=$(gh release view "$tag" --repo jacobcxdev/cq --json apiUrl --jq .apiUrl) || {
+  # Only a confirmed absent parent release may use its fixed staging draft.
+  if [[ "$schema_version" != 2 || "${3:-}" != --allow-draft ]]; then
+    exit 1
+  fi
+  if gh api --include "repos/jacobcxdev/cq/releases/tags/$tag" >"$temporary/parent-response"; then
+    echo "parent release exists but could not be resolved" >&2
+    exit 1
+  fi
+  if ! /usr/bin/grep -Eq '^HTTP/[0-9.]+ 404([[:space:]]|$)' "$temporary/parent-response"; then
+    echo "parent release absence could not be verified" >&2
+    exit 1
+  fi
+  staging_tag=$(jq -er .staging_tag "$temporary/info.json")
+  release_api=$(gh release view "$staging_tag" --repo jacobcxdev/cq --json apiUrl --jq .apiUrl) || exit 1
+}
 if [[ ! "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]]; then
   echo "native release resolved outside its expected repository API" >&2
   exit 1

@@ -33,6 +33,8 @@ export PATH="$root/bin:$PATH" GITHUB_REPOSITORY=release-test/repository PUBLISHE
 
 expect() {
   local expected=$1 ref=$2
+  mkdir -p .github
+  printf '{"schema_version":%s,"version":"%s"}\n' "${NATIVE_PIN_SCHEMA:-2}" "${NATIVE_PIN_VERSION:-${ref#refs/tags/v}}" >.github/native-network-release.json
   if GITHUB_REF="$ref" bash "$validator" >"$root/result" 2>&1; then
     actual=pass
   else
@@ -47,6 +49,8 @@ expect() {
 
 # The reviewed main commit, including an annotated release tag, is accepted.
 expect pass refs/tags/v1.0.1
+NATIVE_PIN_SCHEMA=1 expect fail refs/tags/v1.0.1
+NATIVE_PIN_VERSION=0.41.9 expect fail refs/tags/v1.0.1
 expect fail refs/heads/main
 expect fail refs/tags/v1.0.1-rc
 expect fail refs/tags/v9.9.9
