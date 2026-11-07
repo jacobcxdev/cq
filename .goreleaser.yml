@@ -1,5 +1,10 @@
 version: 2
 
+git:
+  ignore_tags:
+    - "cq-native-stage-*"
+    - "cq-network-*"
+
 builds:
   - id: cq
     main: ./cmd/cq
@@ -37,6 +42,7 @@ checksum:
 
 release:
   draft: true
+  target_commitish: "{{ .FullCommit }}"
   use_existing_draft: true
   replace_existing_artifacts: true
   extra_files:
@@ -192,11 +198,31 @@ homebrew_casks:
             JSON
             version = pin.fetch("version")
             sha256 = pin.fetch("sha256")
-            url = "https://github.com/jacobcxdev/cq/releases/download/cq-network-v#{version}/CQNetwork_#{version}_universal.zip"
+            schema = pin["schema_version"]
+            native_tag = schema == 2 ? "v#{version}" : "cq-network-v#{version}"
+            url = "https://github.com/jacobcxdev/cq/releases/download/#{native_tag}/CQNetwork_#{version}_universal.zip"
+            valid_bundles = true
+            if pin.key?("bundles")
+              bundles = pin["bundles"]
+              valid_bundles = schema == 2 && version == @cask.version.to_s &&
+                              bundles.is_a?(Hash) && bundles.keys.sort == %w[amd64 arm64] &&
+                              bundles.all? do |architecture, bundle|
+                                expected_url = "https://github.com/jacobcxdev/cq/releases/download/v#{version}/cq_#{version}_darwin_#{architecture}_bundle.tar.gz"
+                                bundle.is_a?(Hash) && bundle.keys.sort == %w[sha256 url] &&
+                                  bundle["url"] == expected_url &&
+                                  bundle["sha256"].is_a?(String) && bundle["sha256"].match?(/\A[0-9a-f]{64}\z/)
+                              end
+              if valid_bundles
+                architecture = Homebrew::SimulateSystem.current_arch == :arm ? "arm64" : "amd64"
+                bundle = bundles.fetch(architecture)
+                sha256 = bundle.fetch("sha256")
+                url = bundle.fetch("url")
+              end
+            end
             companion = cask_and_formula_dependencies.find do |dependency|
               dependency.is_a?(::Cask::Cask) && dependency.token == "cq-network"
             end
-            valid_pin = pin["schema_version"] == 1 &&
+            valid_pin = [1, 2].include?(schema) && valid_bundles &&
                         version.is_a?(String) && version.match?(/\A\d+\.\d+\.\d+\z/) &&
                         sha256.is_a?(String) && sha256.match?(/\A[0-9a-f]{64}\z/) &&
                         companion && companion.version.to_s == version &&

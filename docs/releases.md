@@ -1,7 +1,8 @@
 # Release and deployment guide
 
-CQ has a stable Go release stream and an independently versioned macOS native
-companion. Package generation, publication and installed-runtime activation are
+CQ and its macOS native companion share one stable release version. Every
+release includes a freshly signed and notarised companion, including Go-only
+fixes. Package generation, publication and installed-runtime activation are
 separate steps. The executable's version, a green workflow or a healthy listener
 alone does not prove delivery.
 
@@ -24,11 +25,12 @@ companion assets. The executable configuration is
    before tagging and prove the final release commit is the current `origin/main`
    tip. Do not release a feature branch, pre-merge candidate, stale checkout or a
    different commit with equivalent changes.
-4. Check `.github/native-network-release.json`. Validation compares the pinned
-   source commit's native Git tree with the release sources. Changed native
-   sources require a new signed/notarised immutable companion and a reviewed pin;
-   a Go-only release reuses the existing pin. Do not ship a newer Go package with
-   an older companion that omits merged native fixes.
+4. Stage the signed/notarised companion for that same version using the
+   [native release guide](native-network-releases.md), then merge its reviewed
+   schema-2 pin in `.github/native-network-release.json`. The pin records the
+   immutable native ZIP's source, asset ID and digest. Validation proves that
+   source is an ancestor of the final release commit and both native Git trees
+   match. A previous version's companion cannot qualify a new release.
 5. Complete the relevant build/vet/race, platform and installed-client gates.
    Retain the exact source, client version, package inputs and outcomes.
 
@@ -74,6 +76,13 @@ tag for the selected stable version and push that tag. For example, substitute
 the selected version in `git tag -s vX.Y.Z` and `git push origin vX.Y.Z`.
 Never move a published tag or force-push shared release history.
 
+Retarget the existing unpublished staging draft to this parent tag and the full
+final commit SHA, keeping its title `vVERSION`, `draft=true` and
+`prerelease=false`. Keep the staging tag and uploaded native ZIP unchanged. This
+is the same draft, not a second release; the workflow adds the CLI packages and
+combined macOS bundles before publishing it. See the native guide for the exact
+staging and pin-review order.
+
 The **Release** workflow is manually dispatched against the tag. Pushing the
 tag alone does not publish CQ. Its source preflight rejects a tag outside the
 current reviewed `origin/main` tip and rejects invalid stable version ordering.
@@ -82,12 +91,12 @@ The workflow stages are:
 
 | Stage | Gate/output |
 | --- | --- |
-| `release-source` | Current reviewed main provenance and sequential stable version |
+| `release-source` | Current reviewed main provenance, sequential stable version and matching schema-2 native pin |
 | `native-network`, `validate-codex` | Verify pinned signed/notarised native asset; installed Codex normal/compaction/hard-limit/rescue and reviewed corpus gates |
-| `draft-build` | Require the commit-bound live routing status, bind corpus provenance/native pin/Gemini secret, generate immutable candidate package inputs and GitHub draft |
+| `draft-build` | Require the commit-bound live routing status, bind corpus provenance/native pin/Gemini secret, add CLI packages and verified combined macOS bundles to the existing draft |
 | `release` | macOS Cask formatting, quarantine and actual predecessor-to-candidate lifecycle checks |
 | `windows-packages`, `windows-acceptance` | Build AMD64/ARM64 per-user MSI and manifests, validate package/installer lifecycle |
-| `publish` | Publish qualified GitHub assets and generated companion/main Casks; reject draft companion dependencies |
+| `publish` | Publish the qualified parent release and paired companion/main Casks together |
 | `linux-install`, `windows-deployed` | Download public packages and verify deployed installer/lifecycle behaviour |
 | `winget-publish` | Submit the community manifest after deployed checks, then account for superseded candidates |
 
@@ -105,10 +114,17 @@ provenance are linked at build time. Race validation runs separately on supporte
 native hosts; a cross-build does not replace it.
 
 Windows packaging uses .NET 8 and WiX 5.0.2. MSI lifecycle and WinGet manifests
-are separate from ZIP archives and the Go installer runner. macOS packaging
-installs the signed universal companion through its reviewed immutable pin on
-macOS 13 and later. CI downloads/verifies that companion; it has no Apple signing
-or notarisation credentials. Preserve the third-party ZCode licence, published
+are separate from ZIP archives and the Go installer runner. Each macOS
+`cq_VERSION_darwin_ARCH_bundle.tar.gz` contains `cq` and the signed universal
+`CQNetwork.app`, both at the parent version. The existing CLI-only archive names
+and contents remain available for installer compatibility. The `cq` and
+`cq-network` Homebrew receipts remain separate internally; both Casks select the
+same bundle URL and SHA-256 for the host architecture. The companion dependency
+applies on macOS 13 and later, preserving core CQ's macOS 12 support.
+
+CI downloads and verifies the reviewed companion before assembly, then verifies
+its signatures and notarisation again after extracting the final bundle. It has
+no Apple signing or notarisation credentials. Preserve the third-party ZCode licence, published
 as the checksummed `ZCode-LICENSE.txt` asset, alongside the project's [MIT
 licence](../LICENCE).
 
@@ -138,8 +154,8 @@ Verify these outcomes separately:
 
 - GitHub release/tag, expected architecture assets and checksums identify the
   intended reviewed commit. Preserve published assets; do not replace them.
-- Homebrew Casks point to the reviewed package and immutable companion. Check
-  generated Cask bytes and both pinned/installed companion versions.
+- Both Homebrew Casks select the same reviewed macOS bundle URL and digest.
+  Check generated Cask bytes and matching CQ, host and provider versions.
 - Installed `cq --version` identifies the package. `cq service status --json`
   separately identifies active/pending runtime versions and upgrade phase.
   Deferred activation remains pending until the service actually adopts it.
@@ -154,7 +170,7 @@ Verify these outcomes separately:
 
 Use the [Homebrew upgrade guide](homebrew-upgrades.md) to interpret active versus
 pending runtime state. A genuine rollback uses retained verified runtime/package
-state; a native rollback selects a previously reviewed immutable asset through a
-new pin change. Never overwrite published tags/assets. Repair release omissions
+state; a package rollback restores its matching reviewed native payload and
+previous routing intent. Never overwrite published tags/assets. Repair release omissions
 with the next complete sequential version, and annotate affected release notes
 so previous publication state remains clear.

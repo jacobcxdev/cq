@@ -4,7 +4,7 @@ set -euo pipefail
 # CI runners are disposable. Install the validated dependency without enabling
 # the extension so the existing CQ Cask lifecycle checks use the real dependency.
 if [[ $# -ne 2 || "$(uname -s)" != Darwin || "${CI:-}" != true ]]; then
-  echo "usage (disposable macOS CI only): install-native-network-validation.sh VERIFIED_CASK VERIFIED_ZIP" >&2
+  echo "usage (disposable macOS CI only): install-native-network-validation.sh VERIFIED_CASK VERIFIED_ARCHIVE" >&2
   exit 64
 fi
 [[ -f "$1" && -f "$2" ]]

@@ -439,7 +439,7 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 		`for arch in amd64 arm64; do`,
 		`needs: [release, windows-packages, windows-acceptance]`,
 		`needs: [windows-deployed, linux-install]`,
-		`test "$(jq '.assets | length' <<<"$release")" -ge 9`,
+		`test "$(jq '.assets | length' <<<"$release")" -ge 14`,
 		`git fetch --force --tags origin`,
 	} {
 		if !strings.Contains(text, required) {
@@ -464,9 +464,9 @@ func TestReleasePublishesAfterNativePackageProof(t *testing.T) {
 		text string
 		want int
 	}{
-		{text: "--exclude-drafts", want: 3},
-		{text: "--exclude-pre-releases", want: 3},
-		{text: "--limit 100", want: 3},
+		{text: "--exclude-drafts", want: 4},
+		{text: "--exclude-pre-releases", want: 4},
+		{text: "--limit 100", want: 4},
 		{text: "sort_by(.parts) | last | .tagName", want: 2},
 		{text: "Sort-Object Version -Descending | Select-Object -First 1", want: 1},
 	} {

@@ -20,8 +20,9 @@ post-install command is required.
 brew install --cask jacobcxdev/tap/cq
 ```
 
-On macOS 13 and later, the Cask includes the signed CQ Network companion. Installation
-and upgrades check its reviewed package version and automatically upgrade an older
+On macOS 13 and later, the Cask includes the signed CQ Network companion. CQ and
+Network share one release version and macOS download bundle. Installation and
+upgrades verify that matching payload and automatically upgrade an older
 companion. With WireGuard configured, `cq codex network enable` requests macOS approval to route native
 ChatGPT traffic without restarting it. See [Native network releases](docs/native-network-releases.md).
 

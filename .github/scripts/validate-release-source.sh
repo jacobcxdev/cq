@@ -31,4 +31,8 @@ if [[ "$version" != "$major.$minor.$((patch + 1))" && \
   echo "release must follow published v$latest with the next patch, minor or major version" >&2
   exit 1
 fi
+if ! jq -e --arg version "$version" '.schema_version == 2 and .version == $version and (has("bundles") | not)' .github/native-network-release.json >/dev/null; then
+  echo 'CQ and Network must share the selected parent release version and a reviewed base pin' >&2
+  exit 1
+fi
 echo "Verified release source: $GITHUB_REF at reviewed main $main_commit"

@@ -54,7 +54,7 @@ func TestHomebrewCompanionReconciliation(t *testing.T) {
 	if err := json.Unmarshal(pinData, &pin); err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"current", "stale-enabled", "stale-disabled", "rollback", "restore-failed", "pin-mismatch", "pinned", "newer", "unsafe-agent", "missing", "macos12", "unsupported-dependency-callback", "unsupported-upgrade-callback"} {
+	for _, scenario := range []string{"current", "stale-enabled", "stale-disabled", "rollback", "restore-failed", "pin-mismatch", "pinned", "newer", "unsafe-agent", "missing", "macos12", "unsupported-dependency-callback", "unsupported-upgrade-callback", "parent-zip", "parent-bundle-arm64", "parent-bundle-amd64", "reject-parent-bundle-version", "reject-malformed-version", "reject-bundle-missing-arch", "reject-bundle-extra-arch", "reject-bundle-not-map", "reject-bundle-entry-field", "reject-bundle-url", "reject-bundle-digest", "reject-native-digest", "reject-legacy-bundles"} {
 		t.Run(scenario, func(t *testing.T) {
 			selected := "0.41.9"
 			if scenario == "current" {
@@ -64,7 +64,58 @@ func TestHomebrewCompanionReconciliation(t *testing.T) {
 			for key, value := range pin {
 				fixturePin[key] = value
 			}
-			fixturePin["version"] = selected
+			fixturePin["schema_version"], fixturePin["version"] = 1, selected
+			delete(fixturePin, "bundles")
+			selectedSHA := fixturePin["sha256"].(string)
+			selectedURL := "https://github.com/jacobcxdev/cq/releases/download/cq-network-v" + selected + "/CQNetwork_" + selected + "_universal.zip"
+			architecture := runtime.GOARCH
+			if scenario == "parent-bundle-arm64" {
+				architecture = "arm64"
+			}
+			if scenario == "parent-bundle-amd64" {
+				architecture = "amd64"
+			}
+			if strings.HasPrefix(scenario, "parent-") || strings.HasPrefix(scenario, "reject-") {
+				selected = "0.50.0"
+				if scenario == "parent-zip" || scenario == "reject-parent-bundle-version" {
+					selected = "0.49.9"
+				}
+				fixturePin["schema_version"], fixturePin["version"] = 2, selected
+				selectedURL = "https://github.com/jacobcxdev/cq/releases/download/v" + selected + "/CQNetwork_" + selected + "_universal.zip"
+				bundles := map[string]any{}
+				for _, arch := range []string{"arm64", "amd64"} {
+					digest := strings.Repeat("d", 64)
+					if arch == "amd64" {
+						digest = strings.Repeat("e", 64)
+					}
+					bundles[arch] = map[string]any{"url": "https://github.com/jacobcxdev/cq/releases/download/v" + selected + "/cq_" + selected + "_darwin_" + arch + "_bundle.tar.gz", "sha256": digest}
+				}
+				if strings.Contains(scenario, "bundle") {
+					fixturePin["bundles"] = bundles
+					bundle := bundles[architecture].(map[string]any)
+					selectedURL, selectedSHA = bundle["url"].(string), bundle["sha256"].(string)
+				}
+				switch scenario {
+				case "reject-malformed-version":
+					fixturePin["version"] = "0.50.invalid"
+				case "reject-bundle-missing-arch":
+					delete(bundles, "amd64")
+				case "reject-bundle-extra-arch":
+					bundles["other"] = bundles["arm64"]
+				case "reject-bundle-not-map":
+					fixturePin["bundles"] = []any{}
+				case "reject-bundle-entry-field":
+					bundles["arm64"].(map[string]any)["extra"] = true
+				case "reject-bundle-url":
+					bundles["arm64"].(map[string]any)["url"] = "https://example.invalid/bundle.tar.gz"
+				case "reject-bundle-digest":
+					bundles["amd64"].(map[string]any)["sha256"] = "TODO"
+				case "reject-native-digest":
+					fixturePin["sha256"] = "TODO"
+				case "reject-legacy-bundles":
+					fixturePin["schema_version"] = 1
+				}
+			}
 			encodedPin, err := json.Marshal(fixturePin)
 			if err != nil {
 				t.Fatal(err)
@@ -75,7 +126,11 @@ func TestHomebrewCompanionReconciliation(t *testing.T) {
 			if err := os.WriteFile(parentPath, []byte(parent), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			script := "CQ_FIXTURE_ROOT=" + strconv.Quote(root) + "\nCQ_FIXTURE_SCENARIO=" + strconv.Quote(scenario) + "\nCQ_FIXTURE_PIN=JSON.parse(" + strconv.Quote(string(encodedPin)) + ")\n" + homebrewCompanionFixture
+			simulated := "intel"
+			if architecture == "arm64" {
+				simulated = "arm"
+			}
+			script := "require \"cask/cask_loader\"\nHomebrew::SimulateSystem.with(arch: :" + simulated + ") do\nCQ_FIXTURE_ROOT=" + strconv.Quote(root) + "\nCQ_FIXTURE_SCENARIO=" + strconv.Quote(scenario) + "\nCQ_FIXTURE_PIN=JSON.parse(" + strconv.Quote(string(encodedPin)) + ")\nCQ_FIXTURE_SELECTED_URL=" + strconv.Quote(selectedURL) + "\nCQ_FIXTURE_SELECTED_SHA=" + strconv.Quote(selectedSHA) + "\n" + homebrewCompanionFixture + "\nend\n"
 			path := filepath.Join(root, "companion.rb")
 			if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
 				t.Fatal(err)
@@ -157,14 +212,15 @@ SystemCommand.singleton_class.prepend(Module.new do
     super
   end
 end)
-def native_cask(version,directory,sha=CQ_FIXTURE_PIN.fetch("sha256"))
+def native_cask(version,directory,sha="a"*64,url=nil)
+  url ||= "https://github.com/jacobcxdev/cq/releases/download/cq-network-v#{version}/CQNetwork_#{version}_universal.zip"
   path=Pathname(CQ_FIXTURE_ROOT)/directory/"cq-network.rb"
   path.dirname.mkpath
   File.write(path,<<~RUBY)
     cask "cq-network" do
       version #{version.inspect}
       sha256 #{sha.inspect}
-      url "https://github.com/jacobcxdev/cq/releases/download/cq-network-v\#{version}/CQNetwork_\#{version}_universal.zip"
+      url #{url.inspect}
       app "CQNetwork.app"
       uninstall launchctl: "dev.jacobcx.cq.network",
                 script: {executable: "\#{appdir}/CQNetwork.app/Contents/MacOS/CQNetwork",args: ["disable"]},
@@ -210,8 +266,8 @@ unless CQ_FIXTURE_SCENARIO=="missing"
   installer.install_artifacts
   Cask::Tab.create(old).write
 end
-sha=CQ_FIXTURE_SCENARIO=="pin-mismatch" ? "0"*64 : CQ_FIXTURE_PIN.fetch("sha256")
-selected=native_cask(CQ_FIXTURE_PIN.fetch("version"),"selected",sha)
+sha=CQ_FIXTURE_SCENARIO=="pin-mismatch" ? "0"*64 : CQ_FIXTURE_SELECTED_SHA
+selected=native_cask(CQ_FIXTURE_PIN.fetch("version"),"selected",sha,CQ_FIXTURE_SELECTED_URL)
 selected.define_singleton_method(:pinned?) { true } if CQ_FIXTURE_SCENARIO=="pinned"
 if CQ_FIXTURE_SCENARIO=="unsupported-dependency-callback"
   Cask::Installer.class_eval { def satisfy_cask_and_formula_dependencies(unexpected:); raise "unexpected callback"; end }
@@ -246,7 +302,9 @@ begin
 rescue => error
   failure=error
 end
-if %w[rollback restore-failed pin-mismatch pinned newer unsafe-agent].include?(CQ_FIXTURE_SCENARIO)
+if CQ_FIXTURE_SCENARIO.start_with?("reject-")
+  raise "invalid parent pin was accepted" unless failure && failure.to_s.include?("reviewed")
+elsif %w[rollback restore-failed pin-mismatch pinned newer unsafe-agent].include?(CQ_FIXTURE_SCENARIO)
   raise "expected visible failure" unless failure
   expected={"rollback"=>"fixture install failed","restore-failed"=>"restoration failed","pin-mismatch"=>"reviewed","pinned"=>"pinned","newer"=>"newer","unsafe-agent"=>"private"}.fetch(CQ_FIXTURE_SCENARIO)
   raise "wrong failure: #{failure}" unless failure.to_s.include?(expected)
@@ -255,11 +313,11 @@ else
 end
 if %w[current macos12].include?(CQ_FIXTURE_SCENARIO)
   raise "current companion was touched" unless CQFixtureEvents.empty?
-elsif %w[pin-mismatch pinned newer unsafe-agent].include?(CQ_FIXTURE_SCENARIO)
+elsif CQ_FIXTURE_SCENARIO.start_with?("reject-") || %w[pin-mismatch pinned newer unsafe-agent].include?(CQ_FIXTURE_SCENARIO)
   raise "rejected companion was mutated: #{CQFixtureEvents}" unless CQFixtureEvents.empty?
 else
   raise "stale/missing companion was skipped" unless CQFixtureEvents.include?("stage")
-  should_restore=%w[stale-enabled rollback restore-failed].include?(CQ_FIXTURE_SCENARIO)
+  should_restore=CQ_FIXTURE_SCENARIO.start_with?("parent-") || %w[stale-enabled rollback restore-failed].include?(CQ_FIXTURE_SCENARIO)
   raise "routing restoration policy differs: #{CQFixtureEvents}" unless CQFixtureEvents.include?("enable")==should_restore
   if should_restore
     raise "old unconditional disable was skipped" unless CQFixtureEvents.include?("disable")
