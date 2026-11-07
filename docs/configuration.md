@@ -252,6 +252,7 @@ WireGuard keys in another VPN client.
 | `CODEX_HOME` | `~/.codex` | Native client/version discovery and read-only native model-cache fallback before CQ's own registry cache exists. CQ does not publish to the native entitlement cache; credential discovery still uses `~/.codex`. |
 | `ANTHROPIC_BASE_URL` | unset | Client-side setting to point compatible clients at CQ. |
 | `ZAI_API_KEY` | unset | Selects one account; a saved OAuth account wins when the exact key's ownership was verified. Otherwise uses only this key. Never put its value in shell history or logs. |
+| `CODEXBAR_CONFIG` | CodexBar provider configuration lookup | Explicit path for provider-scoped Grok/Z.ai discovery; `~/` is expanded and other paths must be absolute. Does not change Codex managed-account manifest lookup. |
 | `CODEX_THREAD_ID` | unset | Validated current chat identity for harness `--chat current`; CQ does not search transcripts to infer it. |
 | `OPENAI_BASE_URL` | unset | Native-client routing input; the Dots launcher sets it to CQ. This is separate from the native network extension. |
 
@@ -285,7 +286,8 @@ Some legacy lifecycle/continuity files intentionally remain in the CQ configurat
 | `~/.codex/auth.json` | System Codex credential, read automatically but not rewritten by routing. |
 | `~/.codex/accounts/` | CQ-managed Codex accounts and registry. |
 | `~/.codex/models_cache.json` (or `$CODEX_HOME` equivalent) | Native client-owned entitlement cache; CQ reads it as a fallback before its own registry cache exists. |
-| CQ cache root `model-registry.json` | CQ-owned native Codex/Z.ai listing/routing metadata; overlays remain in configuration `models.json`. |
+| CQ cache root `model-registry.json` | CQ-owned native Codex/Z.ai/Grok listing/routing metadata; overlays remain in configuration `models.json`. |
+| CQ configuration root `grok-accounts.json` / `grok-accounts.key` | Encrypted CQ-owned Grok subscription sessions and the adjacent decryption key; keep both private. |
 | `~/.claude/cache/model-capabilities.json` | Registry pipeline's Claude capability publication; the compatibility startup helper can also write the path selected by `CLAUDE_CONFIG_DIR`. |
 | `~/Library/LaunchAgents/dev.jacobcx.cq.refresh.plist` | Background refresh agent on macOS. |
 | `~/Library/Logs/cq/refresh.log` | Background refresh log. |
@@ -328,7 +330,7 @@ A portable export envelope is `{"version":1,"name":"review","definition":{"descr
 |---|---|
 | Configuration `zai.json` | Private API keys, browser-account references and verified opaque key aliases. Use login/switch/remove/route; do not copy raw OAuth credentials into it. `ZAI_API_KEY` selects one account, preferring verified same-account OAuth. |
 | Encrypted ZCode session store and device identity | Browser-login material and stable device registration. Keep its private key material with the configuration during an authorised migration. PATs/signing material remain in memory. |
-| Configuration `models.json` | User overlays managed by `models overlay`; provider IDs are `anthropic`, `codex`, `zai`, distinct from quota ID `claude`. |
+| Configuration `models.json` | User overlays managed by `models overlay`; registry provider IDs are `anthropic`, `codex`, `zai`, `grok`, distinct from quota ID `claude`. |
 | Codex managed account registry / credential journal | Coordinator-owned account identity and refresh/removal records. Do not edit to bypass uncertain outcomes or change ownership. |
 | Reset schedule/journal state | Exact accepted credits, confirmations and durable uncertain outcomes. Use schedule/list/status commands, not manual file changes. |
 | Dots private installation | Defaults to `~/.local/share/cq/dots`, outside source checkouts. Use `dots --root` for a deliberate separate installation; see [Dots](dots.md). |
@@ -338,7 +340,7 @@ Unix secret files use mode `0600` and private directories `0700`; WireGuard and 
 
 ## Model overlay format
 
-The overlay file is a versioned object: `{"version":1,"models":[]}`. Use `models overlay add --provider PROVIDER --id MODEL [--clone-from NATIVE_MODEL]` to create it and `remove` / `prune` to maintain it. Supported providers are `anthropic`, `codex` and `zai`.
+The overlay file is a versioned object: `{"version":1,"models":[]}`. Use `models overlay add --provider PROVIDER --id MODEL [--clone-from NATIVE_MODEL]` to create it and `remove` / `prune` to maintain it. Supported registry provider IDs are `anthropic`, `codex`, `zai` and `grok`. Grok client projection still requires Responses-backend metadata and known context; a manual entry does not create entitlement or backend compatibility.
 
 Each model entry requires `provider` and `id`. Optional public fields are `aliases` (string array), `display_name`, `description`, `context_window`, `max_context_window`, `max_output_tokens`, `visibility`, `priority`, `source`, `clone_from`, `inferred_from` and `raw` provider JSON. `source` is `native` or `overlay`; an omitted source in an overlay file becomes `overlay`. Preserve downloaded `raw` metadata rather than inventing capabilities. Cross-provider duplicate model IDs, compared case-insensitively, are rejected. Cloning copies metadata for an upstream-supported alias; it does not establish provider availability, pricing or entitlement. The CLI and registry infer provider-specific metadata where supported, so prefer those commands to hand-editing a client cache.
 
@@ -349,9 +351,13 @@ Grok subscription sessions use CQ-owned `grok-accounts.json` and
 key with the encrypted store. Public xAI API keys and purchased balances are not
 configuration options. Use `cq grok login` for browser authentication.
 
-CodexBar provider discovery honors `CODEXBAR_CONFIG`, then its supported XDG/home
-configuration paths. A current provider configuration takes precedence over
-legacy token files, including explicit absence. Reads do not change permissions,
+CodexBar provider discovery uses explicit `CODEXBAR_CONFIG` first (`~/` expands;
+other relative paths are rejected), then an absolute or home-expanded
+`XDG_CONFIG_HOME/codexbar/config.json`. Without either override, it tries existing
+`~/.config/codexbar/config.json`, then `~/.codexbar/config.json`. Legacy macOS
+`~/Library/Application Support/CodexBar/token-accounts.json` is a separate fallback.
+A current provider configuration takes precedence over legacy token files,
+including explicit absence. Reads do not change permissions,
 active source accounts or credential ownership. Unsupported regional/team Z.ai
 key scopes are not routed through the personal/global endpoint. See
 [provider setup and qualification](usage.md#grok-subscriptions).

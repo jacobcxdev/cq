@@ -850,7 +850,7 @@ func TestManualHelpTextDocumentsEachCommandPath(t *testing.T) {
 		{
 			name: "proxy start",
 			path: []string{"proxy", "start"},
-			want: []string{"Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]", "Start local Claude and Codex proxy", "--migrate-legacy-managed"},
+			want: []string{"Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]", "Start the local multi-provider API proxy", "--migrate-legacy-managed"},
 		},
 		{
 			name: "proxy validate HTTP",
@@ -951,6 +951,7 @@ func TestRunModelsHelpDoesNotRefresh(t *testing.T) {
 		{"--help"},
 		{"list", "--help"},
 		{"overlay", "add", "--help"},
+		{"overlay", "remove", "--help"},
 	} {
 		stdout.Reset()
 		if err := runModels(args, deps); err != nil {
@@ -958,6 +959,13 @@ func TestRunModelsHelpDoesNotRefresh(t *testing.T) {
 		}
 		if refreshCalls != 0 {
 			t.Fatalf("runModels(%v) called Refresh %d time(s), want 0", args, refreshCalls)
+		}
+		if len(args) > 1 {
+			for _, id := range []string{"anthropic", "codex", "zai", "grok"} {
+				if !strings.Contains(stdout.String(), id) {
+					t.Errorf("runModels(%v) help omitted registry provider %s", args, id)
+				}
+			}
 		}
 		if !strings.Contains(stdout.String(), "Usage: cq models") {
 			t.Fatalf("runModels(%v) did not print models help:\n%s", args, stdout.String())

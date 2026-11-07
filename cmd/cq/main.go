@@ -145,7 +145,7 @@ type AgentUninstallCmd struct{}
 // ProxyCmd groups local proxy commands.
 type ProxyCmd struct {
 	Reserve      ProxyReserveCmd      `cmd:"" help:"Manage the system account quota reserve"`
-	Start        ProxyStartCmd        `cmd:"" help:"Start local Claude and Codex proxy"`
+	Start        ProxyStartCmd        `cmd:"" help:"Start the local multi-provider API proxy"`
 	Install      ProxyInstallCmd      `cmd:"" help:"Install proxy launch agent"`
 	Uninstall    ProxyUninstallCmd    `cmd:"" help:"Uninstall proxy launch agent"`
 	Restart      ProxyRestartCmd      `cmd:"" help:"Restart proxy launch agent"`
@@ -216,7 +216,7 @@ type ModelsCmd struct {
 }
 
 type ModelsListCmd struct {
-	Provider string `help:"Filter by provider: anthropic, codex or zai" placeholder:"PROVIDER"`
+	Provider string `help:"Filter by provider: anthropic, codex, zai or grok" placeholder:"PROVIDER"`
 }
 
 type ModelsRefreshCmd struct{}
@@ -228,13 +228,13 @@ type ModelsOverlayCmd struct {
 }
 
 type ModelsOverlayAddCmd struct {
-	Provider  string `help:"Provider: anthropic, codex or zai" placeholder:"PROVIDER"`
+	Provider  string `help:"Provider: anthropic, codex, zai or grok" placeholder:"PROVIDER"`
 	ID        string `help:"Model ID to add" placeholder:"MODEL"`
 	CloneFrom string `help:"Native model ID to copy metadata from" placeholder:"MODEL"`
 }
 
 type ModelsOverlayRemoveCmd struct {
-	Provider string `help:"Provider: anthropic, codex or zai" placeholder:"PROVIDER"`
+	Provider string `help:"Provider: anthropic, codex, zai or grok" placeholder:"PROVIDER"`
 	ID       string `help:"Model ID to remove" placeholder:"MODEL"`
 }
 

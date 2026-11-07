@@ -298,10 +298,10 @@ Commands:
 `,
 	"proxy": `Usage: cq proxy <command>
 
-Run and configure the local Claude and Codex API proxy.
+Run and configure the local Claude, Codex, Z.ai and Grok API proxy.
 
 Commands:
-  proxy start         Start local Claude and Codex proxy
+  proxy start         Start the local multi-provider API proxy
   proxy status        Show proxy health
   proxy install       Install proxy launch agent
   proxy uninstall     Uninstall proxy launch agent
@@ -321,7 +321,7 @@ Commands:
 `,
 	"proxy start": `Usage: cq proxy start [--port PORT] [--migrate-legacy-managed]
 
-Start local Claude and Codex proxy.
+Start the local multi-provider API proxy.
 
 Options:
   --port PORT                    Override configured listen port for this run
@@ -639,7 +639,7 @@ List active registry models.
 
 Options:
   --json              Output JSON
-  --provider PROVIDER Filter by provider: anthropic, codex or zai
+  --provider PROVIDER Filter by provider: anthropic, codex, zai or grok
 `,
 	"models refresh": `Usage: cq models refresh
 
@@ -664,7 +664,7 @@ Commands:
 Add or update user model overlay.
 
 Options:
-  --provider PROVIDER Provider to publish under: anthropic, codex or zai
+  --provider PROVIDER Provider to publish under: anthropic, codex, zai or grok
   --id MODEL          Model ID to add
   --clone-from MODEL  Native model ID to copy metadata from
 `,
@@ -673,7 +673,7 @@ Options:
 Remove user model overlay.
 
 Options:
-  --provider PROVIDER Provider to remove from: anthropic, codex or zai
+  --provider PROVIDER Provider to remove from: anthropic, codex, zai or grok
   --id MODEL          Model ID to remove
 `,
 	"models overlay prune": `Usage: cq models overlay prune
