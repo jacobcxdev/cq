@@ -604,6 +604,102 @@ func TestNativeInventoryPeerUsedOnlyReadMethodsAndClosedPipes(t *testing.T) {
 	}
 }
 
+func TestNativeInventoryDetailBudgetKeptCompletedMetadata(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("helper shell executable")
+	}
+	for _, test := range []struct {
+		name, scenario, caller string
+		budget, partial        bool
+	}{
+		{"own budget", "detail-hang", "", true, true},
+		{"caller deadline", "detail-hang", "deadline", false, false},
+		{"caller cancellation", "detail-hang", "cancel", false, false},
+		{"core response missing", "core-hang", "", true, false},
+		{"core response invalid", "invalid-core-detail-hang", "", true, false},
+		{"malformed detail", "detail-malformed", "", true, false},
+		{"oversized detail", "detail-oversized", "", true, false},
+		{"unexpected peer exit", "detail-exit", "", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			executable := filepath.Join(dir, "native codex")
+			if err := os.WriteFile(executable, []byte("#!/bin/sh\nexec \"$CQ_TEST_NATIVE_INVENTORY_BINARY\" -test.run=^TestNativeInventoryPeerHelper$ -- \"$@\"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			binary, err := os.Executable()
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("CQ_TEST_NATIVE_INVENTORY_BINARY", binary)
+			t.Setenv("CQ_TEST_NATIVE_INVENTORY_SCENARIO", test.scenario)
+			t.Setenv("CQ_TEST_NATIVE_INVENTORY_DIR", dir)
+			ctx := context.Background()
+			if test.caller == "deadline" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 500*time.Millisecond)
+				defer cancel()
+			} else if test.caller == "cancel" {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				defer cancel()
+				timer := time.AfterFunc(500*time.Millisecond, cancel)
+				defer timer.Stop()
+			}
+			client := NativeInventory{Executable: executable, Run: func(ctx context.Context, executable, cwd string, output io.Writer) error {
+				if test.budget {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeoutCause(ctx, 500*time.Millisecond, errNativeInventoryBudget)
+					defer cancel()
+				}
+				return runNativeCurationInventory(ctx, executable, cwd, output)
+			}}
+			started := time.Now()
+			inventory, err := client.Snapshot(ctx, dir)
+			if time.Since(started) > 2*time.Second {
+				t.Fatal("native metadata deadline did not bound child cleanup")
+			}
+			pid, readErr := os.ReadFile(filepath.Join(dir, "peer-pid"))
+			if readErr != nil {
+				t.Fatal("native metadata peer did not start")
+			}
+			if exec.Command("kill", "-0", string(pid)).Run() == nil {
+				t.Fatal("native metadata child survived snapshot completion")
+			}
+			if !test.partial {
+				if err == nil {
+					t.Fatal("caller or core failure returned a partial inventory")
+				}
+				if test.caller == "deadline" && !errors.Is(err, context.DeadlineExceeded) || test.caller == "cancel" && !errors.Is(err, context.Canceled) {
+					t.Fatalf("caller cancellation identity changed: %v", err)
+				}
+				return
+			}
+			if err != nil || len(inventory.Capabilities) != 10 {
+				t.Fatalf("completed metadata lost to one pending detail: count=%d err=%v", len(inventory.Capabilities), err)
+			}
+			for _, code := range []string{"plugin_mcp_ownership_unresolved", "plugin_app_ownership_unresolved"} {
+				if !slices.ContainsFunc(inventory.Issues, func(issue InventoryIssue) bool {
+					return issue.Kind == PluginKind && issue.ID == "one@market" && issue.Code == code
+				}) {
+					t.Fatalf("pending plugin detail lost its explicit %s gap", code)
+				}
+			}
+			if slices.ContainsFunc(inventory.Issues, func(issue InventoryIssue) bool {
+				return issue.Kind == PluginKind && issue.ID != "one@market"
+			}) {
+				t.Fatal("pending plugin detail contaminated another plugin")
+			}
+			encoded, _ := json.Marshal(inventory)
+			for _, secret := range []string{"private-secret", "private-command", "private-url", "private-dependency"} {
+				if strings.Contains(string(encoded), secret) {
+					t.Fatal("partial inventory disclosed private native metadata")
+				}
+			}
+		})
+	}
+}
+
 func TestNativeInventoryPeerHelper(t *testing.T) {
 	scenario := os.Getenv("CQ_TEST_NATIVE_INVENTORY_SCENARIO")
 	if scenario == "" {
@@ -613,6 +709,7 @@ func TestNativeInventoryPeerHelper(t *testing.T) {
 		os.Exit(80)
 	}
 	dir := os.Getenv("CQ_TEST_NATIVE_INVENTORY_DIR")
+	_ = os.WriteFile(filepath.Join(dir, "peer-pid"), []byte(strconv.Itoa(os.Getpid())), 0o600)
 	reader := bufio.NewReader(os.Stdin)
 	read := func() map[string]any {
 		line, err := reader.ReadBytes('\n')
@@ -662,6 +759,9 @@ func TestNativeInventoryPeerHelper(t *testing.T) {
 	fixture := strings.ReplaceAll(nativeCurationFixture, `"cwd":"/work"`, `"cwd":`+strconv.Quote(dir))
 	var response map[string]json.RawMessage
 	_ = json.Unmarshal([]byte(fixture), &response)
+	if scenario == "invalid-core-detail-hang" {
+		response["config"] = json.RawMessage(`{"config":{},"layers":[]}`)
+	}
 	if scenario == "remote-details" {
 		response["plugins"] = json.RawMessage(strings.Replace(string(response["plugins"]), `"path":"/private/marketplace.json"`, `"path":null`, 1))
 		for _, name := range []string{"one", "disabled"} {
@@ -709,6 +809,10 @@ func TestNativeInventoryPeerHelper(t *testing.T) {
 		}
 		if scenario == "request-error" && index == 2 {
 			write(map[string]any{"id": request["id"], "error": map[string]any{"code": -1, "message": "private-secret"}})
+			_, _ = io.Copy(io.Discard, reader)
+			os.Exit(0)
+		}
+		if scenario == "core-hang" && index == 2 {
 			_, _ = io.Copy(io.Discard, reader)
 			os.Exit(0)
 		}
@@ -762,9 +866,17 @@ func TestNativeInventoryPeerHelper(t *testing.T) {
 			} else if params["marketplacePath"] != "/private/marketplace.json" || params["remoteMarketplaceName"] != nil {
 				os.Exit(95)
 			}
-			if name == "one" && scenario == "detail-hang" {
+			if name == "one" && (scenario == "detail-hang" || scenario == "invalid-core-detail-hang") {
 				_, _ = io.Copy(io.Discard, reader)
 				os.Exit(0)
+			}
+			if name == "one" && scenario == "detail-malformed" {
+				_, _ = io.WriteString(os.Stdout, "invalid JSON\n")
+				_, _ = io.Copy(io.Discard, reader)
+				os.Exit(0)
+			}
+			if name == "one" && scenario == "detail-exit" {
+				os.Exit(97)
 			}
 			if name == "one" && scenario == "detail-oversized" {
 				_, _ = io.WriteString(os.Stdout, strings.Repeat(" ", 4<<20)+"\n")
