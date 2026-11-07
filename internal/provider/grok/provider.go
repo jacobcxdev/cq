@@ -2,8 +2,10 @@ package grok
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -91,6 +93,17 @@ func (p *Provider) fetchAccount(ctx context.Context, account Account, now time.T
 	result, err = parseQuota(body, now)
 	if err != nil {
 		return quota.ErrorResult("parse_error", "Grok included subscription quota unavailable", 0)
+	}
+	// The /user tier is an internal identifier (e.g. GrokPro). Follow the
+	// official client's account-scoped display name rather than guessing aliases.
+	// Optional presentation metadata must not hide otherwise usable quota.
+	if settings, err := readSubscriptionJSON(ctx, p.authority, account.ID, "/settings"); err == nil {
+		var display struct {
+			Plan string `json:"subscription_tier_display"`
+		}
+		if json.Unmarshal(settings, &display) == nil && validText(display.Plan, 256) && strings.TrimSpace(display.Plan) != "" {
+			account.Plan = display.Plan
+		}
 	}
 	return result
 }

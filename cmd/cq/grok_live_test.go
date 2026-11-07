@@ -36,6 +36,7 @@ func TestGrokLiveSavedSubscription(t *testing.T) {
 		if !result.IsUsable() {
 			t.Fatalf("live quota unavailable: %v", result.Error)
 		}
+		t.Logf("reported_plan=%q", result.Plan)
 		for name, window := range result.Windows {
 			t.Logf("quota window=%s remaining=%g reset=%s", name, window.RemainingPercent(), time.Unix(window.ResetAtUnix, 0).UTC().Format(time.RFC3339))
 		}

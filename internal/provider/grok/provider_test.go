@@ -41,6 +41,9 @@ func TestSubscriptionReadsBoundRequestContext(t *testing.T) {
 
 func TestFetchSubscriptionQuota(t *testing.T) {
 	a := fakeAuthority{accounts: []Account{{ID: "a", UserID: "user-a", Email: "a@example.test", Plan: "SuperGrok Heavy", Active: true}}, do: func(_ context.Context, id AccountID, r *http.Request) (*http.Response, error) {
+		if r.URL.String() == BaseURL+"/settings" {
+			return &http.Response{StatusCode: 404, Body: io.NopCloser(strings.NewReader(""))}, nil
+		}
 		if id != "a" || r.Method != "GET" || r.URL.String() != BaseURL+"/billing?format=credits" {
 			t.Errorf("wrong request: %s %s %s", id, r.Method, r.URL)
 		}
@@ -133,5 +136,47 @@ func TestFetchReportingOnlySourceDoesNotImplyUsableQuota(t *testing.T) {
 	rows, err := New(a).Fetch(t.Context(), quotaNow())
 	if err != nil || len(rows) != 1 || rows[0].IsUsable() || rows[0].Error == nil || len(rows[0].Windows) > 0 {
 		t.Fatalf("rows=%#v err=%v", rows, err)
+	}
+}
+
+func TestFetchUsesSubscriptionDisplayName(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+		status           int
+	}{
+		{"legacy", `{"subscription_tier_display":"SuperGrok"}`, "SuperGrok", 200},
+		{"heavy", `{"subscription_tier_display":"SuperGrok Heavy"}`, "SuperGrok Heavy", 200},
+		{"plus", `{"subscription_tier_display":"Plus"}`, "Plus", 200},
+		{"premium", `{"subscription_tier_display":"Premium"}`, "Premium", 200},
+		{"super", `{"subscription_tier_display":"Super"}`, "Super", 200},
+		{"ultra", `{"subscription_tier_display":"Ultra"}`, "Ultra", 200},
+		{"future", `{"subscription_tier_display":"Future Plan"}`, "Future Plan", 200},
+		{"missing", `{}`, "GrokPro", 200},
+		{"empty", `{"subscription_tier_display":""}`, "GrokPro", 200},
+		{"whitespace", `{"subscription_tier_display":"   "}`, "GrokPro", 200},
+		{"invalid", `{"subscription_tier_display":42}`, "GrokPro", 200},
+		{"malformed", `{`, "GrokPro", 200},
+		{"control", `{"subscription_tier_display":"Plan\u001b[2J"}`, "GrokPro", 200},
+		{"long", `{"subscription_tier_display":"` + strings.Repeat("x", 257) + `"}`, "GrokPro", 200},
+		{"unavailable", `private-response`, "GrokPro", 503},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := fakeAuthority{accounts: []Account{{ID: "a", Plan: "GrokPro"}}, do: func(_ context.Context, id AccountID, req *http.Request) (*http.Response, error) {
+				if id != "a" || req.Method != http.MethodGet {
+					t.Fatal("unexpected account or method")
+				}
+				if req.URL.Path == "/v1/settings" {
+					return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body))}, nil
+				}
+				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(goodQuota))}, nil
+			}}
+			rows, err := New(a).Fetch(t.Context(), quotaNow())
+			if err != nil || len(rows) != 1 || !rows[0].IsUsable() || rows[0].Plan != tc.want {
+				t.Fatalf("rows=%#v error=%v; want usable quota with plan %q", rows, err, tc.want)
+			}
+			if a.accounts[0].Plan != "GrokPro" {
+				t.Fatal("stored account label mutated")
+			}
+		})
 	}
 }

@@ -100,9 +100,10 @@ You need at least one signed-in provider. Existing supported local credentials a
 cq claude login
 cq codex login
 cq zai login
+cq grok login
 ```
 
-Each command saves an account. Claude and Codex require `--activate` if you also want to replace the active client credential. A Z.ai browser login becomes preferred by default. Gemini sign-in stays with Antigravity; CQ has no Gemini login command.
+Each command saves an account. Claude and Codex require `--activate` if you also want to replace the active client credential. Z.ai and Grok browser logins become preferred by default; Grok's `--no-activate` preserves its existing CQ preference without changing a native client's login. Gemini sign-in stays with Antigravity; CQ has no Gemini login command.
 
 Check the providers you configured:
 
@@ -110,6 +111,7 @@ Check the providers you configured:
 cq check claude codex             # Select one or more providers
 cq check gemini                   # Requires Antigravity credentials
 cq check zai                     # Z.ai Coding Plan or Start Plan
+cq check grok                    # Grok included subscription quota
 cq                               # Check every provider in parallel
 cq --refresh check codex          # Fetch fresh quota instead of the cache
 cq --json check codex             # Report suitable for a pipe or file
@@ -139,7 +141,7 @@ These commands inspect service/runtime health. Verify a real request from the cl
 | Use banked resets before expiry or schedule them with my approval | [Codex resets](docs/usage.md#codex) and [Z.ai reset cards](docs/usage.md#zai-coding-plan) |
 | Start eligible usage windows earlier instead of waiting for my first task | [Codex priming](docs/usage.md#pins-defaults-and-priming) and [Z.ai priming](docs/usage.md#zai-coding-plan) |
 | Give each chat, project or model a suitable plugin/MCP/skill set | [Harness profiles](docs/usage.md#harness-capability-profiles) |
-| Use available models, including supported Z.ai models in Codex, without maintaining picker entries by hand | [Model registry](docs/usage.md#model-registry) and [Z.ai setup](docs/usage.md#zai-coding-plan) |
+| Use available models, including supported Z.ai and Grok models in compatible Codex clients, without maintaining picker entries by hand | [Model registry](docs/usage.md#model-registry), [Z.ai setup](docs/usage.md#zai-coding-plan) and [Grok setup/limits](docs/usage.md#grok-subscriptions) |
 | Access my primary Dot before Dots is available in my region | Use a **US WireGuard profile** with [native ChatGPT routing](docs/configuration.md#native-chatgpt-network-routing). Normal ChatGPT launches work; the multi-account adapter is not required. |
 | Use Dots from several accounts in one ChatGPT sidebar | Install [multi-account Dots](docs/dots.md) and launch through CQ. Secondary Dots must already be onboarded; add US WireGuard routing too if regional access requires it. |
 | Let Dots coordinate, send them one announcement or share one local message board | [Dot setup and relay](docs/dots.md#setup-and-manual-reminders), [broadcast](docs/dots.md#broadcast), [message board](docs/dots.md#shared-message-board) |
@@ -165,10 +167,10 @@ guide](docs/agent-installation.md#5-verify-the-requested-outcome) for the checks
 |---|---|
 | Quota | Concurrent Claude, Codex, Gemini, Z.ai and Grok checks; multi-account reports, cache, burn history, aggregate pace and availability. Gemini uses Antigravity's platform credential store. |
 | Accounts | Claude/Codex OAuth and activation; read-only system discovery; coordinated renewal of eligible managed accounts; Z.ai browser/API-key accounts and billing-route selection; Grok subscription OAuth and borrowed CodexBar discovery. |
-| Proxy | Loopback Anthropic Messages and native Codex Responses HTTP/WebSocket routing; local authentication; bounded failover and durable continuity. |
+| Proxy | Loopback Anthropic Messages and native Codex Responses HTTP/WebSocket routing; local authentication; provider-specific failover and native Codex durable continuity. Grok opaque-state bindings are process-local. |
 | Routing | Pins/defaults, account allowlists, pools/session bindings, system-account preservation and reserve, priming, leases and rescue. |
 | Automation | Explicitly accepted reset schedules, periodic credential refresh, model registry refresh and publication. |
-| Models | Anthropic/Codex/Z.ai catalogues, overlays, CQ-owned registry cache and Claude Code publication; compatible Codex clients fetch CQ's model-discovery routes. |
+| Models | Anthropic/Codex/Z.ai/Grok catalogues, overlays, CQ-owned registry cache and Claude Code publication; compatible Codex clients fetch CQ's model-discovery routes. |
 | Native ChatGPT | Optional macOS Dots adapter, scoped harness capability profiles, and signed native network/usage handling. Each integration has separate prerequisites. |
 | Operations | Privacy-aware trace JSONL, opt-in payload diagnostics, Stop-hook receipts, canary, isolated candidate validation, durable recovery and legacy endpoint maintenance. |
 

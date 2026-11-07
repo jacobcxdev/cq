@@ -10,6 +10,7 @@ OAuth PKCE login flow, browser detection, and JWT utilities.
 |------|-------------|
 | `oauth.go` | `Login` function: PKCE flow, local callback server, token exchange, profile fetch |
 | `codex_oauth.go` | Codex PKCE callback/exchange and owner-invoked refresh helpers |
+| `grok_oauth.go` | Fixed-issuer Grok subscription OAuth/OIDC login, identity verification and owner-invoked refresh |
 | `browser.go` | Platform-specific browser detection and private-mode launch (Darwin/Linux/Windows) |
 | `jwt.go` | `DecodeEmail`: extracts email from JWT payload without signature verification |
 
