@@ -74,6 +74,45 @@ func TestProbeSecondaryVoiceNeverRetriedUnknownOutcome(t *testing.T) {
 	}
 }
 
+func TestProbeSecondaryVoiceAcceptedCompositeProfileID(t *testing.T) {
+	p, _, owner := probeFixtureForTest(t)
+	const profileID = "profile-owner~workspace-owner"
+	p.fixture.Profiles[1]["id"] = profileID
+	delete(p.fixture.Owners, "profile-owner")
+	p.fixture.Owners[profileID] = owner
+	dot := p.settings.Dots["two"]
+	dot.ProfileID = profileID
+	p.settings.Dots["two"] = dot
+	if _, err := p.validateFixture(p.fixture); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	p.options.HTTP = probeDoer(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.Header.Get("Authorization") != "Bearer "+owner.Token || r.Header.Get("ChatGPT-Account-Id") != owner.AccountID || !strings.Contains(r.URL.Path, "/"+profileID+"/voice/calls") {
+			t.Error("composite profile lost owner identity")
+		}
+		return probeSuccess("{}"), nil
+	})
+	for _, operation := range []struct{ suffix, body string }{
+		{"", `{"sdp":"v=0 offer"}`},
+		{"/rtc_call/attach", ""},
+		{"/rtc_call/refresh", `{"sdp":"v=0 new offer","ufrag":"ice-fragment"}`},
+		{"/rtc_call/stop", `{"client_duration_ms":120000}`},
+	} {
+		r := probeRequest("POST", "/backend-api/tbo/"+profileID+"/voice/calls"+operation.suffix, operation.body)
+		r.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		p.ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Errorf("composite profile operation %q returned %d", operation.suffix, w.Code)
+		}
+	}
+	if calls != 4 {
+		t.Fatalf("composite profile lifecycle reached upstream %d times, want 4", calls)
+	}
+}
+
 func TestProbeSecondaryVoiceRejectedInvalidWrites(t *testing.T) {
 	for _, invalid := range []struct{ method, suffix, body, contentType string }{
 		{"DELETE", "", "", ""},
