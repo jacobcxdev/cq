@@ -213,6 +213,24 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "failed to build direct service lifecycle probe"
     }
+
+    Invoke-MSI -Action install -Path $CurrentMSI -Log (Join-Path $temporaryRoot "install-unconfigured.log")
+    $null = Wait-ServiceStatus -Version $CurrentVersion
+    Invoke-MSI -Action uninstall -Path $CurrentMSI -Log (Join-Path $temporaryRoot "uninstall-unconfigured.log")
+    if (Test-Path -LiteralPath $installedCQ) {
+        throw "CQ executable remains after unconfigured MSI uninstall"
+    }
+    foreach ($name in @("Proxy", "Refresh")) {
+        if (Get-ScheduledTask -TaskPath $taskPath -TaskName $name -ErrorAction SilentlyContinue) {
+            throw "$name task remains after unconfigured MSI uninstall"
+        }
+    }
+    foreach ($path in @($codexRoot, $roamingCQ, $localCQ)) {
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Recurse -Force
+        }
+    }
+
     $upstreamProcess = Start-Process -FilePath $probeExecutable -ArgumentList @("serve", "--address-file", $addressFile) -PassThru -NoNewWindow
     Wait-File -Path $addressFile
     $upstream = (Get-Content -LiteralPath $addressFile -Raw).Trim()
