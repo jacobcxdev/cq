@@ -50,7 +50,7 @@ type CLI struct {
 
 // CheckCmd is the default command that checks provider quota usage.
 type CheckCmd struct {
-	Providers []string `arg:"" optional:"" enum:"claude,codex,gemini,zai,grok" help:"Providers to check"`
+	Providers []string `arg:"" optional:"" enum:"claude,codex,gemini,grok,zai" help:"Providers to check"`
 }
 
 // ClaudeCmd groups Claude-specific subcommands.
@@ -565,7 +565,7 @@ func runCheck(cli *CLI) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("resolve CQ directories: %w", err)
 	}
-	providerIDs := []provider.ID{provider.Claude, provider.Codex, provider.Gemini, provider.ZAI, provider.Grok}
+	providerIDs := []provider.ID{provider.Claude, provider.Codex, provider.Gemini, provider.Grok, provider.ZAI}
 	if len(cli.Check.Providers) > 0 {
 		providerIDs = make([]provider.ID, len(cli.Check.Providers))
 		for i, p := range cli.Check.Providers {

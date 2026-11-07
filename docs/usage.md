@@ -813,6 +813,11 @@ The provider reports included subscription usage and the actual reset period.
 Purchased credit, top-ups, public xAI API keys and monetary reporting are outside
 CQ's scope. Unknown plan capacity is excluded from weighted aggregates. New and
 legacy plan names are retained rather than assigned guessed multipliers.
+Reports use the account-scoped `subscription_tier_display` from Grok Build's
+`/settings`, rather than internal `/user` identifiers such as `GrokPro`.
+If display metadata is unavailable, CQ retains the saved plan label and still
+reports usable quota. Current [X Subscription tiers](https://x.ai/pricing) are
+Plus, Premium, Super and Ultra; existing SuperGrok subscriptions remain valid.
 
 Percentages represent included allowance remaining, rounded upwards for display
 while exact remaining percentage controls admission. A small positive allowance
