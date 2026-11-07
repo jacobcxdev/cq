@@ -823,7 +823,20 @@ func (h *cloudHarness) callOn(source, method string, params any) (cloudMessage, 
 }
 
 func (h *cloudHarness) event(threadID string, selection harness.Selection, state string) {
-	h.b.event(map[string]any{"harness_profile": string(selection.Profile), "source": selection.Source, "thread_id": threadID, "scope": "full", "state": state})
+	event := map[string]any{"harness_profile": string(selection.Profile), "source": selection.Source, "thread_id": threadID, "scope": "full", "state": state}
+	if state == "pending" {
+		h.mu.Lock()
+		if thread := h.threads[threadID]; thread != nil {
+			event["active"] = thread.active
+			event["pending_turns"] = thread.pendingTurns
+			event["pending_settings"] = thread.pendingSettings
+			event["awaiting_rollout"] = thread.awaitingRollout
+			event["ephemeral"] = thread.ephemeral
+			event["refresh"] = thread.refresh
+		}
+		h.mu.Unlock()
+	}
+	h.b.event(event)
 }
 
 func (h *cloudHarness) reconcile(id, model, cwd string) error {
@@ -1615,6 +1628,11 @@ func (h *cloudHarness) observeFrom(source string, raw []byte) bool {
 		case "turn/completed":
 			if cloudHarnessActivitySource(thread, source) {
 				cloudHarnessTurnCompleted(thread, cloudHarnessString(cloudHarnessObject(params["turn"]), "id"))
+			} else if thread.subscriptions[source] {
+				// Secondary completion can follow the last active read. Keep
+				// the guard until native readback confirms this chat is idle.
+				thread.activityRevision++
+				thread.refresh = true
 			}
 		case "thread/status/changed":
 			status := cloudHarnessObject(params["status"])
@@ -1623,6 +1641,9 @@ func (h *cloudHarness) observeFrom(source string, raw []byte) bool {
 				cloudHarnessStatus(thread, kind)
 			} else if thread.subscriptions[source] && kind == "active" {
 				cloudHarnessStatus(thread, kind)
+				thread.refresh = true
+			} else if thread.subscriptions[source] && kind == "idle" {
+				thread.activityRevision++
 				thread.refresh = true
 			}
 		}

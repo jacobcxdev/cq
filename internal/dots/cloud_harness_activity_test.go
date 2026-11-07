@@ -105,6 +105,82 @@ func TestCloudHarnessGatewayActivityGuardedOpaqueTurns(t *testing.T) {
 	}
 }
 
+func TestCloudHarnessSecondaryIdleRefreshedActiveSnapshot(t *testing.T) {
+	for _, event := range []string{
+		`{"method":"turn/completed","params":{"threadId":"chat","turn":{"id":"current"}}}`,
+		`{"method":"thread/status/changed","params":{"threadId":"chat","status":{"type":"idle"}}}`,
+	} {
+		for _, status := range []string{"idle", "active"} {
+			t.Run(cloudHarnessObject([]byte(event)).method()+"/"+status, func(t *testing.T) {
+				source := "gateway/background"
+				thread := &cloudHarnessThread{id: "chat", owned: true, subscriptions: map[string]bool{"stdio": true, source: true}}
+				h := &cloudHarness{b: &cloudBridge{ctx: context.Background()}, threads: map[string]*cloudHarnessThread{"chat": thread}, calls: make(map[string]chan cloudMessage), prefix: "cq-harness/activity/"}
+				nativeStatus, reads := "active", 0
+				h.b.local = &cloudLocal{input: cloudTestWriter{write: func(raw []byte) (int, error) {
+					reads++
+					request := cloudHarnessObject(raw)
+					h.observe(cloudHarnessRaw(map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]any{"id": "chat", "model": "gpt-6.1-sol", "status": map[string]string{"type": nativeStatus}}}}))
+					return len(raw), nil
+				}}}
+				h.observeFrom(source, []byte(`{"method":"turn/started","params":{"threadId":"chat","turn":{"id":"current"}}}`))
+				if err := h.refresh("chat"); err != nil {
+					t.Fatal(err)
+				}
+				if !thread.active || thread.refresh {
+					t.Fatal("fixture did not establish a refreshed active snapshot")
+				}
+				nativeStatus = status
+				h.observeFrom(source, []byte(event))
+				if !thread.active {
+					t.Fatal("secondary idle event cleared the guard before authoritative readback")
+				}
+				if err := h.refresh("chat"); err != nil {
+					t.Fatal(err)
+				}
+				if reads != 2 || thread.active != (status == "active") || thread.refresh {
+					t.Fatalf("secondary idle event stranded or cleared the guard: reads=%d active=%v refresh=%v", reads, thread.active, thread.refresh)
+				}
+			})
+		}
+	}
+}
+
+func TestCloudHarnessSecondaryIdleInvalidatedInFlightActiveRead(t *testing.T) {
+	for _, event := range []string{
+		`{"method":"turn/completed","params":{"threadId":"chat","turn":{"id":"current"}}}`,
+		`{"method":"thread/status/changed","params":{"threadId":"chat","status":{"type":"idle"}}}`,
+	} {
+		t.Run(cloudHarnessObject([]byte(event)).method(), func(t *testing.T) {
+			thread := &cloudHarnessThread{id: "chat", owned: true, active: true, activeTurnID: "current", refresh: true, subscriptions: map[string]bool{"stdio": true, "gateway/background": true}}
+			h := &cloudHarness{b: &cloudBridge{ctx: context.Background()}, threads: map[string]*cloudHarnessThread{"chat": thread}, calls: make(map[string]chan cloudMessage), prefix: "cq-harness/activity/"}
+			reads := 0
+			h.b.local = &cloudLocal{input: cloudTestWriter{write: func(raw []byte) (int, error) {
+				reads++
+				status := "idle"
+				if reads == 1 {
+					status = "active"
+					h.observeFrom("gateway/background", []byte(event))
+				}
+				request := cloudHarnessObject(raw)
+				h.observe(cloudHarnessRaw(map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]any{"id": "chat", "model": "gpt-6.1-sol", "status": map[string]string{"type": status}}}}))
+				return len(raw), nil
+			}}}
+			if err := h.refresh("chat"); err != nil {
+				t.Fatal(err)
+			}
+			if !thread.active || !thread.refresh {
+				t.Fatal("in-flight active read consumed a newer secondary idle event")
+			}
+			if err := h.refresh("chat"); err != nil {
+				t.Fatal(err)
+			}
+			if reads != 2 || thread.active || thread.refresh {
+				t.Fatal("fresh native idle read did not release the active guard")
+			}
+		})
+	}
+}
+
 func TestCloudHarnessDelayedGatewayCompletionKeptCurrentDesktopTurn(t *testing.T) {
 	h := &cloudHarness{b: &cloudBridge{ctx: context.Background()}, threads: map[string]*cloudHarnessThread{"chat": {id: "chat", owned: true, baseline: cloudMessage{}}}, requests: map[string]cloudHarnessRequest{}, calls: map[string]chan cloudMessage{}, prefix: "cq-harness/review/", wake: make(chan struct{}, 1)}
 	g := newCloudHarnessGateway(h)

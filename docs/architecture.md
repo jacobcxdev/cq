@@ -221,7 +221,10 @@ Observed resume requests remain candidates when large history responses are
 chunked; native unsubscribe results establish which candidates were subscribed.
 Other chats and spawned children retain their subscriptions. Gateway reconnects
 preserve logical ownership; replayed traffic cannot repeat preparation or clear
-a newer active turn. CQ checks the chat's effective
+a newer active turn. Completion or idle notices from a secondary connection
+request fresh native status without clearing the activity guard directly. Pending
+application events report activity, outstanding request counts and rollout guards
+without recording message content. CQ checks the chat's effective
 plugin feature and standalone MCP tools, resources and templates after reload.
 Retained or unverified controls produce a `partial` receipt and leave the chat
 usable. Skills have no independent per-chat readback; changed skill settings
