@@ -81,6 +81,109 @@ func TestStoreDiscoveryDoesNotCreateState(t *testing.T) {
 		t.Fatal("discovery created state")
 	}
 }
+func TestStoreDiscoveryExistingDirectoryWithoutAccounts(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	if err := fsys.MkdirAll("/config", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.WriteFile("/config/proxy.json", []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := NewAuthority(Store{FS: fsys, ConfigDir: "/config"}, nil, nil)
+	accounts, err := a.Accounts(context.Background())
+	if err != nil || len(accounts) != 0 {
+		t.Fatalf("unconfigured discovery = %v, %v", accounts, err)
+	}
+	info, err := fsys.Stat("/config")
+	if err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("discovery changed directory policy: %v, %v", info, err)
+	}
+	entries, err := fsys.ReadDir("/config")
+	if err != nil || len(entries) != 1 || entries[0].Name() != "proxy.json" {
+		t.Fatalf("discovery changed state: %v, %v", entries, err)
+	}
+}
+
+type storeMetadataErrorFS struct {
+	*fsutil.MemFS
+	err error
+}
+
+func (fsys storeMetadataErrorFS) Lstat(string) (os.FileInfo, error) {
+	return nil, fsys.err
+}
+
+type storeBasicFS struct{ fsutil.FileSystem }
+
+func TestStoreDiscoveryRejectsMetadataErrors(t *testing.T) {
+	for _, cause := range []error{os.ErrPermission, fsutil.ErrUnsafeSecurePath} {
+		t.Run(cause.Error(), func(t *testing.T) {
+			fsys := storeMetadataErrorFS{MemFS: fsutil.NewMemFS(), err: cause}
+			store := Store{FS: fsys, ConfigDir: "/config"}
+			if _, err := store.readFile(storeFilename, 1024); !errors.Is(err, cause) {
+				t.Fatalf("metadata error = %v, want %v", err, cause)
+			}
+		})
+	}
+	store := Store{FS: storeBasicFS{fsutil.NewMemFS()}, ConfigDir: "/config"}
+	if _, err := store.readFile(storeFilename, 1024); !errors.Is(err, fsutil.ErrSecureCapabilityUnavailable) {
+		t.Fatalf("missing no-follow capability = %v", err)
+	}
+}
+
+func TestStoreDiscoveryStillRejectsUnsafePresentFile(t *testing.T) {
+	for _, mode := range []os.FileMode{0o700, 0o755} {
+		t.Run(fmt.Sprintf("directory-%04o", mode), func(t *testing.T) {
+			fsys := fsutil.NewMemFS()
+			if err := fsys.MkdirAll("/config", mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := fsys.WriteFile("/config/"+storeFilename, []byte("untrusted"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			store := Store{FS: fsys, ConfigDir: "/config"}
+			if _, err := store.readFile(storeFilename, 1024); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
+				t.Fatalf("unsafe present file error = %v", err)
+			}
+		})
+	}
+}
+
+func TestStoreDiscoveryRejectsSymlinkFile(t *testing.T) {
+	root := privateTestDir(t)
+	target := filepath.Join(t.TempDir(), "target")
+	if err := os.WriteFile(target, []byte("untrusted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, storeFilename)); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	store := Store{FS: fsutil.OSFileSystem{}, ConfigDir: root}
+	if data, err := store.readFile(storeFilename, 1024); err == nil || len(data) != 0 {
+		t.Fatalf("symlinked credential file was read: %q, %v", data, err)
+	}
+}
+
+func TestStoreRetainedReadKeepsDirectoryAuthority(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	if err := fsys.MkdirAll("/config", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.WriteFile("/config/"+storeFilename, []byte("retained"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := fsys.OpenSecureDirectory("/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	store := Store{FS: storeBasicFS{fsys}, ConfigDir: "/config", directory: directory, inspector: fsys, fence: func() error { return nil }}
+	data, err := store.readFile(storeFilename, 1024)
+	if err != nil || string(data) != "retained" {
+		t.Fatalf("retained-directory read = %q, %v", data, err)
+	}
+}
+
 func TestRefreshConcurrentAuthoritiesExchangeOnce(t *testing.T) {
 	var calls atomic.Int32
 	exchange := func(context.Context, string) (TokenSet, error) {

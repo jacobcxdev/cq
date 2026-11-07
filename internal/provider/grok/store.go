@@ -161,7 +161,17 @@ func (s Store) readFile(name string, maxBytes int64) ([]byte, error) {
 		}
 		return fsutil.ReadSecureFileInDirectory(s.inspector, s.directory, name, maxBytes)
 	}
-	return fsutil.ReadSecureFile(s.FS, filepath.Join(s.ConfigDir, name), maxBytes)
+	path := filepath.Join(s.ConfigDir, name)
+	inspector, ok := s.FS.(fsutil.SecurePathInspector)
+	if !ok {
+		return nil, fsutil.ErrSecureCapabilityUnavailable
+	}
+	// Optional discovery must recognise an absent entry before applying the
+	// stricter private-directory contract needed to read existing credentials.
+	if _, err := inspector.Lstat(path); err != nil {
+		return nil, err
+	}
+	return fsutil.ReadSecureFile(s.FS, path, maxBytes)
 }
 func (s Store) writeFile(name string, data []byte) error {
 	if s.directory == nil {
