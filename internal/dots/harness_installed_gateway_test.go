@@ -352,6 +352,8 @@ func TestHarnessInstalledGatewayReload(t *testing.T) {
 				}
 			}
 			write("codex/skills/qualification/SKILL.md", "---\nname: qualification\ndescription: CQ_QUALIFICATION_SKILL_MARKER\n---\nSynthetic isolated capability.\n")
+			write("codex/skills/retain-curation/SKILL.md", "---\nname: retain-curation\ndescription: CQ_RETAIN_CURATION_SKILL_MARKER\n---\nSynthetic retained curation skill.\n")
+			write("codex/skills/retain-goal/SKILL.md", "---\nname: retain-goal\ndescription: CQ_RETAIN_GOAL_SKILL_MARKER\n---\nSynthetic retained goal skill.\n")
 			ctx, cancel := context.WithTimeout(t.Context(), 120*time.Second)
 			defer cancel()
 			observed := make(chan map[string]any, 64)
@@ -399,6 +401,54 @@ func TestHarnessInstalledGatewayReload(t *testing.T) {
 					}
 					gatewayCursors <- r.Header.Get("x-codex-subscribe-cursor")
 					gatewayConnected <- conn
+					return
+				}
+
+				if strings.HasSuffix(r.URL.Path, "/connectors/directory/list") || strings.HasSuffix(r.URL.Path, "/connectors/directory/list_workspace") {
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]any{"apps": []any{map[string]any{"id": "calendar", "name": "CQ Qualification", "description": "Synthetic loopback app"}, map[string]any{"id": "documents", "name": "CQ Documents", "description": "Second synthetic app"}}, "nextToken": nil})
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, "/ps/mcp") {
+					if r.Method != "POST" {
+						w.WriteHeader(http.StatusMethodNotAllowed)
+						return
+					}
+					raw, err := httputil.ReadBody(r.Body)
+					if err != nil {
+						t.Error(err)
+						w.WriteHeader(400)
+						return
+					}
+					var req map[string]json.RawMessage
+					if json.Unmarshal(raw, &req) != nil {
+						w.WriteHeader(400)
+						return
+					}
+					method := cloudHarnessString(req, "method")
+					t.Logf("SYNTHETIC APPS RPC %s", method)
+					var result any = map[string]any{}
+					switch method {
+					case "initialize":
+						params := cloudHarnessObject(req["params"])
+						result = map[string]any{"protocolVersion": cloudHarnessString(params, "protocolVersion"), "capabilities": map[string]any{"tools": map[string]any{"listChanged": true}}, "serverInfo": map[string]any{"name": "cq-apps-fixture", "version": "1"}}
+					case "tools/list":
+						tool := map[string]any{"name": "calendar_list_events", "description": "CQ_QUALIFICATION_APP_MARKER", "annotations": map[string]any{"readOnlyHint": true}, "inputSchema": map[string]any{"type": "object", "properties": map[string]any{}}, "_meta": map[string]any{"connector_id": "calendar", "link_id": "link_calendar", "connector_name": "CQ Qualification", "connector_description": "Synthetic loopback app", "_codex_apps": map[string]any{"connector_id": "calendar", "resource_uri": "connector://calendar/tools/calendar_list_events", "contains_mcp_source": true}}}
+						second := cloudHarnessObject(cloudHarnessRaw(tool))
+						second["name"] = cloudHarnessRaw("documents_search")
+						second["description"] = cloudHarnessRaw("CQ_QUALIFICATION_SECOND_APP_MARKER")
+						second["_meta"] = cloudHarnessRaw(map[string]any{"connector_id": "documents", "link_id": "link_documents", "connector_name": "CQ Documents", "_codex_apps": map[string]any{"connector_id": "documents", "resource_uri": "connector://documents/tools/documents_search", "contains_mcp_source": true}})
+						result = map[string]any{"tools": []any{tool, second}}
+					case "resources/list":
+						result = map[string]any{"resources": []any{}}
+					case "resources/templates/list":
+						result = map[string]any{"resourceTemplates": []any{}}
+					case "notifications/initialized":
+						w.WriteHeader(202)
+						return
+					}
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req["id"], "result": result})
 					return
 				}
 				if r.Method != "POST" || r.URL.Path != "/responses" {
@@ -461,7 +511,7 @@ func TestHarnessInstalledGatewayReload(t *testing.T) {
 				upstream.Config.Handler.ServeHTTP(w, r)
 			}))
 			defer route.Close()
-			write("codex/config.toml", "chatgpt_base_url = "+fmt.Sprintf("%q", route.URL+"/backend-api")+"\n"+fmt.Sprintf("model = \"glm-5.3\"\nmodel_provider = \"fixture\"\napproval_policy = \"never\"\nsandbox_mode = \"read-only\"\ncli_auth_credentials_store = \"file\"\ncheck_for_update_on_startup = false\n[analytics]\nenabled = false\n[features]\nplugins = true\ncode_mode_host = %t\nenable_request_compression = false\n[model_providers.fixture]\nname = \"Synthetic fixture\"\nbase_url = %q\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n[mcp_servers.probe]\ncommand = %q\nargs = [\"-test.run=^TestHarnessInstalledMCPHelper$\"]\nstartup_timeout_sec = 5\n[mcp_servers.probe.env]\nCQ_HARNESS_INSTALLED_MCP_HELPER = \"1\"\n", codeMode, upstream.URL, os.Args[0]))
+			write("codex/config.toml", "chatgpt_base_url = "+fmt.Sprintf("%q", route.URL+"/backend-api")+"\n"+fmt.Sprintf("model = \"glm-5.3\"\nmodel_provider = \"fixture\"\napproval_policy = \"never\"\nsandbox_mode = \"read-only\"\ncli_auth_credentials_store = \"file\"\ncheck_for_update_on_startup = false\n[analytics]\nenabled = false\n[features]\nplugins = true\napps = true\ncode_mode_host = %t\nenable_request_compression = false\n[model_providers.fixture]\nname = \"Synthetic fixture\"\nbase_url = %q\nwire_api = \"responses\"\nrequires_openai_auth = false\nsupports_websockets = false\nrequest_max_retries = 0\nstream_max_retries = 0\n[mcp_servers.probe]\ncommand = %q\nargs = [\"-test.run=^TestHarnessInstalledMCPHelper$\"]\nstartup_timeout_sec = 5\n[mcp_servers.probe.env]\nCQ_HARNESS_INSTALLED_MCP_HELPER = \"1\"\n", codeMode, upstream.URL, os.Args[0]))
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
 			if err != nil {
 				t.Fatal(err)
@@ -557,6 +607,80 @@ func TestHarnessInstalledGatewayReload(t *testing.T) {
 					name, _ := schema["name"].(string)
 					if strings.HasPrefix(name, "mcp__probe") || name == "mcp" {
 						hasMCP = true
+					}
+				}
+
+				hasApp := strings.Contains(string(tools), "CQ_QUALIFICATION_APP_MARKER") || strings.Contains(string(tools), "mcp__codex_apps__calendar__list_events")
+				t.Logf("APPS MODEL PROOF label=%s codeMode=%v appTool=%v want=%v", label, codeMode, hasApp, wantMCP)
+				if hasApp != wantMCP {
+					t.Fatalf("native connected-app tool mismatch at %s: got=%v want=%v tools=%s", label, hasApp, wantMCP, string(tools))
+				}
+				hasSecond := strings.Contains(string(tools), "CQ_QUALIFICATION_SECOND_APP_MARKER")
+				wantSecond := wantMCP && label != "granular-app"
+				t.Logf("APPS GRANULAR PROOF label=%s codeMode=%v first=%v second=%v wantSecond=%v", label, codeMode, hasApp, hasSecond, wantSecond)
+				if hasSecond != wantSecond {
+					t.Fatalf("second app filter mismatch at %s: got=%v want=%v", label, hasSecond, wantSecond)
+				}
+
+				host := ""
+				items, _ := request["input"].([]any)
+				for _, item := range items {
+					message, _ := item.(map[string]any)
+					if message["role"] != "developer" {
+						continue
+					}
+					content, _ := message["content"].([]any)
+					for _, value := range content {
+						part, _ := value.(map[string]any)
+						text, _ := part["text"].(string)
+						blocks := strings.Split(text, "<skills_instructions>")
+						for _, block := range blocks[1:] {
+							block = strings.TrimSpace(strings.SplitN(block, "</skills_instructions>", 2)[0])
+							if strings.HasPrefix(block, "## Host skills") || strings.HasPrefix(block, "## Skills\n") {
+								host = block
+							}
+						}
+					}
+				}
+				skillRoots := map[string]string{}
+				paths := map[string]bool{}
+				for _, line := range strings.Split(host, "\n") {
+					if strings.HasPrefix(line, "- `r") {
+						fields := strings.Split(line, "`")
+						if len(fields) >= 4 {
+							skillRoots[fields[1]] = fields[3]
+						}
+					}
+					if i := strings.LastIndex(line, "(file: "); i >= 0 {
+						ref := strings.TrimSuffix(line[i+7:], ")")
+						pair := strings.SplitN(ref, "/", 2)
+						if len(pair) != 2 || skillRoots[pair[0]] == "" {
+							t.Fatalf("unresolved current skill path %q", ref)
+						}
+						paths[filepath.Join(skillRoots[pair[0]], pair[1])] = true
+					}
+				}
+				retained := paths[filepath.Join(root, "codex/skills/retain-curation/SKILL.md")] && paths[filepath.Join(root, "codex/skills/retain-goal/SKILL.md")]
+				if label == "first" || label == "sibling-first" {
+					if !retained || !strings.Contains(host, "CQ_QUALIFICATION_SKILL_MARKER") {
+						t.Fatal("positive full skill catalogue baseline missing")
+					}
+				}
+				if label == "skills-two" {
+					if len(paths) != 2 || !retained || strings.Contains(host, "CQ_FRESH_DISABLED_SKILL_MARKER") || strings.Contains(host, "CQ_QUALIFICATION_SKILL_MARKER") || strings.Contains(host, "CQ_QUALIFICATION_NEW_SKILL_MARKER") {
+						t.Fatalf("current catalogue was not exactly retained two paths: paths=%v block=%s", paths, host)
+					}
+					t.Logf("CURRENT SKILLS TWO PASSED codeMode=%v exactPaths=%d freshDisabledAbsent=true", codeMode, len(paths))
+				}
+				if label == "skills-restored" {
+					if len(paths) <= 2 || !retained || !strings.Contains(host, "CQ_FRESH_DISABLED_SKILL_MARKER") {
+						t.Fatalf("current skill catalogue did not restore: paths=%v block=%s", paths, host)
+					}
+					t.Logf("CURRENT SKILLS RESTORED codeMode=%v paths=%d", codeMode, len(paths))
+				}
+				if label == "sibling-after-cycles" {
+					if len(paths) <= 2 || !retained || !strings.Contains(host, "CQ_QUALIFICATION_SKILL_MARKER") {
+						t.Fatal("target skill selection leaked into sibling")
 					}
 				}
 				history := strings.Contains(string(raw), "CQ_QUALIFICATION_HISTORY")
@@ -672,7 +796,7 @@ func TestHarnessInstalledGatewayReload(t *testing.T) {
 			}
 			write("codex/skills/new-qualification/SKILL.md", "---\nname: new-qualification\ndescription: CQ_QUALIFICATION_NEW_SKILL_MARKER\n---\nSynthetic new skill.\n")
 			status := func(id, label string, want bool) {
-				runtime, err := h.readMCPRuntime(id)
+				runtime, err := h.readMCPRuntime(id, map[string]bool{"probe": false})
 				if err != nil {
 					t.Fatalf("MCP readback: %v", err)
 				}
@@ -718,6 +842,84 @@ func TestHarnessInstalledGatewayReload(t *testing.T) {
 			b.turnCompleted(target)
 			reconcile(false, "restored-full")
 			turn(target, "restored-full", true, true)
+			b.turnCompleted(target)
+
+			applyScopedConfig := func(overrides cloudMessage, label string) {
+				h.op.Lock()
+				defer h.op.Unlock()
+				h.mu.Lock()
+				snapshot := *h.threads[target]
+				snapshot.baseline = cloudHarnessClone(snapshot.baseline)
+				snapshot.settings = cloudHarnessClone(snapshot.settings)
+				desired := cloudHarnessClone(snapshot.fullConfig)
+				h.mu.Unlock()
+				for key, value := range overrides {
+					desired[key] = value
+				}
+				params := cloudHarnessResumeParams(snapshot, snapshot.model, snapshot.cwd)
+				params["config"] = cloudHarnessRaw(desired)
+				primary, restore, err := h.suspendSubscriptions(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				resumed, err := h.callOn(primary, "thread/resume", params)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if cloudThreadID(cloudHarnessRaw(resumed)) != target {
+					t.Fatal("granular app reload changed identity")
+				}
+				if err := restore(primary); err != nil {
+					t.Fatal(err)
+				}
+				h.mu.Lock()
+				cloudHarnessActual(h.threads[target], resumed)
+				h.threads[target].runtimeConfig = desired
+				h.mu.Unlock()
+				if enabled, err := h.readAppsRuntime(target); err != nil || !enabled {
+					t.Fatalf("granular Apps gate changed: %v %v", enabled, err)
+				}
+				if after := a.call("thread/goal/get", map[string]any{"threadId": target})["goal"]; string(beforeGoal) != string(after) {
+					t.Fatal("granular app reload changed paused goal")
+				}
+				childState(label)
+			}
+			applyScopedConfig(cloudMessage{"features.apps": cloudHarnessRaw(true), "apps": cloudHarnessRaw(cloudMessage{"_default": cloudHarnessRaw(map[string]any{"enabled": false}), "calendar": cloudHarnessRaw(map[string]any{"enabled": true})})}, "granular-app")
+			turn(target, "granular-app", true, true)
+			b.turnCompleted(target)
+			h.mu.Lock()
+			fullApps := cloudHarnessClone(cloudHarnessObject(h.threads[target].fullConfig["apps"]))
+			h.mu.Unlock()
+			applyScopedConfig(cloudMessage{"features.apps": cloudHarnessRaw(true), "apps": cloudHarnessRaw(fullApps)}, "granular-restored")
+			turn(target, "granular-restored", true, true)
+			b.turnCompleted(target)
+
+			write("codex/skills/fresh-disabled/SKILL.md", "---\nname: fresh-disabled\ndescription: CQ_FRESH_DISABLED_SKILL_MARKER\n---\nSynthetic fresh excluded skill.\n")
+			listed := a.call("skills/list", map[string]any{"cwds": []string{cmd.Dir}, "forceReload": true})
+			var skillEntries []struct{ Skills []struct{ Name, Path string } }
+			if json.Unmarshal(listed["data"], &skillEntries) != nil {
+				t.Fatal("native skills inventory shape")
+			}
+			var skillConfig []map[string]any
+			retainedCount, freshFound := 0, false
+			for _, entry := range skillEntries {
+				for _, skill := range entry.Skills {
+					keep := skill.Name == "retain-curation" || skill.Name == "retain-goal"
+					if keep {
+						retainedCount++
+					}
+					freshFound = freshFound || skill.Name == "fresh-disabled"
+					skillConfig = append(skillConfig, map[string]any{"path": skill.Path, "enabled": keep})
+				}
+			}
+			if retainedCount != 2 || !freshFound || len(skillConfig) <= 2 {
+				t.Fatalf("native catalogue did not include retained and fresh excluded paths: kept=%d fresh=%v total=%d", retainedCount, freshFound, len(skillConfig))
+			}
+			applyScopedConfig(cloudMessage{"skills.include_instructions": cloudHarnessRaw(true), "skills.config": cloudHarnessRaw(skillConfig)}, "skills-two")
+			turn(target, "skills-two", true, true)
+			b.turnCompleted(target)
+			applyScopedConfig(cloudMessage{}, "skills-restored")
+			turn(target, "skills-restored", true, true)
 			b.turnCompleted(target)
 			if string(gateway.ResumeParams(source, target)["initialTurnsPage"]) != originalPage {
 				t.Fatal("private reload changed the original backend pagination request")

@@ -192,9 +192,15 @@ that baseline, not unconditional enablement. `full` resets to native behaviour;
 capabilities. Exported definitions contain stable capability IDs and portable
 rules, not private chat bindings or versioned installation paths.
 
-Plugins are controlled as bundles, including their declared MCP servers. The
-inventory exposes those server names on the owning plugin; standalone MCP rows
-remain independent controls. Native plugin detail metadata resolves a skill's
+Plugins are controlled as bundles, including their declared MCP servers and
+connected apps. The inventory exposes server names and stable app IDs on the
+owning plugin; standalone MCP rows remain independent controls. Connected apps
+use a separate native feature gate and app table. Restrictive profiles disable
+unselected apps while retaining apps owned by selected, eligible plugins. Shared
+ownership uses the union of selected owners. Existing disabled app settings,
+approvals and tool settings remain authoritative and are restored with the
+original app table when the binding is removed. Native plugin detail metadata
+resolves a skill's
 MCP dependency to the owning plugin when unambiguous. A missing or ambiguous
 owner remains an explicit dependency issue rather than a guessed relationship.
 
@@ -223,6 +229,8 @@ qualified native process's relay to that same broker, preserving authentication,
 enrolment identity and public message sequences. At an idle boundary, CQ releases
 all known subscriptions for only the selected chat, reloads its configuration,
 then restores the other notification subscriptions without replaying history.
+Automatic goal continuations can keep a chat active across turn boundaries;
+pausing the goal lets a queued configuration reload reach an idle boundary.
 Observed resume requests remain candidates when large history responses are
 chunked; native unsubscribe results establish which candidates were subscribed.
 Other chats and spawned children retain their subscriptions. Gateway reconnects
@@ -232,10 +240,14 @@ request fresh native status without clearing the activity guard directly. A new
 turn also refreshes cached activity when application is pending and no submitted
 turn or settings request remains outstanding. Pending
 application events report activity, outstanding request counts and rollout guards
-without recording message content. CQ checks the chat's effective
-plugin feature and standalone MCP tools, resources and templates after reload.
+without recording message content. CQ checks the chat's effective plugin and
+Apps features and standalone MCP tools, resources and templates after reload.
+MCP verification reads the relevant servers through their existing selected-chat
+connections; it does not start unrelated discovery across the whole catalogue.
 Retained or unverified controls produce a `partial` receipt and leave the chat
-usable. Skills have no independent per-chat readback; changed skill settings
+usable. Granular app selection remains unverified without a witnessed
+configuration reassembly. Skills have no independent per-chat readback; changed
+skill settings
 remain unverified unless an observed runtime transition confirms configuration
 reassembly. Removing a binding does not turn an unverified restoration into a
 successful one. CQ preserves the original baseline across partial plugin-only

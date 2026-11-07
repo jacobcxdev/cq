@@ -24,8 +24,8 @@ const nativeCurationFixture = `{
   {"id":"disabled@market","name":"disabled","installed":true,"enabled":false,"availability":"AVAILABLE"}
  ]}]},
  "pluginDetails":{
-  "one@market":{"plugin":{"summary":{"id":"one@market","name":"one"},"mcpServers":[]}},
-  "disabled@market":{"plugin":{"summary":{"id":"disabled@market","name":"disabled"},"mcpServers":[]}}
+  "one@market":{"plugin":{"summary":{"id":"one@market","name":"one"},"mcpServers":[],"apps":[]}},
+  "disabled@market":{"plugin":{"summary":{"id":"disabled@market","name":"disabled"},"mcpServers":[],"apps":[]}}
  },
  "skills":{"data":[{"cwd":"/work","errors":[],"skills":[
   {"name":"plain","description":"Plain skill","enabled":false,"path":"/home/skills/plain/SKILL.md","scope":"user"},
@@ -58,6 +58,66 @@ func nativeOwnershipFixture(t *testing.T, change func(map[string]any)) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func TestNativeInventoryKeptPluginAppIDsIncludingDisabled(t *testing.T) {
+	data := nativeOwnershipFixture(t, func(fixture map[string]any) {
+		details := fixture["pluginDetails"].(map[string]any)
+		details["one@market"].(map[string]any)["plugin"].(map[string]any)["apps"] = []any{map[string]any{"id": "asdk_app_second", "name": "Second", "description": "private-description"}, map[string]any{"id": "asdk_app_first"}}
+		details["disabled@market"].(map[string]any)["plugin"].(map[string]any)["apps"] = []any{map[string]any{"id": "asdk_app_dormant"}}
+	})
+	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, _ := json.Marshal(inventory)
+	var decoded struct {
+		Capabilities []struct {
+			ID     string
+			AppIDs []string `json:"app_ids"`
+		}
+	}
+	_ = json.Unmarshal(encoded, &decoded)
+	found := make(map[string][]string)
+	for _, capability := range decoded.Capabilities {
+		if capability.AppIDs != nil {
+			found[capability.ID] = capability.AppIDs
+		}
+	}
+	if !reflect.DeepEqual(found, map[string][]string{"one@market": {"asdk_app_first", "asdk_app_second"}, "disabled@market": {"asdk_app_dormant"}}) {
+		t.Fatalf("plugin app ownership lost or independently controllable: %v", found)
+	}
+	if strings.Contains(string(encoded), "private-description") {
+		t.Fatal("unneeded app metadata leaked into inventory")
+	}
+}
+
+func TestNativeInventoryAppOwnershipFailuresWereLocal(t *testing.T) {
+	for _, scenario := range []string{"missing", "null", "wrong-type", "empty-id", "duplicate-id", "reserved-id"} {
+		t.Run(scenario, func(t *testing.T) {
+			data := nativeOwnershipFixture(t, func(fixture map[string]any) {
+				plugin := fixture["pluginDetails"].(map[string]any)["one@market"].(map[string]any)["plugin"].(map[string]any)
+				switch scenario {
+				case "missing":
+					delete(plugin, "apps")
+				case "null":
+					plugin["apps"] = nil
+				case "wrong-type":
+					plugin["apps"] = "private-secret"
+				case "empty-id":
+					plugin["apps"] = []any{map[string]any{"id": ""}}
+				case "duplicate-id":
+					plugin["apps"] = []any{map[string]any{"id": "same"}, map[string]any{"id": "same"}}
+				case "reserved-id":
+					plugin["apps"] = []any{map[string]any{"id": "_default"}}
+				}
+			})
+			inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+			if err != nil || !slices.Contains(inventory.Issues, InventoryIssue{Code: "plugin_app_ownership_unresolved", Kind: PluginKind, ID: "one@market"}) {
+				t.Fatalf("app metadata gap not localised: %v %v", inventory.Issues, err)
+			}
+		})
+	}
 }
 
 func TestNativeInventoryKeptPluginMCPNamesAtomicIncludingDisabled(t *testing.T) {
@@ -132,7 +192,11 @@ func TestNativeInventoryPluginMCPFailuresWereLocalAndPrivate(t *testing.T) {
 					pluginIssues = append(pluginIssues, issue)
 				}
 			}
-			if !reflect.DeepEqual(pluginIssues, []InventoryIssue{{Code: "plugin_mcp_ownership_unresolved", Kind: PluginKind, ID: "one@market"}}) {
+			want := []InventoryIssue{{Code: "plugin_mcp_ownership_unresolved", Kind: PluginKind, ID: "one@market"}}
+			if scenario == "missing" || scenario == "rejected" || scenario == "wrong-id" || scenario == "wrong-name" {
+				want = append([]InventoryIssue{{Code: "plugin_app_ownership_unresolved", Kind: PluginKind, ID: "one@market"}}, want...)
+			}
+			if !reflect.DeepEqual(pluginIssues, want) {
 				t.Fatalf("plugin detail gap was not localised: %+v", pluginIssues)
 			}
 			encoded, _ := json.Marshal(inventory)
@@ -616,7 +680,7 @@ func TestNativeInventoryPeerHelper(t *testing.T) {
 		for index := 0; index < 8; index++ {
 			name := "extra-" + strconv.Itoa(index)
 			marketplace["plugins"] = append(marketplace["plugins"].([]any), map[string]any{"id": name + "@market", "name": name, "installed": true, "enabled": true})
-			details[name+"@market"] = map[string]any{"plugin": map[string]any{"summary": map[string]string{"id": name + "@market", "name": name}, "mcpServers": []string{}}}
+			details[name+"@market"] = map[string]any{"plugin": map[string]any{"summary": map[string]string{"id": name + "@market", "name": name}, "mcpServers": []string{}, "apps": []any{}}}
 		}
 		response["plugins"], _ = json.Marshal(plugins)
 		response["pluginDetails"], _ = json.Marshal(details)

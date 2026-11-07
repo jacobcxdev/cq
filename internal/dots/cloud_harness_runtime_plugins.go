@@ -10,7 +10,11 @@ import (
 // Read the selected thread's effective plugin flag. The feature can occur on a
 // later page, and the whole bounded result must be valid and unambiguous.
 func (h *cloudHarness) readPluginRuntime(threadID string) (bool, error) {
-	unavailable := errors.New("native plugin runtime unavailable")
+	return h.readRuntimeFeature(threadID, "plugins")
+}
+
+func (h *cloudHarness) readRuntimeFeature(threadID, feature string) (bool, error) {
+	unavailable := errors.New("native " + feature + " runtime unavailable")
 	if threadID == "" {
 		return false, unavailable
 	}
@@ -44,7 +48,7 @@ func (h *cloudHarness) readPluginRuntime(threadID string) (bool, error) {
 			if row.Name == "" || len(row.Name) > 4096 || strings.TrimSpace(row.Name) != row.Name || strings.ContainsFunc(row.Name, unicode.IsControl) || row.Enabled == nil {
 				return false, unavailable
 			}
-			if row.Name == "plugins" {
+			if row.Name == feature {
 				if found {
 					return false, unavailable
 				}
