@@ -29,7 +29,7 @@ type Codec struct {
 
 type message struct {
 	Role    string `json:"role"`
-	Content []any  `json:"content"`
+	Content any    `json:"content"`
 }
 
 // Project converts one stateless Responses request. Opaque response IDs require
@@ -310,7 +310,22 @@ func (c *Codec) projectInput(raw json.RawMessage, history *[]message, system *[]
 				return err
 			}
 			if role == "system" || role == "developer" {
-				*system = append(*system, parts...)
+				for _, part := range parts {
+					if part.(map[string]any)["type"] != "text" {
+						return errors.New("unsupported Responses system content")
+					}
+				}
+				if len(*history) == 0 {
+					*system = append(*system, parts...)
+				} else if len(parts) != 0 {
+					// ZCode accepts chronological system messages. Hoisting runtime
+					// reminders would invalidate every cached conversation prefix.
+					var content any = parts
+					if len(parts) == 1 {
+						content = parts[0].(map[string]any)["text"]
+					}
+					*history = append(*history, message{Role: "system", Content: content})
+				}
 				continue
 			}
 			if role != "user" && role != "assistant" {
@@ -478,17 +493,18 @@ func appendMessage(history *[]message, role string, content []any) {
 	}
 	if len(*history) > 0 && (*history)[len(*history)-1].Role == role {
 		last := &(*history)[len(*history)-1]
-		last.Content = append(last.Content, content...)
+		last.Content = append(last.Content.([]any), content...)
 	} else {
 		*history = append(*history, message{Role: role, Content: content})
 	}
 	if role == "user" {
 		last := &(*history)[len(*history)-1]
+		blocks := last.Content.([]any)
 		// Messages requires tool results before other user content. Preserve
 		// the recorded order within the results and within literal history.
-		sort.SliceStable(last.Content, func(i, j int) bool {
-			left := last.Content[i].(map[string]any)
-			right := last.Content[j].(map[string]any)
+		sort.SliceStable(blocks, func(i, j int) bool {
+			left := blocks[i].(map[string]any)
+			right := blocks[j].(map[string]any)
 			return left["type"] == "tool_result" && right["type"] != "tool_result"
 		})
 	}

@@ -253,6 +253,11 @@ func runProxy(args []string) error {
 			return writeManualHelp(os.Stdout, []string{"proxy", "trace"})
 		}
 		return runProxyTrace(args[1:], os.Stdout)
+	case "cache":
+		if helpRequested(args[1:]) {
+			return writeManualHelp(os.Stdout, []string{"proxy", "cache"})
+		}
+		return runProxyCache(args[1:], os.Stdout)
 	case "hook":
 		return runProxyHook(args[1:], os.Stdin, os.Stdout)
 	case "candidate":
@@ -850,7 +855,20 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		defer func() { returnErr = errors.Join(returnErr, resilienceState.Close()) }()
 	}
 	refreshClient := newHTTPClientFn(30*time.Second, version)
+	cacheProfiler, profileErr := openDefaultCacheProfiler(cfg, roots)
+	if profileErr != nil {
+		fmt.Fprintln(os.Stderr, "cq: cache profiling unavailable; routing continues without cache evidence")
+	} else if cacheProfiler != nil {
+		defer func() {
+			if err := cacheProfiler.Close(); err != nil {
+				fmt.Fprintln(os.Stderr, "cq: cache profiling close failed")
+			}
+		}()
+	}
 	codexHTTPClient := httputil.NewClientWithTransport(30*time.Second, version, codexEgress.HTTP)
+	if cacheProfiler != nil {
+		codexHTTPClient = cacheProfiler.WrapClient(codexHTTPClient)
+	}
 	servingAttestor := proxy.NewServingAttestor()
 	httpRequirements, _ := proxy.DefaultCodexRoutingRequirements(version, codexClientBuild)
 	activeCanary, err := openProxyCodexCanary(
@@ -1168,6 +1186,9 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		fmt.Fprintln(os.Stderr, "cq: Codex window priming enabled")
 	}
 	zcodeHTTP := zaiHTTPClient(0)
+	if cacheProfiler != nil {
+		zcodeHTTP = cacheProfiler.WrapClient(zcodeHTTP)
+	}
 	zcodeDevice, _ := zcodeDeviceMid()
 	zcodeTokens := &zcode.ProjectTokenClient{HTTP: zcodeHTTP, Version: zcodeClientVersion}
 	zcodeGateway := &zcode.Gateway{HTTP: zcodeHTTP, Signer: &zcode.Signer{HTTP: zcodeHTTP, Version: zcodeClientVersion}, Version: zcodeClientVersion, DeviceMid: zcodeDevice, Catalogue: &zcode.ModelCatalogue{HTTP: zcodeHTTP, Version: zcodeClientVersion}}
@@ -1357,9 +1378,16 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	}
 	harnessObserver, stopHarness := startHarnessController(proxyCtx, fsys, roots)
 	defer stopHarness()
+	grokClient := grokHTTPClient(0)
+	var zaiTransport http.RoundTripper
+	if cacheProfiler != nil {
+		transport.Inner = cacheProfiler.WrapTransport(transport.Inner)
+		grokClient = cacheProfiler.WrapClient(grokClient)
+		zaiTransport = cacheProfiler.WrapTransport(nil)
+	}
 	srv := &proxy.Server{
 		HarnessObserver: harnessObserver,
-		GrokAuthority:   grokReadAuthority(fsys, roots.Config, grokHTTPClient(0), os.Getenv, homeDir),
+		GrokAuthority:   grokReadAuthority(fsys, roots.Config, grokClient, os.Getenv, homeDir),
 		Config:          cfg,
 		Selector:        selector,
 		Discover:        discover,
@@ -1380,6 +1408,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		ZAIPrimer:         zaiPrimer,
 		ZAIGateway:        zcodeGateway,
 		ZAIProjectTokens:  zcodeTokens,
+		ZAITransport:      zaiTransport,
 		ZAIResetScheduler: zaiResetScheduler,
 		CodexHealth: func() proxy.CodexHealth {
 			return codexHealthTracker.Health(context.Background())
@@ -1390,6 +1419,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		CodexWebSocketBroker:             codexWebSocketBroker,
 		Headroom:                         headroom,
 		Diag:                             diagnostics,
+		CacheProfiler:                    cacheProfiler,
 		PayloadDiag:                      payloadDiag,
 		ServingAttestor:                  servingAttestor,
 		CodexRouting:                     codexRouting,

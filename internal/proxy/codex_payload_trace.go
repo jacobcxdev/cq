@@ -49,6 +49,7 @@ func emitCodexTracePayload(ctx context.Context, event PayloadEvent) {
 // emitCodexRawTracePayload avoids validating or copying request bytes when
 // payload diagnostics are disabled and bounds work when they are enabled.
 func emitCodexRawTracePayload(ctx context.Context, event PayloadEvent, raw []byte) {
+	observeCacheProfilePayload(ctx, event, raw)
 	trace := codexTraceFromContext(ctx)
 	if trace == nil || trace.payload == nil {
 		return

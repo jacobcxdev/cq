@@ -173,7 +173,7 @@ guide](docs/agent-installation.md#5-verify-the-requested-outcome) for the checks
 | Automation | Explicitly accepted reset schedules, periodic credential refresh, model registry refresh and publication. |
 | Models | Anthropic/Codex/Z.ai/Grok catalogues, overlays, CQ-owned registry cache and Claude Code publication; compatible Codex clients fetch CQ's model-discovery routes. |
 | Native ChatGPT | Optional macOS Dots adapter, scoped harness capability profiles, and signed native network/usage handling. Each integration has separate prerequisites. |
-| Operations | Privacy-aware trace JSONL, opt-in payload diagnostics, Stop-hook receipts, canary, isolated candidate validation, durable recovery and legacy endpoint maintenance. |
+| Operations | Default private [cache profiles](docs/cache-profiling.md), privacy-aware trace JSONL, opt-in payload diagnostics, Stop-hook receipts, canary, isolated candidate validation, durable recovery and legacy endpoint maintenance. |
 
 Official packages target macOS, Windows and Linux on the architectures in each release. Core macOS support includes macOS 12; the signed native network companion requires macOS 13 or later. Dots uses macOS-specific native app contracts. Linux background services require a functional systemd user manager. Windows uses current-user scheduled tasks. Platform support for an external client is separate from CQ's own build support.
 
@@ -273,6 +273,7 @@ cq operation
 cq operation recover
 cq operation status
 cq proxy
+cq proxy cache
 cq proxy candidate
 cq proxy candidate artifact
 cq proxy candidate artifact switch

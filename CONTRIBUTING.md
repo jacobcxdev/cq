@@ -137,6 +137,13 @@ platform, installed-client and package gates are described in the release guide.
 
 All checks must pass before merge:
 
+Cache prefix contracts are part of the required race suite. Inference adapters,
+tool projection and harness changes must preserve append-only reuse or include a
+reviewed, case-specific justification for intentional loss. New inference paths
+must add profiling and continuation fixtures; unsupported formats must remain
+explicitly unknown. See [cache profiling](docs/cache-profiling.md). Do not update
+expectations merely to silence a regression.
+
 ```bash
 go build ./...
 go vet ./...

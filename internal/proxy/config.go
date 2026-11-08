@@ -99,6 +99,9 @@ type Config struct {
 	// a specific account identified by email or AccountUUID. Omitted when empty.
 	PinnedClaudeAccount string `json:"pinned_claude_account,omitempty"`
 	DiagnosticsLog      string `json:"diagnostics_log,omitempty"`
+	// Cache profiles contain only keyed fingerprints and usage counters. They
+	// are enabled by default; this explicit opt-out leaves routing unchanged.
+	CacheProfilingDisabled bool `json:"cache_profiling_disabled,omitempty"`
 	// PayloadDiagnosticsLog is the optional path to a JSONL file for payload
 	// diagnostics. When set, the proxy logs exact HTTP request/response bodies
 	// and WebSocket frames with causal trace metadata. Disabled by default.

@@ -31,6 +31,7 @@ Config lives at `proxy.json` in the platform CQ configuration directory describe
 | `codex_window_priming` | `{"enabled":false}` | Object with `enabled` and optional `model_overrides`; see below. |
 | `zai_window_priming` | `{"enabled":false}` | Object with `enabled`; use `cq zai prime` to change it. |
 | `diagnostics_log` | unset | Causal routing trace JSONL path; restart required. |
+| `cache_profiling_disabled` | `false` | Opt out of default private cache fingerprints and usage counters; restart required. See [cache profiling](cache-profiling.md). |
 | `payload_diagnostics_log` | unset | Raw request/response and WebSocket payload JSONL path; restart required. |
 
 ### Editing, validation and reload

@@ -316,6 +316,7 @@ Commands:
   proxy rescue        Enter, exit, or inspect rescue mode
   proxy leases        Manage reusable Codex account leases
   proxy trace         Query or follow causal Codex request traces
+  proxy cache         Profile observed cache usage and request prefix changes
   proxy hook          Emit privacy-safe Codex turn receipts for hooks
   proxy candidate     Prepare and control isolated candidate validation
 `,
@@ -412,6 +413,16 @@ CQ never consumes a banked reset automatically for lease redistribution. Pending
 Invalidate reusable Codex account leases across all sessions.
 Active requests and required continuity remain unchanged. Each next eligible
 request re-runs account selection using current pool membership and capacity.
+`,
+	"proxy cache": `Usage: cq proxy cache [--since DURATION] [--session HASH] [--log PATH] [--events] [--json]
+
+Read default private cache profiles without contacting providers or changing the proxy.
+Default period is 24h. --session selects a reported session hash; --log reads an
+isolated profile log. --events emits typed JSONL records instead of a summary.
+Reports distinguish provider-reported cached tokens from structural prefix reuse
+in bytes. Unknown usage remains unknown. Prefix changes and cached-token decreases
+are flagged for review; new input, curation, compaction, routing and provider cache
+retention may explain a reduction. Content and credentials are never recorded.
 `,
 	"proxy trace": `Usage: cq proxy trace [--session SELECTOR] [--trace ID] [--since DURATION] [--tail N] [--follow] [--json] [--payload]
 
@@ -803,6 +814,12 @@ func runPureGlobalInspectionWithTarget(args []string, stdout, stderr io.Writer, 
 		}
 		return true, 0, nil
 	}
+	if authority.Catalogue == "proxy" && authority.Row == "proxy_cache" && !authority.Terminating {
+		if err := runProxyCache(args[2:], stdout); err != nil {
+			return true, 1, err
+		}
+		return true, 0, nil
+	}
 	if len(args) >= 3 && args[0] == "proxy" && args[1] == "status" && args[2] == "--port" && authority.Row == "ordinary_usage_error" && !proxyStatusHasReconciledSelector(args[3:]) {
 		_, parseErr := parseProxyCommandOptionsFor("proxy status", args[2:])
 		if parseErr == nil {
@@ -1000,6 +1017,9 @@ func validateProxyLexicalGrammar(args []string) error {
 		return nil
 	case "trace":
 		_, err := parseProxyTraceOptions(args[1:])
+		return err
+	case "cache":
+		_, err := parseProxyCacheOptions(args[1:])
 		return err
 	case "hook":
 		if len(args) != 2 || args[1] != "codex-stop" {
@@ -1226,7 +1246,7 @@ func manualUsageInspectionError(args []string) error {
 				return fmt.Errorf("unknown models command: %s", args[1])
 			}
 		case "proxy":
-			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "default": true, "prime": true, "reserve": true, "endpoint": true, "policy": true, "rescue": true, "leases": true, "trace": true}
+			known := map[string]bool{"start": true, "install": true, "uninstall": true, "restart": true, "validate-http": true, "status": true, "pin": true, "default": true, "prime": true, "reserve": true, "endpoint": true, "policy": true, "rescue": true, "leases": true, "trace": true, "cache": true}
 			if !known[args[1]] {
 				return fmt.Errorf("unknown proxy command: %s", args[1])
 			}
@@ -1418,6 +1438,12 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 		}
 		return nil, false
 	}
+	if args[0] == "cache" {
+		if len(args) == 1 || helpRequested(args[1:]) {
+			return []string{"proxy", "cache"}, true
+		}
+		return nil, false
+	}
 	if args[0] == "trace" {
 		if len(args) == 1 || helpRequested(args[1:]) {
 			return []string{"proxy", "trace"}, true
@@ -1457,7 +1483,7 @@ func proxyHelpInspectionPath(args []string) ([]string, bool) {
 	leaves := map[string]bool{
 		"start": true, "install": true, "uninstall": true, "restart": true,
 		"validate-http": true, "status": true, "pin": true,
-		"policy": true, "rescue": true, "leases": true, "trace": true, "hook": true,
+		"policy": true, "rescue": true, "leases": true, "trace": true, "cache": true, "hook": true,
 	}
 	return interceptedGroupHelpPath("proxy", args, leaves)
 }
