@@ -98,6 +98,7 @@ func (s *Server) zaiAccounts() ([]zaiprov.Account, error) {
 // upstream may already have consumed them. Opaque response IDs stay on the
 // preferred account; WebSocket requests instead replay their complete history.
 func (s *Server) doZAIRequest(ctx context.Context, target string, header http.Header, body []byte, accounts []zaiprov.Account) (*http.Response, error) {
+	ctx = withCacheProfileRequestSession(ctx, header, body)
 	var request struct {
 		PreviousResponseID string `json:"previous_response_id"`
 	}

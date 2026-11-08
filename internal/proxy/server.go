@@ -136,6 +136,7 @@ type Server struct {
 	codexLive                 codexLiveState
 	Headroom                  *HeadroomBridge
 	Diag                      *DiagnosticsWriter
+	CacheProfiler             *CacheProfiler
 	PayloadDiag               *PayloadWriter
 	// CodexCanary enforces the always-on Codex diagnostics privacy boundary
 	// even when route diagnostics persistence is disabled.
@@ -1247,6 +1248,7 @@ func (s *Server) parseCodexHTTPEnforcementDecoded(body []byte, header http.Heade
 // headroom compression — the handshake body is minimal and subsequent frames
 // are relayed without transformation.
 func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
+	r = r.WithContext(withCacheProfile(r.Context(), s.CacheProfiler, r.Header))
 	start := time.Now()
 	statusCode := 0
 	diagError := ""
@@ -1263,6 +1265,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	})
 	ctx, routeDiag := withRouteDiagnostics(ctx)
 	r = r.WithContext(ctx)
+	defer finishCacheProfileWebSocket(ctx, "closed")
 	emitCodexTrace(ctx, CodexTraceEvent{Phase: "connection_ingress", Outcome: "accepted", Method: r.Method, Path: r.URL.Path})
 	defer func() {
 		emitCodexTrace(ctx, CodexTraceEvent{
@@ -1406,6 +1409,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			s.emitCodexWebSocketFrameObservation(diagnostics)
 		})
 		brokerContext = context.WithValue(brokerContext, cqCompactionTokenContextKey{}, s.cqCompactionToken())
+		brokerContext = context.WithValue(brokerContext, cacheProfileBrokerContextKey{}, true)
 		var brokerErr error
 		if firstFrame != nil {
 			if broker, ok := s.CodexWebSocketBroker.(initialCodexWebSocketRoutingHandler); ok {
@@ -2006,7 +2010,7 @@ func (s *Server) emitPayloadDiagnostics(event PayloadEvent) {
 }
 
 func (s *Server) emitCodexWebSocketPayloadDiagnostics(r *http.Request, path, model, direction string, messageType int, frame []byte, frameIndex int) {
-	if s == nil || s.PayloadDiag == nil || r == nil {
+	if s == nil || s.PayloadDiag == nil && s.CacheProfiler == nil || r == nil {
 		return
 	}
 	frameType := ""

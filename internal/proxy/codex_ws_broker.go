@@ -508,6 +508,7 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 			FrameType: codexTraceWebSocketFrameType(messageType), Complete: true,
 		}, encoded)
 		err = broker.serveFrame(frameCtx, downstream, pending, &active)
+		finishCacheProfileWebSocket(frameCtx, "interrupted")
 		pending.Release()
 		var limit *CachedUsageLimitError
 		if errors.As(err, &limit) {
@@ -1202,6 +1203,7 @@ func (broker *codexTerminatingWSBroker) serveDispatchedFrame(ctx context.Context
 			return false, err
 		}
 	}
+	beginCacheProfileWebSocket(ctx, requestFrame.encoded, codexTraceAccountHint(active.account))
 	if err := writeCodexWSMessage(ctx, active.conn, requestFrame.messageType, requestFrame.encoded); err != nil {
 		emitCodexTrace(ctx, CodexTraceEvent{Phase: "upstream_write", Outcome: "error", FrameType: codexTraceWebSocketFrameType(requestFrame.messageType), FrameBytes: len(requestFrame.encoded), Reason: codexTraceErrorReason(err), AccountHint: codexTraceAccountHint(active.account)})
 		indeterminateErr := codexWSMarkIndeterminate(ctx, lifecycle, active.generation)
