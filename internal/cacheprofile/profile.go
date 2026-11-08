@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"unicode/utf8"
 )
 
 type Protocol string
@@ -49,6 +50,10 @@ func New(key []byte) (*Profiler, error) {
 
 const maxComponents = 4096
 
+// Long text is compared at this conservative byte granularity. These are UTF-8
+// content bytes, not provider tokens or an estimate of cache eligibility.
+const textChunkBytes = 4 << 10
+
 // Capture represents inference content, not wire framing or a vendor tokenizer.
 // Provider/account/cache-key partitioning must be recorded by the caller. Only
 // top-level delivery, attribution and cache-policy fields are ignored. Nested
@@ -85,16 +90,19 @@ func (p *Profiler) Capture(protocol Protocol, body []byte) (Snapshot, error) {
 	config := omit(request, "model", "tools", systemField, historyField,
 		"stream", "stream_options", "metadata", "client_metadata", "id", "store", "include", "background", "service_tier", "prompt_cache_key", "prompt_cache_retention", "previous_response_id")
 	config["protocol"] = string(protocol)
-	add := func(kind string, value any) error {
+	appendComponent := func(kind, domain string, data []byte) error {
 		if len(snapshot.Components) >= maxComponents {
 			return errors.New("cache profiling component limit")
 		}
+		snapshot.Components = append(snapshot.Components, Component{Kind: kind, Hash: p.hash(domain, data), Bytes: len(data)})
+		return nil
+	}
+	add := func(kind string, value any) error {
 		data, err := json.Marshal(value)
 		if err != nil {
 			return errors.New("invalid cache profiling component")
 		}
-		snapshot.Components = append(snapshot.Components, Component{Kind: kind, Hash: p.hash(kind, data), Bytes: len(data)})
-		return nil
+		return appendComponent(kind, kind, data)
 	}
 	if err = add("config", config); err != nil {
 		return snapshot, err
@@ -115,6 +123,10 @@ func (p *Profiler) Capture(protocol Protocol, body []byte) (Snapshot, error) {
 			if object, ok := value.(map[string]any); ok {
 				value = omit(object, "cache_control")
 			}
+		}
+		chunk := func(kind string, data []byte) error { return appendComponent(kind, kind+"/text", data) }
+		if handled, err := captureTextBlock(protocol, kind, value, add, chunk); handled || err != nil {
+			return err
 		}
 		return add(kind, value)
 	}
@@ -198,6 +210,50 @@ func (p *Profiler) Capture(protocol Protocol, body []byte) (Snapshot, error) {
 	}
 	snapshot.Complete = true
 	return snapshot, nil
+}
+
+func captureTextBlock(protocol Protocol, kind string, value any, add func(string, any) error, chunk func(string, []byte) error) (bool, error) {
+	var text string
+	var header any
+	switch content := value.(type) {
+	case string:
+		text, header = content, map[string]any{"representation": "string"}
+	case map[string]any:
+		var ok bool
+		text, ok = content["text"].(string)
+		if !ok {
+			return false, nil
+		}
+		typeName, _ := content["type"].(string)
+		known := protocol == Gemini && typeName == "" || protocol == Responses && (typeName == "input_text" || typeName == "output_text") || (protocol == Messages || protocol == ChatCompletions) && typeName == "text"
+		if !known {
+			return false, nil
+		}
+		header = map[string]any{"representation": "object", "metadata": omit(content, "text")}
+	default:
+		return false, nil
+	}
+	if len(text) <= textChunkBytes {
+		return false, nil
+	}
+	if err := add(kind+"_header", header); err != nil {
+		return true, err
+	}
+	for start := 0; start < len(text); {
+		end := min(start+textChunkBytes, len(text))
+		if end < len(text) {
+			for !utf8.RuneStart(text[end]) {
+				end--
+			}
+		}
+		if err := chunk(kind, []byte(text[start:end])); err != nil {
+			return true, err
+		}
+		start = end
+	}
+	// Keep the semantic block boundary: appending at an exact chunk boundary
+	// cannot falsely claim the complete old block, including its end, survived.
+	return true, chunk(kind+"_end", nil)
 }
 
 func captureTool(protocol Protocol, value any, add func(string, any) error) error {

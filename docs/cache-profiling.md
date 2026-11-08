@@ -22,8 +22,11 @@ average of per-request percentages. Missing counters remain unknown. Anthropic
 input is normalised to include uncached input, cache reads and cache writes.
 
 Ordered keyed fingerprints identify configuration, tools, system instructions,
-message boundaries and content blocks. Comparisons report reusable canonical
+message boundaries and content blocks. Long text uses ordered UTF-8 chunks of
+at most 4 KiB, so editing its tail can retain measured earlier overlap.
+Comparisons report reusable canonical
 **bytes**, not token estimates or a promise that a provider cached those bytes.
+Provider cache eligibility may end at different message or block boundaries.
 Account, model, session and cache partition changes start separate comparisons.
 Keys change with the proxy process, so a restart starts a new observation period.
 `cold_start` means no earlier comparison observation exists; it does not assert
@@ -39,9 +42,11 @@ the configuration through the normal service lifecycle.
 ## Reading reductions
 
 A changed early prefix can invalidate reuse of a large unchanged conversation.
-Profiles identify the first changed component. Cached-token decreases with an
-otherwise stable prefix are flagged separately; provider retention, cache
-partitioning and concurrent traffic can still explain them. A short new request,
+Profiles identify the first changed component. Observed cached-token decreases
+within the same known account, model, route and cache partition are flagged
+separately, including opaque continuations where prefix comparison is unavailable.
+These flags do not establish a regression: provider retention, a shorter input
+and concurrent traffic can explain them. A short new request,
 an explicit curation change, account/model switch or compaction can legitimately
 reduce a hit percentage. Raw percentages alone cannot attribute a regression.
 
@@ -58,6 +63,10 @@ fixtures and real ZCode conversion. User follow-ups, tool continuations and new
 runtime developer/system instructions must preserve the complete earlier content
 prefix. The test rejects an unexplained loss and reports the changed component.
 The historical converter that hoisted runtime reminders fails this contract.
+The case matrix covers native GPT and converted GLM requests, warm and cold
+usage observations, earlier user-message edits, developer reminders, goal
+continuations, compaction and tool/skill changes. Cold cache state is an observed
+provider counter, not something inferred from elapsed time or a new chat ID.
 
 Compaction intentionally replaces history. Its fixture records an explicit,
 case-specific justification. Any new exception or reduced reuse expectation must

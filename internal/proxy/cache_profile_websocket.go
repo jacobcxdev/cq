@@ -103,10 +103,13 @@ func beginCacheProfileWebSocket(ctx context.Context, raw []byte, accountHint str
 		event.AccountHash = p.hash("account", accountHint)
 		event.AccountSource = "route_account"
 	}
-	if snapshot, err := p.engine.Capture(cacheprofile.Responses, raw); err == nil {
-		event.Snapshot = snapshot
-		event.ModelHash = snapshot.ModelHash
+	snapshot, captureErr := p.engine.Capture(cacheprofile.Responses, raw)
+	event.Snapshot = snapshot
+	event.ModelHash = snapshot.ModelHash
+	if snapshot.ModelHash != "" {
 		event.PartitionHash = p.partition(raw, nil)
+	}
+	if captureErr == nil || snapshot.ModelHash != "" {
 		event.Reason = "unknown_prefix"
 	} else {
 		event.Reason = "invalid_request"

@@ -29,11 +29,15 @@ func TestCacheProfilerWebSocketWorksWithoutPayloadDiagnostics(t *testing.T) {
 	defer p.Close()
 	headers := make(http.Header)
 	headers.Set("Session_id", "private-websocket-session")
-	for _, request := range []string{`{"type":"response.create","model":"gpt-6","input":[{"role":"user","content":"test"}]}`, `{"type":"response.create","model":"gpt-6","previous_response_id":"private-response","input":[]}`} {
+	for index, request := range []string{`{"type":"response.create","model":"gpt-6","input":[{"role":"user","content":"test"}]}`, `{"type":"response.create","model":"gpt-6","previous_response_id":"private-response","input":[]}`} {
 		ctx := withCacheProfile(context.Background(), p, headers)
 		ctx = withCodexTrace(ctx, nil, nil, CodexTraceStart{Transport: "websocket"})
 		emitCodexRawTracePayload(ctx, PayloadEvent{Direction: "downstream_request", Complete: true}, []byte(request))
-		emitCodexRawTracePayload(ctx, PayloadEvent{Direction: "upstream_response", AccountHint: "account:test", Complete: true}, []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":90},"output_tokens":4}}}`))
+		response := `{"type":"response.completed","response":{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":90},"output_tokens":4}}}`
+		if index == 1 {
+			response = `{"type":"response.completed","response":{"usage":{"input_tokens":200,"input_tokens_details":{"cached_tokens":20},"output_tokens":4}}}`
+		}
+		emitCodexRawTracePayload(ctx, PayloadEvent{Direction: "upstream_response", AccountHint: "account:test", Complete: true}, []byte(response))
 	}
 	events := readCacheProfileTestEvents(t, path)
 	if len(events) != 2 {
@@ -44,6 +48,9 @@ func TestCacheProfilerWebSocketWorksWithoutPayloadDiagnostics(t *testing.T) {
 	}
 	if events[1].Snapshot.Complete || events[1].Comparison != nil {
 		t.Fatalf("delta-only continuation claimed complete: %+v", events[1])
+	}
+	if events[1].ModelHash == "" || events[0].ModelHash != events[1].ModelHash || events[1].PartitionHash == "" || events[0].PartitionHash != events[1].PartitionHash || events[1].Reason != "unknown_prefix" || !events[1].CachedTokensDecreased {
+		t.Fatalf("opaque WebSocket identity/drop lost: %+v", events[1])
 	}
 }
 
@@ -102,6 +109,47 @@ func TestCacheProfilerHTTPPreservesWireAndRecordsUsage(t *testing.T) {
 	}
 	if info, err := os.Stat(path); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("permissions: %v %v", info, err)
+	}
+}
+
+func TestCacheProfilerOpaqueContinuationRetainsIdentityAndObservedDrop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.jsonl")
+	p, err := OpenCacheProfiler(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	count := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		count++
+		w.Header().Set("Content-Type", "application/json")
+		if count == 1 {
+			_, _ = io.WriteString(w, `{"usage":{"input_tokens":100,"output_tokens":1,"input_tokens_details":{"cached_tokens":90}}}`)
+		} else {
+			_, _ = io.WriteString(w, `{"usage":{"input_tokens":200,"output_tokens":1,"input_tokens_details":{"cached_tokens":20}}}`)
+		}
+	}))
+	defer server.Close()
+	client := p.WrapClient(server.Client())
+	for _, body := range []string{`{"model":"synthetic-model","input":[{"role":"user","content":"first"}]}`, `{"model":"synthetic-model","previous_response_id":"opaque-prior","input":[{"role":"user","content":"next"}]}`} {
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/responses", strings.NewReader(body))
+		req.Header.Set("Session_id", "synthetic-session")
+		req.Header.Set("Authorization", "Bearer synthetic-credential")
+		response, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = io.Copy(io.Discard, response.Body); err != nil {
+			t.Fatal(err)
+		}
+		_ = response.Body.Close()
+	}
+	events := readCacheProfileTestEvents(t, path)
+	if len(events) != 2 {
+		t.Fatalf("events=%d", len(events))
+	}
+	if events[1].ModelHash == "" || events[0].ModelHash != events[1].ModelHash || events[1].Snapshot.Complete || events[1].Comparison != nil || !events[1].CachedTokensDecreased || events[1].Reason != "unknown_prefix" {
+		t.Fatalf("opaque observation=%+v", events[1])
 	}
 }
 

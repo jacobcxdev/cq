@@ -201,7 +201,7 @@ func writeProxyCacheReport(output io.Writer, opts proxyCacheOptions, now time.Ti
 			return err
 		}
 	}
-	_, err = fmt.Fprintf(output, "Prefix changes: %d; cached-token decreases with stable prefix: %d\nPrefix comparisons measure bytes, not provider cache eligibility. Inspect with --events --json.\n", report.PrefixChanges, report.CachedTokenDecreases)
+	_, err = fmt.Fprintf(output, "Prefix changes: %d; observed cached-token decreases: %d\nPrefix comparisons measure bytes, not provider cache eligibility. Inspect with --events --json.\n", report.PrefixChanges, report.CachedTokenDecreases)
 	return err
 }
 

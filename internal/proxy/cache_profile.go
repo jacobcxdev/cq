@@ -234,10 +234,13 @@ func (t *cacheProfileTransport) RoundTrip(r *http.Request) (*http.Response, erro
 				if session, _ := r.Context().Value(cacheProfileSessionContextKey{}).(string); session == "" {
 					event.SessionHash = p.hash("session", cacheProfileRequestSession(r.Header, body))
 				}
-				if snapshot, err := p.engine.Capture(protocol, body); err == nil {
+				snapshot, captureErr := p.engine.Capture(protocol, body)
+				event.Snapshot = snapshot
+				event.ModelHash = snapshot.ModelHash
+				if snapshot.ModelHash != "" {
 					event.PartitionHash = p.partition(body, r.Header)
-					event.Snapshot = snapshot
-					event.ModelHash = snapshot.ModelHash
+				}
+				if captureErr == nil || snapshot.ModelHash != "" {
 					event.Reason = "unknown_prefix"
 				} else {
 					event.Reason = "invalid_request"
@@ -314,7 +317,7 @@ func (p *CacheProfiler) record(event CacheProfileEvent) {
 		event.Reason = "missing_session"
 	} else if event.AccountHash == "" {
 		event.Reason = "missing_account"
-	} else if event.Snapshot.Complete {
+	} else if event.ModelHash != "" {
 		if previous, ok := p.previous[event.SessionHash]; !ok {
 			event.Reason = "cold_start"
 		} else {
@@ -332,20 +335,24 @@ func (p *CacheProfiler) record(event CacheProfileEvent) {
 				event.Reason = "model_changed"
 			case previous.PartitionHash != event.PartitionHash:
 				event.Reason = "cache_partition_changed"
-			case !previous.Snapshot.Complete:
-				event.Reason = "unknown_prefix"
 			default:
-				comparison := cacheprofile.Compare(previous.Snapshot, event.Snapshot)
-				event.Comparison = &comparison
-				event.Reason = "prefix_changed"
-				if comparison.PrefixStable {
-					event.Reason = "stable_prefix"
+				// A numerical drop is observable even when the provider owns
+				// opaque history. It is a review flag, not proof of a regression.
+				event.CachedTokensDecreased = previous.Usage.Known && event.Usage.Known && event.Usage.CachedInputTokens < previous.Usage.CachedInputTokens
+				if !previous.Snapshot.Complete || !event.Snapshot.Complete {
+					event.Reason = "unknown_prefix"
+				} else {
+					comparison := cacheprofile.Compare(previous.Snapshot, event.Snapshot)
+					event.Comparison = &comparison
+					event.Reason = "prefix_changed"
+					if comparison.PrefixStable {
+						event.Reason = "stable_prefix"
+					}
 				}
-				event.CachedTokensDecreased = comparison.PrefixStable && previous.Usage.Known && event.Usage.Known && event.Usage.CachedInputTokens < previous.Usage.CachedInputTokens
 			}
 		}
 	}
-	if event.SessionHash != "" && event.AccountHash != "" && event.Outcome == "completed" && (event.StatusCode == 0 || event.StatusCode >= 200 && event.StatusCode < 300) {
+	if event.SessionHash != "" && event.AccountHash != "" && event.ModelHash != "" && event.Outcome == "completed" && (event.StatusCode == 0 || event.StatusCode >= 200 && event.StatusCode < 300) {
 		if _, ok := p.previous[event.SessionHash]; !ok {
 			if len(p.order) >= cacheProfileSessionLimit {
 				delete(p.previous, p.order[0])
