@@ -831,6 +831,9 @@ preserves the existing preference; `switch` changes only CQ's preference and doe
 not sign Grok Build or another native client into a different account.
 
 The provider reports included subscription usage and the actual reset period.
+The credits service can omit a zero-valued usage percentage. With a valid
+current period, CQ treats that omission as zero usage, matching Grok Build.
+Explicit null, malformed usage and missing or stale periods remain errors.
 Purchased credit, top-ups, public xAI API keys and monetary reporting are outside
 CQ's scope. Unknown plan capacity is excluded from weighted aggregates. New and
 legacy plan names are retained rather than assigned guessed multipliers.

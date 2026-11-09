@@ -76,10 +76,6 @@ func (p *Provider) fetchAccount(ctx context.Context, account Account, now time.T
 		}
 		return quota.ErrorResult("fetch_error", "Grok subscription quota request failed", 0)
 	}
-	result, err = parseQuota(body, now)
-	if err != nil {
-		return quota.ErrorResult("parse_error", "Grok included subscription quota unavailable", 0)
-	}
 	// The /user tier is an internal identifier (e.g. GrokPro). Follow the
 	// official client's account-scoped display name rather than guessing aliases.
 	// Optional presentation metadata must not hide otherwise usable quota.
@@ -90,6 +86,10 @@ func (p *Provider) fetchAccount(ctx context.Context, account Account, now time.T
 		if json.Unmarshal(settings, &display) == nil && validText(display.Plan, 256) && strings.TrimSpace(display.Plan) != "" {
 			account.Plan = display.Plan
 		}
+	}
+	result, err = parseQuota(body, now)
+	if err != nil {
+		return quota.ErrorResult("parse_error", "Grok included subscription quota unavailable", 0)
 	}
 	return result
 }
