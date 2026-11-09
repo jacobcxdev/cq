@@ -20,7 +20,13 @@ case "$1 $2" in
   'api repos/microsoft/winget-pkgs/contents/manifests/j/jacobcxdev/cq/0.48.0') echo '{"status":"404"}'; exit 1 ;;
   'pr list')
     if [[ -f "$root/existing" ]]; then jq '[.]' "$root/pr.json"; else echo '[]'; fi ;;
-  'api repos/jacobcxdev/winget-pkgs') echo '{"fork":true,"parent":{"full_name":"microsoft/winget-pkgs"},"owner":{"login":"jacobcxdev"}}' ;;
+  'api repos/jacobcxdev/winget-pkgs')
+    if [[ -f "$root/missing-fork" && ! -f "$root/fork-created" ]]; then echo '{"status":"404"}'; exit 1;
+    elif [[ -f "$root/fork-read-error" ]]; then echo '{"status":"403"}'; exit 1;
+    else echo '{"fork":true,"parent":{"full_name":"microsoft/winget-pkgs"},"owner":{"login":"jacobcxdev"}}'; fi ;;
+  'repo fork')
+    [[ "$3" == microsoft/winget-pkgs && "$4" == --clone=false && $# == 4 ]]
+    echo fork >>"$root/writes"; touch "$root/fork-created" ;;
   'api repos/jacobcxdev/winget-pkgs/git/ref/heads/master') echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
   'api repos/jacobcxdev/winget-pkgs/git/ref/heads/cq-0.48.0')
     if [[ -f "$root/existing" || -f "$root/committed" ]]; then
@@ -89,6 +95,18 @@ rm -f "$root/unexpected-diff" "$root/writes" "$root/branched" "$root/committed"
 bash "$script" "$root/manifests" >"$root/output"
 [[ "$(cat "$root/writes")" == $'branch\ncommit\npr' ]]
 jq -e '.variables.input.fileChanges.additions|length == 3' "$root/request.json" >/dev/null
+
+# Preserve first-time fork setup, after permission checks, and fail closed on
+# lookup errors which do not establish that the fork is absent.
+rm -f "$root/writes" "$root/branched" "$root/committed"
+touch "$root/fork-read-error"
+if bash "$script" "$root/manifests" >"$root/output" 2>"$root/error"; then exit 1; fi
+[[ ! -e "$root/writes" ]]
+rm "$root/fork-read-error"
+touch "$root/missing-fork"
+bash "$script" "$root/manifests" >"$root/output"
+[[ "$(cat "$root/writes")" == $'fork\nbranch\ncommit\npr' ]]
+rm "$root/missing-fork"
 
 # A crash after the signed commit can resume without another commit or ref write.
 rm "$root/writes"

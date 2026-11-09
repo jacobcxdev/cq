@@ -77,7 +77,11 @@ fi
 # No remote write occurs until the actual publication token can both assign the
 # requested user and add assignees. GitHub otherwise silently ignores assignment.
 bash "$scripts/check-winget-permissions.sh"
-gh api "repos/$fork" >"$temporary/fork.json"
+if ! gh api "repos/$fork" >"$temporary/fork.json" 2>/dev/null; then
+  jq -e '.status == "404"' "$temporary/fork.json" >/dev/null || { echo 'fork state could not be verified' >&2; exit 1; }
+  gh repo fork "$repository" --clone=false >/dev/null
+  gh api "repos/$fork" >"$temporary/fork.json"
+fi
 jq -e '.fork == true and .owner.login == "jacobcxdev" and .parent.full_name == "microsoft/winget-pkgs"' "$temporary/fork.json" >/dev/null
 base=$(gh api "repos/$fork/git/ref/heads/master" --jq .object.sha)
 [[ "$base" =~ ^[0-9a-f]{40}$ ]]
