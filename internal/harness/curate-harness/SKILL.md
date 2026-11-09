@@ -25,6 +25,11 @@ Use CQ's CLI; make task-specific choices without another MCP or model service.
    visible in this chat or temporarily enable everything to discover choices.
    Read `explain --chat current --project ROOT --json` for inheritance and model;
    supply `--model ID` when native model lookup is unavailable.
+   After capabilities are added, removed or updated for the task, re-read both
+   inventory and explain, then reassess the intended selection. Discovery alone
+   does not select capabilities. Keep the current binding when its selection
+   already matches the task; do not grow profiles automatically or poll for new
+   capabilities on every turn.
 5. Select relevant capabilities and available dependencies. A plugin-owned skill
    may require its plugin and expose coupled tools. Use exact stable inventory
    IDs. Plugins are bundles: selecting one includes its declared `mcp_servers`;
@@ -51,6 +56,13 @@ Use CQ's CLI; make task-specific choices without another MCP or model service.
    If no current receipt establishes the mode, report it as unconfirmed.
    Report unsupported controls, missing capabilities and
    dependency conflicts. Existing history/catalogue text stays intact.
+   A matching failed receipt is an application failure, separate from stale
+   selection. Inspect its stage/reason and address the underlying cause. If the
+   CLI and full-mode receipt support retry, request one attempt with
+   `retry --chat current --project ROOT`, adding the intended model only when
+   needed, then re-read explain. Pending work waits for native idle. If retry is
+   unsupported or the same failure persists, report that limit. Do not change
+   fingerprints or repeatedly bind an unchanged profile to force another attempt.
 
 Keep CQ's small curation entrypoint and native core tools available. Native child
 agents inherit parent capabilities; independent model-based changes before an
