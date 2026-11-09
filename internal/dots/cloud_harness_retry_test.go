@@ -139,6 +139,20 @@ func TestCloudHarnessFailedContextSwitchRetriedAttemptedContext(t *testing.T) {
 					t.Fatalf("failed receipt lost attempted or observed context: %#v", failed)
 				}
 				lease, before := thread.lease, len(*methods)
+				receiptPath := store.Dir + "/" + id + ".json"
+				receiptBytes, err := store.FS.ReadFile(receiptPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := store.FS.Remove(receiptPath); err != nil {
+					t.Fatal(err)
+				}
+				if err := h.reconcile(id, "", ""); err == nil || len(*methods) != before {
+					t.Fatal("missing failed receipt admitted native work")
+				}
+				if err := store.FS.WriteFile(receiptPath, receiptBytes, 0o600); err != nil {
+					t.Fatal(err)
+				}
 				for range 3 {
 					if err := h.reconcile(id, "", ""); err == nil || len(*methods) != before {
 						t.Fatal("failed context was retried or replaced without intent")
@@ -183,5 +197,57 @@ func TestCloudHarnessFailedContextSwitchRetriedAttemptedContext(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestCloudHarnessRetryPreservedLateNativeContext(t *testing.T) {
+	for _, observed := range []harness.ApplicationContext{{Model: "glm-current", Cwd: "/fixture"}, {Model: "glm-5.3", Cwd: "/current"}, {Model: "glm-current", Cwd: "/current"}} {
+		t.Run(observed.Model+observed.Cwd, func(t *testing.T) {
+			h, store, id, _ := cloudHarnessFailureFixture(t)
+			policy := harness.Policy{Version: 2, Enabled: true, Global: harness.Scope{All: harness.Binding{Changes: harness.Changes{Default: harness.Enabled}}, Models: map[string]harness.Binding{"glm-5.3-flash": {Changes: harness.Changes{Default: harness.Disabled}}}}}
+			h.b.deps.readHarnessPolicy = func() (harness.Policy, error) { return policy, nil }
+			h.b.deps.readHarnessInventory = func(string) (harness.Inventory, error) { return harness.Inventory{}, nil }
+			base, reject, change := h.b.local.input, true, false
+			changed, resumesAfterChange := false, 0
+			h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+				request := cloudHarnessObject(raw)
+				if reject && request.method() == "thread/resume" {
+					reject = false
+					h.calls[string(request["id"])] <- cloudMessage{"error": cloudHarnessRaw(map[string]any{"code": -32042})}
+					return len(raw), nil
+				}
+				if change && request.method() == "config/read" {
+					change = false
+					changed = true
+					cloudHarnessActual(h.threads[id], cloudMessage{"thread": cloudHarnessRaw(map[string]any{"id": id, "model": observed.Model, "cwd": observed.Cwd})})
+				}
+				if changed && request.method() == "thread/resume" {
+					resumesAfterChange++
+				}
+				return base.Write(raw)
+			}}
+			if err := h.reconcile(id, "glm-5.3-flash", ""); err == nil {
+				t.Fatal("expected fixture failure")
+			}
+			failed, err := store.Load(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.RequestRetry(id, harness.RetryRequest{Fingerprint: failed.Fingerprint, Model: "glm-5.3-flash", Cwd: "/fixture", FailedAt: failed.UpdatedAt}); err != nil {
+				t.Fatal(err)
+			}
+			baseline, lease := cloudHarnessClone(h.threads[id].baseline), h.threads[id].lease
+			change = true
+			if err := h.reconcile(id, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			current := h.threads[id]
+			if current.model != observed.Model || current.cwd != observed.Cwd || current.retryPending || resumesAfterChange != 0 {
+				t.Fatalf("stale retry changed late native context: model=%s project=%s pending=%t resumes=%d", current.model, current.cwd, current.retryPending, resumesAfterChange)
+			}
+			if !reflect.DeepEqual(current.baseline, baseline) || current.lease != lease {
+				t.Fatal("superseded retry changed baseline or ownership")
+			}
+		})
 	}
 }
