@@ -837,8 +837,8 @@ for the same verified user/principal type/principal/team, including when its sav
 account ID predates the current identity scheme. Different users, seats and teams
 remain separate even when their email or label matches. Borrowed credentials are never adopted,
 renewed, switched or removed. Cookies, public API keys and unverified bearer
-records produce a credential-free diagnostic and stay out of account lists and
-totals. A broken external source does not hide healthy CQ-owned accounts.
+records are silently excluded from account lists and totals. A broken external
+source does not hide healthy CQ-owned accounts.
 
 Model routing currently requires an explicit native Responses backend and known
 context in the authenticated catalogue. The adapter translates supported Codex
