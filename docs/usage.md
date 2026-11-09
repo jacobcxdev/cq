@@ -821,6 +821,10 @@ cq --json check grok
 cq models list --provider grok
 cq grok resets list
 cq grok resets list ACCOUNT
+cq grok prime status
+cq grok prime enable
+cq grok prime disable
+cq grok prime now
 ```
 
 Grok uses browser OAuth and the Grok Build subscription service. CQ stores its
@@ -838,6 +842,15 @@ The provider reports included subscription usage and the actual reset period.
 The credits service can omit a zero-valued usage percentage. With a valid
 current period, CQ treats that omission as zero usage, matching Grok Build.
 Explicit null, malformed usage and missing or stale periods remain errors.
+Optional Grok priming observes actual five-hour windows. It requires two
+unused-window observations whose reset moves with the clock before sending one
+minimal request through that account's native Responses model. Scheduled weekly
+and already-active windows are skipped. The dispatch journal suppresses repeated
+consumption after a crash or uncertain outcome. Automatic priming is opt-in and
+starts on the next CQ runtime launch after `cq grok prime enable`; `prime now`
+waits for a second observation when a dormant window needs confirmation.
+Current weekly-only plans are a
+no-op. This supports the existing quota schema, not arbitrary future changes.
 Purchased credit, top-ups, public xAI API keys and monetary reporting are outside
 CQ's scope. Unknown plan capacity is excluded from weighted aggregates. New and
 legacy plan names are retained rather than assigned guessed multipliers.

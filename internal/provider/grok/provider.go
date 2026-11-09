@@ -62,6 +62,7 @@ func (p *Provider) fetchAccount(ctx context.Context, account Account, now time.T
 	if account.ReportingOnly {
 		return quota.ErrorResult("not_configured", "Grok source requires a verified subscription login; run cq grok login", 0)
 	}
+	readStarted := time.Now()
 	body, err := readSubscriptionJSON(ctx, p.authority, account.ID, "/billing?format=credits")
 	if err != nil {
 		if errors.Is(err, ErrAuthExpired) {
@@ -87,7 +88,9 @@ func (p *Provider) fetchAccount(ctx context.Context, account Account, now time.T
 			account.Plan = display.Plan
 		}
 	}
-	result, err = parseQuota(body, now)
+	// The server can start a rolling period during this read. Preserve the
+	// caller's clock while validating against the completed observation time.
+	result, err = parseQuota(body, now.Add(time.Since(readStarted)))
 	if err != nil {
 		return quota.ErrorResult("parse_error", "Grok included subscription quota unavailable", 0)
 	}
