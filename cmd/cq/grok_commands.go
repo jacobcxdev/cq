@@ -31,6 +31,7 @@ type GrokCmd struct {
 	Accounts AccountsCmd      `cmd:"" help:"List Grok subscription accounts"`
 	Switch   GrokReferenceCmd `cmd:"" help:"Choose CQ's preferred Grok account"`
 	Remove   GrokReferenceCmd `cmd:"" help:"Remove a CQ-owned Grok login"`
+	Prime    GrokPrimeCmd     `cmd:"" help:"Prime confirmed dormant subscription windows"`
 	Resets   GrokResetsCmd    `cmd:"" help:"Inspect included-quota reset rewards"`
 }
 type GrokLoginCmd struct {

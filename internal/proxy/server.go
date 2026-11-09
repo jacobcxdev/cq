@@ -171,6 +171,7 @@ type Server struct {
 	// CodexPrimer is non-nil only in credential-coordinator owner process.
 	CodexPrimer       *CodexPrimer
 	ZAIPrimer         *ZAIPrimer
+	GrokPrimer        *GrokPrimer
 	ZAIResetScheduler *ZAIResetScheduler
 	// HeadroomMode is the resolved compression mode. Only meaningful when
 	// Headroom is non-nil. Reported in the /health response.
@@ -1039,6 +1040,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	primerConfigured := s.Config != nil && s.Config.CodexWindowPriming.Enabled
 	resp["codex_window_priming"] = s.CodexPrimer.Health(primerConfigured)
 	resp["zai_window_priming"] = s.ZAIPrimer.Health(s.Config != nil && s.Config.ZAIWindowPriming.Enabled)
+	resp["grok_window_priming"] = s.GrokPrimer.Health(s.Config != nil && s.Config.GrokWindowPriming.Enabled)
 	if s.ZAIResetScheduler != nil {
 		resp["zai_reset_schedule"] = s.ZAIResetScheduler.Health()
 	}

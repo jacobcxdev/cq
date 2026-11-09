@@ -295,9 +295,7 @@ func (p *CodexPrimer) dormantDue(account codex.AccountKey, target CodexPrimerTar
 	if !found {
 		return false, now.Add(probe)
 	}
-	shift := target.ResetAt.Sub(previous.ResetAt)
-	elapsed := now.Sub(previous.ObservedAt)
-	if shift > 0 && elapsed > 0 && absDuration(shift-elapsed) <= tolerance {
+	if movingPrimerReset(previous.ResetAt, previous.ObservedAt, target.ResetAt, now) {
 		delete(p.dormantSamples, key)
 		return true, time.Time{}
 	}

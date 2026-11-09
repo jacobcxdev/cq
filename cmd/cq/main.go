@@ -456,6 +456,9 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 	if strings.HasPrefix(ctx.Command(), "zai zcode ") {
 		return runZAIZCodeCommand(context.Background(), strings.TrimPrefix(ctx.Command(), "zai zcode "), cli.ZAI.ZCode, cli.JSON, defaultZCodeCommandDependencies())
 	}
+	if strings.HasPrefix(ctx.Command(), "grok prime ") {
+		return runGrokPrimeCommand(context.Background(), strings.TrimPrefix(ctx.Command(), "grok prime "), cli.JSON, defaultGrokPrimeDependencies())
+	}
 	if strings.HasPrefix(ctx.Command(), "zai prime ") {
 		return runZAIPrimeCommand(context.Background(), strings.TrimPrefix(ctx.Command(), "zai prime "), cli.JSON, defaultZAIPrimeDependencies())
 	}

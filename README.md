@@ -260,6 +260,10 @@ cq gemini accounts
 cq grok
 cq grok accounts
 cq grok login
+cq grok prime disable
+cq grok prime enable
+cq grok prime now
+cq grok prime status
 cq grok remove
 cq grok resets list
 cq grok switch

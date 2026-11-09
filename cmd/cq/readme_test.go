@@ -55,6 +55,7 @@ var commandDispatcherSpecs = []commandDispatcherSpec{
 	{"grok_commands.go", "runGrokCommand", "command", "grok"},
 	{"zai_zcode.go", "runZAIZCodeCommand", "command", "zai zcode"},
 	{"zai_priming.go", "runZAIPrimeCommand", "command", "zai prime"},
+	{"grok_priming.go", "runGrokPrimeCommand", "command", "grok prime"},
 	{"zai_resets.go", "runZAIResetsCommand", "command", "zai resets"},
 	{"zai_reset_schedule.go", "runZAIResetScheduleCommand", "command", "zai resets schedule"},
 	{"proxy.go", "runProxy", "args[0]", "proxy"},
