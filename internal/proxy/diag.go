@@ -52,6 +52,11 @@ type RouteEvent struct {
 	CallerContinuityMapped   *bool     `json:"caller_continuity_mapped,omitempty"`
 	CallerRoutingMapped      *bool     `json:"caller_routing_mapped,omitempty"`
 	CallerIndexEpoch         uint64    `json:"caller_index_epoch,omitempty"`
+
+	// UpstreamStatus is the actual upstream handshake response; StatusCode
+	// remains the downstream HTTP status (usually 101 for WebSockets).
+	UpstreamStatus int                        `json:"upstream_status,omitempty"`
+	UpstreamError  *CodexUpstreamErrorDetails `json:"upstream_error,omitempty"`
 }
 
 type routeDiagnosticsContextKey struct{}
@@ -69,6 +74,10 @@ type routeDiagnostics struct {
 }
 
 type codexObservationFields struct {
+	UpstreamHandshakeObserved bool
+	UpstreamStatus            int
+	UpstreamError             *CodexUpstreamErrorDetails
+
 	SessionKey               string
 	SessionSource            string
 	ThreadKey                string
@@ -123,6 +132,11 @@ func noteCodexObservation(ctx context.Context, fields codexObservationFields) {
 	}
 	diag.mu.Lock()
 	defer diag.mu.Unlock()
+	if fields.UpstreamHandshakeObserved {
+		diag.codex.UpstreamHandshakeObserved = true
+		diag.codex.UpstreamStatus = fields.UpstreamStatus
+		diag.codex.UpstreamError = fields.UpstreamError
+	}
 	if fields.SessionKey != "" {
 		diag.codex.SessionKey = fields.SessionKey
 		diag.codex.SessionSource = fields.SessionSource
@@ -259,6 +273,8 @@ func (event *RouteEvent) applyRouteDiagnostics(diag *routeDiagnostics) {
 		event.SessionKey = codex.SessionKey
 		event.SessionSource = codex.SessionSource
 	}
+	event.UpstreamStatus = codex.UpstreamStatus
+	event.UpstreamError = codex.UpstreamError
 	event.ThreadKey = codex.ThreadKey
 	event.TurnHint = codex.TurnHint
 	event.RequestKind = codex.RequestKind
@@ -833,6 +849,9 @@ func (w *DiagnosticsWriter) WriteTrace(event CodexTraceEvent) error {
 	if w == nil || w.w == nil {
 		return nil
 	}
+	if !safeCodexUpstreamErrorDetails(event.UpstreamError) {
+		return ErrUnsafeCodexDiagnostics
+	}
 	return w.w.encode(event)
 }
 
@@ -849,7 +868,8 @@ func rejectUnsafeCodexDiagnostics(event RouteEvent, recorder *CodexCanaryRecorde
 }
 
 func safeCodexRouteEvent(event RouteEvent) bool {
-	return safeCodexTraceIdentifier(event.TraceID, "trace") &&
+	return safeCodexUpstreamErrorDetails(event.UpstreamError) &&
+		safeCodexTraceIdentifier(event.TraceID, "trace") &&
 		safeCodexTraceIdentifier(event.ConnectionID, "connection") &&
 		safeCodexDiagnosticsMethod(event.Method) &&
 		safeCodexRouteKind(event.RouteKind) &&
