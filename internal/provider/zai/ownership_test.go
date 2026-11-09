@@ -97,8 +97,12 @@ func TestVerifiedOwnershipUpgradeRemovedOnlyMatchingOwnedKeyAndSuppressedExterna
 		t.Fatal(err)
 	}
 	got, err = ReadAccounts(fs, noEnvironment, "/config")
-	if err != nil || len(got) != 2 {
-		t.Fatal("borrowed key not restored after OAuth removal")
+	if err != nil || len(got) != 1 || got[0].APIKey != "different.secret" {
+		t.Fatal("unresolved borrowed key entered inventory after OAuth removal")
+	}
+	candidates, err := ReadAPIKeyCandidates(fs, noEnvironment, "/config")
+	if err != nil || len(candidates) != 2 || candidates[1].APIKey != "key-id.secret" || candidates[1].Source != "codexbar" {
+		t.Fatal("borrowed source lost after OAuth removal")
 	}
 }
 

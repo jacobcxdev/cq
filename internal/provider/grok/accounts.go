@@ -61,6 +61,30 @@ func accountID(a Account) AccountID {
 	h := sha256.Sum256([]byte("grok\x00" + a.UserID + "\x00" + a.PrincipalType + "\x00" + a.PrincipalID + "\x00" + a.TeamID))
 	return AccountID("grok_" + hex.EncodeToString(h[:16]))
 }
+
+// subscriptionAccounts excludes unverified sources and collapses aliases of
+// one user/principal/seat. Keep the first account's public ID and preference.
+func subscriptionAccounts(accounts []Account) []Account {
+	unique := make([]Account, 0, len(accounts))
+	seenIDs := make(map[AccountID]bool, len(accounts))
+	seenIdentities := make(map[AccountID]bool, len(accounts))
+	for _, account := range accounts {
+		if account.ID == "" || account.ReportingOnly || account.Source == "codexbar" && (!validAccount(account) || account.Plan == "" || strings.EqualFold(account.Plan, "free")) {
+			continue
+		}
+		identity := account.ID
+		if account.UserID != "" {
+			identity = accountID(account)
+		}
+		if seenIDs[account.ID] || seenIdentities[identity] {
+			continue
+		}
+		seenIDs[account.ID], seenIdentities[identity] = true, true
+		unique = append(unique, account)
+	}
+	return unique
+}
+
 func validText(s string, n int) bool {
 	return len(s) <= n && !strings.ContainsFunc(s, unicode.IsControl)
 }

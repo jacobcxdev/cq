@@ -112,7 +112,7 @@ func runZAIOAuthLogin(ctx context.Context, options ZAILoginCmd, dir string, json
 		}
 		return deps.getenv(name)
 	}
-	accounts, proofErr := zaiprov.ReadAccounts(deps.fs, discoveryEnv, dir)
+	accounts, proofErr := zaiprov.ReadAPIKeyCandidates(deps.fs, discoveryEnv, dir)
 	var proof zaiprov.VerifiedAPIKeyOwnership
 	if proofErr == nil {
 		proof, proofErr = zaiprov.VerifyAPIKeyOwnership(ctx, deps.client, session, accounts)

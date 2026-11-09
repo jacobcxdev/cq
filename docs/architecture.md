@@ -280,11 +280,15 @@ without repeating its exchange; an attempted exchange without a durable result
 is indeterminate. Fresh login generations supersede old retained operations.
 
 `internal/provider/codexbar` reads provider-scoped external configuration. Grok
-verifies borrowed bearer identities before exposing usable accounts. Z.ai browser
-login verifies exact subscription keys through authenticated personal-project
-reads before replacing a CQ key with OAuth. The OAuth record retains only opaque
-key aliases, allowing discovery to suppress matching borrowed keys without
-changing their source. External sources never gain CQ renewal ownership.
+verifies borrowed bearer identities before exposing usable accounts and deduplicates
+by user, principal type, principal and team rather than a stored account ID. Z.ai
+browser login verifies exact subscription keys through authenticated personal-project
+reads before replacing a CQ key with OAuth. Reporting refresh and account listing
+also backfill opaque key aliases for existing browser logins without replacing
+credentials or changing routes and logical preference. Request-time Z.ai discovery
+stays local. Unresolved external sources contribute no accounts or quota capacity;
+matching labels, email, key prefixes or quota values never prove ownership.
+External sources remain unchanged and never gain CQ renewal ownership.
 
 Grok quota/model providers join the existing report and catalogue pipelines.
 Registry sources distinguish no configured accounts from successful empty model

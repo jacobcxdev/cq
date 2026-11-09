@@ -267,22 +267,28 @@ See [Z.ai's Codex setup](https://docs.z.ai/devpack/tool/codex) for the supported
 
 CQ also reads personal/global Z.ai Coding Plan keys configured in CodexBar.
 `ZAI_API_KEY` selects only its corresponding account, preferring a saved OAuth
-account when exact ownership was previously verified. Otherwise CQ-owned entries
-precede borrowed entries; exact duplicate keys keep CQ ownership. Borrowed
-credentials never enter CQ's write/removal paths, and their source is shown by
-`cq zai accounts`.
+account when exact ownership was previously verified. Borrowed keys are identity
+verification candidates, not independent accounts. Unresolved sources stay out
+of account lists, quota totals, priming and routing; a credential-free diagnostic
+reports incomplete verification. Explicit CQ-owned API-key logins remain usable.
+Borrowed credentials never enter CQ's write/removal paths.
 
 Browser login verifies existing subscription keys against the OAuth account's
 personal projects. A full key match replaces the CQ-owned key with OAuth and
 records an opaque alias to suppress any borrowed duplicate. CodexBar's key stays
-in CodexBar. This reconciliation runs during explicit browser login; existing
-OAuth accounts gain aliases on their next login. Removing the OAuth login makes
-borrowed keys visible again. A later login with an already verified key retains
-the OAuth account.
+in CodexBar. Existing browser logins also gain aliases during quota refresh and
+`cq zai accounts`, without signing in again. These refreshes append aliases only;
+they preserve saved credentials, routes and logical account preference. Known
+aliases need no further identity reads. Request-time account discovery stays
+local and read-only. Removing the OAuth login leaves its borrowed keys unresolved
+and excluded. A later login with an already verified key retains the OAuth account.
+Paid Coding Plan and Start Plan are separate quota pools. A paid API key never
+collapses into a `zcode-start` login or changes its selected billing route.
 
 If ownership reads fail, CQ saves the browser login, preserves existing keys and
-reports the limitation. Ambiguous keys and keys belonging to different accounts
-remain separate. CQ does not delete keys by matching a label,
+reports the limitation. Ambiguous CQ-owned keys and keys belonging to different
+accounts remain separate; unresolved external keys are excluded. CQ does not
+deduplicate or delete keys by matching a label,
 email or key prefix. Explicit local key cleanup remains available through the
 existing `cq zai remove --api-keys` command after a saved browser login; it is
 not an automatic same-account upgrade and never modifies CodexBar.
@@ -827,11 +833,12 @@ is not treated as exhausted merely because of display rounding.
 
 CodexBar's configured Grok bearer credentials are discovered dynamically and
 verified against the subscription profile. A CQ-owned OAuth login takes priority
-for the same verified user/principal/team. Borrowed credentials are never adopted,
+for the same verified user/principal type/principal/team, including when its saved
+account ID predates the current identity scheme. Different users, seats and teams
+remain separate even when their email or label matches. Borrowed credentials are never adopted,
 renewed, switched or removed. Cookies, public API keys and unverified bearer
-records remain visible as unavailable sources; they are not silently promoted to
-subscription inference. A broken external source is shown separately and does
-not hide healthy CQ-owned accounts.
+records produce a credential-free diagnostic and stay out of account lists and
+totals. A broken external source does not hide healthy CQ-owned accounts.
 
 Model routing currently requires an explicit native Responses backend and known
 context in the authenticated catalogue. The adapter translates supported Codex

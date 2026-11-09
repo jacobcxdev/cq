@@ -52,10 +52,35 @@ func ReadAPIKey(fsys fsutil.FileSystem, env func(string) string, configDir strin
 	return accounts[0].APIKey, nil
 }
 
-// ReadAccounts reads subscriptions in preferred-account order. An environment
-// key selects its verified OAuth account when available; otherwise it overrides
-// stored accounts. This path never discovers external credentials or writes.
+// ReadAccounts reads usable accounts in preferred order without HTTP or writes.
+// An environment key selects its verified OAuth account when available;
+// otherwise it overrides stored accounts. Unresolved borrowed credentials are
+// candidates for ownership verification, not independent subscription capacity.
 func ReadAccounts(fsys fsutil.FileSystem, env func(string) string, configDir string) ([]Account, error) {
+	accounts, err := readAccountSources(fsys, env, configDir)
+	if err != nil {
+		return nil, err
+	}
+	return usableAccounts(accounts), nil
+}
+
+// ReadAPIKeyCandidates supplies local credentials only for exact ownership
+// verification. The result must not be used as an account or routing inventory.
+func ReadAPIKeyCandidates(fsys fsutil.FileSystem, env func(string) string, configDir string) ([]Account, error) {
+	return readAccountSources(fsys, env, configDir)
+}
+
+func usableAccounts(accounts []Account) []Account {
+	usable := make([]Account, 0, len(accounts))
+	for _, account := range accounts {
+		if account.Source != "codexbar" {
+			usable = append(usable, account)
+		}
+	}
+	return usable
+}
+
+func readAccountSources(fsys fsutil.FileSystem, env func(string) string, configDir string) ([]Account, error) {
 	accounts, err := readOwnedAccounts(fsys, env, configDir)
 	if err != nil {
 		return accounts, err
@@ -64,7 +89,7 @@ func ReadAccounts(fsys fsutil.FileSystem, env func(string) string, configDir str
 		owned, readErr := readOwnedAccounts(fsys, func(string) string { return "" }, configDir)
 		if readErr == nil {
 			for _, account := range owned {
-				if account.OAuth != nil && containsAlias(account.verifiedAPIKeyIDs, accounts[0].ID) {
+				if account.OAuth != nil && account.Transport != "zcode-start" && containsAlias(account.verifiedAPIKeyIDs, accounts[0].ID) {
 					return []Account{account}, nil
 				}
 			}
@@ -255,10 +280,16 @@ func StoreVerifiedZCodeAccount(fsys fsutil.FileSystem, configDir string, session
 	}
 	account := newZCodeAccount(session)
 	account.verifiedAPIKeyIDs = append([]string(nil), proof.keyIDs...)
+	for _, existing := range accounts {
+		if existing.ID == account.ID {
+			account.Transport = existing.Transport
+			break
+		}
+	}
 	filtered := accounts[:0]
 	replacementIndex := -1
 	for _, existing := range accounts {
-		remove := existing.OAuth == nil && containsAlias(proof.keyIDs, existing.ID)
+		remove := account.Transport != "zcode-start" && existing.OAuth == nil && containsAlias(proof.keyIDs, existing.ID)
 		if remove && replacementIndex < 0 {
 			replacementIndex = len(filtered)
 		}
@@ -271,7 +302,6 @@ func StoreVerifiedZCodeAccount(fsys fsutil.FileSystem, configDir string, session
 	for i, existing := range accounts {
 		if existing.ID == account.ID {
 			index = i
-			account.Transport = existing.Transport
 			for _, id := range existing.verifiedAPIKeyIDs {
 				if !containsAlias(account.verifiedAPIKeyIDs, id) {
 					account.verifiedAPIKeyIDs = append(account.verifiedAPIKeyIDs, id)
@@ -319,7 +349,7 @@ func StoreAccount(fsys fsutil.FileSystem, configDir, key, label string, activate
 	}
 	account := newAccount(key, label)
 	for i, existing := range accounts {
-		if existing.OAuth != nil && containsAlias(existing.verifiedAPIKeyIDs, account.ID) {
+		if existing.OAuth != nil && existing.Transport != "zcode-start" && containsAlias(existing.verifiedAPIKeyIDs, account.ID) {
 			if activate && i > 0 {
 				copy(accounts[1:i+1], accounts[:i])
 				accounts[0] = existing
@@ -512,17 +542,22 @@ func containsAlias(aliases []string, id string) bool {
 }
 
 func preferVerifiedOAuth(accounts []Account) []Account {
-	aliases := map[string]bool{}
+	aliases := map[string]Account{}
 	for _, a := range accounts {
-		if a.OAuth != nil {
+		if a.OAuth != nil && a.Transport != "zcode-start" {
 			for _, id := range a.verifiedAPIKeyIDs {
-				aliases[id] = true
+				aliases[id] = a
 			}
 		}
 	}
-	out := accounts[:0]
+	out := make([]Account, 0, len(accounts))
+	seen := map[string]bool{}
 	for _, a := range accounts {
-		if a.OAuth != nil || !aliases[a.ID] {
+		if owner, ok := aliases[a.ID]; a.OAuth == nil && ok {
+			a = owner
+		}
+		if !seen[a.ID] {
+			seen[a.ID] = true
 			out = append(out, a)
 		}
 	}

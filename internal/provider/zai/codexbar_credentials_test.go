@@ -19,7 +19,7 @@ func TestBrokenCodexBarPreservesOwnedZAIAvailability(t *testing.T) {
 		t.Fatal(err)
 	}
 	accounts, err := ReadAccounts(fs, noEnvironment, "/config")
-	if err != nil || len(accounts) != 2 || accounts[0].APIKey != "owned-key" || accounts[1].Source != "codexbar" || accounts[1].APIKey != "" {
+	if err != nil || len(accounts) != 1 || accounts[0].APIKey != "owned-key" {
 		t.Fatalf("healthy account or source diagnostic lost: %d accounts, %v", len(accounts), err)
 	}
 }
@@ -36,13 +36,13 @@ func TestInvalidCodexBarRecordPreservesOwnedZAIAvailability(t *testing.T) {
 			t.Fatal(err)
 		}
 		accounts, err := ReadAccounts(fs, noEnvironment, "/config")
-		if err != nil || len(accounts) != 2 || accounts[0].APIKey != "owned-key" || accounts[1].Source != "codexbar" || accounts[1].APIKey != "" {
+		if err != nil || len(accounts) != 1 || accounts[0].APIKey != "owned-key" {
 			t.Fatalf("healthy account or invalid-source diagnostic lost: %d accounts, %v", len(accounts), err)
 		}
 	}
 }
 
-func TestReadAccountsIncludesBorrowedCodexBarWithoutAdoption(t *testing.T) {
+func TestReadAccountsExcludedUnverifiedCodexBarWithoutAdoption(t *testing.T) {
 	fs := fsutil.NewMemFS()
 	home, err := fs.UserHomeDir()
 	if err != nil {
@@ -57,13 +57,13 @@ func TestReadAccountsIncludesBorrowedCodexBarWithoutAdoption(t *testing.T) {
 		t.Fatal(err)
 	}
 	accounts, err := ReadAccounts(fs, noEnvironment, "/config")
-	if err != nil || len(accounts) != 2 || accounts[0].APIKey != "external-two" || accounts[0].Source != "codexbar" {
+	if err != nil || len(accounts) != 0 {
 		t.Fatalf("count=%d err=%v", len(accounts), err)
 	}
-	if err := SetActiveAccount(fs, "/config", accounts[0].ID); err == nil {
+	if err := SetActiveAccount(fs, "/config", "Second"); err == nil {
 		t.Fatal("borrowed account activated through owned store")
 	}
-	if err := RemoveAccount(fs, "/config", accounts[0].ID); err == nil {
+	if err := RemoveAccount(fs, "/config", "Second"); err == nil {
 		t.Fatal("borrowed account removed through owned store")
 	}
 	if _, err := StoreAccount(fs, "/config", "owned", "CQ", true); err != nil {
@@ -81,7 +81,7 @@ func TestReadAccountsIncludesBorrowedCodexBarWithoutAdoption(t *testing.T) {
 		t.Fatal("CodexBar source changed")
 	}
 	accounts, err = ReadAccounts(fs, noEnvironment, "/config")
-	if err != nil || len(accounts) != 3 || accounts[0].APIKey != "owned" {
+	if err != nil || len(accounts) != 1 || accounts[0].APIKey != "owned" {
 		t.Fatal("CQ preference not preserved")
 	}
 	public, _ := json.Marshal(accounts)

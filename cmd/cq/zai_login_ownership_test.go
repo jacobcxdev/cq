@@ -88,3 +88,45 @@ func TestZAILoginPreservedKeysWhenOwnershipUnavailable(t *testing.T) {
 		t.Fatal("missing safe ownership warning")
 	}
 }
+
+func TestZAIAccountsBackfilledExistingBrowserLogin(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	if _, err := zaiprov.StoreAccount(fsys, "/config", "key-id.secret", "legacy", false); err != nil {
+		t.Fatal(err)
+	}
+	oauth, err := zaiprov.StoreZCodeAccount(fsys, "/config", zcode.LoginSession{UserID: "user-one", ZCodeJWT: "zcode-private", RawOAuth: "oauth-private", BusinessJWT: "business-private"}, "browser", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	deps := zaiTestDependencies(fsys, &out)
+	reads := 0
+	deps.client = zaiCommandDoer(func(r *http.Request) (*http.Response, error) {
+		reads++
+		if r.Method != http.MethodGet {
+			t.Fatal("account listing changed provider state")
+		}
+		var data string
+		switch r.URL.Path {
+		case "/api/biz/customer/getCustomerInfo":
+			data = `{"organizations":[{"organizationId":"org","projects":[{"projectId":"personal","projectType":1}]}]}`
+		case "/api/biz/v1/organization/org/projects/personal/api_keys":
+			data = `[{"apiKey":"key-id"}]`
+		case "/api/biz/v1/organization/org/projects/personal/api_keys/copy/key-id":
+			data = `{"secretKey":"secret"}`
+		default:
+			t.Fatalf("unexpected identity request %s", r.URL.Path)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(`{"code":200,"data":` + data + `}`)), Header: make(http.Header)}, nil
+	})
+	if err := runZAICommand(t.Context(), "accounts", ZAICmd{}, true, deps); err != nil {
+		t.Fatal(err)
+	}
+	if reads != 3 || strings.Count(out.String(), `"id":`) != 1 || !strings.Contains(out.String(), oauth.ID) {
+		t.Fatalf("existing browser login not backfilled: reads=%d output=%s", reads, out.String())
+	}
+	stored, _ := fsys.ReadFile("/config/zai.json")
+	if !bytes.Contains(stored, []byte("key-id.secret")) {
+		t.Fatal("reporting removed existing owned credentials")
+	}
+}
