@@ -85,6 +85,26 @@ func TestReceiptAcceptsLifecycleStatesAndFullMode(t *testing.T) {
 	}
 }
 
+func TestReceiptRejectedUnclassifiedFailureData(t *testing.T) {
+	for name, alter := range map[string]func(*ApplicationFailure){
+		"stage":                   func(failure *ApplicationFailure) { failure.Stage = "native-secret" },
+		"reason":                  func(failure *ApplicationFailure) { failure.Reason = "native-secret" },
+		"rollback":                func(failure *ApplicationFailure) { failure.Rollback = "unknown" },
+		"rollback detail":         func(failure *ApplicationFailure) { failure.RollbackStage = "resume" },
+		"missing rollback detail": func(failure *ApplicationFailure) { failure.Rollback = "failed" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			receipt := receiptFixture()
+			receipt.State = "failed"
+			receipt.Failure = &ApplicationFailure{Stage: "resume", Reason: "rpc_rejected", Rollback: "restored"}
+			alter(receipt.Failure)
+			if err := (Receipts{FS: fsutil.NewMemFS(), Dir: "/state/receipts"}).Save(receipt); err == nil {
+				t.Fatal("unclassified failure detail accepted")
+			}
+		})
+	}
+}
+
 func TestReceiptRejectsInvalidValuesBeforeCreatingState(t *testing.T) {
 	for name, alter := range map[string]func(*Receipt){
 		"future version":        func(receipt *Receipt) { receipt.Version = 2 },

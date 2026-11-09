@@ -356,12 +356,25 @@ cq codex harness profile show minimal
 cq codex harness profile save review --file review-definition.json
 cq codex harness bind minimal review --chat current
 cq codex harness explain --chat current --project /path/to/project --json
+cq codex harness retry --chat current --project /path/to/project
 cq codex harness unbind --chat current
 ```
 
 Definitions contain a description and `changes`, using `enabled`, `disabled` or `inherit` decisions keyed by stable IDs from `inventory`. `plugins`, `mcp` and `skills` each accept an ID-to-decision map; `"*"` supplies a per-kind default. `changes.default` applies to all kinds. `minimal` disables optional capabilities by default, while `full` restores native baseline choices. Multiple profile names apply in the given order. Saving or copying a definition does not bind it or enable policy. Existing names require explicit `--replace`; built-in `full` and `minimal` cannot be overwritten.
 
 Bindings support every model. `--scope chat` is the default; `--scope project` writes `<project>/.cq/harness.json`, and `--scope global` writes CQ's private user policy. `--model` accepts an exact ID or a family with one trailing wildcard, such as `glm-*`; omit it for all models. Rules apply from global all-model and model-specific rules, through project ancestry, then chat all-model and model-specific rules. `inherit` preserves the previous decision. A first binding enables a fresh policy and requests application for a known chat after saving. Chat and project bindings preserve a disabled policy that already contains rules, saving as pending with `policy_disabled`; use `enable` or an explicit global binding to activate it. Application errors also retain the saved binding and report pending. `--chat current` uses only a validated `CODEX_THREAD_ID`; it does not search session files or chat history. `explain` reads the selected chat's model when `--model` is omitted, reports decision layers and current application status, and keeps the last application receipt separate as an audit record.
+
+`retry` requests one new attempt for a matching failed full-mode receipt whose
+current owner advertises retry support. An older full-mode owner must be updated
+before retry intent can be saved. It
+requires the same chat, project, model and effective profile fingerprint. It
+does not rebind the profile, take the launcher's lease or interrupt a turn.
+Intent is stored beside the chat's private receipt; shared policy stays unchanged
+so older controllers for other chats remain compatible.
+The existing full controller consumes the request at its next idle boundary;
+duplicate requests for the same failure reuse their nonce. Pending, partial,
+successful, stale and plugin-only receipts are refused. Re-read `explain` for
+application proof; a saved retry request alone does not establish tool visibility.
 
 Profiles can be shared without installation paths:
 

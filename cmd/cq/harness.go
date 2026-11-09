@@ -25,6 +25,7 @@ type CodexHarnessCmd struct {
 	Bind      CodexHarnessBindCmd      `cmd:"" help:"Bind profiles and apply them to a known chat"`
 	Unbind    CodexHarnessUnbindCmd    `cmd:"" help:"Remove a binding and restore inherited decisions"`
 	Explain   CodexHarnessExplainCmd   `cmd:"" help:"Explain effective decisions, layers and last application"`
+	Retry     CodexHarnessExplainCmd   `cmd:"" help:"Request one idle-boundary retry of a matching failed full-mode application"`
 	Export    CodexHarnessExportCmd    `cmd:"" help:"Export a portable named profile as JSON"`
 	Import    CodexHarnessImportCmd    `cmd:"" help:"Import a portable profile without binding or activating it"`
 	Skill     CodexHarnessSkillCmd     `cmd:"" help:"Install CQ curation skill"`
@@ -58,6 +59,7 @@ type codexHarnessRunner struct {
 	fs               fsutil.FileSystem
 	path             func() (string, error)
 	receipt          func(string) (harness.Receipt, error)
+	requestRetry     func(string, harness.RetryRequest) (harness.RetryRequest, error)
 	snapshot         func(context.Context, string) (harness.Inventory, error)
 	apply            func(context.Context, string) error
 	readModel        func(context.Context, string) (harness.Snapshot, error)
@@ -86,6 +88,13 @@ func defaultCodexHarnessRunner() codexHarnessRunner {
 			}
 			return (harness.Receipts{FS: fsutil.OSFileSystem{}, Dir: filepath.Join(roots.State, "harness")}).Load(chatID)
 		},
+		requestRetry: func(chatID string, request harness.RetryRequest) (harness.RetryRequest, error) {
+			roots, err := userdirs.Default()
+			if err != nil {
+				return harness.RetryRequest{}, err
+			}
+			return (harness.Receipts{FS: fsutil.OSFileSystem{}, Dir: filepath.Join(roots.State, "harness")}).RequestRetry(chatID, request)
+		},
 		path: func() (string, error) {
 			roots, err := userdirs.Default()
 			if err != nil {
@@ -102,7 +111,7 @@ func (runner codexHarnessRunner) execute(operation string, cmd CodexHarnessCmd, 
 	if strings.HasPrefix(operation, "skill ") {
 		return runHarnessSkillCommand(operation, cmd, jsonOutput, output)
 	}
-	if operation == "inventory" || strings.HasPrefix(operation, "profile ") || operation == "bind <profiles>" || operation == "unbind" || operation == "explain" || operation == "export <name>" || operation == "import" {
+	if operation == "inventory" || strings.HasPrefix(operation, "profile ") || operation == "bind <profiles>" || operation == "unbind" || operation == "explain" || operation == "retry" || operation == "export <name>" || operation == "import" {
 		return runner.executeProfiles(operation, cmd, jsonOutput, output)
 	}
 	var update func(*harness.Policy) error

@@ -140,6 +140,8 @@ func (runner codexHarnessRunner) executeProfiles(operation string, cmd CodexHarn
 		return runner.harnessBinding(ctx, cmd.Unbind.HarnessBindingSelector, nil, true, jsonOutput, output)
 	case "explain":
 		return runner.harnessExplain(ctx, cmd.Explain, jsonOutput, output)
+	case "retry":
+		return runner.harnessRetry(ctx, cmd.Retry, jsonOutput, output)
 	default:
 		return fmt.Errorf("unknown harness profile operation: %s", operation)
 	}
