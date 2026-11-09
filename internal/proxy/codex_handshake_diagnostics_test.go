@@ -9,11 +9,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 
-	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 func handshakeRouteEvent(t *testing.T, response *http.Response, body []byte) map[string]any {
