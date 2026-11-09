@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -213,5 +214,22 @@ func TestFetchRetainsDisplayNameWhenQuotaCannotBeParsed(t *testing.T) {
 	results, err := New(a).Fetch(t.Context(), quotaNow())
 	if err != nil || len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "parse_error" || results[0].Plan != "SuperGrok" {
 		t.Fatalf("quota error lost readable plan: %#v, %v", results, err)
+	}
+}
+
+func TestFetchAcceptsPeriodStartedDuringQuotaRead(t *testing.T) {
+	now := quotaNow()
+	a := fakeAuthority{accounts: []Account{{ID: "a", Plan: "SuperGrok"}}, do: func(_ context.Context, _ AccountID, request *http.Request) (*http.Response, error) {
+		body := `{}`
+		if request.URL.Path == "/v1/billing" {
+			start := now.Add(20 * time.Millisecond)
+			time.Sleep(50 * time.Millisecond)
+			body = fmt.Sprintf(`{"config":{"currentPeriod":{"start":%q,"end":%q}}}`, start.Format(time.RFC3339Nano), start.Add(5*time.Hour).Format(time.RFC3339Nano))
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}}
+	results, err := New(a).Fetch(t.Context(), now)
+	if err != nil || len(results) != 1 || !results[0].IsUsable() {
+		t.Fatalf("fresh server period rejected: %#v, %v", results, err)
 	}
 }

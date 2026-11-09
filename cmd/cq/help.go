@@ -48,6 +48,7 @@ Commands:
   grok switch       Choose CQ's preferred account
   grok remove       Remove a CQ-owned login
   grok resets list  Read reset reward inventory without consuming it
+  grok prime        Inspect, configure or run dormant-window priming
 
 Verified OAuth identity takes priority over duplicate borrowed credentials.
 CodexBar accounts remain owned by CodexBar. Unverified cookies are reported as

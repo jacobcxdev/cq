@@ -1385,9 +1385,29 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		grokClient = cacheProfiler.WrapClient(grokClient)
 		zaiTransport = cacheProfiler.WrapTransport(nil)
 	}
+	grokAuthority := grokReadAuthority(fsys, roots.Config, grokClient, os.Getenv, homeDir)
+	grokPrimer, err := buildGrokPrimer(cfg, roots, fsys, grokAuthority)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cq: Grok window primer unavailable; automatic priming disabled")
+	}
+	if grokPrimer != nil {
+		grokPrimer.OnError = func(error) { fmt.Fprintln(os.Stderr, "cq: Grok window priming failed; inspect cq grok prime status") }
+		grokPrimerDone := make(chan struct{})
+		go func() {
+			defer close(grokPrimerDone)
+			defer func() {
+				if recover() != nil {
+					fmt.Fprintln(os.Stderr, "cq: Grok window primer panic")
+				}
+			}()
+			_ = grokPrimer.Run(proxyCtx)
+		}()
+		defer func() { proxyCancel(); <-grokPrimerDone }()
+	}
 	srv := &proxy.Server{
 		HarnessObserver: harnessObserver,
-		GrokAuthority:   grokReadAuthority(fsys, roots.Config, grokClient, os.Getenv, homeDir),
+		GrokAuthority:   grokAuthority,
+		GrokPrimer:      grokPrimer,
 		Config:          cfg,
 		Selector:        selector,
 		Discover:        discover,

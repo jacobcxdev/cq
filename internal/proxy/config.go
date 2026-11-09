@@ -23,6 +23,10 @@ type CodexWindowPrimingConfig struct {
 	ModelOverrides map[string]string `json:"model_overrides,omitempty"`
 }
 
+type GrokWindowPrimingConfig struct {
+	Enabled bool `json:"enabled"`
+}
+
 type ZAIWindowPrimingConfig struct {
 	Enabled bool `json:"enabled"`
 }
@@ -120,6 +124,7 @@ type Config struct {
 	ProxyResilienceStateDir       string                   `json:"proxy_resilience_state_dir,omitempty"`
 	CodexWindowPriming            CodexWindowPrimingConfig `json:"codex_window_priming,omitempty"`
 	ZAIWindowPriming              ZAIWindowPrimingConfig   `json:"zai_window_priming,omitempty"`
+	GrokWindowPriming             GrokWindowPrimingConfig  `json:"grok_window_priming,omitempty"`
 
 	unknownFields map[string]json.RawMessage
 }
@@ -140,6 +145,7 @@ var configKnownFields = map[string]bool{
 	"proxy_resilience_state_dir":        true,
 	"codex_window_priming":              true,
 	"zai_window_priming":                true,
+	"grok_window_priming":               true,
 }
 
 // UnmarshalJSON retains fields unknown to this build for N/N-1 safe writes.
