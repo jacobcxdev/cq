@@ -140,7 +140,7 @@ func TestCodexBarGrokDeduplicatesVerifiedIdentityWithoutMergingSeats(t *testing.
 	}
 }
 
-func TestCodexBarGrokUnverifiedSourcesEmitOneNonAccountDiagnostic(t *testing.T) {
+func TestCodexBarGrokUnverifiedSourcesStaySilent(t *testing.T) {
 	for _, scenario := range []string{"source read", "unknown identity", "auth expired", "profile read", "no subscription"} {
 		t.Run(scenario, func(t *testing.T) {
 			fs := fsutil.NewMemFS()
@@ -182,8 +182,8 @@ func TestCodexBarGrokUnverifiedSourcesEmitOneNonAccountDiagnostic(t *testing.T) 
 				t.Fatal(err)
 			}
 			output, err := io.ReadAll(capture)
-			if err != nil || strings.Count(string(output), "\n") != 1 || !strings.Contains(string(output), "CodexBar") || strings.Contains(string(output), "private-") {
-				t.Fatal("ignored source diagnostic missing, repeated or disclosed private data")
+			if err != nil || len(output) != 0 {
+				t.Fatal("ignored source produced user-facing output")
 			}
 		})
 	}

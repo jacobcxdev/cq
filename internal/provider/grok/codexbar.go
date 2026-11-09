@@ -4,12 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
-	"sync"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
@@ -17,12 +14,11 @@ import (
 )
 
 type codexBarAuthority struct {
-	owned   Authority
-	fs      fsutil.FileSystem
-	env     func(string) string
-	home    string
-	client  httputil.Doer
-	warning sync.Once
+	owned  Authority
+	fs     fsutil.FileSystem
+	env    func(string) string
+	home   string
+	client httputil.Doer
 }
 
 // WithCodexBar adds borrowed, dynamically reread credentials. Discovery never
@@ -52,7 +48,6 @@ func (a *codexBarAuthority) Accounts(ctx context.Context) ([]Account, error) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		a.warnUnverified()
 		return accounts, nil
 	}
 	for _, external := range borrowed {
@@ -60,12 +55,6 @@ func (a *codexBarAuthority) Accounts(ctx context.Context) ([]Account, error) {
 		accounts = append(accounts, external.account)
 	}
 	return subscriptionAccounts(accounts), nil
-}
-
-func (a *codexBarAuthority) warnUnverified() {
-	a.warning.Do(func() {
-		fmt.Fprintln(os.Stderr, "cq: Grok: ignored CodexBar source without a verified subscription account")
-	})
 }
 
 func (a *codexBarAuthority) borrowed(ctx context.Context) ([]borrowedGrok, error) {
@@ -83,7 +72,6 @@ func (a *codexBarAuthority) borrowed(ctx context.Context) ([]borrowedGrok, error
 			token = strings.TrimSpace(token[7:])
 		}
 		if !validToken(token) || strings.HasPrefix(strings.ToLower(token), "xai-") || strings.Contains(token, "=") {
-			a.warnUnverified()
 			continue
 		}
 		verified, err := readSubscriptionProfile(ctx, a.client, token)
@@ -91,14 +79,12 @@ func (a *codexBarAuthority) borrowed(ctx context.Context) ([]borrowedGrok, error
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
-			a.warnUnverified()
 			continue
 		}
 		verified.Label = source.Label
 		verified.Source = "codexbar"
 		verified.ID = accountID(verified)
 		if !validAccount(verified) {
-			a.warnUnverified()
 			continue
 		}
 		result = append(result, borrowedGrok{account: verified, token: token})
