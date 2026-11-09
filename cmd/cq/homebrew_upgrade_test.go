@@ -129,7 +129,7 @@ CQCommandRecorder.calls = []
 ` + metadataSetup + prelude + `
 
 # Load the generated file through the same loader as a published tap cask.
-# FromContentLoader's local cask variable shadows the DSL reader during eval.
+# Callback bindings must survive a loader-local cask variable during eval.
 cask = Cask::CaskLoader::FromPathLoader.new(Pathname(` + strconv.Quote(caskPath) + `)).load(config: nil)
 ` + metadataProbe + `
 artifact = cask.artifacts.find { |a| a.is_a?(Cask::Artifact::Uninstall) }
@@ -203,4 +203,43 @@ func TestHomebrewInstalledMetadataRetainsSuccessorCallback(t *testing.T) {
 
 func TestHomebrewFormattedMetadataRetainsSuccessorCallback(t *testing.T) {
 	runGeneratedCQHomebrewArtifactsWithFormatting(t, "", false, true, true)
+}
+
+// Reproduce the lexical evaluation scope independently of the installed brew
+// version. A local variable already exists while the generated DSL is parsed;
+// callbacks must bind the DSL's owning cask rather than that nil local value.
+const homebrewShadowedCaskLoader = `class Cask::CaskLoader::FromPathLoader
+  def load(config:)
+    @config = config
+    @content = path.read(encoding: "UTF-8")
+    cask = nil
+    cask = instance_eval(content, path.to_s)
+    raise "generated source did not return its cask" unless cask.is_a?(Cask::Cask)
+    cask
+  end
+end
+`
+
+func TestHomebrewShadowedLoaderRetainsCallbacksAndMetadata(t *testing.T) {
+	for _, formatted := range []bool{false, true} {
+		name := "generated"
+		if formatted {
+			name = "formatted"
+		}
+		t.Run(name, func(t *testing.T) {
+			output := runGeneratedCQHomebrewArtifactsWithFormatting(t, homebrewShadowedCaskLoader, false, true, formatted)
+			if !strings.Contains(output, "cq-homebrew-lifecycle") {
+				t.Fatal("shadowed evaluation lost the true-uninstall callback")
+			}
+		})
+	}
+}
+
+func TestHomebrewShadowedLoaderKeptUnsupportedCallbackGuard(t *testing.T) {
+	for _, method := range []string{
+		"def uninstall_phase(command:); raise \"unexpected removal mutation\"; end",
+		"def dispatch_uninstall_directive(directive, command:); raise \"unexpected removal mutation\"; end",
+	} {
+		runGeneratedCQHomebrewArtifacts(t, homebrewShadowedCaskLoader+"\nclass Cask::Artifact::Uninstall\n  "+method+"\nend\n", true)
+	}
 }
