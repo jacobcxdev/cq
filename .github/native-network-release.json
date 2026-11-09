@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
-  "version": "0.47.10",
-  "source_commit": "f001705a2f059db03f914a7eeda55b27f85d383a",
-  "asset_id": 727822284,
-  "sha256": "79c1611d885193d11818979c9f834f4365f7f5a91fa258119a9bf37612b96b37",
+  "version": "0.47.11",
+  "source_commit": "39e5b4a8bb34d924de2259bb64c9b74ed350fc09",
+  "asset_id": 728345978,
+  "sha256": "423eadc75c7785439b1f07eebc688566c0d39a0610b256f15649521521dee3cb",
   "minimum_macos": "13.0"
 }
