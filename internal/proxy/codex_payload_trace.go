@@ -148,8 +148,21 @@ func captureCodexHTTPAttemptPayload(ctx context.Context, request *http.Request, 
 	captureCodexHTTPResponsePayloadWithEvent(ctx, response, event)
 }
 
-func emitCodexWSHandshakePayload(ctx context.Context, response *http.Response, body []byte, choice RouteChoice, attempt CandidateAttempt) {
-	if response != nil && response.StatusCode == http.StatusSwitchingProtocols && len(body) == 0 {
+func emitCodexWSHandshakePayload(ctx context.Context, response *http.Response, body []byte, choice RouteChoice, attempt CandidateAttempt, dialErr error) {
+	status := 0
+	if response != nil {
+		status = response.StatusCode
+	}
+	var details *CodexUpstreamErrorDetails
+	if response != nil && (status != http.StatusSwitchingProtocols || dialErr != nil) {
+		details = projectCodexHandshakeError(response, body)
+	}
+	noteCodexObservation(ctx, codexObservationFields{UpstreamHandshakeObserved: true, UpstreamStatus: status, UpstreamError: details})
+	if details != nil {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "upstream_handshake", Outcome: "rejected", UpstreamStatus: status, UpstreamError: details, AccountHint: codexTraceAccountHint(choice.AccountKey), Attempt: attempt.Ordinal})
+	}
+
+	if response != nil && response.StatusCode == http.StatusSwitchingProtocols && dialErr == nil && len(body) == 0 {
 		return
 	}
 	captured := body

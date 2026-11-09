@@ -3002,7 +3002,7 @@ func TestCodexTerminatingWSBrokerPreservesHandledHandshakeFailureWithoutLoggingB
 	}
 	event := RouteEvent{}
 	event.applyRouteDiagnostics(routeDiagnostics)
-	if event.Decision != "broker_failed" || event.Reason != "upstream_rejected" {
+	if event.Decision != "broker_failed" || event.Reason != "upstream_rejected" || event.UpstreamStatus != 401 || event.UpstreamError == nil || event.UpstreamError.ErrorCode != "token_expired" {
 		t.Fatalf("diagnostics = %+v, want broker_failed/upstream_rejected", event)
 	}
 	for _, private := range []string{"re-authenticate before retry", "token_expired", "private dial error"} {
@@ -3017,6 +3017,9 @@ func TestCodexTerminatingWSBrokerPreservesHandledHandshakeFailureWithoutLoggingB
 	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
 		return event.Phase == "upstream_dial" && event.Outcome == "error" && event.UpstreamStatus == http.StatusUnauthorized && event.ErrorClass == "auth_rejected"
 	}, "WebSocket 401 handshake")
+	requireCodexTraceEvent(t, traceEvents, func(event CodexTraceEvent) bool {
+		return event.Phase == "upstream_handshake" && event.UpstreamStatus == 401 && event.UpstreamError != nil && event.UpstreamError.ErrorType == "authentication_error" && event.UpstreamError.ErrorCode == "token_expired"
+	}, "safe WebSocket handshake details")
 }
 
 func TestCodexTerminatingWSBrokerReportsHandledPrewarmTransportFailure(t *testing.T) {

@@ -94,6 +94,19 @@ Broadcasts, board notices and setup reminders are ordinary messages. If delivery
 
 ### Routing diagnostics
 
+For Codex WebSocket handshakes, `status_code` remains the downstream HTTP
+status, usually `101` after the local upgrade. `upstream_status` records the
+actual upstream handshake response, such as `403`. Rejected attempts also emit
+an `upstream_handshake` trace event with `upstream_error`: captured body size and kind,
+allowlisted error type/code, and validated request ID / Cloudflare Ray ID when
+present. Unknown error symbols, free-form messages, cookies and arbitrary
+headers are omitted. Empty, malformed, oversized and undecodable bodies retain
+a safe classification. `body_truncated` marks known or possible prefix captures;
+`body_bytes` counts captured bytes, not the original response size. The WebSocket
+library retains at most 1 KiB of a rejected response. A successful retry clears the prior error from the route
+summary; each rejected attempt remains in the trace. Raw bodies remain confined
+to separately enabled payload capture.
+
 `diagnostics_log` is unset by default. Set an absolute private log path and arrange an approved restart to enable it; clearing/restoring the field also requires restart. Every Codex HTTP request and WebSocket `response.create` frame receives a trace ID. Ordered JSONL events record ingress, request identity, candidate eligibility and exclusion, selected account hint, pool, durable lease state before and after transitions, credential refresh, upstream dispatch/status, retries, failover, relay result, close/error classification, and terminal outcome. WebSocket events also carry a stable connection ID. Route summaries share the same trace ID. Metadata and payload JSONL logs rotate at a 64 MiB target and retain four prior files plus the current file. Retention is size-based, not age-based; oversized records can exceed the target. This policy does not apply to macOS service stderr or Dots logs. Enabling diagnostics does not change routing policy.
 
 Query one user-facing task, one trace, or recent traffic without manually searching JSONL:

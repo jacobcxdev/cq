@@ -103,6 +103,8 @@ type CodexTraceEvent struct {
 	Failover       bool                  `json:"failover,omitempty"`
 	Candidates     []CodexTraceCandidate `json:"candidates,omitempty"`
 	Lease          *CodexTraceLeaseState `json:"lease,omitempty"`
+
+	UpstreamError *CodexUpstreamErrorDetails `json:"upstream_error,omitempty"`
 }
 
 type codexTraceContextKey struct{}
