@@ -28,7 +28,8 @@ type RetryRequest struct {
 }
 
 func (request RetryRequest) Matches(receipt Receipt) bool {
-	return request.ChatID == receipt.ChatID && receipt.Mode == "full" && receipt.RetrySupported && receipt.State == "failed" && request.Fingerprint == receipt.Fingerprint && request.Model == receipt.Model && request.Cwd == receipt.Cwd && request.FailedAt.Equal(receipt.UpdatedAt)
+	attempt := receipt.RetryContext()
+	return request.ChatID == receipt.ChatID && receipt.Mode == "full" && receipt.RetrySupported && receipt.State == "failed" && request.Fingerprint == receipt.Fingerprint && request.Model == attempt.Model && request.Cwd == attempt.Cwd && request.FailedAt.Equal(receipt.UpdatedAt)
 }
 
 // LoadRetry reads only this chat's bounded request without acquiring its native

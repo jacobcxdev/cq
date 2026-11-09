@@ -37,7 +37,7 @@ func cloudHarnessFailureReason(err error) (string, *int) {
 	return "internal", nil
 }
 
-func (h *cloudHarness) recordFailure(id string, selection harness.Selection, stage string, err error, rollback, rollbackStage string, rollbackErr error) {
+func (h *cloudHarness) recordFailure(id string, selection harness.Selection, stage string, err error, rollback, rollbackStage string, rollbackErr error, attempt harness.ApplicationContext) {
 	reason, code := cloudHarnessFailureReason(err)
 	failure := &harness.ApplicationFailure{Stage: stage, Reason: reason, NativeCode: code, Rollback: rollback}
 	if rollbackErr != nil {
@@ -47,6 +47,7 @@ func (h *cloudHarness) recordFailure(id string, selection harness.Selection, sta
 	h.mu.Lock()
 	if thread := h.threads[id]; thread != nil {
 		thread.failure = failure
+		thread.attemptedContext = &attempt
 	}
 	h.mu.Unlock()
 	_ = h.record(id, selection, "failed")

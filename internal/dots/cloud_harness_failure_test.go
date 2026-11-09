@@ -100,7 +100,7 @@ func TestCloudHarnessFailureEventWasSafeAndRecoveryClearedDetail(t *testing.T) {
 	h, store, id, _ := cloudHarnessFailureFixture(t)
 	var events []map[string]any
 	h.b.deps.event = func(event map[string]any) { events = append(events, event) }
-	h.recordFailure(id, harness.Selection{Profile: harness.Minimal, Source: "default"}, "settings", &cloudHarnessRPCError{reason: "rpc_rejected"}, "not_needed", "", nil)
+	h.recordFailure(id, harness.Selection{Profile: harness.Minimal, Source: "default"}, "settings", &cloudHarnessRPCError{reason: "rpc_rejected"}, "not_needed", "", nil, harness.ApplicationContext{Model: "glm-5.3", Cwd: "/fixture"})
 	if len(events) != 1 || events[0]["failure"] == nil {
 		t.Fatal("failure event omitted classification")
 	}
