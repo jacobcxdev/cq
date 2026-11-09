@@ -1352,7 +1352,7 @@ func (broker *codexTerminatingWSBroker) connectPrewarm(ctx context.Context, acco
 		generation := broker.upstreamGeneration
 		conn, response, body, actual, dialErr := broker.config.Upstream.Dial(ctx, choice, attempt, broker.config.UpstreamURL, broker.config.Headers, nil)
 		if _, capturesHandshake := broker.config.Upstream.(codexExplicitWSUpstreamDialer); !capturesHandshake {
-			emitCodexWSHandshakePayload(ctx, response, body, choice, actual)
+			emitCodexWSHandshakePayload(ctx, response, body, choice, actual, dialErr)
 		}
 		if dialErr == nil && conn != nil {
 			active.conn = conn
@@ -1524,7 +1524,7 @@ func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *Cod
 			receipt.attempt(actual.AccountKey)
 		})
 		if _, capturesHandshake := broker.config.Upstream.(codexExplicitWSUpstreamDialer); !capturesHandshake {
-			emitCodexWSHandshakePayload(ctx, response, body, choice, actual)
+			emitCodexWSHandshakePayload(ctx, response, body, choice, actual, dialErr)
 		}
 		if dialErr == nil && conn != nil {
 			*active = codexWSActiveUpstream{conn: conn, account: choice.AccountKey, attempt: actual, generation: generation}
@@ -2042,8 +2042,10 @@ func codexWSMessageTooBig(err error) bool {
 func reportCodexWSHandshakeFailure(ctx context.Context, response *http.Response, wrapped CodexWrappedError) {
 	status := 0
 	reason := string(codexWebSocketFailureReasonUpstreamOutcomeIndeterminate)
-	if response != nil && response.StatusCode >= 400 && response.StatusCode <= 599 {
+	if response != nil {
 		status = response.StatusCode
+	}
+	if status >= 400 && status <= 599 {
 		reason = "upstream_rejected"
 	}
 	noteCodexObservation(ctx, codexObservationFields{Decision: "broker_failed", Reason: reason})
