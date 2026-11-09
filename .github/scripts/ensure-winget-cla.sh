@@ -13,6 +13,12 @@ agreement='@microsoft-github-policy-service agree company="JacobCX Development L
   echo 'refusing CLA comment: authenticated author must be jacobcxdev' >&2
   exit 1
 }
+release=$(gh release view "$RELEASE_TAG" --repo jacobcxdev/cq --json tagName,isDraft,isPrerelease)
+jq -e --arg tag "$RELEASE_TAG" '.tagName == $tag and .isDraft == false and .isPrerelease == false' \
+  <<<"$release" >/dev/null || {
+  echo 'refusing CLA comment: CQ release must be published and stable' >&2
+  exit 1
+}
 matches=$(gh pr list --repo "$repository" --state open --head "cq-$version" \
   --json number,title,headRefName,headRepositoryOwner,author,url |
   jq --arg version "$version" '[.[] | select(
@@ -51,6 +57,20 @@ jq -e --arg version "$version" --argjson number "$number" '
 }
 # WinGet's opening policy adds Needs-CLA asynchronously for these associations.
 # Its separate author-comment rule only removes a label which already exists.
+head=$(jq -r .headRefOid <<<"$pr")
+cla_check_passed() {
+  local checks
+  checks=$(gh api --paginate --slurp "repos/$repository/commits/$head/check-runs?check_name=license%2Fcla&filter=latest&per_page=100") || return 1
+  jq -e --arg head "$head" '
+    if type == "array" and all(.[]; type == "object" and (.check_runs|type) == "array")
+    then [.[].check_runs[] | select(.name == "license/cla"
+      and .app.id == 95686 and .app.slug == "microsoft-github-policy-service")]
+    else error("invalid CLA check response") end |
+    if all(.[]; (.id|type) == "number" and .id > 0 and (.id|floor) == .id and .head_sha == $head)
+    then max_by(.id) | .status == "completed" and .conclusion == "success"
+    else false end
+  ' <<<"$checks" >/dev/null
+}
 read_policy() {
   policy=$(gh api "repos/$repository/pulls/$number" --jq '{number,state,author:.user.login,author_association,labels:[.labels[].name]}')
   jq -e --argjson number "$number" '
@@ -81,6 +101,11 @@ for attempt in {1..24}; do
   read_policy
   if jq -e '(.author_association|test("^(NONE|FIRST_TIMER|FIRST_TIME_CONTRIBUTOR)$")|not)
     or (.labels|index("Needs-CLA") != null)' <<<"$policy" >/dev/null; then
+    break
+  fi
+  # Policy can accept the CLA without ever adding Needs-CLA. Only trust its
+  # latest check on this exact head; explicit labels still control replay.
+  if cla_check_passed; then
     break
   fi
   label_event=$(read_label_event) || {
@@ -133,7 +158,6 @@ if [[ "$existing" != null ]]; then
     exit 0
   fi
 fi
-head=$(jq -r .headRefOid <<<"$pr")
 current=$(gh pr view "$number" --repo "$repository" \
   --json number,state,headRefName,headRefOid,headRepository,headRepositoryOwner,author,url)
 jq -e --arg version "$version" --arg head "$head" --argjson number "$number" '
