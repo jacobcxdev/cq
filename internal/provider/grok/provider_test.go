@@ -134,8 +134,29 @@ func TestFetchReportingOnlySourceDoesNotImplyUsableQuota(t *testing.T) {
 		return nil, nil
 	}}
 	rows, err := New(a).Fetch(t.Context(), quotaNow())
-	if err != nil || len(rows) != 1 || rows[0].IsUsable() || rows[0].Error == nil || len(rows[0].Windows) > 0 {
+	if err != nil || len(rows) != 1 || rows[0].AccountID != "" || rows[0].IsUsable() || rows[0].Error == nil || len(rows[0].Windows) > 0 {
 		t.Fatalf("rows=%#v err=%v", rows, err)
+	}
+}
+
+func TestFetchOmitsUnverifiedBorrowedAccountsBeforeDeduplication(t *testing.T) {
+	accounts := []Account{
+		{ID: "unverified", Source: "codexbar", ReportingOnly: true, UserID: "same", PrincipalType: "Team", PrincipalID: "seat", TeamID: "team"},
+		{ID: "unknown", Source: "codexbar"},
+		{ID: "owned", UserID: "same", PrincipalType: "Team", PrincipalID: "seat", TeamID: "team", Active: true},
+	}
+	a := fakeAuthority{accounts: accounts, do: func(_ context.Context, id AccountID, _ *http.Request) (*http.Response, error) {
+		if id != "owned" {
+			t.Error("unverified source reached quota endpoint")
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(goodQuota))}, nil
+	}}
+	rows, err := New(a).Fetch(t.Context(), quotaNow())
+	if err != nil || len(rows) != 1 || rows[0].AccountID != "owned" || !rows[0].IsUsable() || !rows[0].Active {
+		t.Fatalf("unverified source counted or suppressed verified capacity: rows=%#v err=%v", rows, err)
+	}
+	if accounts[0].ID != "unverified" || accounts[1].ID != "unknown" || accounts[2].ID != "owned" {
+		t.Fatal("authority inventory mutated")
 	}
 }
 

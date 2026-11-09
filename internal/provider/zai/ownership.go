@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 )
@@ -19,6 +21,108 @@ import (
 type VerifiedAPIKeyOwnership struct {
 	userID string
 	keyIDs []string
+}
+
+// RefreshAccounts verifies unresolved sources during an explicit reporting
+// refresh. Request-time ReadAccounts remains local and read-only.
+func RefreshAccounts(ctx context.Context, client httputil.Doer, fsys fsutil.FileSystem, env func(string) string, configDir string) ([]Account, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	accounts, err := readAccountSources(fsys, env, configDir)
+	if err != nil {
+		return nil, err
+	}
+	var candidates []Account
+	warn := false
+	for _, account := range accounts {
+		if account.OAuth == nil && account.APIKey != "" {
+			candidates = append(candidates, account)
+		}
+		if account.Source == "codexbar" && account.APIKey == "" {
+			warn = true
+		}
+	}
+	// Identity reads belong to reporting, never the request-time inventory.
+	// Leave time for the actual quota requests if a source is unavailable.
+	verifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for _, account := range accounts {
+		if verifyCtx.Err() != nil {
+			break
+		}
+		if account.OAuth == nil || len(candidates) == 0 {
+			continue
+		}
+		session := *account.OAuth
+		if session.BusinessExpiresAt > 0 && session.BusinessExpiresAt <= time.Now().Unix() {
+			session, err = (zcode.OAuthClient{HTTP: client, Version: zcode.ClientVersion}).RefreshBusiness(verifyCtx, session)
+			if err != nil {
+				warn = true
+				continue
+			}
+		}
+		proof, proofErr := VerifyAPIKeyOwnership(verifyCtx, client, session, candidates)
+		if proofErr != nil {
+			warn = true
+			continue
+		}
+		if len(proof.keyIDs) == 0 {
+			continue
+		}
+		if verifyCtx.Err() != nil {
+			break
+		}
+		if err := storeVerifiedAliases(fsys, configDir, proof); err != nil {
+			warn = true
+			continue
+		}
+		remaining := candidates[:0]
+		for _, candidate := range candidates {
+			if !containsAlias(proof.keyIDs, candidate.ID) {
+				remaining = append(remaining, candidate)
+			}
+		}
+		candidates = remaining
+	}
+	for _, candidate := range candidates {
+		if candidate.Source == "codexbar" {
+			warn = true
+		}
+	}
+	if warn {
+		fmt.Fprintln(os.Stderr, "cq: Z.ai: credential identity verification incomplete; unresolved CodexBar sources are excluded from accounts")
+	}
+	return ReadAccounts(fsys, env, configDir)
+}
+
+func storeVerifiedAliases(fsys fsutil.FileSystem, configDir string, proof VerifiedAPIKeyOwnership) error {
+	if proof.userID == "" {
+		return errors.New("Z.ai key ownership account unavailable")
+	}
+	// Re-read after network work. Preserve current preference, routes, keys and
+	// session references; only append proved fingerprints to an existing owner.
+	accounts, err := readOwnedAccounts(fsys, func(string) string { return "" }, configDir)
+	if err != nil {
+		return err
+	}
+	for i := range accounts {
+		if accounts[i].OAuth == nil || accounts[i].OAuth.UserID != proof.userID {
+			continue
+		}
+		changed := false
+		for _, id := range proof.keyIDs {
+			if !containsAlias(accounts[i].verifiedAPIKeyIDs, id) {
+				accounts[i].verifiedAPIKeyIDs = append(accounts[i].verifiedAPIKeyIDs, id)
+				changed = true
+			}
+		}
+		if changed {
+			return writeAccounts(fsys, configDir, accounts)
+		}
+		return nil
+	}
+	return errors.New("Z.ai key ownership account no longer configured")
 }
 
 // VerifyAPIKeyOwnership reads OAuth-owned key metadata and compares full keys.

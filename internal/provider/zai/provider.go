@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 	"github.com/jacobcxdev/cq/internal/quota"
@@ -20,7 +21,7 @@ const accountID = "zai-coding-plan"
 // Provider retrieves quota for Z.ai Coding Plan subscriptions.
 type Provider struct {
 	client   httputil.Doer
-	accounts func() ([]Account, error)
+	accounts func(context.Context) ([]Account, error)
 	tokens   *zcode.ProjectTokenClient
 }
 
@@ -37,10 +38,17 @@ func New(client httputil.Doer, apiKey func() (string, error)) *Provider {
 
 // NewAccounts creates a provider with an ordered subscription credential reader.
 func NewAccounts(client httputil.Doer, accounts func() ([]Account, error)) *Provider {
-	return &Provider{client: client, accounts: accounts, tokens: &zcode.ProjectTokenClient{HTTP: client, Version: zcode.ClientVersion}}
+	return &Provider{client: client, accounts: func(context.Context) ([]Account, error) { return accounts() }, tokens: &zcode.ProjectTokenClient{HTTP: client, Version: zcode.ClientVersion}}
 }
 
-// Fetch retrieves subscription quota without modifying credentials.
+// NewDiscoveredAccounts verifies unresolved identities during quota refresh.
+func NewDiscoveredAccounts(client httputil.Doer, fsys fsutil.FileSystem, env func(string) string, configDir string) *Provider {
+	return &Provider{client: client, accounts: func(ctx context.Context) ([]Account, error) {
+		return RefreshAccounts(ctx, client, fsys, env, configDir)
+	}, tokens: &zcode.ProjectTokenClient{HTTP: client, Version: zcode.ClientVersion}}
+}
+
+// Fetch retrieves subscription quota and backfills identity metadata when discovery is enabled.
 func (p *Provider) Fetch(ctx context.Context, _ time.Time) (results []quota.Result, err error) {
 	defer func() {
 		if recover() != nil {
@@ -48,10 +56,11 @@ func (p *Provider) Fetch(ctx context.Context, _ time.Time) (results []quota.Resu
 			err = nil
 		}
 	}()
-	accounts, err := p.accounts()
+	accounts, err := p.accounts(ctx)
 	if err != nil {
 		return singleError("fetch_error", "read Z.ai credentials", 0), nil
 	}
+	accounts = usableAccounts(accounts)
 	if len(accounts) == 0 {
 		return singleError("not_configured", "run cq zai login or set ZAI_API_KEY", 0), nil
 	}

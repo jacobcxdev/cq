@@ -193,7 +193,7 @@ func runZAICommand(ctx context.Context, command string, options ZAICmd, jsonOutp
 		}
 		return err
 	case "accounts":
-		accounts, err := zaiprov.ReadAccounts(deps.fs, deps.getenv, dir)
+		accounts, err := zaiprov.RefreshAccounts(ctx, deps.client, deps.fs, deps.getenv, dir)
 		if err != nil {
 			return err
 		}

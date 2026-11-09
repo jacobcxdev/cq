@@ -596,9 +596,7 @@ func runCheck(cli *CLI) (returnErr error) {
 		provider.Codex:  {Usage: codexProvider},
 		provider.Gemini: {Usage: geminiprov.New(httpClient, geminiOAuthClientSecret)},
 		provider.Grok:   {Usage: grokprov.New(grokReadAuthority(fsutil.OSFileSystem{}, roots.Config, grokHTTPClient(15*time.Second), os.Getenv, grokHome))},
-		provider.ZAI: {Usage: zaiprov.NewAccounts(httpClient, func() ([]zaiprov.Account, error) {
-			return zaiprov.ReadAccounts(fsutil.OSFileSystem{}, os.Getenv, roots.Config)
-		})},
+		provider.ZAI:    {Usage: zaiprov.NewDiscoveredAccounts(httpClient, fsutil.OSFileSystem{}, os.Getenv, roots.Config)},
 	}
 
 	tty := isTerminal()

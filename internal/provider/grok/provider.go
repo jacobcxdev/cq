@@ -32,21 +32,7 @@ func (p *Provider) Fetch(ctx context.Context, now time.Time) (results []quota.Re
 	if err != nil {
 		return []quota.Result{quota.ErrorResult("fetch_error", "read Grok accounts", 0)}, nil
 	}
-	seen := make(map[string]bool, len(accounts))
-	unique := make([]Account, 0, len(accounts))
-	for _, account := range accounts {
-		// A saved alias for the same user/principal/seat is not independent
-		// capacity. Distinct seats within a team retain their own allowance.
-		key := string(account.ID)
-		if account.UserID != "" {
-			key = account.UserID + "\x00" + account.PrincipalType + "\x00" + account.PrincipalID + "\x00" + account.TeamID
-		}
-		if account.ID == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		unique = append(unique, account)
-	}
+	unique := subscriptionAccounts(accounts)
 	if len(unique) == 0 {
 		return []quota.Result{quota.ErrorResult("not_configured", "run cq grok login", 0)}, nil
 	}

@@ -3,12 +3,13 @@ package grok
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
@@ -16,11 +17,12 @@ import (
 )
 
 type codexBarAuthority struct {
-	owned  Authority
-	fs     fsutil.FileSystem
-	env    func(string) string
-	home   string
-	client httputil.Doer
+	owned   Authority
+	fs      fsutil.FileSystem
+	env     func(string) string
+	home    string
+	client  httputil.Doer
+	warning sync.Once
 }
 
 // WithCodexBar adds borrowed, dynamically reread credentials. Discovery never
@@ -44,25 +46,26 @@ func (a *codexBarAuthority) Accounts(ctx context.Context) ([]Account, error) {
 	if err != nil {
 		return nil, err
 	}
+	accounts = subscriptionAccounts(accounts)
 	borrowed, err := a.borrowed(ctx)
 	if err != nil {
-		if len(accounts) > 0 {
-			return append(accounts, Account{ID: "grok_codexbar_unavailable", Label: "CodexBar source unavailable", Source: "codexbar", ReportingOnly: true}), nil
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
-		return nil, err
-	}
-	seen := make(map[AccountID]bool, len(accounts))
-	for _, account := range accounts {
-		seen[account.ID] = true
+		a.warnUnverified()
+		return accounts, nil
 	}
 	for _, external := range borrowed {
-		if !seen[external.account.ID] {
-			external.account.Active = len(accounts) == 0
-			accounts = append(accounts, external.account)
-			seen[external.account.ID] = true
-		}
+		external.account.Active = len(accounts) == 0
+		accounts = append(accounts, external.account)
 	}
-	return accounts, nil
+	return subscriptionAccounts(accounts), nil
+}
+
+func (a *codexBarAuthority) warnUnverified() {
+	a.warning.Do(func() {
+		fmt.Fprintln(os.Stderr, "cq: Grok: ignored CodexBar source without a verified subscription account")
+	})
 }
 
 func (a *codexBarAuthority) borrowed(ctx context.Context) ([]borrowedGrok, error) {
@@ -75,26 +78,30 @@ func (a *codexBarAuthority) borrowed(ctx context.Context) ([]borrowedGrok, error
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		h := sha256.Sum256([]byte("codexbar:grok:" + source.ID))
-		account := Account{ID: AccountID("grok_codexbar_" + hex.EncodeToString(h[:16])), Label: source.Label, Source: "codexbar", ReportingOnly: true}
 		token := strings.TrimSpace(source.Token)
 		if strings.HasPrefix(strings.ToLower(token), "bearer ") {
 			token = strings.TrimSpace(token[7:])
 		}
 		if !validToken(token) || strings.HasPrefix(strings.ToLower(token), "xai-") || strings.Contains(token, "=") {
-			result = append(result, borrowedGrok{account: account})
+			a.warnUnverified()
 			continue
 		}
 		verified, err := readSubscriptionProfile(ctx, a.client, token)
-		if err == nil {
-			verified.Label = source.Label
-			verified.Source = "codexbar"
-			verified.ID = accountID(verified)
-			if validAccount(verified) {
-				account = verified
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
+			a.warnUnverified()
+			continue
 		}
-		result = append(result, borrowedGrok{account: account, token: token})
+		verified.Label = source.Label
+		verified.Source = "codexbar"
+		verified.ID = accountID(verified)
+		if !validAccount(verified) {
+			a.warnUnverified()
+			continue
+		}
+		result = append(result, borrowedGrok{account: verified, token: token})
 	}
 	return result, nil
 }
