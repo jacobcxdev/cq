@@ -66,6 +66,9 @@ type cloudHarnessThread struct {
 	selection            harness.Selection
 	refresh              bool
 	failureKey           string
+	failure              *harness.ApplicationFailure
+	retryNonce           string
+	retryPending         bool
 	reportedPending      string
 	lease                fsutil.ExclusiveLock
 	receiptState         string
@@ -258,6 +261,15 @@ func (h *cloudHarness) record(id string, selection harness.Selection, state stri
 	_ = json.Unmarshal(thread.baseline["disabledPluginIds"], &baseline)
 	plugins := slices.Clone(thread.plugins)
 	model, cwd := thread.model, thread.cwd
+	var failure *harness.ApplicationFailure
+	if state == "failed" {
+		failure = thread.failure
+	} else {
+		thread.failure = nil
+	}
+	if state == "prepared" {
+		thread.retryPending = false
+	}
 	var unsupported []string
 	issues := slices.Clone(thread.runtimeIssues)
 	var pendingPlugins []string
@@ -277,7 +289,7 @@ func (h *cloudHarness) record(id string, selection harness.Selection, state stri
 	}
 	h.mu.Unlock()
 	if store := h.b.deps.harnessReceipts; store != nil {
-		receipt := harness.Receipt{Version: 1, ChatID: id, Mode: "full", Profile: selection.Profile, Source: selection.Source, State: state, BaselinePlugins: baseline, AppliedPlugins: plugins, PendingPlugins: pendingPlugins, UpdatedAt: time.Now().UTC(), Fingerprint: selection.Fingerprint, Model: model, Cwd: cwd, Unsupported: unsupported, Issues: issues}
+		receipt := harness.Receipt{Version: 1, ChatID: id, Mode: "full", Profile: selection.Profile, Source: selection.Source, State: state, BaselinePlugins: baseline, AppliedPlugins: plugins, PendingPlugins: pendingPlugins, UpdatedAt: time.Now().UTC(), Fingerprint: selection.Fingerprint, Model: model, Cwd: cwd, Unsupported: unsupported, Issues: issues, Failure: failure, RetrySupported: true}
 		if err := store.Save(receipt); err != nil {
 			h.event(id, selection, "failed")
 			return errors.New("native harness receipt could not be saved")
@@ -860,18 +872,22 @@ func (h *cloudHarness) callOn(source, method string, params any) (cloudMessage, 
 		return err
 	}()
 	if err != nil {
-		return nil, errors.New("native harness request failed")
+		return nil, &cloudHarnessRPCError{reason: "transport"}
 	}
 	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 	select {
 	case <-h.b.ctx.Done():
-		return nil, h.b.ctx.Err()
+		return nil, &cloudHarnessRPCError{reason: "cancelled"}
 	case <-timer.C:
-		return nil, errors.New("native harness request timed out")
+		return nil, &cloudHarnessRPCError{reason: "rpc_timeout"}
 	case response := <-reply:
 		if failure := bytes.TrimSpace(response["error"]); len(failure) > 0 && !bytes.Equal(failure, []byte("null")) {
-			return nil, errors.New("native harness request rejected")
+			var detail struct {
+				Code *int `json:"code"`
+			}
+			_ = json.Unmarshal(failure, &detail)
+			return nil, &cloudHarnessRPCError{reason: "rpc_rejected", code: detail.Code}
 		}
 		return cloudHarnessObject(response["result"]), nil
 	}
@@ -879,6 +895,14 @@ func (h *cloudHarness) callOn(source, method string, params any) (cloudMessage, 
 
 func (h *cloudHarness) event(threadID string, selection harness.Selection, state string) {
 	event := map[string]any{"harness_profile": string(selection.Profile), "source": selection.Source, "thread_id": threadID, "scope": "full", "state": state}
+	if state == "failed" {
+		h.mu.Lock()
+		if thread := h.threads[threadID]; thread != nil && thread.failure != nil {
+			copy := *thread.failure
+			event["failure"] = copy
+		}
+		h.mu.Unlock()
+	}
 	if state == "pending" {
 		h.mu.Lock()
 		if thread := h.threads[threadID]; thread != nil {
@@ -957,18 +981,33 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		return errors.New("chat plugin choices changed; harness baseline was left untouched")
 	}
 	minimal := selection.Managed && selection.Profile == harness.Minimal
-	key := string(cloudHarnessRaw(policy)) + "\n" + model + "\n" + cwd + "\n" + string(cloudHarnessRaw(selection)) + "\n" + strconv.FormatUint(snapshot.sourceEpoch, 10)
+	if retries, ok := h.b.deps.harnessReceipts.(interface {
+		LoadRetry(string) (harness.RetryRequest, error)
+	}); ok && snapshot.receiptState == "failed" {
+		request, retryErr := retries.LoadRetry(id)
+		if retryErr == nil && request.Nonce != snapshot.retryNonce && request.Fingerprint == selection.Fingerprint && request.Model == model && request.Cwd == cwd {
+			if receipt, err := h.b.deps.harnessReceipts.Load(id); err == nil && request.Matches(receipt) {
+				h.mu.Lock()
+				if current := h.threads[id]; current != nil {
+					current.retryNonce, current.retryPending = request.Nonce, true
+				}
+				h.mu.Unlock()
+				snapshot.retryNonce, snapshot.retryPending = request.Nonce, true
+			}
+		}
+	}
+	key := string(cloudHarnessRaw(policy)) + "\n" + model + "\n" + cwd + "\n" + string(cloudHarnessRaw(selection)) + "\n" + strconv.FormatUint(snapshot.sourceEpoch, 10) + "\n" + snapshot.retryNonce
 	if snapshot.failureKey == key {
 		return errors.New("native harness reload previously failed; profile was not applied")
 	}
-	if policy.Version != 2 && !snapshot.profileManaged && minimal == snapshot.minimal && !snapshot.restorePlugins && !contextChanged && !retryRuntime {
+	if policy.Version != 2 && !snapshot.profileManaged && minimal == snapshot.minimal && !snapshot.restorePlugins && !contextChanged && !retryRuntime && !snapshot.retryPending {
 		state := cloudHarnessProfileState(nil, snapshot.runtimeIssues...)
 		if selection.Managed && (snapshot.receiptState != state || snapshot.selection != selection) {
 			return h.record(id, selection, state)
 		}
 		return nil
 	}
-	if policy.Version == 2 && snapshot.profilePlan != nil && snapshot.profileFingerprint == selection.Fingerprint && !snapshot.profileRefresh && !snapshot.profileNeedsSettings && !snapshot.restorePlugins && !contextChanged && !retryRuntime {
+	if policy.Version == 2 && snapshot.profilePlan != nil && snapshot.profileFingerprint == selection.Fingerprint && !snapshot.profileRefresh && !snapshot.profileNeedsSettings && !snapshot.restorePlugins && !contextChanged && !retryRuntime && !snapshot.retryPending {
 		state := cloudHarnessProfileState(snapshot.profilePlan, snapshot.runtimeIssues...)
 		if snapshot.receiptState != state || snapshot.selection != selection {
 			return h.record(id, selection, state)
@@ -1053,7 +1092,12 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 					return err
 				}
 				if _, err := h.call("thread/settings/update", map[string]any{"threadId": id, "disabledPluginIds": desiredPlan.plugins}); err != nil {
-					_ = h.record(id, selection, "failed")
+					h.mu.Lock()
+					if current := h.threads[id]; current != nil {
+						current.failureKey = key
+					}
+					h.mu.Unlock()
+					h.recordFailure(id, selection, "settings", err, "not_needed", "", nil)
 					return err
 				}
 			}
@@ -1089,7 +1133,12 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 				return err
 			}
 			if _, err := h.call("thread/settings/update", map[string]any{"threadId": id, "disabledPluginIds": desiredPlan.plugins}); err != nil {
-				_ = h.record(id, selection, "failed")
+				h.mu.Lock()
+				if current := h.threads[id]; current != nil {
+					current.failureKey = key
+				}
+				h.mu.Unlock()
+				h.recordFailure(id, selection, "settings", err, "not_needed", "", nil)
 				return err
 			}
 			h.mu.Lock()
@@ -1179,13 +1228,20 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 			current.failureKey = key
 		}
 		h.mu.Unlock()
-		_ = h.record(id, selection, "failed")
+		rollback, rollbackStage := "restored", ""
+		var rollbackErr error
+		var subscription *cloudHarnessSubscriptionError
+		if errors.As(err, &subscription) && subscription.rollback != nil {
+			rollback, rollbackStage, rollbackErr = "failed", "restore_subscriptions", subscription.rollback
+		}
+		h.recordFailure(id, selection, "release_subscriptions", err, rollback, rollbackStage, rollbackErr)
 		return errors.New("native harness could not release this chat subscription")
 	}
 	defer func() { _ = restoreSubscriptions(primary) }()
+	stage := "resume"
 	result, err := h.callOn(primary, "thread/resume", params)
 	if err == nil && cloudThreadID(cloudHarnessRaw(result)) != id {
-		err = errors.New("native harness resumed a different chat")
+		err = &cloudHarnessRPCError{reason: "invalid_response"}
 	}
 	var resumedPlugins bool
 	var resumedPluginsErr error
@@ -1201,27 +1257,33 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 		if desiredPlan != nil {
 			replay["disabledPluginIds"] = cloudHarnessRaw(desiredPlan.plugins)
 		}
+		stage = "settings"
 		_, err = h.call("thread/settings/update", replay)
 	}
 	if err == nil {
+		stage = "restore_subscriptions"
 		err = restoreSubscriptions(primary)
 	}
 	if err != nil {
 		rollback := cloudHarnessResumeParams(snapshot, snapshot.model, snapshot.cwd)
 		// Rollback must also release background owners of the attempted config.
+		rollbackStage := "release_subscriptions"
 		rollbackPrimary, rollbackRestore, rollbackErr := h.suspendSubscriptions(id)
 		var rollbackResult cloudMessage
 		if rollbackErr == nil {
 			primary, restoreSubscriptions = rollbackPrimary, rollbackRestore
+			rollbackStage = "resume"
 			rollbackResult, rollbackErr = h.callOn(primary, "thread/resume", rollback)
 		}
 		if rollbackErr == nil && cloudThreadID(cloudHarnessRaw(rollbackResult)) != id {
-			rollbackErr = errors.New("native harness rollback changed chat identity")
+			rollbackErr = &cloudHarnessRPCError{reason: "invalid_response"}
 		}
 		if rollbackErr == nil {
+			rollbackStage = "settings"
 			_, rollbackErr = h.call("thread/settings/update", cloudHarnessReplaySettings(snapshot, snapshot.model, snapshot.cwd))
 		}
 		if rollbackErr == nil {
+			rollbackStage = "restore_subscriptions"
 			rollbackErr = restoreSubscriptions(primary)
 		}
 		h.mu.Lock()
@@ -1239,7 +1301,13 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 			}
 		}
 		h.mu.Unlock()
-		_ = h.record(id, selection, "failed")
+		outcome := "restored"
+		if rollbackErr != nil {
+			outcome = "failed"
+		} else {
+			rollbackStage = ""
+		}
+		h.recordFailure(id, selection, stage, err, outcome, rollbackStage, rollbackErr)
 		return errors.New("native harness reload failed; profile was not applied")
 	}
 	runtimeIssues, reassembled := h.verifyMCPRuntime(id, desiredConfig, attemptedConfig, beforeRuntime)

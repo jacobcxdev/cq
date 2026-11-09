@@ -14,21 +14,35 @@ import (
 
 // Receipt retains the baseline needed to restore a chat's harness state.
 type Receipt struct {
-	Version         int       `json:"version"`
-	ChatID          string    `json:"chat_id"`
-	Mode            string    `json:"mode"`
-	Profile         Profile   `json:"profile"`
-	Source          string    `json:"source"`
-	State           string    `json:"state"`
-	BaselinePlugins []string  `json:"baseline_plugins"`
-	AppliedPlugins  []string  `json:"applied_plugins"`
-	PendingPlugins  []string  `json:"pending_plugins,omitempty"`
-	Fingerprint     string    `json:"fingerprint,omitempty"`
-	Model           string    `json:"model,omitempty"`
-	Cwd             string    `json:"cwd,omitempty"`
-	Unsupported     []string  `json:"unsupported,omitempty"`
-	Issues          []string  `json:"issues,omitempty"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	Version         int                 `json:"version"`
+	ChatID          string              `json:"chat_id"`
+	Mode            string              `json:"mode"`
+	Profile         Profile             `json:"profile"`
+	Source          string              `json:"source"`
+	State           string              `json:"state"`
+	BaselinePlugins []string            `json:"baseline_plugins"`
+	AppliedPlugins  []string            `json:"applied_plugins"`
+	PendingPlugins  []string            `json:"pending_plugins,omitempty"`
+	Fingerprint     string              `json:"fingerprint,omitempty"`
+	Model           string              `json:"model,omitempty"`
+	Cwd             string              `json:"cwd,omitempty"`
+	Unsupported     []string            `json:"unsupported,omitempty"`
+	Issues          []string            `json:"issues,omitempty"`
+	Failure         *ApplicationFailure `json:"failure,omitempty"`
+	RetrySupported  bool                `json:"retry_supported,omitempty"`
+	UpdatedAt       time.Time           `json:"updated_at"`
+}
+
+// ApplicationFailure contains classifications only, never native messages or
+// request data. Rollback reports recovery separately from the original failure.
+type ApplicationFailure struct {
+	Stage              string `json:"stage"`
+	Reason             string `json:"reason"`
+	NativeCode         *int   `json:"native_code,omitempty"`
+	Rollback           string `json:"rollback"`
+	RollbackStage      string `json:"rollback_stage,omitempty"`
+	RollbackReason     string `json:"rollback_reason,omitempty"`
+	RollbackNativeCode *int   `json:"rollback_native_code,omitempty"`
 }
 
 // Receipts stores private per-chat receipts and ownership leases.
@@ -120,6 +134,9 @@ func (receipts Receipts) path(chatID, suffix string) (string, error) {
 }
 
 func validateReceipt(receipt Receipt) error {
+	if receipt.RetrySupported && receipt.Mode != "full" {
+		return fmt.Errorf("harness retry requires full-mode ownership")
+	}
 	if receipt.Version != 1 {
 		return fmt.Errorf("unsupported harness receipt version %d", receipt.Version)
 	}
@@ -142,6 +159,37 @@ func validateReceipt(receipt Receipt) error {
 	}
 	if receipt.UpdatedAt.IsZero() {
 		return fmt.Errorf("harness receipt timestamp is required")
+	}
+	if failure := receipt.Failure; failure != nil {
+		stage := func(value string) bool {
+			switch value {
+			case "settings", "release_subscriptions", "resume", "restore_subscriptions":
+				return true
+			}
+			return false
+		}
+		reason := func(value string) bool {
+			switch value {
+			case "rpc_rejected", "rpc_timeout", "transport", "cancelled", "invalid_response", "subscription_missing", "internal":
+				return true
+			}
+			return false
+		}
+		if receipt.State != "failed" || !stage(failure.Stage) || !reason(failure.Reason) {
+			return fmt.Errorf("invalid harness failure classification")
+		}
+		switch failure.Rollback {
+		case "not_needed", "restored":
+			if failure.RollbackStage != "" || failure.RollbackReason != "" || failure.RollbackNativeCode != nil {
+				return fmt.Errorf("unexpected harness rollback failure")
+			}
+		case "failed":
+			if !stage(failure.RollbackStage) || !reason(failure.RollbackReason) {
+				return fmt.Errorf("invalid harness rollback classification")
+			}
+		default:
+			return fmt.Errorf("invalid harness rollback outcome")
+		}
 	}
 	if len(receipt.Model) > 1024 || strings.ContainsRune(receipt.Model, '\x00') || (receipt.Cwd != "" && (!filepath.IsAbs(receipt.Cwd) || filepath.Clean(receipt.Cwd) != receipt.Cwd || strings.ContainsRune(receipt.Cwd, '\x00'))) {
 		return fmt.Errorf("invalid harness receipt context")

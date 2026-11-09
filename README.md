@@ -223,6 +223,7 @@ cq codex harness profile list
 cq codex harness profile save
 cq codex harness profile show
 cq codex harness project
+cq codex harness retry
 cq codex harness skill install
 cq codex harness status
 cq codex harness unbind

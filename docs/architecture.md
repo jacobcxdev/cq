@@ -251,7 +251,12 @@ request fresh native status without clearing the activity guard directly. A new
 turn also refreshes cached activity when application is pending and no submitted
 turn or settings request remains outstanding. Pending
 application events report activity, outstanding request counts and rollout guards
-without recording message content. CQ checks the chat's effective plugin and
+without recording message content. Failed native application receipts and events
+record the failed stage, classified reason and numeric native RPC code where
+available. Rollback outcome and any rollback failure remain separate from the
+original failure. Native error messages, error data, request configuration and
+environment values are never included. Successful or pending application clears
+the previous failure detail. CQ checks the chat's effective plugin and
 Apps features and standalone MCP tools, resources and templates after reload.
 MCP verification reads the relevant servers through their existing selected-chat
 connections; it does not start unrelated discovery across the whole catalogue.

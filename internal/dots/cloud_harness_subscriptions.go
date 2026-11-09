@@ -1,7 +1,6 @@
 package dots
 
 import (
-	"errors"
 	"slices"
 )
 
@@ -19,7 +18,7 @@ func (h *cloudHarness) suspendSubscriptions(id string) (string, func(string) err
 	}
 	h.mu.Unlock()
 	if len(sources) == 0 {
-		return "", nil, errors.New("native harness has no chat subscription")
+		return "", nil, &cloudHarnessRPCError{reason: "subscription_missing"}
 	}
 	restoreSource := make(map[string]bool, len(sources))
 	for _, source := range sources {
@@ -58,7 +57,11 @@ func (h *cloudHarness) suspendSubscriptions(id string) (string, func(string) err
 			}
 			result, err := h.callOn(source, "thread/resume", resume[source])
 			if err != nil || cloudThreadID(cloudHarnessRaw(result)) != id {
-				failure = errors.New("native chat subscription could not be restored")
+				if err != nil {
+					failure = err
+				} else {
+					failure = &cloudHarnessRPCError{reason: "invalid_response"}
+				}
 			}
 		}
 		restored = failure == nil
@@ -68,8 +71,10 @@ func (h *cloudHarness) suspendSubscriptions(id string) (string, func(string) err
 		result, err := h.callOn(source, "thread/unsubscribe", map[string]string{"threadId": id})
 		status := cloudHarnessString(result, "status")
 		if err != nil || (status != "unsubscribed" && status != "notSubscribed" && status != "notLoaded") {
-			_ = restore("")
-			return "", nil, errors.New("native harness could not release this chat subscription")
+			if err == nil {
+				err = &cloudHarnessRPCError{reason: "invalid_response"}
+			}
+			return "", nil, &cloudHarnessSubscriptionError{cause: err, rollback: restore("")}
 		}
 		restoreSource[source] = status == "unsubscribed"
 	}
@@ -80,7 +85,7 @@ func (h *cloudHarness) suspendSubscriptions(id string) (string, func(string) err
 		}
 	}
 	if primary == "" {
-		return "", nil, errors.New("native harness has no verified chat subscription")
+		return "", nil, &cloudHarnessRPCError{reason: "subscription_missing"}
 	}
 	return primary, restore, nil
 }
