@@ -2317,7 +2317,10 @@ func (runtime *CodexLeaseRuntime) validateExpectedBound(restored CodexRestoredLa
 		return nil
 	}
 	record, found := runtime.restoredRecord(restored, expected.Identity)
-	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != expected.Identity || !found || (!record.Record.EverAdmitted && !record.Record.NonMigratable) || record.Record.RecordGeneration != expected.RecordGeneration || record.AccountKey != expected.AccountKey || selected != expected.AccountKey || !constantTimeCodexLeaseDigestEqual(record.Record.RequestedModelHash, runtime.store.hash("requested-model", plan.RequestedModel)) || record.Record.EffectiveModel != plan.EffectiveModel {
+	// Fence turn/account authority, not the preceding request's model. A new
+	// request generation can change models after the prior response has drained;
+	// BeginRequest and its CAS commit enforce that boundary separately.
+	if restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != expected.Identity || !found || (!record.Record.EverAdmitted && !record.Record.NonMigratable) || record.Record.RecordGeneration != expected.RecordGeneration || record.AccountKey != expected.AccountKey || selected != expected.AccountKey {
 		return fmt.Errorf("%w: expected bound turn changed", ErrCodexLeaseAuthorityMismatch)
 	}
 	return nil
