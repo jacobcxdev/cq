@@ -1681,7 +1681,7 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 					}
 				}
 				markCodexWSProviderTerminal(ctx, string(result.Kind), reason, reason, terminalAccountHint, 0)
-				if err := broker.writeResponseMessage(ctx, downstream, messageType, frame); err != nil {
+				if err := broker.writeResponseMessage(ctx, downstream, messageType, frame, result.Kind); err != nil {
 					return false, fmt.Errorf("Codex downstream WebSocket write failed: %w", err)
 				}
 				return false, nil
@@ -1706,7 +1706,7 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 				}
 			}
 			markCodexWSProviderTerminal(ctx, string(result.Kind), reason, reason, terminalAccountHint, 0)
-			if err := broker.writeResponseMessage(ctx, downstream, messageType, frame); err != nil {
+			if err := broker.writeResponseMessage(ctx, downstream, messageType, frame, result.Kind); err != nil {
 				return false, fmt.Errorf("Codex downstream WebSocket write failed: %w", err)
 			}
 			return false, nil
@@ -1716,13 +1716,13 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 				return false, err
 			}
 			markCodexWSProviderTerminal(ctx, string(result.Kind), "provider_failed", "provider_error", codexTraceAccountHint(active.account), 0)
-			if err := broker.writeResponseMessage(ctx, downstream, messageType, frame); err != nil {
+			if err := broker.writeResponseMessage(ctx, downstream, messageType, frame, result.Kind); err != nil {
 				return false, fmt.Errorf("Codex downstream WebSocket write failed: %w", err)
 			}
 			closeCodexWSActiveUpstream(active)
 			return false, nil
 		}
-		if err := broker.writeResponseMessage(ctx, downstream, messageType, frame); err != nil {
+		if err := broker.writeResponseMessage(ctx, downstream, messageType, frame, result.Kind); err != nil {
 			emitCodexTrace(ctx, CodexTraceEvent{Phase: "downstream_write", Outcome: "error", FrameType: codexTraceWebSocketFrameType(messageType), FrameBytes: len(frame), Reason: codexTraceErrorReason(err)})
 			return false, fmt.Errorf("Codex downstream WebSocket write failed: %w", err)
 		}
@@ -1741,7 +1741,38 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 	}
 }
 
-func (broker *codexTerminatingWSBroker) writeResponseMessage(ctx context.Context, downstream websocketRelayConn, messageType int, frame []byte) error {
+func (broker *codexTerminatingWSBroker) writeResponseMessage(ctx context.Context, downstream websocketRelayConn, messageType int, frame []byte, kind CodexSSEEventKind) error {
+	// Codex ignores status-less top-level cyber_policy errors. Surface the same
+	// rejection as a failed response so it terminates instead of timing out.
+	if kind == CodexSSEError && messageType == websocket.TextMessage {
+		wrapped, err := ParseCodexWrappedError(frame)
+		if err == nil && wrapped.Found && wrapped.Code == "cyber_policy" && wrapped.Status == 0 {
+			var envelope map[string]json.RawMessage
+			if err := json.Unmarshal(frame, &envelope); err != nil {
+				return err
+			}
+			// Preserve explicit status authority, including invalid values.
+			_, hasStatus := envelope["status"]
+			_, hasStatusCode := envelope["status_code"]
+			if !hasStatus && !hasStatusCode {
+				response := map[string]json.RawMessage{"status": json.RawMessage(`"failed"`), "error": envelope["error"]}
+				if id, ok := envelope["response_id"]; ok {
+					response["id"] = id
+				}
+				envelope["response"], err = json.Marshal(response)
+				if err != nil {
+					return err
+				}
+				envelope["type"] = json.RawMessage(`"response.failed"`)
+				delete(envelope, "error")
+				delete(envelope, "response_id")
+				frame, err = json.Marshal(envelope)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
 	writeCtx, cancelWrite := context.WithTimeout(ctx, broker.config.ResponseIdleTimeout)
 	defer cancelWrite()
 	return writeCodexWSMessage(writeCtx, downstream, messageType, frame)
