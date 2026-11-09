@@ -14,7 +14,7 @@ import (
 func parseQuota(body []byte, now time.Time) (quota.Result, error) {
 	var response struct {
 		Config *struct {
-			Used   *float64 `json:"creditUsagePercent"`
+			Used   json.RawMessage `json:"creditUsagePercent"`
 			Period *struct {
 				Start string `json:"start"`
 				End   string `json:"end"`
@@ -22,10 +22,20 @@ func parseQuota(body []byte, now time.Time) (quota.Result, error) {
 		} `json:"config"`
 	}
 	invalid := errors.New("Grok included subscription quota unavailable")
-	if json.Unmarshal(body, &response) != nil || response.Config == nil || response.Config.Used == nil || response.Config.Period == nil {
+	if json.Unmarshal(body, &response) != nil || response.Config == nil || response.Config.Period == nil {
 		return quota.Result{}, invalid
 	}
-	used := *response.Config.Used
+	// The credits service omits zero-valued scalars. Match Grok Build's
+	// credit_balance_from_config while still requiring a valid current period.
+	// Explicit null is not an omitted proto3 zero.
+	used := 0.0
+	if len(response.Config.Used) != 0 {
+		var value *float64
+		if json.Unmarshal(response.Config.Used, &value) != nil || value == nil {
+			return quota.Result{}, invalid
+		}
+		used = *value
+	}
 	if math.IsNaN(used) || math.IsInf(used, 0) || used < 0 {
 		return quota.Result{}, invalid
 	}

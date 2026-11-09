@@ -201,3 +201,17 @@ func TestFetchUsesSubscriptionDisplayName(t *testing.T) {
 		})
 	}
 }
+
+func TestFetchRetainsDisplayNameWhenQuotaCannotBeParsed(t *testing.T) {
+	a := fakeAuthority{accounts: []Account{{ID: "a", Plan: "GrokPro"}}, do: func(_ context.Context, _ AccountID, req *http.Request) (*http.Response, error) {
+		body := `{"config":{}}`
+		if req.URL.Path == "/v1/settings" {
+			body = `{"subscription_tier_display":"SuperGrok"}`
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
+	}}
+	results, err := New(a).Fetch(t.Context(), quotaNow())
+	if err != nil || len(results) != 1 || results[0].Error == nil || results[0].Error.Code != "parse_error" || results[0].Plan != "SuperGrok" {
+		t.Fatalf("quota error lost readable plan: %#v, %v", results, err)
+	}
+}
