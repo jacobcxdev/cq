@@ -66,3 +66,35 @@ func TestParseSubscriptionCalendarPeriodUsesActualBoundaries(t *testing.T) {
 		t.Fatalf("fabricated monthly period: %#v", result.Windows)
 	}
 }
+
+func TestParseSubscriptionQuotaOmittedZeroUsage(t *testing.T) {
+	// Sanitised live shape: proto3 JSON omits the zero-valued percentage.
+	body := []byte(`{"config":{"currentPeriod":{"type":"USAGE_PERIOD_TYPE_WEEKLY","start":"2026-11-06T17:04:32.756+00:00","end":"2026-11-13T17:04:32.756+00:00"},"isUnifiedBillingUser":true}}`)
+	result, err := parseQuota(body, time.Date(2026, 11, 9, 18, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	window, ok := result.Windows[quota.Window7Day]
+	if !ok || result.Status != quota.StatusOK || window.RemainingPct != 100 || window.RemainingPctExact == nil || *window.RemainingPctExact != 100 || window.ResetAtUnix != time.Date(2026, 11, 13, 17, 4, 32, 0, time.UTC).Unix() {
+		t.Fatalf("unexpected omitted-zero result: %#v", result)
+	}
+}
+
+func TestParseSubscriptionQuotaRejectsMissingUsageWithoutValidPeriod(t *testing.T) {
+	now := time.Date(2026, 11, 9, 18, 0, 0, 0, time.UTC)
+	for _, body := range []string{
+		`{"config":{}}`,
+		`{"config":{"currentPeriod":null}}`,
+		`{"config":{"currentPeriod":{}}}`,
+		`{"config":{"currentPeriod":{"start":"2026-11-06T17:04:32Z"}}}`,
+		`{"config":{"currentPeriod":{"start":"2026-10-06T17:04:32Z","end":"2026-10-13T17:04:32Z"}}}`,
+		`{"config":{"creditUsagePercent":null,"currentPeriod":{"start":"2026-11-06T17:04:32Z","end":"2026-11-13T17:04:32Z"}}}`,
+		`{"config":{"creditUsagePercent":"0","currentPeriod":{"start":"2026-11-06T17:04:32Z","end":"2026-11-13T17:04:32Z"}}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			if _, err := parseQuota([]byte(body), now); err == nil {
+				t.Fatal("invalid or unknown quota accepted")
+			}
+		})
+	}
+}
