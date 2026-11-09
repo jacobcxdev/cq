@@ -125,6 +125,16 @@ gates do not establish equivalence with WinGet's Sandbox, ShellExecute or
 downloaded file handling. Inspect the community PR's actual failed check before
 attributing an installation failure to its URL or package.
 
+Publication writes use GitHub's `createCommitOnBranch` API with an exact expected
+branch head, then require the resulting commit's verified signature, parent and
+changed files. The paired Homebrew Casks are committed together; unchanged bytes
+create no commit. WinGet submission uses the same signed path and checks the
+actual publication token's actor, upstream push permission and requested
+assignee eligibility before creating a branch or PR. GitHub can silently ignore
+assignment without push permission, so submission fails explicitly when those
+checks cannot pass. Existing unsigned commits are historical records; do not
+rewrite them or append an empty commit to imply they became signed.
+
 If only the WinGet publication helper fails after packages are public, recover
 that stage from reviewed `main` with `gh workflow run release.yml --ref main -f
 winget_release_tag=vX.Y.Z`, using the existing published version. Recovery runs
@@ -132,6 +142,24 @@ the guarded agreement and superseded-candidate cleanup steps without building,
 uploading, publishing or replacing package assets. The helper verifies a stable
 published release and accepts the Microsoft policy app's latest successful
 `license/cla` check on the exact PR head as completed initial CLA processing.
+
+If a published Windows ARM64 installation check was interrupted, use the
+read-only **Published Windows validation** workflow from reviewed `main`:
+
+```sh
+gh workflow run published-windows.yml --repo jacobcxdev/cq --ref main -f release_tag=v0.48.0
+```
+
+Substitute the already published stable version. This downloads its immutable
+ARM64 MSI and the published predecessor, checks both GitHub asset digests and
+checksums against their exact tag sources, and runs the existing Go-runner and
+MSI lifecycle validators on Windows ARM64. It does not build, upload or replace
+release packages. A separate read-only job checks the actual WinGet publication
+token; an assignment-permission failure does not invalidate a successful named
+Windows installation job. Neither job submits a community PR. The existing
+`winget_release_tag` recovery still handles an already submitted PR's agreement
+and cleanup; it does not create a missing submission or establish installation
+qualification.
 
 ## Toolchain and package configuration
 

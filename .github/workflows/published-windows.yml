@@ -1,0 +1,91 @@
+name: Published Windows validation
+run-name: Published Windows ARM64 ${{ inputs.release_tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable published stable release to qualify
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-arm64:
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Require reviewed main
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -ne "refs/heads/main") { throw "published validation requires reviewed main" }
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version-file: go.mod
+      - name: Verify public package guard regressions
+        shell: pwsh
+        run: .\.github\scripts\test-published-windows-package.ps1
+      - name: Resolve and verify immutable public packages
+        id: packages
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw "a stable release tag is required" }
+          $version = [version]$tag.TrimStart("v")
+          $published = gh release list --repo jacobcxdev/cq --exclude-drafts --exclude-pre-releases --limit 100 --json tagName | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw "published release inventory could not be read" }
+          $previous = @($published | ForEach-Object {
+            if ($_.tagName -match '^v[0-9]+\.[0-9]+\.[0-9]+$') {
+              $candidate = [version]$_.tagName.TrimStart("v")
+              if ($candidate -lt $version) { [pscustomobject]@{ Tag = $_.tagName; Version = $candidate } }
+            }
+          } | Sort-Object Version -Descending | Select-Object -First 1)
+          if ($previous.Count -ne 1) { throw "published predecessor is absent or ambiguous" }
+          foreach ($selected in @($tag, $previous[0].Tag)) {
+            $selectedVersion = $selected.TrimStart("v")
+            $root = Join-Path $env:RUNNER_TEMP "public-$selectedVersion"
+            New-Item -ItemType Directory -Path $root | Out-Null
+            $releaseFile = Join-Path $root "release.json"
+            gh api "repos/jacobcxdev/cq/releases/tags/$selected" | Set-Content -LiteralPath $releaseFile -Encoding utf8
+            if ($LASTEXITCODE -ne 0) { throw "published release metadata could not be read" }
+            $source = (git rev-parse --verify "refs/tags/$selected^{commit}").Trim()
+            if ($LASTEXITCODE -ne 0 -or $source -notmatch '^[0-9a-f]{40}$') { throw "release tag source could not be resolved" }
+            $name = "cq_${selectedVersion}_windows_arm64.msi"
+            gh release download $selected --repo jacobcxdev/cq --pattern $name --pattern checksums.txt --dir $root
+            if ($LASTEXITCODE -ne 0) { throw "public package download failed" }
+            .\.github\scripts\verify-published-windows-package.ps1 -ReleaseFile $releaseFile -ChecksumsFile (Join-Path $root "checksums.txt") -PackageFile (Join-Path $root $name) -Tag $selected -Source $source
+          }
+          "version=$($version.ToString())" >> $env:GITHUB_OUTPUT
+          "previous=$($previous[0].Version.ToString())" >> $env:GITHUB_OUTPUT
+      - name: Validate public ARM64 Go runner and MSI lifecycle
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CURRENT_VERSION: ${{ steps.packages.outputs.version }}
+          PREVIOUS_VERSION: ${{ steps.packages.outputs.previous }}
+        run: |
+          $current = Join-Path $env:RUNNER_TEMP "public-$env:CURRENT_VERSION/cq_$($env:CURRENT_VERSION)_windows_arm64.msi"
+          $previous = Join-Path $env:RUNNER_TEMP "public-$env:PREVIOUS_VERSION/cq_$($env:PREVIOUS_VERSION)_windows_arm64.msi"
+          .\.github\scripts\validate-windows-install.ps1 -SkipWinGet -ExpectedVersion $env:CURRENT_VERSION -PreviousGoVersion $env:PREVIOUS_VERSION
+          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previous -CurrentMSI $current -PreviousVersion $env:PREVIOUS_VERSION -CurrentVersion $env:CURRENT_VERSION
+
+  winget-permissions:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - name: Require reviewed main
+        run: test "$GITHUB_REF" = refs/heads/main
+      - name: Inspect actual publication actor and assignment permissions
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
+        run: bash .github/scripts/check-winget-permissions.sh
