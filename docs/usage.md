@@ -375,6 +375,10 @@ The existing full controller consumes the request at its next idle boundary;
 duplicate requests for the same failure reuse their nonce. Pending, partial,
 successful, stale and plugin-only receipts are refused. Re-read `explain` for
 application proof; a saved retry request alone does not establish tool visibility.
+A failed model or project switch keeps the observed, rolled-back runtime context
+in `model` and `cwd`, and records the failed target separately in
+`attempted_context`. Use that target's `--model` and `--project` for `retry` and
+`explain`; retry does not claim the native context changed before idle application.
 
 Profiles can be shared without installation paths:
 

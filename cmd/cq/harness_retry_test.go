@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"testing"
 	"time"
@@ -57,6 +58,55 @@ func TestCodexHarnessRetryRequestedSameFailedBindingOnce(t *testing.T) {
 	second, _ := fsys.ReadFile("/cq/harness.json")
 	if !bytes.Equal(first, second) {
 		t.Fatal("duplicate request changed retry nonce")
+	}
+}
+
+func TestCodexHarnessRetryMatchedAttemptedContextAfterRollback(t *testing.T) {
+	for _, target := range []struct{ name, model, cwd string }{
+		{"model", "glm-5.3-flash", "/fixture"},
+		{"project", "glm-5.3", "/other"},
+		{"model_and_project", "glm-5.3-flash", "/other"},
+	} {
+		t.Run(target.name, func(t *testing.T) {
+			runner, fsys := harnessProfilesFixture(t)
+			policy := harness.Policy{Version: 2, Enabled: true, Global: harness.Scope{All: harness.Binding{Changes: harness.Changes{Default: harness.Enabled}}, Models: map[string]harness.Binding{"glm-5.3-flash": {Changes: harness.Changes{Default: harness.Disabled}}}}, Workspaces: map[string]harness.Scope{"/other": {All: harness.Binding{Changes: harness.Changes{Default: harness.Disabled}}}}}
+			if err := harness.Save(fsys, "/cq/harness.json", policy); err != nil {
+				t.Fatal(err)
+			}
+			selection := policy.Resolve(target.model, target.cwd, harnessProfilesChat)
+			store := harness.Receipts{FS: fsys, Dir: "/state/harness"}
+			receipt := harness.Receipt{Version: 1, ChatID: harnessProfilesChat, Mode: "full", RetrySupported: true, Profile: selection.Profile, Source: selection.Source, State: "failed", Fingerprint: selection.Fingerprint, Model: "glm-5.3", Cwd: "/fixture", AttemptedContext: &harness.ApplicationContext{Model: target.model, Cwd: target.cwd}, Failure: &harness.ApplicationFailure{Stage: "resume", Reason: "rpc_rejected", Rollback: "restored"}}
+			if err := store.Save(receipt); err != nil {
+				t.Fatal(err)
+			}
+			runner.receipt, runner.requestRetry = store.Load, store.RequestRetry
+			runner.apply = func(context.Context, string) error { t.Fatal("retry bypassed native owner"); return nil }
+			before, _ := fsys.ReadFile("/cq/harness.json")
+			var explanation bytes.Buffer
+			if err := runHarnessTestCLI(t, runner, &explanation, "explain", "--chat", "current", "--project", target.cwd, "--model", target.model, "--json"); err != nil {
+				t.Fatal(err)
+			}
+			var explained harnessExplanation
+			if err := json.Unmarshal(explanation.Bytes(), &explained); err != nil || explained.ApplicationStatus.State != "failed" || explained.ApplicationStatus.Reason != "receipt_matches" || explained.LastApplication.Model != "glm-5.3" || explained.LastApplication.Cwd != "/fixture" {
+				t.Fatalf("explain lost observed/attempted distinction: %s %v", explanation.Bytes(), err)
+			}
+			for range 2 {
+				if err := runHarnessTestCLI(t, runner, io.Discard, "retry", "--chat", "current", "--project", target.cwd, "--model", target.model); err != nil {
+					t.Fatal(err)
+				}
+			}
+			intent, err := store.LoadRetry(harnessProfilesChat)
+			if err != nil || intent.Model != target.model || intent.Cwd != target.cwd {
+				t.Fatalf("wrong retry context: %#v %v", intent, err)
+			}
+			if err := runHarnessTestCLI(t, runner, io.Discard, "retry", "--chat", "current", "--project", "/fixture", "--model", "glm-5.3"); err == nil {
+				t.Fatal("rolled-back context was accepted as the failed attempt")
+			}
+			after, _ := fsys.ReadFile("/cq/harness.json")
+			if !bytes.Equal(before, after) {
+				t.Fatal("context retry changed curation policy")
+			}
+		})
 	}
 }
 

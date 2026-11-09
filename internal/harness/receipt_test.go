@@ -24,6 +24,40 @@ func receiptFixture() Receipt {
 	}
 }
 
+func TestReceiptAttemptedContextWasBoundedAndSeparate(t *testing.T) {
+	receipt := receiptFixture()
+	receipt.Mode, receipt.State, receipt.Model, receipt.Cwd = "full", "failed", "observed", "/observed"
+	receipt.AttemptedContext = &ApplicationContext{Model: "attempted", Cwd: "/attempted"}
+	store := Receipts{FS: fsutil.NewMemFS(), Dir: "/state/receipts"}
+	if err := store.Save(receipt); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load(testChat)
+	if err != nil || got.Model != "observed" || got.Cwd != "/observed" || got.RetryContext() != *receipt.AttemptedContext {
+		t.Fatalf("lost context distinction: %#v %v", got, err)
+	}
+	for name, alter := range map[string]func(*Receipt){
+		"empty_model":      func(r *Receipt) { r.AttemptedContext.Model = "" },
+		"long_model":       func(r *Receipt) { r.AttemptedContext.Model = strings.Repeat("m", 1025) },
+		"nul_model":        func(r *Receipt) { r.AttemptedContext.Model = "m\x00" },
+		"relative_project": func(r *Receipt) { r.AttemptedContext.Cwd = "relative" },
+		"unclean_project":  func(r *Receipt) { r.AttemptedContext.Cwd = "/a/../b" },
+		"nul_project":      func(r *Receipt) { r.AttemptedContext.Cwd = "/a\x00" },
+		"applied_state":    func(r *Receipt) { r.State = "applied" },
+		"plugins_mode":     func(r *Receipt) { r.Mode = "plugins" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := receipt
+			attempt := *receipt.AttemptedContext
+			invalid.AttemptedContext = &attempt
+			alter(&invalid)
+			if err := store.Save(invalid); err == nil {
+				t.Fatal("invalid attempted context accepted")
+			}
+		})
+	}
+}
+
 func TestReceiptMissingDoesNotCreateState(t *testing.T) {
 	fsys := fsutil.NewMemFS()
 	receipts := Receipts{FS: fsys, Dir: "/state/receipts"}

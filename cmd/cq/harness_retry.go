@@ -44,7 +44,8 @@ func (runner codexHarnessRunner) harnessRetry(ctx context.Context, cmd CodexHarn
 			return fmt.Errorf("full-mode owner does not support retry; update the owner before requesting retry")
 		}
 		selection := policy.Resolve(model, project, chat)
-		if policy.Version != 2 || !policy.Enabled || !selection.Managed || receipt.ChatID != chat || receipt.Mode != "full" || !receipt.RetrySupported || receipt.State != "failed" || receipt.Profile != selection.Profile || receipt.Fingerprint != selection.Fingerprint || receipt.Model != model || receipt.Cwd != project || receipt.UpdatedAt.IsZero() {
+		attempt := receipt.RetryContext()
+		if policy.Version != 2 || !policy.Enabled || !selection.Managed || receipt.ChatID != chat || receipt.Mode != "full" || !receipt.RetrySupported || receipt.State != "failed" || receipt.Profile != selection.Profile || receipt.Fingerprint != selection.Fingerprint || attempt.Model != model || attempt.Cwd != project || receipt.UpdatedAt.IsZero() {
 			return fmt.Errorf("retry requires a matching failed full-mode receipt for this chat, project and model")
 		}
 		return nil

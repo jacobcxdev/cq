@@ -14,23 +14,39 @@ import (
 
 // Receipt retains the baseline needed to restore a chat's harness state.
 type Receipt struct {
-	Version         int                 `json:"version"`
-	ChatID          string              `json:"chat_id"`
-	Mode            string              `json:"mode"`
-	Profile         Profile             `json:"profile"`
-	Source          string              `json:"source"`
-	State           string              `json:"state"`
-	BaselinePlugins []string            `json:"baseline_plugins"`
-	AppliedPlugins  []string            `json:"applied_plugins"`
-	PendingPlugins  []string            `json:"pending_plugins,omitempty"`
-	Fingerprint     string              `json:"fingerprint,omitempty"`
-	Model           string              `json:"model,omitempty"`
-	Cwd             string              `json:"cwd,omitempty"`
-	Unsupported     []string            `json:"unsupported,omitempty"`
-	Issues          []string            `json:"issues,omitempty"`
-	Failure         *ApplicationFailure `json:"failure,omitempty"`
-	RetrySupported  bool                `json:"retry_supported,omitempty"`
-	UpdatedAt       time.Time           `json:"updated_at"`
+	Version          int                 `json:"version"`
+	ChatID           string              `json:"chat_id"`
+	Mode             string              `json:"mode"`
+	Profile          Profile             `json:"profile"`
+	Source           string              `json:"source"`
+	State            string              `json:"state"`
+	BaselinePlugins  []string            `json:"baseline_plugins"`
+	AppliedPlugins   []string            `json:"applied_plugins"`
+	PendingPlugins   []string            `json:"pending_plugins,omitempty"`
+	Fingerprint      string              `json:"fingerprint,omitempty"`
+	Model            string              `json:"model,omitempty"`
+	Cwd              string              `json:"cwd,omitempty"`
+	AttemptedContext *ApplicationContext `json:"attempted_context,omitempty"`
+	Unsupported      []string            `json:"unsupported,omitempty"`
+	Issues           []string            `json:"issues,omitempty"`
+	Failure          *ApplicationFailure `json:"failure,omitempty"`
+	RetrySupported   bool                `json:"retry_supported,omitempty"`
+	UpdatedAt        time.Time           `json:"updated_at"`
+}
+
+// ApplicationContext identifies an attempted application separately from the
+// observed runtime context retained after rollback.
+type ApplicationContext struct {
+	Model string `json:"model"`
+	Cwd   string `json:"cwd"`
+}
+
+// RetryContext preserves compatibility with same-context older receipts.
+func (receipt Receipt) RetryContext() ApplicationContext {
+	if receipt.AttemptedContext != nil {
+		return *receipt.AttemptedContext
+	}
+	return ApplicationContext{Model: receipt.Model, Cwd: receipt.Cwd}
 }
 
 // ApplicationFailure contains classifications only, never native messages or
@@ -134,6 +150,11 @@ func (receipts Receipts) path(chatID, suffix string) (string, error) {
 }
 
 func validateReceipt(receipt Receipt) error {
+	if attempt := receipt.AttemptedContext; attempt != nil {
+		if receipt.Mode != "full" || (receipt.State != "failed" && receipt.State != "pending" && receipt.State != "prepared") || attempt.Model == "" || len(attempt.Model) > 1024 || strings.ContainsRune(attempt.Model, '\x00') || !filepath.IsAbs(attempt.Cwd) || filepath.Clean(attempt.Cwd) != attempt.Cwd || strings.ContainsRune(attempt.Cwd, '\x00') {
+			return fmt.Errorf("invalid attempted harness context")
+		}
+	}
 	if receipt.RetrySupported && receipt.Mode != "full" {
 		return fmt.Errorf("harness retry requires full-mode ownership")
 	}
