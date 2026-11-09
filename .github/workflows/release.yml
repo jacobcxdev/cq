@@ -2,6 +2,12 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      winget_release_tag:
+        description: Published release tag to recover WinGet only (for example v0.47.9)
+        type: string
+        required: false
+        default: ''
 
 concurrency:
   group: release-publication
@@ -13,6 +19,7 @@ permissions:
 
 jobs:
   release-source:
+    if: inputs.winget_release_tag == ''
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     steps:
@@ -788,20 +795,30 @@ jobs:
 
   winget-publish:
     needs: [windows-deployed, linux-install]
+    if: >-
+      ${{ !cancelled() && (inputs.winget_release_tag != '' ||
+      (needs.windows-deployed.result == 'success' && needs.linux-install.result == 'success')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      RELEASE_TAG: ${{ inputs.winget_release_tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v5
 
+      - name: Require reviewed main for WinGet recovery
+        if: inputs.winget_release_tag != ''
+        run: test "$GITHUB_REF" = refs/heads/main
+
       - uses: actions/download-artifact@v8
+        if: inputs.winget_release_tag == ''
         with:
           name: winget-manifests
           path: ${{ runner.temp }}/winget-manifests
 
       - name: Submit WinGet community manifest PR
+        if: inputs.winget_release_tag == ''
         env:
           GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           test -n "$GH_TOKEN"
@@ -849,11 +866,9 @@ jobs:
       - name: Ensure WinGet contributor agreement
         env:
           GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: bash .github/scripts/ensure-winget-cla.sh
 
       - name: Close superseded CQ WinGet candidates
         env:
           GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: bash .github/scripts/close-superseded-winget-prs.sh

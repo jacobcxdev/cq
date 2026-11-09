@@ -10,6 +10,7 @@ cat >"$root/bin/gh" <<'SH'
 set -euo pipefail
 case "$1 $2" in
   'api user') cat "$CQ_WINGET_TEST_ROOT/actor" ;;
+  'release view') cat "$CQ_WINGET_TEST_ROOT/release.json" ;;
   'pr list') cat "$CQ_WINGET_TEST_ROOT/prs.json" ;;
   'pr view')
     if [[ -f "$CQ_WINGET_TEST_ROOT/viewed" && -f "$CQ_WINGET_TEST_ROOT/current-after.json" ]]; then
@@ -30,6 +31,7 @@ case "$1 $2" in
     case "$4" in
       */comments) cat "$CQ_WINGET_TEST_ROOT/comments.json" ;;
       */events) cat "$CQ_WINGET_TEST_ROOT/events.json" ;;
+      */check-runs\?*) cat "$CQ_WINGET_TEST_ROOT/checks.json" ;;
       *) exit 2 ;;
     esac ;;
   'api repos/microsoft/winget-pkgs/issues/comments/123')
@@ -63,6 +65,7 @@ export CQ_WINGET_TEST_ROOT="$root" GH_TOKEN=fixture RELEASE_TAG=v0.47.3
 export PATH="$root/bin:$PATH"
 agreement='@microsoft-github-policy-service agree company="JacobCX Development Ltd."'
 printf 'jacobcxdev\n' >"$root/actor"
+printf '{"tagName":"v0.47.3","isDraft":false,"isPrerelease":false}\n' >"$root/release.json"
 printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n' >"$root/fork-head"
 jq -n '{number:42,state:"OPEN",title:"New version: jacobcxdev.cq version 0.47.3",
   url:"https://github.com/microsoft/winget-pkgs/pull/42",headRefName:"cq-0.47.3",
@@ -74,6 +77,7 @@ jq -n '{number:42,state:"OPEN",title:"New version: jacobcxdev.cq version 0.47.3"
 jq '[.]' "$root/current.json" >"$root/prs.json"
 printf '[[]]\n' >"$root/comments.json"
 printf '[[]]\n' >"$root/events.json"
+printf '[{"check_runs":[]}]\n' >"$root/checks.json"
 printf '{"number":42,"state":"open","author":"jacobcxdev","author_association":"CONTRIBUTOR","labels":[]}\n' >"$root/policy.json"
 
 # New and already-existing submissions use the same guarded, idempotent step.
@@ -215,4 +219,62 @@ jq '.author_association=null' "$root/policy.json" >"$root/policy-next.json"
 mv "$root/policy-next.json" "$root/policy.json"
 if bash "$script" >"$root/error" 2>&1; then exit 1; fi
 [[ ! -e "$root/writes" ]]
-echo 'WinGet CLA checks passed: identity, head, exact dedupe, label ordering, replay and invalid metadata.'
+# A trusted green CLA check completes initial policy processing without a label.
+jq -n '[{check_runs:[{id:1,name:"license/cla",
+  head_sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",status:"completed",conclusion:"success",
+  app:{id:95686,slug:"microsoft-github-policy-service"}}]}]' >"$root/checks-valid.json"
+cp "$root/checks-valid.json" "$root/checks.json"
+printf '[[]]\n' >"$root/comments.json"
+printf '[[]]\n' >"$root/events.json"
+for association in NONE FIRST_TIMER FIRST_TIME_CONTRIBUTOR; do
+  rm -f "$root/writes" "$root/policy-read" "$root/sleeps"
+  jq --arg association "$association" '.author_association=$association | .labels=[]' "$root/policy.json" >"$root/policy-next.json"
+  mv "$root/policy-next.json" "$root/policy.json"
+  bash "$script"
+  [[ "$(cat "$root/writes")" == 42 && ! -e "$root/sleeps" ]]
+done
+
+# Green checks do not weaken the current-head guard or exact comment dedupe.
+rm -f "$root/writes" "$root/viewed"
+jq '.headRefOid="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$root/valid.json" >"$root/current-after.json"
+if bash "$script" >"$root/error" 2>&1; then exit 1; fi
+[[ ! -e "$root/writes" ]]
+rm "$root/current-after.json"
+jq -n --arg body "$agreement" '[[{id:123,user:{login:"jacobcxdev"},body:($body+"\n"),created_at:"2026-11-07T16:00:00Z",updated_at:"2026-11-07T16:00:00Z",issue_url:"https://api.github.com/repos/microsoft/winget-pkgs/issues/42"}]]' >"$root/comments.json"
+bash "$script"
+[[ ! -e "$root/writes" ]]
+
+# A green check cannot suppress an explicit new Needs-CLA label generation.
+jq '.labels=["Needs-CLA"]' "$root/policy.json" >"$root/policy-next.json"
+mv "$root/policy-next.json" "$root/policy.json"
+printf '[[{"id":99,"event":"labeled","label":{"name":"Needs-CLA"},"created_at":"2026-11-07T17:00:00Z"}]]\n' >"$root/events.json"
+bash "$script"
+[[ "$(cat "$root/writes")" == edit ]]
+
+# Pending, failed, spoofed, stale and malformed checks cannot authorise progress.
+jq '.labels=[]' "$root/policy.json" >"$root/policy-next.json"
+mv "$root/policy-next.json" "$root/policy.json"
+printf '[[]]\n' >"$root/comments.json"
+printf '[[]]\n' >"$root/events.json"
+for mutation in '.[0].check_runs[0].conclusion="failure"' \
+  '.[0].check_runs[0].status="in_progress"' \
+  '.[0].check_runs[0].app.id=1' \
+  '.[0].check_runs[0].app.slug="other"' \
+  '.[0].check_runs[0].name="other"' \
+  '.[0].check_runs[0].head_sha="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' \
+  '.[0].check_runs |= . + [(.[0] | .id=2 | .status="in_progress" | .conclusion=null)]' \
+  '.[0].check_runs[0].id=null' \
+  '.[0].check_runs=null'; do
+  jq "$mutation" "$root/checks-valid.json" >"$root/checks.json"
+  rm -f "$root/writes" "$root/sleeps"
+  if bash "$script" >"$root/error" 2>&1; then exit 1; fi
+  [[ ! -e "$root/writes" && "$(wc -l <"$root/sleeps" | tr -d ' ')" == 23 ]]
+done
+for mutation in '.isDraft=true' '.isPrerelease=true' '.tagName="v0.47.2"' 'del(.isDraft)'; do
+  jq "$mutation" <<< '{"tagName":"v0.47.3","isDraft":false,"isPrerelease":false}' >"$root/release.json"
+  rm -f "$root/writes"
+  if bash "$script" >"$root/error" 2>&1; then exit 1; fi
+  [[ ! -e "$root/writes" ]]
+  grep -F 'release must be published and stable' "$root/error" >/dev/null
+done
+echo 'WinGet CLA checks passed: identity, head, exact dedupe, label ordering, trusted checks, replay and invalid metadata.'

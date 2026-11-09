@@ -125,6 +125,14 @@ gates do not establish equivalence with WinGet's Sandbox, ShellExecute or
 downloaded file handling. Inspect the community PR's actual failed check before
 attributing an installation failure to its URL or package.
 
+If only the WinGet publication helper fails after packages are public, recover
+that stage from reviewed `main` with `gh workflow run release.yml --ref main -f
+winget_release_tag=vX.Y.Z`, using the existing published version. Recovery runs
+the guarded agreement and superseded-candidate cleanup steps without building,
+uploading, publishing or replacing package assets. The helper verifies a stable
+published release and accepts the Microsoft policy app's latest successful
+`license/cla` check on the exact PR head as completed initial CLA processing.
+
 ## Toolchain and package configuration
 
 GoReleaser v2 builds `cmd/cq` for Darwin, Linux and Windows, each in AMD64 and
