@@ -364,6 +364,10 @@ func codexTraceErrorReason(err error) string {
 	if err == nil {
 		return ""
 	}
+	var transport *codexWSDialTransportError
+	if errors.As(err, &transport) {
+		return string(transport.reason)
+	}
 	return string(codexRequestFailureReason(err))
 }
 

@@ -107,6 +107,16 @@ library retains at most 1 KiB of a rejected response. A successful retry clears 
 summary; each rejected attempt remains in the trace. Raw bodies remain confined
 to separately enabled payload capture.
 
+When an upstream WebSocket dial fails without an HTTP response, diagnostics use
+`stage=upstream_dial` and a fixed transport reason: `dns`, `connect`,
+`connection_refused`, `tls`, `cancelled`, `deadline`, `timeout`,
+`connection_reset`, `broken_pipe`, `eof`, `unexpected_eof`, `protocol` or
+`unknown`. These labels describe observed error types, not a proven network
+root cause. No HTTP status is inferred from the synthetic downstream error.
+The dial label survives lifecycle cleanup errors, so transport failures do not
+appear as frame-decoding failures. Raw errors, credentials and endpoint addresses
+are excluded. Existing HTTP rejection status and safe metadata remain separate.
+
 `diagnostics_log` is unset by default. Set an absolute private log path and arrange an approved restart to enable it; clearing/restoring the field also requires restart. Every Codex HTTP request and WebSocket `response.create` frame receives a trace ID. Ordered JSONL events record ingress, request identity, candidate eligibility and exclusion, selected account hint, pool, durable lease state before and after transitions, credential refresh, upstream dispatch/status, retries, failover, relay result, close/error classification, and terminal outcome. WebSocket events also carry a stable connection ID. Route summaries share the same trace ID. Metadata and payload JSONL logs rotate at a 64 MiB target and retain four prior files plus the current file. Retention is size-based, not age-based; oversized records can exceed the target. This policy does not apply to macOS service stderr or Dots logs. Enabling diagnostics does not change routing policy.
 
 Query one user-facing task, one trace, or recent traffic without manually searching JSONL:
