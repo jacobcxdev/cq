@@ -185,6 +185,8 @@ For API-key authentication, run `cq zai login --api-key` and paste a Personal Co
 
 CQ supports individual Coding Plan subscriptions through Z.ai's global endpoint. Group plans and regional endpoints are not configured separately.
 
+Paid capacity uses Lite as its baseline: Lite is 1×, Pro is 6× and Max is 14×, matching the [published credit allowances](https://docs.z.ai/devpack/overview#usage-instruction). Two current Max subscriptions therefore show `2 × Max 14x = 28x`. If explicit quota caps conflict with those allowances or report legacy token units, CQ keeps the account's percentages visible but excludes its unknown capacity from weighted totals. Start Plan token pools remain separate from paid subscription capacity.
+
 ```bash
 cq zai login
 cq zai login --no-activate

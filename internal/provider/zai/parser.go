@@ -2,6 +2,7 @@ package zai
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 
@@ -34,6 +35,20 @@ func parseQuota(body []byte) (quota.Result, string) {
 	if code != "" && code != "null" && code != "0" && code != "200" || response.Success != nil && !*response.Success {
 		return quota.Result{}, "api_error"
 	}
+	var plan string
+	var multiplier int
+	// Current paid credit allowances are Lite 2,000/10,000, Pro
+	// 12,000/60,000 and Max 28,000/140,000 per five hours/week.
+	// https://docs.z.ai/devpack/overview#usage-instruction
+	switch strings.ToLower(response.Data.Level) {
+	case "lite":
+		plan, multiplier = "Lite", 1
+	case "pro":
+		plan, multiplier = "Pro", 6
+	case "max":
+		plan, multiplier = "Max", 14
+	}
+	capacityKnown := multiplier > 0
 	windows := make(map[quota.WindowName]quota.Window)
 	for _, raw := range response.Data.Limits {
 		var kind struct {
@@ -60,6 +75,17 @@ func parseQuota(body []byte) (quota.Result, string) {
 		if _, duplicate := windows[name]; duplicate {
 			return quota.Result{}, "parse_error"
 		}
+		if name != "monthly:mcp" {
+			baseAllowance := 2000.0
+			if name == quota.Window7Day {
+				baseAllowance = 10000
+			}
+			// Explicit legacy token caps and conflicting credit caps do
+			// not establish a current paid allowance, even for a known tier.
+			if limit.Type != "CREDIT_LIMIT" || limit.Usage != nil && *limit.Usage != baseAllowance*float64(multiplier) {
+				capacityKnown = false
+			}
+		}
 		percentage := limit.Percentage
 		if percentage == nil && limit.Type == "TIME_LIMIT" && limit.Usage != nil && *limit.Usage > 0 && limit.CurrentValue != nil {
 			used := *limit.CurrentValue / *limit.Usage * 100
@@ -80,20 +106,16 @@ func parseQuota(body []byte) (quota.Result, string) {
 	if !hasFiveHour && !hasWeekly {
 		return quota.Result{}, "parse_error"
 	}
-	var plan string
-	switch strings.ToLower(response.Data.Level) {
-	case "lite":
-		plan = "Lite"
-	case "pro":
-		plan = "Pro"
-	case "max":
-		plan = "Max"
+	var tier string
+	if capacityKnown {
+		tier = fmt.Sprintf("zai_coding_%dx", multiplier)
 	}
 	return quota.Result{
-		AccountID: accountID,
-		Active:    true,
-		Status:    quota.StatusFromWindows(windows),
-		Plan:      plan,
-		Windows:   windows,
+		AccountID:     accountID,
+		Active:        true,
+		Status:        quota.StatusFromWindows(windows),
+		Plan:          plan,
+		RateLimitTier: tier,
+		Windows:       windows,
 	}, ""
 }
