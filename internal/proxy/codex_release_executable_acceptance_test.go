@@ -498,7 +498,7 @@ func TestNewCodexReleaseExecutableIsolationSeparatesSystemCallerFromRoutingAuth(
 		AccessToken: "system-access-secret", IDToken: "system-identity-secret", AccountID: "system-account",
 	}}
 
-	isolation := newCodexReleaseExecutableIsolation(t, routingCredential, clientCredential)
+	isolation := newCodexReleaseExecutableIsolationWithEgress(t, routingCredential, clientCredential, "http://127.0.0.1:1")
 	body, err := os.ReadFile(filepath.Join(isolation.codexHome, "auth.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -510,6 +510,9 @@ func TestNewCodexReleaseExecutableIsolationSeparatesSystemCallerFromRoutingAuth(
 	config, err := loadConfigFile(filepath.Join(isolation.config, "cq", "proxy.json"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	if config.CodexEgressProxy != "http://127.0.0.1:1" {
+		t.Fatal("synthetic isolation did not preserve its blocked egress proxy")
 	}
 	if config.CodexRoutingPinnedAccountKey != "release-validation-account" {
 		t.Fatalf("validation routing pin = %q, want release-validation-account", config.CodexRoutingPinnedAccountKey)
@@ -541,7 +544,7 @@ func TestNewCodexReleaseExecutableIsolationInitialisesRescueState(t *testing.T) 
 		},
 		localToken: "local-validation-token",
 	}
-	isolation := newCodexReleaseExecutableIsolation(t, credential, credential)
+	isolation := newCodexReleaseExecutableIsolationWithEgress(t, credential, credential, "http://127.0.0.1:1")
 	temporaryCredentialSocket := filepath.Join(isolation.config, "cq", "state", ".cq-credential-"+strings.Repeat("f", 32)+".sock")
 	if len(temporaryCredentialSocket) >= len(syscall.RawSockaddrUnix{}.Path) {
 		t.Fatalf("validation credential socket path has %d bytes, limit is %d", len(temporaryCredentialSocket), len(syscall.RawSockaddrUnix{}.Path)-1)
@@ -975,6 +978,11 @@ func writeCodexReleaseExecutableAccessSnapshot(path string, credential codexLive
 
 func newCodexReleaseExecutableIsolation(t *testing.T, routingCredential, clientCredential codexLiveAcceptanceCredential) codexReleaseExecutableIsolation {
 	t.Helper()
+	return newCodexReleaseExecutableIsolationWithEgress(t, routingCredential, clientCredential, newCodexLiveAcceptanceEgress(t).candidateProxyURL)
+}
+
+func newCodexReleaseExecutableIsolationWithEgress(t *testing.T, routingCredential, clientCredential codexLiveAcceptanceCredential, proxyURL string) codexReleaseExecutableIsolation {
+	t.Helper()
 	tmpRoot, err := filepath.EvalSymlinks("/tmp")
 	if err != nil {
 		t.Fatal(err)
@@ -1027,6 +1035,7 @@ func newCodexReleaseExecutableIsolation(t *testing.T, routingCredential, clientC
 		CodexLeaseRetentionDays:      7, CodexContinuityStateDir: isolation.continuity,
 		ProxyResilienceStateDir: isolation.resilience, CodexWindowPriming: CodexWindowPrimingConfig{Enabled: false},
 	}
+	config.CodexEgressProxy = proxyURL
 	if err := config.validate(); err != nil {
 		t.Fatal(err)
 	}
@@ -1217,7 +1226,11 @@ func verifyCodexReleaseExecutableListenerOwnership(process *codexReleaseExecutab
 
 func captureCodexReleaseSystemProxySnapshot() (codexReleaseSystemProxySnapshot, error) {
 	var snapshot codexReleaseSystemProxySnapshot
-	pids, err := codexReleaseListenerPIDs(DefaultPort)
+	port, err := codexLiveAcceptancePort(os.Getenv(codexLiveEgressPortEnvironment))
+	if err != nil {
+		return snapshot, err
+	}
+	pids, err := codexReleaseListenerPIDs(port)
 	if err != nil {
 		return snapshot, err
 	}
@@ -1235,7 +1248,7 @@ func captureCodexReleaseSystemProxySnapshot() (codexReleaseSystemProxySnapshot, 
 	// The installed proxy may be serving large turns while validation runs.
 	// Allow its health response to complete without relaxing snapshot equality.
 	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
-	response, err := client.Get("http://127.0.0.1:" + strconv.Itoa(DefaultPort) + "/health")
+	response, err := client.Get("http://127.0.0.1:" + strconv.Itoa(port) + "/health")
 	if err != nil {
 		return snapshot, errors.New("read system proxy health")
 	}

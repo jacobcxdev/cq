@@ -38,6 +38,7 @@ func TestCodexLiveProxyLatencyMatchesDirect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	egress := newCodexLiveAcceptanceEgress(t)
 	listener, supervisor, traffic := newCodexLiveNormalAcceptanceServer(t, credential)
 	if listener.URL == "http://127.0.0.1:19280" || supervisor.TrafficMode() != TrafficModeNormal || !supervisor.AdmissionReady() {
 		t.Fatal("live Codex latency acceptance did not use isolated normal proxy")
@@ -52,7 +53,7 @@ func TestCodexLiveProxyLatencyMatchesDirect(t *testing.T) {
 			output := fmt.Sprintf("LIVE-LATENCY-%t-%d", webSocket, sample)
 			directIsolation, proxyIsolation := newCodexLiveLatencyProfiles(t, credential, selection.catalogue)
 			started := time.Now()
-			if err := runCodexLiveDirectLatencyTurn(ctx, client, directIsolation, webSocket, output); err != nil {
+			if err := runCodexLiveDirectLatencyTurn(ctx, client, directIsolation, webSocket, output, egress); err != nil {
 				t.Fatalf("direct Codex latency sample: %v", err)
 			}
 			direct = append(direct, time.Since(started))
@@ -120,7 +121,7 @@ func TestCodexLiveLatencyProfilesShareFrozenCatalogue(t *testing.T) {
 	}
 }
 
-func runCodexLiveDirectLatencyTurn(ctx context.Context, client codexInstalledExecutableProof, isolation codexTaskAffinityAcceptanceIsolation, webSocket bool, output string) error {
+func runCodexLiveDirectLatencyTurn(ctx context.Context, client codexInstalledExecutableProof, isolation codexTaskAffinityAcceptanceIsolation, webSocket bool, output string, egress codexLiveAcceptanceEgress) error {
 	before, err := captureCodexInstalledExecutable(client.path)
 	if err != nil || before != client {
 		return fmt.Errorf("direct Codex executable changed")
@@ -136,14 +137,16 @@ func runCodexLiveDirectLatencyTurn(ctx context.Context, client codexInstalledExe
 		"XDG_DATA_HOME="+isolation.data,
 		"OPENAI_BASE_URL="+DefaultCodexUpstream,
 	)
-	if _, err := (osCodexAcceptanceRunner{}).Run(ctx, codexAcceptanceCommand{
+	command := codexAcceptanceCommand{
 		executable: client.path,
 		args:       args,
-		env:        environment,
+		env:        egress.environment(environment),
 		dir:        isolation.work,
 		endpoint:   DefaultCodexUpstream + legacyCodexResponsesPath,
 		outputPath: outputPath,
-	}); err != nil {
+	}
+	command = codexLiveLatencyConfinedCommand(command, egress, isolation.root, client)
+	if _, err := (osCodexAcceptanceRunner{}).Run(ctx, command); err != nil {
 		return err
 	}
 	after, err := captureCodexInstalledExecutable(client.path)
@@ -189,4 +192,54 @@ func medianCodexLiveLatency(samples []time.Duration) time.Duration {
 	ordered := append([]time.Duration(nil), samples...)
 	sort.Slice(ordered, func(left, right int) bool { return ordered[left] < ordered[right] })
 	return ordered[len(ordered)/2]
+}
+
+func codexLiveLatencyConfinedCommand(command codexAcceptanceCommand, egress codexLiveAcceptanceEgress, root string, client codexInstalledExecutableProof) codexAcceptanceCommand {
+	if egress.proxyEndpoint != "" {
+		// Only the local relay is admitted; ignoring proxy policy cannot escape.
+		// An explicit environment proxy must outrank macOS system-direct routing.
+		for index, argument := range command.args {
+			if argument == "features.respect_system_proxy=true" {
+				command.args[index] = "features.respect_system_proxy=false"
+			}
+		}
+		command.endpoint = egress.proxyEndpoint
+		command.egressProxyURL = egress.proxyEndpoint
+		command.sandboxWriteRoot = root
+		command.loopbackOnly = true
+		command.expectedExecutable = client
+	}
+	return command
+}
+
+func TestCodexLiveLatencyConfinedBaselineToRelay(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	egress := codexLiveAcceptanceEgress{proxyURL: "http://cq-live-token:private-authority@127.0.0.1:4567", proxyEndpoint: "http://127.0.0.1:4567"}
+	command := codexLiveLatencyConfinedCommand(codexAcceptanceCommand{
+		endpoint: DefaultCodexUpstream + legacyCodexResponsesPath,
+		args:     []string{"exec", "-c", "features.respect_system_proxy=true", "prompt"},
+	}, egress, root, codexInstalledExecutableProof{})
+	if slices.Contains(command.args, "features.respect_system_proxy=true") || !slices.Contains(command.args, "features.respect_system_proxy=false") {
+		t.Fatal("system route could override the explicit configured relay")
+	}
+	profile, err := codexAcceptanceSandboxProfile(command)
+	if err != nil || !command.loopbackOnly || !strings.Contains(profile, `(deny network*)`) || !strings.Contains(profile, `localhost:4567`) || strings.Contains(profile, "chatgpt.com") {
+		t.Fatal("baseline could escape the configured relay")
+	}
+	environment := egress.environment([]string{"HOME=" + root})
+	found := false
+	for _, entry := range environment {
+		if entry == "HTTPS_PROXY="+egress.proxyURL {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("baseline omitted configured proxy")
+	}
+	if strings.Contains(sanitiseCodexAcceptanceDiagnostic("proxy="+egress.proxyURL), "private-authority") {
+		t.Fatal("relay authority leaked in diagnostic")
+	}
 }

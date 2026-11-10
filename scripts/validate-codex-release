@@ -3,7 +3,7 @@
 set -eu
 
 status_context=cq/live-normal-routing
-production_port=19280
+production_port=
 validation_root=
 
 fail() {
@@ -13,9 +13,26 @@ fail() {
 
 [ "$(uname -s)" = Darwin ] || fail "macOS is required"
 
-for command in gh git go lsof; do
+for command in gh git go lsof jq; do
 	command -v "$command" >/dev/null 2>&1 || fail "$command is required"
 done
+
+# Read only the configured port; never expose the local bearer or WireGuard profile.
+if [ -n "${CQ_CODEX_LIVE_EGRESS_PORT:-}" ]; then
+	production_port=$CQ_CODEX_LIVE_EGRESS_PORT
+else
+	config_base=${XDG_CONFIG_HOME:-}
+	case "$config_base" in
+	/*) ;;
+	*) config_base=$HOME/.config ;;
+	esac
+	production_port=$(jq -er 'if .port == null then 19280 else .port end | select(type == "number") | select(floor == .)' "$config_base/cq/proxy.json" 2>/dev/null) ||
+		fail "cannot read configured runtime egress port"
+fi
+case "$production_port" in
+'' | *[!0-9]*) fail "invalid runtime egress port" ;;
+esac
+[ "$production_port" -ge 1 ] && [ "$production_port" -le 65535 ] || fail "invalid runtime egress port"
 
 root=$(git rev-parse --show-toplevel)
 cd "$root"
@@ -61,7 +78,7 @@ production_snapshot() {
 	mode=
 	if [ -n "$pid" ]; then
 		mode=$(
-			cq proxy rescue status 2>/dev/null |
+			cq proxy rescue status --port "$production_port" 2>/dev/null |
 				sed -n 's/.*"mode":"\([^"]*\)".*/\1/p'
 		) || fail "cannot read production proxy mode"
 		[ -n "$mode" ] || fail "cannot decode production proxy mode"
@@ -154,6 +171,7 @@ TestCodexLiveProxyLatencyMatchesDirect
 release_test_pattern='^(TestCodexInstalledNormalPassesThroughLiveUpstream|TestCodexInstalledNormalContinuesAfterLiveToolCall|TestCodexInstalledRescuePassesThroughLiveUpstream|TestCodexInstalledLiveRescueTaskResumesInNormal|TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover|TestCodexExactExecutableNormalPassesThroughLiveUpstream|TestCodexExactExecutableDegradedRescuePassesThroughLiveUpstream|TestCodexLiveProxyLatencyMatchesDirect)$'
 release_test_log=$validation_root/live-routing-tests.log
 if ! env \
+	CQ_CODEX_LIVE_EGRESS_PORT="$production_port" \
 	CQ_RUN_CODEX_LIVE_UPSTREAM_ACCEPTANCE=1 \
 	CQ_RUN_CODEX_LIVE_LATENCY_ACCEPTANCE=1 \
 	CQ_RUN_CODEX_RELEASE_EXECUTABLE_ACCEPTANCE=1 \

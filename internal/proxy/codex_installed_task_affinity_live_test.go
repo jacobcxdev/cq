@@ -394,8 +394,9 @@ func TestCodexInstalledRescuePassesThroughLiveUpstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	egress := newCodexLiveAcceptanceEgress(t)
 	relay := &RescueRelay{
-		Transport: http.DefaultTransport,
+		Transport: egress.http,
 		Origin:    origin,
 	}
 	if err := supervisor.ConfigureRescue(context.Background(), relay, &runtimeEvidenceTestStore{}); err != nil {
@@ -629,9 +630,8 @@ func TestCodexInstalledLiveRescueTaskResumesInNormal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	if err := supervisor.ConfigureRescue(context.Background(), &RescueRelay{Transport: transport, Origin: origin}, &runtimeEvidenceTestStore{}); err != nil {
+	egress := newCodexLiveAcceptanceEgress(t)
+	if err := supervisor.ConfigureRescue(context.Background(), &RescueRelay{Transport: egress.http, Origin: origin}, &runtimeEvidenceTestStore{}); err != nil {
 		t.Fatal(err)
 	}
 	rescueControlRequest(t, listener.URL, RuntimeRescueEnterPath, credential.localToken)

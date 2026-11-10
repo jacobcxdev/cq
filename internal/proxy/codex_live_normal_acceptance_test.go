@@ -202,6 +202,7 @@ func newCodexLiveNormalAcceptanceServerWithCallers(t *testing.T, credential code
 
 func newCodexLiveNormalAcceptanceServerWithInventory(t *testing.T, credential codexLiveAcceptanceCredential, callers []NormalCallerCredentialV1) (*httptest.Server, *RuntimeSupervisor, *codexLiveNormalTraffic, *codexLiveRotatingInventory, *codexRuntimeSupervisorAcceptanceCallerRotation) {
 	t.Helper()
+	egress := newCodexLiveAcceptanceEgress(t)
 	selection, err := codexLiveAcceptanceSelectedModel()
 	if err != nil {
 		t.Fatalf("load live Codex model catalogue: %v", err)
@@ -256,7 +257,7 @@ func newCodexLiveNormalAcceptanceServerWithInventory(t *testing.T, credential co
 		Executor: &CodexAttemptExecutor{
 			Inventory: inventory,
 			Secrets:   inventory,
-			Transport: &CodexTokenTransport{Inner: http.DefaultTransport},
+			Transport: &CodexTokenTransport{Inner: egress.http},
 		},
 		Refresher: core.inventory,
 		Capacity:  core.capacity,
@@ -267,7 +268,7 @@ func newCodexLiveNormalAcceptanceServerWithInventory(t *testing.T, credential co
 	core.handler = httpHandler
 
 	webSocketExecutor := NewCodexWebSocketAttemptExecutor(inventory, inventory)
-	webSocketExecutor.Dialer.Proxy = nil
+	webSocketExecutor.Dialer = egress.websocket
 	webSocketBroker, err := NewCodexTerminatingWebSocketHandler(planner, webSocketExecutor, core.inventory, core.capacity, DefaultCodexUpstream)
 	if err != nil {
 		t.Fatalf("construct live Codex normal WebSocket handler: %v", err)
