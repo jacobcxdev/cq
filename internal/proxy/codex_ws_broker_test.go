@@ -3048,14 +3048,14 @@ func TestCodexTerminatingWSBrokerReportsHandledPrewarmTransportFailure(t *testin
 	if len(writes) != 1 || string(writes[0]) != wantFrame {
 		t.Fatalf("translated writes = %q, want %q", writes, wantFrame)
 	}
-	const wantTrace = "cq: Codex route trace transport=websocket event=broker_failed stage=upstream_handshake reason=upstream_outcome_indeterminate response_present=false upstream_status=0 auth_failure=false hard_limit=false\n"
+	const wantTrace = "cq: Codex route trace transport=websocket event=broker_failed stage=upstream_handshake reason=unknown response_present=false upstream_status=0 auth_failure=false hard_limit=false\n"
 	if stderr != wantTrace {
 		t.Fatalf("trace = %q, want %q", stderr, wantTrace)
 	}
 	event := RouteEvent{}
 	event.applyRouteDiagnostics(routeDiagnostics)
-	if event.Decision != "broker_failed" || event.Reason != "upstream_outcome_indeterminate" {
-		t.Fatalf("diagnostics = %+v, want broker_failed/upstream_outcome_indeterminate", event)
+	if event.Decision != "broker_failed" || event.Reason != "unknown" {
+		t.Fatalf("diagnostics = %+v, want broker_failed/unknown", event)
 	}
 	if strings.Contains(stderr, "private prewarm dial error") || strings.Contains(string(writes[0]), "private prewarm dial error") {
 		t.Fatalf("private prewarm detail escaped: trace=%q frame=%q", stderr, writes[0])
