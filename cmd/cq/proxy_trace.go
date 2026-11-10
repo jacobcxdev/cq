@@ -35,29 +35,30 @@ type proxyTraceOptions struct {
 }
 
 type proxyTraceRecord struct {
-	Time           time.Time       `json:"time"`
-	EventType      string          `json:"event_type"`
-	TraceID        string          `json:"trace_id"`
-	ConnectionID   string          `json:"connection_id"`
-	Sequence       uint64          `json:"sequence"`
-	SessionKey     string          `json:"session_key"`
-	ThreadKey      string          `json:"thread_key"`
-	Transport      string          `json:"transport"`
-	Phase          string          `json:"phase"`
-	Stage          string          `json:"stage"`
-	Outcome        string          `json:"outcome"`
-	Reason         string          `json:"reason"`
-	ErrorClass     string          `json:"error_class"`
-	AccountHint    string          `json:"account_hint"`
-	Pool           string          `json:"pool"`
-	Attempt        int             `json:"attempt"`
-	StatusCode     int             `json:"status_code"`
-	UpstreamStatus int             `json:"upstream_status"`
-	CloseCode      int             `json:"close_code"`
-	CloseReason    string          `json:"close_reason"`
-	EventName      string          `json:"event_name"`
-	Direction      string          `json:"direction"`
-	Raw            json.RawMessage `json:"-"`
+	Time              time.Time       `json:"time"`
+	EventType         string          `json:"event_type"`
+	OriginalEventType string          `json:"original_event_type"`
+	TraceID           string          `json:"trace_id"`
+	ConnectionID      string          `json:"connection_id"`
+	Sequence          uint64          `json:"sequence"`
+	SessionKey        string          `json:"session_key"`
+	ThreadKey         string          `json:"thread_key"`
+	Transport         string          `json:"transport"`
+	Phase             string          `json:"phase"`
+	Stage             string          `json:"stage"`
+	Outcome           string          `json:"outcome"`
+	Reason            string          `json:"reason"`
+	ErrorClass        string          `json:"error_class"`
+	AccountHint       string          `json:"account_hint"`
+	Pool              string          `json:"pool"`
+	Attempt           int             `json:"attempt"`
+	StatusCode        int             `json:"status_code"`
+	UpstreamStatus    int             `json:"upstream_status"`
+	CloseCode         int             `json:"close_code"`
+	CloseReason       string          `json:"close_reason"`
+	EventName         string          `json:"event_name"`
+	Direction         string          `json:"direction"`
+	Raw               json.RawMessage `json:"-"`
 }
 
 type proxyTraceFilter struct {
@@ -374,11 +375,16 @@ func parseProxyTraceRecord(raw []byte, filter proxyTraceFilter) (proxyTraceRecor
 	if json.Unmarshal(raw, &record) != nil || record.TraceID == "" {
 		return record, false
 	}
+	eventType := record.EventType
+	if eventType == "diagnostics_record_truncated" {
+		eventType = record.OriginalEventType
+		record.Phase, record.Reason, record.Outcome = "record_truncated", "record_too_large", "truncated"
+	}
 	if filter.payload {
-		if record.EventType != "codex_payload" {
+		if eventType != "codex_payload" {
 			return record, false
 		}
-	} else if record.EventType != "codex_trace" && record.EventType != "" {
+	} else if eventType != "codex_trace" && eventType != "" {
 		return record, false
 	}
 	if filter.traceID != "" && record.TraceID != filter.traceID {

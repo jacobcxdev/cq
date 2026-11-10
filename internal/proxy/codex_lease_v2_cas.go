@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -13,8 +12,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 const CodexLeaseAttemptPolicyVersion uint32 = 1
@@ -97,13 +94,18 @@ func (record CodexJournalRecordV2) Identity() CodexJournalRecordIdentity {
 }
 
 func codexJournalLaneDigest(sessionHash, threadHash, namespaceHash string) string {
-	hash := sha256.New()
-	_, _ = hash.Write([]byte(sessionHash))
-	_, _ = hash.Write([]byte{0})
-	_, _ = hash.Write([]byte(threadHash))
-	_, _ = hash.Write([]byte{0})
-	_, _ = hash.Write([]byte(namespaceHash))
-	return base64.RawURLEncoding.EncodeToString(hash.Sum(nil))
+	// Ordinary encoded hashes fit on the stack; append still accepts arbitrary
+	// strings without changing the identity encoding or truncating inputs.
+	var scratch [256]byte
+	payload := append(scratch[:0], sessionHash...)
+	payload = append(payload, 0)
+	payload = append(payload, threadHash...)
+	payload = append(payload, 0)
+	payload = append(payload, namespaceHash...)
+	digest := sha256.Sum256(payload)
+	var encoded [43]byte // Unpadded base64 length of a SHA-256 digest.
+	base64.RawURLEncoding.Encode(encoded[:], digest[:])
+	return string(encoded[:])
 }
 
 func codexLeaseAttemptPlanDigest(key []byte, slots []CodexAttemptSlot) string {
@@ -190,25 +192,9 @@ func (store *CodexLeaseStore) commitLane(expected CodexLeaseGenerationFence, mut
 		}
 		return nil
 	}
-	if err := fsutil.SecureAtomicWriteInDirectoryChecked(store.inspector, store.directory, store.journalName, data, beforeReplace); err != nil {
-		if fsutil.AtomicWriteOutcome(err) == fsutil.CommitIndeterminate || errors.Is(err, ErrCodexLeaseTrustLost) {
-			store.poisoned = err
-		}
+	if err := store.persistPreparedV2Locked(installedEnvelope, data, beforeReplace); err != nil {
 		return CodexLeaseGenerationFence{}, fmt.Errorf("commit Codex lane mutation: %w", err)
 	}
-	installed, installedID, err := fsutil.ReadSecureFileInDirectoryWithIdentity(store.inspector, store.directory, store.journalName, codexLeaseJournalMaxBytes)
-	if err != nil || !bytes.Equal(installed, data) {
-		poison := &fsutil.CommitError{Outcome: fsutil.CommitIndeterminate, Op: "verify committed Codex lane mutation", Err: err}
-		if err == nil {
-			poison.Err = errors.New("installed bytes differ from committed bytes")
-		}
-		store.poisoned = poison
-		return CodexLeaseGenerationFence{}, fmt.Errorf("%w: %w", ErrCodexLeaseStorePoisoned, poison)
-	}
-	store.v2 = &installedEnvelope
-	store.generation = installedEnvelope.Generation
-	store.journalBytes = installed
-	store.journalID = installedID
 	if !retentionSweepAt.IsZero() {
 		store.lastRetentionSweep = retentionSweepAt
 	}
@@ -1503,9 +1489,10 @@ func (store *CodexLeaseStore) validateCodexLeaseV2StateForSchema(envelope codexL
 }
 
 func (store *CodexLeaseStore) validateCodexLeaseAdmissionEvidence(envelope codexLeaseJournalEnvelopeV2) error {
-	records := make(map[CodexJournalRecordIdentity]CodexJournalRecordV2, len(envelope.Records))
-	eligibleByLane := make(map[string][]CodexJournalRecordV2)
-	for _, record := range envelope.Records {
+	records := make(map[CodexJournalRecordIdentity]*CodexJournalRecordV2, len(envelope.Records))
+	eligibleByLane := make(map[string][]*CodexJournalRecordV2)
+	for index := range envelope.Records {
+		record := &envelope.Records[index]
 		identity := record.Identity()
 		records[identity] = record
 		if !record.EverAdmitted {
@@ -1533,7 +1520,7 @@ func (store *CodexLeaseStore) validateCodexLeaseAdmissionEvidence(envelope codex
 		case LeaseReserving, LeaseProvisional, LeaseFailedUnadmitted:
 			return errors.New("unadmitted lifecycle state has admission evidence")
 		}
-		if codexLeaseAffinityEligible(record) {
+		if codexLeaseAffinityEligible(*record) {
 			eligibleByLane[identity.LaneDigest] = append(eligibleByLane[identity.LaneDigest], record)
 		}
 	}
@@ -1567,7 +1554,7 @@ func (store *CodexLeaseStore) validateCodexLeaseAdmissionEvidence(envelope codex
 			Authoritative: true,
 		}
 		if record, retained := records[source]; retained {
-			if !codexLeaseAffinityEligible(record) || !constantTimeCodexLeaseDigestEqual(record.AccountHash, lane.LastAdmittedAccountHash) || record.AdmissionJournalGeneration != lane.LastAdmissionJournalGeneration || record.AdmittedAt != lane.LastAdmittedAt {
+			if !codexLeaseAffinityEligible(*record) || !constantTimeCodexLeaseDigestEqual(record.AccountHash, lane.LastAdmittedAccountHash) || record.AdmissionJournalGeneration != lane.LastAdmissionJournalGeneration || record.AdmittedAt != lane.LastAdmittedAt {
 				return errors.New("lane affinity source mismatch")
 			}
 		}

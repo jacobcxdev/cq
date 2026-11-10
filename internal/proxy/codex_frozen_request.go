@@ -1278,39 +1278,43 @@ func (scanner *codexFrozenJSONScanner) scanArray() error {
 }
 
 func (scanner *codexFrozenJSONScanner) scanString() (int, int, error) {
-	start := scanner.pos
-	if start >= len(scanner.source) || scanner.source[start] != '"' {
+	source, pos := scanner.source, scanner.pos
+	start := pos
+	// Keep the cursor local while scanning large prompt strings. Publish once
+	// on return, including failures, so callers retain the exact error position.
+	defer func() { scanner.pos = pos }()
+	if start >= len(source) || source[start] != '"' {
 		return 0, 0, newCodexFrozenAuthorityFailure(CodexFrozenRequestProtocolInvalid, "native request field name must be a string")
 	}
-	scanner.pos++
-	for scanner.pos < len(scanner.source) {
-		value := scanner.source[scanner.pos]
-		scanner.pos++
+	pos++
+	for pos < len(source) {
+		value := source[pos]
+		pos++
 		switch {
 		case value == '"':
-			return start, scanner.pos, nil
+			return start, pos, nil
 		case value < 0x20:
 			return 0, 0, newCodexFrozenAuthorityFailure(CodexFrozenRequestProtocolInvalid, "native request string contains a control byte")
 		case value != '\\':
 			continue
 		}
-		if scanner.pos >= len(scanner.source) {
+		if pos >= len(source) {
 			break
 		}
-		escape := scanner.source[scanner.pos]
-		scanner.pos++
+		escape := source[pos]
+		pos++
 		if strings.ContainsRune(`"\/bfnrt`, rune(escape)) {
 			continue
 		}
-		if escape != 'u' || scanner.pos+4 > len(scanner.source) {
+		if escape != 'u' || pos+4 > len(source) {
 			return 0, 0, newCodexFrozenAuthorityFailure(CodexFrozenRequestProtocolInvalid, "native request string escape is invalid")
 		}
-		for _, digit := range scanner.source[scanner.pos : scanner.pos+4] {
+		for _, digit := range source[pos : pos+4] {
 			if !codexFrozenHexDigit(digit) {
 				return 0, 0, newCodexFrozenAuthorityFailure(CodexFrozenRequestProtocolInvalid, "native request Unicode escape is invalid")
 			}
 		}
-		scanner.pos += 4
+		pos += 4
 	}
 	return 0, 0, newCodexFrozenAuthorityFailure(CodexFrozenRequestProtocolInvalid, "native request string is not closed")
 }

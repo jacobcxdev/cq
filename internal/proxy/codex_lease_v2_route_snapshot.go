@@ -223,42 +223,28 @@ func (store *CodexLeaseStore) loadCodexLeaseProvisionalRouteCounts(expectedGener
 		return nil, false, nil
 	}
 
-	type currentRecord struct {
-		sessionHash   string
-		threadHash    string
-		namespaceHash string
-		turnHash      string
-		modeEpoch     uint64
-		authoritative bool
-	}
-	current := make(map[currentRecord]struct{}, len(store.v2.Lanes))
-	for _, lane := range store.v2.Lanes {
-		if lane.CurrentTurnHash != "" {
-			current[currentRecord{
-				sessionHash:   lane.SessionHash,
-				threadHash:    lane.ThreadHash,
-				namespaceHash: lane.NamespaceHash,
-				turnHash:      lane.CurrentTurnHash,
-				modeEpoch:     lane.CurrentModeEpoch,
-				authoritative: lane.CurrentAuthoritative,
-			}] = struct{}{}
-		}
-	}
 	provisional := make(map[codex.AccountKey]int)
 	accountResolver := newCodexLeaseAccountResolver(store, accounts)
-	for _, record := range store.v2.Records {
-		if _, ok := current[currentRecord{
-			sessionHash:   record.SessionHash,
-			threadHash:    record.ThreadHash,
-			namespaceHash: record.NamespaceHash,
-			turnHash:      record.TurnHash,
-			modeEpoch:     record.ModeEpoch,
-			authoritative: record.Authoritative,
-		}]; !ok || record.EverAdmitted || record.State != LeaseProvisional || record.RoutingRefs != 1 {
+	for index := range store.v2.Records {
+		record := &store.v2.Records[index]
+		if record.EverAdmitted || record.State != LeaseProvisional || record.RoutingRefs != 1 {
 			continue
 		}
-		attempt := codexLeaseCurrentAttemptState(record)
-		if attempt != CodexAttemptPrepared && attempt != CodexAttemptDispatched {
+		attempt, found := codexLeaseAttemptByGeneration(record.Attempts, record.CurrentAttemptGeneration)
+		if !found || (attempt.State != CodexAttemptPrepared && attempt.State != CodexAttemptDispatched) {
+			continue
+		}
+		// Installed snapshots are canonical. Locate only candidate provisionals'
+		// lane heads instead of allocating a map of every retained lane per read.
+		laneIndex := sort.Search(len(store.v2.Lanes), func(index int) bool {
+			lane := &store.v2.Lanes[index]
+			return compareCodexLeaseLaneScope(lane.SessionHash, lane.ThreadHash, lane.NamespaceHash, record.SessionHash, record.ThreadHash, record.NamespaceHash) >= 0
+		})
+		if laneIndex == len(store.v2.Lanes) {
+			continue
+		}
+		lane := &store.v2.Lanes[laneIndex]
+		if lane.SessionHash != record.SessionHash || lane.ThreadHash != record.ThreadHash || lane.NamespaceHash != record.NamespaceHash || lane.CurrentTurnHash == "" || lane.CurrentTurnHash != record.TurnHash || lane.CurrentModeEpoch != record.ModeEpoch || lane.CurrentAuthoritative != record.Authoritative {
 			continue
 		}
 		account, resolved := accountResolver.resolve(record.AccountHash)

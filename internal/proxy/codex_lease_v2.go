@@ -373,6 +373,9 @@ func OpenCodexContinuityCoordinator(options CodexContinuityOpenOptions, owner Co
 	if err := store.loadOrMigrateV2Locked(journal); err != nil {
 		return nil, err
 	}
+	if err := store.pruneDeltaOrphansLocked(); err != nil {
+		return nil, err
+	}
 	if store.v2 != nil {
 		codexProcessRuntimeObservability.recordJournalState(len(store.journalBytes), len(store.v2.Lanes), len(store.v2.Records), false)
 	}
@@ -455,6 +458,13 @@ func (store *CodexLeaseStore) close() error {
 	store.modes = CodexModeAuthoritySnapshot{}
 	clear(store.key)
 	clear(store.journalBytes)
+	if store.delta != nil {
+		clear(store.delta.headBytes)
+		for _, ref := range store.delta.refs {
+			clear(ref.data)
+		}
+		store.delta = nil
+	}
 	clear(store.legacyArchiveBytes)
 	store.key = nil
 	store.journalBytes = nil
@@ -511,6 +521,14 @@ func (store *CodexLeaseStore) loadOrMigrateV2Locked(journal []byte) error {
 	version, err := decodeCodexLeaseVersion(journal)
 	if err != nil {
 		return fmt.Errorf("%w: decode Codex lease journal discriminator: %v", ErrCodexLeaseTrustLost, err)
+	}
+	if version == codexLeaseStorageVersion {
+		journal, err = store.loadDeltaStorageLocked(journal)
+		if err != nil {
+			return err
+		}
+		store.journalBytes = journal
+		version = codexLeaseJournalVersionV3
 	}
 	switch version {
 	case codexLeaseJournalVersion:
@@ -794,6 +812,16 @@ func (store *CodexLeaseStore) revalidateV1SourceLocked(want []byte, generation u
 }
 
 func (store *CodexLeaseStore) revalidateV2InstalledLocked() error {
+	if err := store.revalidateV2InstalledHeadLocked(); err != nil {
+		return err
+	}
+	if store.delta != nil {
+		return store.revalidateDeltaReferencesLocked(store.delta)
+	}
+	return nil
+}
+
+func (store *CodexLeaseStore) revalidateV2InstalledHeadLocked() error {
 	if err := store.revalidateDirectoryLocked(); err != nil {
 		return err
 	}
@@ -802,8 +830,12 @@ func (store *CodexLeaseStore) revalidateV2InstalledLocked() error {
 	if err != nil || keyID != store.keyID || !bytes.Equal(key, store.key) {
 		return fmt.Errorf("%w: Codex lease key replaced", ErrCodexLeaseTrustLost)
 	}
+	expected := store.journalBytes
+	if store.delta != nil {
+		expected = store.delta.headBytes
+	}
 	journal, journalID, err := fsutil.ReadSecureFileInDirectoryWithIdentity(store.inspector, store.directory, store.journalName, codexLeaseJournalMaxBytes)
-	if err != nil || journalID != store.journalID || !bytes.Equal(journal, store.journalBytes) {
+	if err != nil || journalID != store.journalID || !bytes.Equal(journal, expected) {
 		return fmt.Errorf("%w: Codex lease journal replaced", ErrCodexLeaseTrustLost)
 	}
 	if store.legacyArchive != "" {
@@ -811,6 +843,37 @@ func (store *CodexLeaseStore) revalidateV2InstalledLocked() error {
 		if archiveErr != nil || archiveID != store.legacyArchiveID || !bytes.Equal(archive, store.legacyArchiveBytes) || codexLeaseSHA256(archive) != store.v2.Cutover.LegacyV1SHA256 || store.validateLegacyArchive(archive, store.v2.Cutover.JournalGeneration-1) != nil {
 			return fmt.Errorf("%w: legacy Codex lease archive replaced", ErrCodexLeaseTrustLost)
 		}
+	}
+	return nil
+}
+
+// acknowledgeV2Generation acknowledges existing durable evidence under the same
+// owner/lifecycle and installed-identity checks as a commit, without replacing
+// unchanged bytes. Account validation can run external code after a runtime
+// snapshot, so the expected journal generation must be rechecked under mu.
+func (store *CodexLeaseStore) acknowledgeV2Generation(expected uint64) error {
+	operation, err := store.beginOperation()
+	if err != nil {
+		return err
+	}
+	defer operation.Release()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if store.poisoned != nil {
+		return fmt.Errorf("%w: %v", ErrCodexLeaseStorePoisoned, store.poisoned)
+	}
+	if store.v2 == nil {
+		return ErrCodexLeaseWriterUnavailable
+	}
+	if store.v2.Cutover.State != CodexLeaseCutoverComplete || !store.v2.Cutover.NoLegacyAuthority {
+		return ErrCodexLegacyQuarantine
+	}
+	if store.v2.Generation != expected {
+		return staleCodexLeaseMutation("journal_generation", fmt.Sprintf("have %d, expected %d", store.v2.Generation, expected))
+	}
+	if err := store.revalidateV2InstalledLocked(); err != nil {
+		store.poisoned = err
+		return err
 	}
 	return nil
 }
@@ -845,23 +908,7 @@ func (store *CodexLeaseStore) commitV2LockedWithPrecondition(expectedGeneration 
 	if err != nil {
 		return err
 	}
-	if err := fsutil.SecureAtomicWriteInDirectoryChecked(store.inspector, store.directory, store.journalName, data, beforeWrite); err != nil {
-		if fsutil.AtomicWriteOutcome(err) == fsutil.CommitIndeterminate || errors.Is(err, ErrCodexLeaseTrustLost) {
-			store.poisoned = err
-		}
-		return err
-	}
-	installed, installedID, err := fsutil.ReadSecureFileInDirectoryWithIdentity(store.inspector, store.directory, store.journalName, codexLeaseJournalMaxBytes)
-	if err != nil || !bytes.Equal(installed, data) {
-		uncertain := fmt.Errorf("%w: verify committed Codex lease journal: %v", fsutil.ErrCommitIndeterminate, err)
-		store.poisoned = uncertain
-		return uncertain
-	}
-	store.v2 = &installedEnvelope
-	store.generation = installedEnvelope.Generation
-	store.journalBytes = installed
-	store.journalID = installedID
-	return nil
+	return store.persistPreparedV2Locked(installedEnvelope, data, beforeWrite)
 }
 
 func (store *CodexLeaseStore) installV3MigrationLocked(envelope codexLeaseJournalEnvelopeV2, beforeWrite func() error) error {
@@ -1145,9 +1192,10 @@ func (store *CodexLeaseStore) validateV2SemanticStateForSchema(envelope codexLea
 			return errors.New("invalid reset redistribution event")
 		}
 	}
+	namespaceHash := store.hash("namespace", CodexResponsesNamespace)
 	laneIndexes := make(map[string]int, len(envelope.Lanes))
 	for index, lane := range envelope.Lanes {
-		if !validCodexLeaseDigest(lane.SessionHash) || !validCodexLeaseDigest(lane.ThreadHash) || lane.NamespaceHash != store.hash("namespace", CodexResponsesNamespace) {
+		if !validCodexLeaseDigest(lane.SessionHash) || !validCodexLeaseDigest(lane.ThreadHash) || lane.NamespaceHash != namespaceHash {
 			return errors.New("invalid lane identity hash")
 		}
 		if lane.RedistributionCompletedGeneration > lane.RedistributionRequestedGeneration || lane.RedistributionRequestedGeneration > envelope.Generation {
@@ -1210,7 +1258,7 @@ func (store *CodexLeaseStore) validateV2SemanticStateForSchema(envelope codexLea
 		if record.RedistributionGeneration > lane.RedistributionRequestedGeneration {
 			return errors.New("request redistribution exceeds lane authority")
 		}
-		if err := store.validateV2Record(envelope, lane, record, protocolSchema); err != nil {
+		if err := store.validateV2Record(envelope, lane, record, protocolSchema, namespaceHash); err != nil {
 			return err
 		}
 	}
@@ -1265,8 +1313,8 @@ func (store *CodexLeaseStore) validateV2SemanticStateForSchema(envelope codexLea
 	return store.validateCodexLeaseAdmissionEvidence(envelope)
 }
 
-func (store *CodexLeaseStore) validateV2Record(envelope codexLeaseJournalEnvelopeV2, lane CodexJournalLane, record CodexJournalRecordV2, protocolSchema int) error {
-	if !validCodexLeaseDigest(record.SessionHash) || !validCodexLeaseDigest(record.ThreadHash) || record.NamespaceHash != store.hash("namespace", CodexResponsesNamespace) || !validCodexLeaseDigest(record.TurnHash) {
+func (store *CodexLeaseStore) validateV2Record(envelope codexLeaseJournalEnvelopeV2, lane CodexJournalLane, record CodexJournalRecordV2, protocolSchema int, namespaceHash string) error {
+	if !validCodexLeaseDigest(record.SessionHash) || !validCodexLeaseDigest(record.ThreadHash) || record.NamespaceHash != namespaceHash || !validCodexLeaseDigest(record.TurnHash) {
 		return errors.New("invalid record identity hash")
 	}
 	for _, digest := range []string{record.AccountHash, record.PredecessorTurnHash, record.CorrelationHash, record.TurnStateHash, record.PreviousTurnStateHash, record.RequestedModelHash, record.DispatchPermitDigest} {

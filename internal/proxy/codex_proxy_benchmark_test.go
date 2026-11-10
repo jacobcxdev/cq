@@ -246,6 +246,7 @@ func BenchmarkCodexLeaseRestartOpenLargeJournal(b *testing.B) {
 
 func BenchmarkCodexLeaseRouteSnapshotLargeJournal(b *testing.B) {
 	store, envelope := codexProxyBenchmarkLargeJournal(b, 2_000)
+	canonicaliseCodexLeaseV2(&envelope)
 	store.v2 = &envelope
 	store.generation = envelope.Generation
 	store.modes = CodexModeAuthoritySnapshot{RecognisedAuthoritativeEpochs: []uint64{1}}
@@ -257,11 +258,19 @@ func BenchmarkCodexLeaseRouteSnapshotLargeJournal(b *testing.B) {
 	}
 	accounts := []codex.AccountKey{"account-0", "account-1"}
 	policy := CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true}
+	restored, err := store.loadLaneSnapshot(key, accounts, policy)
+	if err != nil || restored.Classification != CodexRestoredLaneCurrent || restored.Fence.Current != restored.RequestedIdentity {
+		b.Fatalf("route benchmark target is not the exact current session/turn: %v", err)
+	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
-		if _, err := coordinator.LoadRouteSnapshot(context.Background(), key, accounts, policy); err != nil {
+		snapshot, err := coordinator.LoadRouteSnapshot(context.Background(), key, accounts, policy)
+		if err != nil {
 			b.Fatal(err)
+		}
+		if snapshot.Classification != CodexRestoredLaneCurrent || snapshot.BoundAccountKey != "" || snapshot.Provisional["account-0"] != 1000 || snapshot.Provisional["account-1"] != 1000 {
+			b.Fatalf("route benchmark lost provisional authority: %#v", snapshot)
 		}
 	}
 }

@@ -325,10 +325,8 @@ func TestCodexLeaseV2AdmissionCommitOutcomesDoNotPublishFalseEvidence(t *testing
 		store, fence, record, streaming := openDispatchedCodexLeaseV2AffinityTestStore(t)
 		before := append([]byte(nil), store.journalBytes...)
 		beforeGeneration := store.Generation()
-		store.directory = &failingSecureDirectory{
-			SecureDirectory: store.directory,
-			fsys:            &failingDurableFS{failSyncDir: true},
-		}
+		directory := store.directory
+		store.directory = &deltaFaultDirectory{SecureDirectory: directory, IdentityBoundRenamer: directory.(fsutil.IdentityBoundRenamer), IdentityBoundRemover: directory.(fsutil.IdentityBoundRemover), journal: store.journalName, stage: "head_sync", armed: true}
 		if _, err := store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{streaming}}); err == nil || fsutil.AtomicWriteOutcome(err) != fsutil.CommitIndeterminate {
 			t.Fatalf("directory sync failure outcome = %v (%v)", fsutil.AtomicWriteOutcome(err), err)
 		}
@@ -1107,7 +1105,6 @@ func (file *blockingCodexLeaseAffinityFile) Stat() (os.FileInfo, error) {
 }
 
 func (file *blockingCodexLeaseAffinityFile) Write(data []byte) (int, error) {
-	file.directory.once.Do(func() { close(file.directory.entered) })
-	<-file.directory.release
+	file.directory.once.Do(func() { close(file.directory.entered); <-file.directory.release })
 	return file.DurableFile.Write(data)
 }

@@ -157,6 +157,7 @@ import (
     "encoding/json"
     "os"
     "runtime"
+    "strconv"
 )
 
 func main() {
@@ -195,8 +196,14 @@ func main() {
     if err := file.Close(); err != nil {
         panic(err)
     }
+    protocol := 1
+    if value := os.Getenv("CQ_RUNTIME_ARTIFACT_TEST_PROTOCOL"); value != "" {
+        parsed, err := strconv.Atoi(value)
+        if err != nil { panic(err) }
+        protocol = parsed
+    }
     result := map[string]any{
-        "schema_version": 1, "version": "0.34.0", "protocol_version": 1,
+        "schema_version": 1, "version": "0.34.0", "protocol_version": protocol,
         "goos": runtime.GOOS, "goarch": runtime.GOARCH,
     }
     if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
@@ -309,5 +316,33 @@ func TestRuntimeArtifactRejectsForgedVersion(t *testing.T) {
 	artifact.Version = "0.34.99"
 	if err := store.Verify(context.Background(), artifact); err == nil {
 		t.Fatal("client-supplied version disagreed with executable")
+	}
+}
+
+func TestRuntimeArtifactRetainsProbedProtocolForLegacyInspection(t *testing.T) {
+	source := buildRuntimeArtifactProbe(t)
+	for _, protocol := range []string{"1", "2", "3"} {
+		t.Run(protocol, func(t *testing.T) {
+			t.Setenv("CQ_RUNTIME_ARTIFACT_TEST_PROTOCOL", protocol)
+			t.Setenv("CQ_RUNTIME_ARTIFACT_TEST_CHECKS", filepath.Join(t.TempDir(), "checks"))
+			store := upgradeArtifactStore(t)
+			artifact, err := store.Stage(context.Background(), source)
+			if protocol == "3" {
+				if !errors.Is(err, ErrRuntimeArtifact) {
+					t.Fatalf("unknown protocol accepted: %+v %v", artifact, err)
+				}
+				return
+			}
+			want := uint32(1)
+			if protocol == "2" {
+				want = 2
+			}
+			if err != nil || artifact.ProtocolVersion != want {
+				t.Fatalf("probed protocol lost: %+v %v", artifact, err)
+			}
+			if err := store.Verify(context.Background(), artifact); err != nil {
+				t.Fatalf("known protocol no longer inspectable: %v", err)
+			}
+		})
 	}
 }

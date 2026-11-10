@@ -49,6 +49,8 @@ func darwinUpgradeExecFiles(ctx context.Context, executable string, files []*os.
 	}
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
+	proxyStderrRetentionExecMu.Lock()
+	defer proxyStderrRetentionExecMu.Unlock()
 	syscall.ForkLock.Lock()
 	defer func() {
 		for index, fd := range sources {

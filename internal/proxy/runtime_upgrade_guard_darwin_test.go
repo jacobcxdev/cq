@@ -54,7 +54,7 @@ func TestRuntimeUpgradeGuardRetainsSocketAfterControlDeath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	previous := installer.RuntimeArtifact{Path: filepath.Join(store.Roots.State, "cq"), SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Version: "test", ProtocolVersion: 1}
+	previous := installer.RuntimeArtifact{Path: filepath.Join(store.Roots.State, "cq"), SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Version: "test", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	receipt := RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "guard-test", Generation: 1, Phase: "prepared", Previous: previous, Candidate: previous, ListenerIdentity: "tcp|" + address, SupervisorPID: os.Getpid()}
 	for _, phase := range []string{"prepared", "waiting", "handoff"} {
 		receipt.Phase = phase
@@ -168,7 +168,7 @@ func TestRuntimeUpgradeGuardRetiresOnlyAfterOwnerRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	previous := installer.RuntimeArtifact{Path: filepath.Join(store.Roots.State, "cq"), SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Version: "test", ProtocolVersion: 1}
+	previous := installer.RuntimeArtifact{Path: filepath.Join(store.Roots.State, "cq"), SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Version: "test", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	receipt := RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "guard-test", Generation: 1, Phase: "prepared", Previous: previous, Candidate: previous, ListenerIdentity: "tcp|" + address, SupervisorPID: dead.Process.Pid}
 	for _, phase := range []string{"prepared", "waiting", "handoff"} {
 		receipt.Phase = phase
@@ -310,7 +310,7 @@ func guardRecoveryLaunchdFixture(t *testing.T, backoff bool) {
 	defer childFile.Close()
 	label := fmt.Sprintf("dev.jacobcx.cq.upgrade-validation.%d.%d", os.Getpid(), time.Now().UnixNano())
 	target := fmt.Sprintf("gui/%d/%s", os.Getuid(), label)
-	previous := installer.RuntimeArtifact{Path: os.Args[0], SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Version: "fixture", ProtocolVersion: 1}
+	previous := installer.RuntimeArtifact{Path: os.Args[0], SHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", Version: "fixture", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	child := exec.CommandContext(ctx, os.Args[0], "-test.run=TestRuntimeUpgradeGuardDyingHelperProcess")
@@ -574,7 +574,7 @@ func TestRuntimeUpgradeGuardDeathReportsListenerGap(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	artifact := installer.RuntimeArtifact{Path: filepath.Join(store.Roots.State, "cq"), SHA256: strings.Repeat("a", 64), Version: "test", ProtocolVersion: 1}
+	artifact := installer.RuntimeArtifact{Path: filepath.Join(store.Roots.State, "cq"), SHA256: strings.Repeat("a", 64), Version: "test", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	receipt := RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "guard-death", Generation: 1, Previous: artifact, Candidate: artifact, ListenerIdentity: "tcp|" + address, SupervisorPID: os.Getpid()}
 	for _, phase := range []string{"prepared", "waiting", "handoff"} {
 		receipt.Phase = phase

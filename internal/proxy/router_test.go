@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"net/http"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -74,6 +76,39 @@ func TestParseModelEffort(t *testing.T) {
 				t.Errorf("ParseModel(%q) = %q, want %q", tt.input, model, tt.wantModel)
 			}
 		})
+	}
+}
+
+func TestParseModelMatchesSuffixRegexp(t *testing.T) {
+	previous := regexp.MustCompile(`(?i)\[1m\]$`)
+	prefixes := []string{"", "gpt-5.4", "GPT-5.4-XHIGH", "模型", "\xff\xfe", "line\n", strings.Repeat("x", 4096)}
+	suffixes := []string{"", "[1m]", "[1M]", "[1m][1M]", "[1m]\n", "[1m] ", "[1ｍ]", "[１m]", "[1ℳ]", "[1m", "1m]", "[1m]\xff"}
+	for _, prefix := range prefixes {
+		for _, suffix := range suffixes {
+			input := prefix + suffix
+			if got, want := ParseModel(input), previous.ReplaceAllString(input, ""); got != want {
+				t.Fatalf("ParseModel(%q) = %q, want %q", input, got, want)
+			}
+		}
+	}
+	// Every byte substitution also covers invalid UTF-8 and suffix boundaries.
+	for index := range len("[1m]") {
+		for value := range 256 {
+			suffix := []byte("[1m]")
+			suffix[index] = byte(value)
+			input := "gpt-5.4" + string(suffix)
+			if got, want := ParseModel(input), previous.ReplaceAllString(input, ""); got != want {
+				t.Fatalf("ParseModel(%q) = %q, want %q", input, got, want)
+			}
+		}
+	}
+}
+
+func TestParseModelDoesNotAllocate(t *testing.T) {
+	for _, input := range []string{"gpt-5.4", "gpt-5.4[1m]", "gpt-5.4[1M]"} {
+		if allocations := testing.AllocsPerRun(100, func() { _ = ParseModel(input) }); allocations != 0 {
+			t.Fatalf("ParseModel(%q) allocated %g times", input, allocations)
+		}
 	}
 }
 

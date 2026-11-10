@@ -164,16 +164,9 @@ func configureDarwinServiceUpgrades(lifecycle *serviceLifecycle, platform *darwi
 		return writeDarwinRuntimeSnapshot(ctx, artifacts, path, data)
 	}
 	lifecycle.RuntimeSnapshotCheck = func(ctx context.Context, snapshot servicePlatformSnapshot) error {
-		paths, err := darwinRuntimeSnapshotPaths(snapshot)
-		if err != nil {
-			return err
-		}
-		for _, path := range paths {
-			if _, err := darwinExistingRuntimeArtifact(ctx, artifacts, path); err != nil {
-				return err
-			}
-		}
-		return nil
+		return checkDarwinRuntimeSnapshot(ctx, snapshot, func(ctx context.Context, path string) (installer.RuntimeArtifact, error) {
+			return darwinExistingRuntimeArtifact(ctx, artifacts, path)
+		})
 	}
 }
 
@@ -549,6 +542,23 @@ func cleanupDarwinServiceRuntime(ctx context.Context, platform *darwinServicePla
 	}
 	if err := os.Remove(store.Path()); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	return nil
+}
+
+func checkDarwinRuntimeSnapshot(ctx context.Context, snapshot servicePlatformSnapshot, lookup func(context.Context, string) (installer.RuntimeArtifact, error)) error {
+	paths, err := darwinRuntimeSnapshotPaths(snapshot)
+	if err != nil {
+		return err
+	}
+	for _, path := range paths {
+		artifact, err := lookup(ctx, path)
+		if err != nil {
+			return err
+		}
+		if artifact.ProtocolVersion != installer.RuntimeUpgradeProtocolVersion {
+			return fmt.Errorf("%w: snapshot runtime protocol %d cannot recover incremental continuity state; use a protocol-%d snapshot or keep the current services", ErrServiceUpgradeMaintenance, artifact.ProtocolVersion, installer.RuntimeUpgradeProtocolVersion)
+		}
 	}
 	return nil
 }

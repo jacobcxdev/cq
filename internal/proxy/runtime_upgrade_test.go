@@ -163,7 +163,7 @@ func TestRuntimeUpgradeReceiptDoesNotRetryOtherFailures(t *testing.T) {
 func upgradeReceiptFixture(t *testing.T) (RuntimeUpgradeStore, RuntimeUpgradeReceiptV1) {
 	t.Helper()
 	roots := userdirs.Roots{State: filepath.Join(t.TempDir(), "state")}
-	artifact := installer.RuntimeArtifact{Path: filepath.Join(roots.State, "runtime-artifacts", strings.Repeat("a", 64), "cq"), SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
+	artifact := installer.RuntimeArtifact{Path: filepath.Join(roots.State, "runtime-artifacts", strings.Repeat("a", 64), "cq"), SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	return RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: roots}, RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "test-upgrade", Generation: 1, Phase: "prepared", Previous: artifact, Candidate: artifact, ListenerIdentity: "tcp:127.0.0.1:12345", SupervisorPID: os.Getpid()}
 }
 func TestRuntimeUpgradeReceiptRejectsInvalidTransitions(t *testing.T) {
@@ -232,3 +232,19 @@ func (upgradeReceiptFailRenameFS) OpenSecureDirectory(path string) (fsutil.Secur
 type upgradeReceiptFailRenameDirectory struct{ fsutil.SecureDirectory }
 
 func (upgradeReceiptFailRenameDirectory) Rename(string, string) error { return os.ErrPermission }
+
+func TestRuntimeUpgradeReceiptRetainsLegacyProtocol(t *testing.T) {
+	store, receipt := upgradeReceiptFixture(t)
+	receipt.Previous.ProtocolVersion = 1
+	receipt.Candidate.ProtocolVersion = 1
+	if err := store.Save(receipt); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != receipt {
+		t.Fatal("legacy receipt changed during inspection")
+	}
+}

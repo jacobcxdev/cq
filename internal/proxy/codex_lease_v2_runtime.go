@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -1468,7 +1469,7 @@ func (handle *CodexLeaseRequestHandle) AdmitWebSocketContext(ctx context.Context
 		desired.AttemptRefs++
 		desired.ResponseObserverRefs++
 	}
-	admitted, err := handle.commitRequestMutation(fence, desired, true)
+	admitted, err := handle.commitAdmissionMutation(fence, desired)
 	if err != nil {
 		return nil, err
 	}
@@ -1516,11 +1517,27 @@ func (handle *CodexLeaseRequestHandle) admitHTTP2xxWithFence(fence CodexLeaseGen
 		return nil, false, err
 	}
 	firstAdmission := firstAttemptAdmission && !handle.record.EverAdmitted && desired.Authoritative && codexLeaseCurrentRequestCacheEligible(desired)
-	admitted, err := handle.commitRequestMutation(fence, desired, true)
+	admitted, err := handle.commitAdmissionMutation(fence, desired)
 	if err == nil && evidence.HasTurnState {
 		admitted.relatchTurnStateOnAdmission = false
 	}
 	return admitted, firstAdmission, err
+}
+
+// Repeated provider metadata may carry evidence already durably installed.
+// Callers must validate the current fence, account and admission transition
+// before reaching this path. A no-op acknowledges existing durable authority;
+// it neither advances revisions nor refreshes retention timestamps.
+func (handle *CodexLeaseRequestHandle) commitAdmissionMutation(fence CodexLeaseGenerationFence, desired CodexJournalRecordV2) (*CodexLeaseRequestHandle, error) {
+	if reflect.DeepEqual(desired, codexLeaseRuntimeMutationRecord(handle.record)) {
+		if err := handle.runtime.store.acknowledgeV2Generation(fence.Journal); err != nil {
+			return nil, err
+		}
+		next := *handle
+		next.fence = cloneCodexLeaseGenerationFence(fence)
+		return &next, nil
+	}
+	return handle.commitRequestMutation(fence, desired, true)
 }
 
 func (handle *CodexLeaseRequestHandle) applyAccountUnavailableRebind(desired *CodexJournalRecordV2) error {
