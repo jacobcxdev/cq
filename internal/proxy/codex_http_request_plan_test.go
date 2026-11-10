@@ -17,6 +17,7 @@ import (
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 func TestCodexHTTPRequestPlanFactoryBuildsOnceAndBeginsDurably(t *testing.T) {
@@ -3047,8 +3048,10 @@ func TestCodexHTTPRequestPlanFactoryResetsCyberOffDeltaOnlyForCheaperAvailableAc
 	factory := &CodexHTTPRequestPlanFactory{
 		Inventory:        &codexHTTPRequestPlanTestInventory{inventory: inventory},
 		SessionPolicy:    NewSessionPolicyResolver([]byte("01234567890123456789012345678901"), policy),
+		Capacity:         NewCodexCapacityLedger(func() time.Time { return now }, time.Hour),
 		CyberEligibility: eligibility, Now: func() time.Time { return now },
 	}
+	frozenDispatchObserveCapacity(t, factory.Capacity, "ordinary", CapacityBucketBase, 50, now)
 	ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"})
 	protocol := CodexProtocolRequest{Model: "gpt-5", Metadata: CodexTurnMetadataResult{Metadata: CodexTurnMetadata{SessionID: "session"}}}
 	if !factory.ShouldResetCyberOff(ctx, protocol, "cyber") {
@@ -3077,6 +3080,56 @@ func TestCodexHTTPRequestPlanFactoryResetsCyberOffDeltaOnlyForCheaperAvailableAc
 	frozenDispatchObserveCapacity(t, factory.Capacity, "ordinary", CapacityBucketBase, 0, now)
 	if factory.ShouldResetCyberOff(ctx, protocol, "cyber") {
 		t.Fatal("exhausted ordinary account triggered Cyber-off retry")
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryKeepsCyberOffContinuationWithoutKnownAlternativeCapacity(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		observe func(*CodexCapacityLedger, time.Time)
+	}{
+		{name: "no observation"},
+		{name: "exhausted usage is advisory", observe: func(ledger *CodexCapacityLedger, now time.Time) {
+			ledger.ObserveQuotaSnapshot("ordinary", QuotaSnapshot{FetchedAt: now, Result: quota.Result{
+				Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{
+					quota.Window7Day: {RemainingPct: 0, ResetAtUnix: now.Add(time.Hour).Unix()},
+				},
+			}})
+		}},
+		{name: "positive observation expired", observe: func(ledger *CodexCapacityLedger, now time.Time) {
+			frozenDispatchObserveCapacity(t, ledger, "ordinary", CapacityBucketBase, 80, now.Add(-2*time.Hour))
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			now := time.Unix(1_700_000_000, 0).UTC()
+			policy := RoutingPolicyV2{
+				SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+				Pools: []AccountPoolV2{{ID: testPoolIDA, Name: "Cyber", Value: 10, Members: []codex.AccountKey{"cyber"}}},
+			}
+			inventory := codex.Inventory{Accounts: []codex.LogicalAccount{
+				frozenDispatchTestLogicalAccount("ordinary", frozenDispatchCandidate("ordinary", "ordinary-candidate", "ordinary-revision", codex.SourceManaged, false, now.Add(time.Hour))),
+				frozenDispatchTestLogicalAccount("cyber", frozenDispatchCandidate("cyber", "cyber-candidate", "cyber-revision", codex.SourceManaged, false, now.Add(time.Hour))),
+			}}
+			ledger := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+			frozenDispatchObserveCapacity(t, ledger, "cyber", CapacityBucketBase, 60, now)
+			if test.observe != nil {
+				test.observe(ledger, now)
+			}
+			factory := &CodexHTTPRequestPlanFactory{
+				Inventory: &codexHTTPRequestPlanTestInventory{inventory: inventory}, Capacity: ledger,
+				SessionPolicy:    NewSessionPolicyResolver([]byte("01234567890123456789012345678901"), policy),
+				CyberEligibility: NewCyberEligibilityStore(&RoutingPolicyStore{current: &policy}), Now: func() time.Time { return now },
+			}
+			ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"})
+			protocol := CodexProtocolRequest{Model: "gpt-6.1-sol", Metadata: CodexTurnMetadataResult{Metadata: CodexTurnMetadata{SessionID: "unbound"}}}
+			if view := ledger.Capacity("ordinary", CapacityBucketBase); view.State != CapacityUnknown {
+				t.Fatalf("alternative capacity = %+v, want unknown", view)
+			}
+			// Pool membership alone is not a reason to interrupt an ordinary continuation.
+			if factory.ShouldResetCyberOff(ctx, protocol, "cyber") {
+				t.Fatal("unknown alternative capacity interrupted usable unbound continuation")
+			}
+		})
 	}
 }
 
@@ -3109,9 +3162,11 @@ func TestCodexHTTPRequestPlanFactoryCyberOffResetPreservesSystemAccount(t *testi
 			factory := &CodexHTTPRequestPlanFactory{
 				Inventory:        &codexHTTPRequestPlanTestInventory{inventory: inventory},
 				SessionPolicy:    NewSessionPolicyResolver([]byte("01234567890123456789012345678901"), policy),
+				Capacity:         NewCodexCapacityLedger(func() time.Time { return now }, time.Hour),
 				CyberEligibility: NewCyberEligibilityStore(&RoutingPolicyStore{current: &policy}),
 				Now:              func() time.Time { return now },
 			}
+			frozenDispatchObserveCapacity(t, factory.Capacity, "ordinary", CapacityBucketBase, 50, now)
 			ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"})
 			protocol := CodexProtocolRequest{Model: "gpt-5", Metadata: CodexTurnMetadataResult{Metadata: CodexTurnMetadata{SessionID: "session"}}}
 			if got := factory.ShouldResetCyberOff(ctx, protocol, "cyber"); got != test.wantReset {

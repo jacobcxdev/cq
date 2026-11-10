@@ -628,6 +628,9 @@ func (p *Probe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer response.Body.Close()
+	if p.ownerAuthenticationUnavailable(w, r, response, owner) {
+		return
+	}
 	if response.StatusCode == 200 && ((watch && strings.HasSuffix(path, "/live")) || (secondary && r.Method == "GET" && probeActivity.MatchString(path))) {
 		if !strings.HasPrefix(response.Header.Get("Content-Type"), "text/event-stream") {
 			w.WriteHeader(502)
@@ -670,6 +673,18 @@ func (p *Probe) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "HEAD" {
 		_, _ = w.Write(data)
 	}
+}
+
+// A substituted owner's rejected token is not a failure of the authenticated
+// native principal. Forwarding 401 would make Desktop refresh that unrelated
+// principal, potentially retiring its active workspace and executor.
+func (p *Probe) ownerAuthenticationUnavailable(w http.ResponseWriter, r *http.Request, response *http.Response, owner *Account) bool {
+	if owner == nil || owner.Alias == p.settings.SystemAlias || response.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+	p.event(map[string]any{"operation": "owner_authentication_unavailable", "method": r.Method, "path": r.URL.EscapedPath(), "routed_owner_alias": owner.Alias, "upstream_status": response.StatusCode, "status": http.StatusBadGateway})
+	probeJSON(w, http.StatusBadGateway, map[string]any{"code": "dot_owner_authentication_unavailable", "detail": "Dot owner authentication unavailable"})
+	return true
 }
 
 func probeRead(reader io.Reader, limit int64) ([]byte, error) {
@@ -778,6 +793,9 @@ func (p *Probe) forward(w http.ResponseWriter, r *http.Request, owner *Account) 
 		return
 	}
 	defer response.Body.Close()
+	if p.ownerAuthenticationUnavailable(w, r, response, owner) {
+		return
+	}
 	summary["status"] = response.StatusCode
 	if (observe || usage) && response.StatusCode == 200 {
 		data, err := probeReadPrefix(response.Body, 1<<20)

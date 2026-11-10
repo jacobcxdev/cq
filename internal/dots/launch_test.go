@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -117,7 +118,7 @@ func TestPrepareLaunchPreservedNormalProfileTrustAndCQRouting(t *testing.T) {
 	if !slices.Equal(before, input) {
 		t.Fatal("input environment mutated")
 	}
-	for key, want := range map[string]string{"CODEX_HOME": filepath.Dir(s.SystemAuth), "OPENAI_BASE_URL": "http://127.0.0.1:12345", "CQ_DOTS_CQ_PATH": "/stable/cq link", "CODEX_API_BASE_URL": "https://localhost:32123/backend-api", "CODEX_APP_SERVER_CHATGPT_BASE_URL": "https://localhost:32123/backend-api", "NO_PROXY": "internal.example,localhost,127.0.0.1", "UNCHANGED": "value with spaces", "CODEX_APP_SERVER_FORCE_CLI": "1"} {
+	for key, want := range map[string]string{"CODEX_HOME": filepath.Dir(s.SystemAuth), "OPENAI_BASE_URL": "http://127.0.0.1:12345", "CQ_DOTS_CQ_PATH": "/stable/cq link", "CODEX_API_BASE_URL": "https://chatgpt.com/backend-api", "CODEX_APP_SERVER_CHATGPT_BASE_URL": "https://localhost:32123/backend-api", "NO_PROXY": "internal.example,localhost,127.0.0.1", "UNCHANGED": "value with spaces"} {
 		if got := environmentValue(env, key); got != want {
 			t.Fatalf("%s = %q, want %q", key, got, want)
 		}
@@ -164,6 +165,42 @@ func TestPrepareLaunchPreservedNormalProfileTrustAndCQRouting(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(s.RuntimeRoot, name)); !os.IsNotExist(err) {
 			t.Fatalf("unexpected native profile or Python state %s: %v", name, err)
 		}
+	}
+}
+
+func TestPrepareLaunchPreservedRemoteEnrollmentChallengeOrigin(t *testing.T) {
+	_, s := preparedInstallationFixture(t)
+	input, _, _ := launchFixtureEnvironment(t, s)
+	// A relaunch may inherit the old adapter's loopback origin. It must not
+	// change the origin to which the server binds its signed challenge.
+	input = append(input, "CODEX_API_BASE_URL=https://localhost:8000/backend-api")
+	_, env, err := prepareLaunch(s, "http://127.0.0.1:12345", "/stable/cq", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base, err := url.Parse(environmentValue(env, "CODEX_API_BASE_URL") + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	finish := base.ResolveReference(&url.URL{Path: "codex/remote/control/client/refresh/finish"})
+	if finish.Scheme+"://"+finish.Host != "https://chatgpt.com" || finish.Path != "/backend-api/codex/remote/control/client/refresh/finish" {
+		t.Fatalf("signed enrollment target cannot match desktop request: %s", finish)
+	}
+}
+
+func TestPrepareLaunchPreservedRemoteHostTransportSelection(t *testing.T) {
+	_, s := preparedInstallationFixture(t)
+	input, _, _ := launchFixtureEnvironment(t, s)
+	input = append(input, "CODEX_APP_SERVER_FORCE_CLI=1")
+	_, env, err := prepareLaunch(s, "http://127.0.0.1:12345", "/stable/cq", input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value := environmentValue(env, "CODEX_APP_SERVER_FORCE_CLI"); value != "" {
+		t.Fatalf("remote hosts forced into a second local writer: %q", value)
+	}
+	if value := environmentValue(env, "CODEX_CLI_PATH"); value != filepath.Join(s.RuntimeRoot, "cloud-stdio-launch") {
+		t.Fatalf("local app-server wrapper lost: %q", value)
 	}
 }
 

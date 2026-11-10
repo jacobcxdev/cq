@@ -271,7 +271,19 @@ func (p *realtimeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	stop := context.AfterFunc(r.Context(), func() { defer func() { _ = recover() }(); _ = client.Close() })
 	defer stop()
 	if host != "ws.chatgpt.com" && host != "realtime.chatgpt.com" {
-		upstream, err := p.dependencies.dial(r.Context(), "tcp", net.JoinHostPort(host, "443"))
+		address := net.JoinHostPort(host, "443")
+		if host == "chatgpt.com" && p.settings.IntegrationMode == "native" {
+			// Preserve the canonical URL, SNI and signed enrollment origin while
+			// reusing the app's SPKI-pinned private Probe TLS transport.
+			port, err := realtimePort(filepath.Join(p.settings.RuntimeRoot, "port"), p.settings.RuntimeRoot, false)
+			if err != nil {
+				_, _ = buffer.WriteString("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
+				_ = buffer.Flush()
+				return
+			}
+			address = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		}
+		upstream, err := p.dependencies.dial(r.Context(), "tcp", address)
 		if err != nil {
 			_, _ = buffer.WriteString("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n")
 			_ = buffer.Flush()
