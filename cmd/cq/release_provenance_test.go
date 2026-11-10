@@ -309,9 +309,11 @@ func TestReleaseRequiresVerifiedDistributionWrites(t *testing.T) {
 	text := string(submitter)
 	permissionIndex := strings.Index(text, `bash "$scripts/check-winget-permissions.sh"`)
 	firstWriteIndex := strings.Index(text, `gh repo fork "$repository" --clone=false`)
-	if permissionIndex < 0 || firstWriteIndex < permissionIndex ||
-		!strings.Contains(text, "--assignee jacobcxdev") {
-		t.Fatal("WinGet publication does not require assignable permissions before writes and an assigned PR")
+	if permissionIndex < 0 || firstWriteIndex < permissionIndex {
+		t.Fatal("WinGet publication does not verify fork permissions before writes")
+	}
+	if strings.Contains(text, "--assignee") {
+		t.Fatal("automated WinGet publication requires upstream assignment permission")
 	}
 	for _, workflow := range []string{"pr", "ci"} {
 		source, err := os.ReadFile("../../.github/workflows/" + workflow + ".yml")
