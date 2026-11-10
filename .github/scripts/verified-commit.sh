@@ -8,7 +8,8 @@ input=$2
 jq -e --arg repository "$repository" '
   .branch.repositoryNameWithOwner == $repository
   and ($repository|test("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"))
-  and (.branch.refName|type == "string" and length > 0)
+  and (.branch|keys == ["branchName","repositoryNameWithOwner"])
+  and (.branch.branchName|type == "string" and length > 0)
   and (.expectedHeadOid|test("^[0-9a-f]{40}$"))
   and (.message.headline|type == "string" and length > 0 and length < 50)
   and (.message.body|type == "string" and startswith("- "))

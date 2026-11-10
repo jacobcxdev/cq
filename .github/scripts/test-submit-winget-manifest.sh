@@ -38,6 +38,8 @@ case "$1 $2" in
     echo branch >>"$root/writes"; touch "$root/branched"; echo '{}' ;;
   'api graphql')
     cp "$4" "$root/request.json"
+    jq -e '.variables.input.branch | keys == ["branchName","repositoryNameWithOwner"]
+      and .branchName == "cq-0.48.0"' "$4" >/dev/null
     echo commit >>"$root/writes"
     [[ ! -e "$root/race" ]] || exit 1
     touch "$root/committed"
