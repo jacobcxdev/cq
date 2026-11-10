@@ -49,9 +49,10 @@ verify_head() {
 }
 verify_submission() {
   local url=$1 pr head current
-  pr=$(gh pr view "$url" --repo "$repository" --json number,state,title,headRefName,headRefOid,headRepository,headRepositoryOwner,author,url,files,assignees)
+  pr=$(gh pr view "$url" --repo "$repository" --json number,state,title,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,author,url,files,assignees)
   jq -e --arg version "$version" --slurpfile additions "$temporary/additions.json" '
-    .state == "OPEN" and .author.login == "jacobcxdev" and .headRepositoryOwner.login == "jacobcxdev"
+    .state == "OPEN" and .baseRefName == "master"
+    and .author.login == "jacobcxdev" and .headRepositoryOwner.login == "jacobcxdev"
     and .headRepository.name == "winget-pkgs" and .headRefName == ("cq-"+$version)
     and .url == ("https://github.com/microsoft/winget-pkgs/pull/"+(.number|tostring))
     and (.title == ("New version: jacobcxdev.cq version "+$version) or .title == ("Update: jacobcxdev.cq to "+$version))

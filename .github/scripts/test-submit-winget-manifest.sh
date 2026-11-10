@@ -64,7 +64,7 @@ jq -n '{sha:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",parents:[{sha:"aaaaaaaaaa
   commit:{verification:{verified:true,reason:"valid"}},files:([
     "jacobcxdev.cq.installer.yaml","jacobcxdev.cq.locale.en-US.yaml","jacobcxdev.cq.yaml"]|
     map({filename:("manifests/j/jacobcxdev/cq/0.48.0/"+.),status:"added"}))}' >"$root/commit.json"
-jq -n '{number:42,state:"OPEN",title:"New version: jacobcxdev.cq version 0.48.0",
+jq -n '{number:42,state:"OPEN",baseRefName:"master",title:"New version: jacobcxdev.cq version 0.48.0",
   url:"https://github.com/microsoft/winget-pkgs/pull/42",headRefName:"cq-0.48.0",headRefOid:"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
   author:{login:"jacobcxdev"},headRepositoryOwner:{login:"jacobcxdev"},headRepository:{name:"winget-pkgs"},
   assignees:[{login:"jacobcxdev"}],files:(["jacobcxdev.cq.installer.yaml","jacobcxdev.cq.locale.en-US.yaml","jacobcxdev.cq.yaml"]|
@@ -118,6 +118,16 @@ touch "$root/existing"
 rm "$root/writes"
 bash "$script" "$root/manifests" >"$root/output"
 [[ ! -e "$root/writes" ]]
+
+# An owned, assigned PR retargeted away from upstream master is not a reusable
+# submission. Refuse it without creating a replacement or touching its branch.
+cp "$root/pr.json" "$root/valid-pr.json"
+jq '.baseRefName="not-master"' "$root/valid-pr.json" >"$root/pr.json"
+if bash "$script" "$root/manifests" >"$root/output" 2>"$root/error"; then exit 1; fi
+[[ ! -e "$root/writes" ]]
+grep -q 'submission identity, assignment or files could not be verified' "$root/error"
+cp "$root/valid-pr.json" "$root/pr.json"
+
 jq '.assignees=[]' "$root/pr.json" >"$root/unassigned.json"
 cp "$root/unassigned.json" "$root/pr.json"
 if bash "$script" "$root/manifests" >"$root/output" 2>"$root/error"; then exit 1; fi
