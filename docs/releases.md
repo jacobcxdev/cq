@@ -62,6 +62,19 @@ commit-bound `cq/live-normal-routing` status consumed by release preflight.
 Treat that status publication and upstream traffic as part of an authorised
 release qualification run.
 
+The validator requires the installed runtime's private egress broker. It reads
+its port from the installed configuration; `CQ_CODEX_LIVE_EGRESS_PORT` selects
+an explicit runtime when qualifying another instance. Direct Go live-test
+invocations must set `CQ_CODEX_LIVE_EGRESS_PORT`; an unset port fails closed.
+The script sets it automatically after resolving the installed configuration.
+HTTP, WebSocket, rescue, exact-executable and latency-baseline traffic borrow
+that broker's configured route. Broker failure stops validation; it does not
+select direct egress or start another WireGuard tunnel. The latency baseline
+bypasses CQ account routing while retaining this egress policy. Model discovery
+remains network-denied. The candidate executable uses a temporary, loopback-only
+CONNECT adapter for allowlisted Codex hosts; its private broker hop remains
+authenticated. Fixture cleanup closes the adapter and its tunnels.
+
 The validator discovers the installed client's recommended model through
 `model/list`, records its concrete ID and fixes that selection across direct and
 proxied traffic. Discovery uses an isolated profile and fails if it cannot find
