@@ -583,31 +583,14 @@ jobs:
             *) echo "release draft state is invalid: $draft" >&2; exit 1 ;;
           esac
 
-          # Both receipts select the same shared-version bundle. Publish the
-          # verified dependency first to preserve Homebrew upgrade ownership.
+          # Both receipts select the same shared-version bundle. Commit their
+          # verified references together through GitHub's signed commit API.
           for token in cq-network cq; do
             cask="$RUNNER_TEMP/homebrew-cask/$token.rb"
             test -f "$cask"
             .github/scripts/format-homebrew-cask.sh "$cask"
-            endpoint="repos/jacobcxdev/homebrew-tap/contents/Casks/$token.rb"
-            encoded="$(base64 <"$cask" | tr -d '\n')"
-            current="$RUNNER_TEMP/$token-cask-current.json"
-            if GH_TOKEN="$HOMEBREW_TAP_TOKEN" gh api "$endpoint" >"$current" 2>/dev/null; then
-              current_content="$(jq -r '.content' "$current" | tr -d '\n')"
-              if [[ "$current_content" == "$encoded" ]]; then
-                continue
-              fi
-              current_sha="$(jq -r '.sha' "$current")"
-              GH_TOKEN="$HOMEBREW_TAP_TOKEN" gh api --method PUT "$endpoint" \
-                -f message="chore: updated ${token} for ${RELEASE_TAG}" \
-                -f content="$encoded" \
-                -f sha="$current_sha"
-            else
-              GH_TOKEN="$HOMEBREW_TAP_TOKEN" gh api --method PUT "$endpoint" \
-                -f message="chore: added ${token} for ${RELEASE_TAG}" \
-                -f content="$encoded"
-            fi
           done
+          GH_TOKEN="$HOMEBREW_TAP_TOKEN" bash .github/scripts/publish-homebrew-casks.sh "$RUNNER_TEMP/homebrew-cask"
 
       - name: Audit published Homebrew Cask
         run: |
@@ -825,43 +808,7 @@ jobs:
           version="${RELEASE_TAG#v}"
           manifest_dir="$(find "$RUNNER_TEMP/winget-manifests" -type d -path "*/j/jacobcxdev/cq/$version" -print -quit)"
           test -n "$manifest_dir"
-          upstream_path="repos/microsoft/winget-pkgs/contents/manifests/j/jacobcxdev/cq/$version"
-          if gh api "$upstream_path" >/dev/null 2>&1; then
-            echo "WinGet version $version already published"
-            exit 0
-          fi
-          branch="cq-$version"
-          existing="$(gh pr list --repo microsoft/winget-pkgs --head "$branch" --state open --json headRepositoryOwner,url --jq '[.[] | select(.headRepositoryOwner.login == "jacobcxdev")][0].url // ""')"
-          if [[ -n "$existing" ]]; then
-            echo "$existing"
-            exit 0
-          fi
-          if ! gh repo view jacobcxdev/winget-pkgs >/dev/null 2>&1; then
-            gh repo fork microsoft/winget-pkgs --clone=false
-          fi
-          gh auth setup-git
-          checkout="$RUNNER_TEMP/winget-pkgs"
-          gh repo clone jacobcxdev/winget-pkgs "$checkout" -- --filter=blob:none --no-checkout --depth=1
-          git -C "$checkout" sparse-checkout set "manifests/j/jacobcxdev/cq"
-          git -C "$checkout" fetch origin "$branch:refs/remotes/origin/$branch" --depth=1 --filter=blob:none || true
-          git -C "$checkout" switch -C "$branch" origin/master
-          destination="$checkout/manifests/j/jacobcxdev/cq/$version"
-          mkdir -p "$destination"
-          cp "$manifest_dir"/*.yaml "$destination/"
-          git -C "$checkout" add "manifests/j/jacobcxdev/cq/$version"
-          if git -C "$checkout" diff --cached --quiet; then
-            echo "WinGet version $version already matches upstream"
-            exit 0
-          fi
-          git -C "$checkout" -c user.name=jacobcxdev -c user.email=41898282+jacobcxdev@users.noreply.github.com \
-            commit -m "New version: jacobcxdev.cq version $version"
-          git -C "$checkout" push origin "$branch"
-          gh pr create \
-            --repo microsoft/winget-pkgs \
-            --base master \
-            --head "jacobcxdev:$branch" \
-            --title "New version: jacobcxdev.cq version $version" \
-            --body "Published CQ $version MSI installers for x64 and ARM64."
+          bash .github/scripts/submit-winget-manifest.sh "$manifest_dir"
 
       - name: Ensure WinGet contributor agreement
         env:

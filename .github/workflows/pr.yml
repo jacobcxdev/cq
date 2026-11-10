@@ -33,4 +33,8 @@ jobs:
       - run: bash .github/scripts/test-package-macos-bundles.sh
       - run: bash .github/scripts/test-close-superseded-winget-prs.sh
       - run: bash .github/scripts/test-ensure-winget-cla.sh
+      - run: bash .github/scripts/test-verified-commit.sh
+      - run: bash .github/scripts/test-winget-permissions.sh
+      - run: bash .github/scripts/test-publish-homebrew-casks.sh
+      - run: bash .github/scripts/test-submit-winget-manifest.sh
       - run: bash .github/scripts/test-homebrew-install-companion.sh

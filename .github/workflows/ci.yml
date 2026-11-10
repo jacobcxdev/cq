@@ -271,6 +271,10 @@ jobs:
       - run: go vet ./...
       - name: Validate WinGet contributor agreement automation
         run: bash .github/scripts/test-ensure-winget-cla.sh
+      - run: bash .github/scripts/test-verified-commit.sh
+      - run: bash .github/scripts/test-winget-permissions.sh
+      - run: bash .github/scripts/test-publish-homebrew-casks.sh
+      - run: bash .github/scripts/test-submit-winget-manifest.sh
       - name: Run full race suite and require native transport gates
         shell: bash
         run: |
@@ -303,6 +307,8 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v5
+
+      - run: .\.github\scripts\test-published-windows-package.ps1
 
       - uses: ./.github/actions/setup-go
         with:

@@ -136,7 +136,7 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 		`.\.github\scripts\validate-windows-install.ps1`,
 		"secrets.WINGET_PKGS_TOKEN",
 		"microsoft/winget-pkgs",
-		`git -C "$checkout" switch -C "$branch" origin/master`,
+		`bash .github/scripts/submit-winget-manifest.sh "$manifest_dir"`,
 	} {
 		if !strings.Contains(workflowText, required) {
 			t.Fatalf("release workflow missing %q", required)
@@ -146,9 +146,6 @@ func TestReleaseBuildsCompletePackageArtifacts(t *testing.T) {
 		if !strings.Contains(workflowText, required) {
 			t.Fatalf("release workflow missing native lifecycle job %q", required)
 		}
-	}
-	if strings.Contains(workflowText, "--assignee jacobcxdev") {
-		t.Fatal("WinGet publisher requests unsupported upstream assignee permission")
 	}
 }
 
@@ -280,13 +277,51 @@ func TestReleasePublishesHomebrewCaskLifecycle(t *testing.T) {
 	for _, required := range []string{
 		`.github/scripts/format-homebrew-cask.sh dist/homebrew/Casks/cq.rb`,
 		`.github/scripts/format-homebrew-cask.sh "$cask"`,
-		"repos/jacobcxdev/homebrew-tap/contents/Casks/$token.rb",
+		`GH_TOKEN="$HOMEBREW_TAP_TOKEN" bash .github/scripts/publish-homebrew-casks.sh "$RUNNER_TEMP/homebrew-cask"`,
 		"secrets.HOMEBREW_TAP_TOKEN",
 		"brew audit --cask --strict jacobcxdev/tap/cq",
 		`.github/scripts/validate-homebrew-cask.sh "$PWD/dist/homebrew/Casks/cq.rb" "$archive"`,
 	} {
 		if !strings.Contains(workflowText, required) {
 			t.Fatalf("Homebrew Cask publish workflow missing %q", required)
+		}
+	}
+}
+
+func TestReleaseRequiresVerifiedDistributionWrites(t *testing.T) {
+	for _, publisher := range []string{"publish-homebrew-casks", "submit-winget-manifest"} {
+		source, err := os.ReadFile("../../.github/scripts/" + publisher + ".sh")
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(source)
+		if !strings.Contains(text, `bash "$scripts/verified-commit.sh"`) {
+			t.Fatalf("%s bypasses verified commit publication", publisher)
+		}
+		if strings.Contains(text, "git commit") || strings.Contains(text, "--method PUT") {
+			t.Fatalf("%s retained an unsigned commit path", publisher)
+		}
+	}
+	submitter, err := os.ReadFile("../../.github/scripts/submit-winget-manifest.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(submitter)
+	permissionIndex := strings.Index(text, `bash "$scripts/check-winget-permissions.sh"`)
+	firstWriteIndex := strings.Index(text, `gh repo fork "$repository" --clone=false`)
+	if permissionIndex < 0 || firstWriteIndex < permissionIndex ||
+		!strings.Contains(text, "--assignee jacobcxdev") {
+		t.Fatal("WinGet publication does not require assignable permissions before writes and an assigned PR")
+	}
+	for _, workflow := range []string{"pr", "ci"} {
+		source, err := os.ReadFile("../../.github/workflows/" + workflow + ".yml")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fixture := range []string{"verified-commit", "winget-permissions", "publish-homebrew-casks", "submit-winget-manifest"} {
+			if !strings.Contains(string(source), "bash .github/scripts/test-"+fixture+".sh") {
+				t.Fatalf("%s workflow omits %s publication regression checks", workflow, fixture)
+			}
 		}
 	}
 }
