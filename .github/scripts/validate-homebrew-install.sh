@@ -35,6 +35,7 @@ config_root="$HOME/.config/cq"
 codex_root="$HOME/.codex"
 logs_root="$HOME/Library/Logs/cq"
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/cq-homebrew-install.XXXXXX")
+temporary_root=$(cd "$temporary_root" && pwd -P)
 probe_executable="$temporary_root/native-transport-probe"
 nativepackage_executable="$temporary_root/nativepackage"
 go_executable="$(go env GOROOT)/bin/go"
