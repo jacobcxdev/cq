@@ -100,7 +100,7 @@ else
 fi
 if [[ "$head" == "$base" ]]; then
   jq -n --arg repository "$fork" --arg branch "$branch" --arg base "$base" --slurpfile additions "$temporary/additions.json" \
-    '{branch:{repositoryNameWithOwner:$repository,refName:$branch},expectedHeadOid:$base,
+    '{branch:{repositoryNameWithOwner:$repository,branchName:$branch},expectedHeadOid:$base,
       message:{headline:"chore: updated package manifests",body:"- Recorded the published version and installer checksums"},
       fileChanges:{additions:$additions[0]}}' >"$temporary/commit-input.json"
   head=$(bash "$scripts/verified-commit.sh" "$fork" "$temporary/commit-input.json")

@@ -32,7 +32,7 @@ for token in cq-network cq; do
 done
 if [[ "$(jq length "$temporary/additions.json")" == 0 ]]; then exit 0; fi
 jq -n --arg repository "$repository" --arg branch "$branch" --arg head "$head" --slurpfile additions "$temporary/additions.json" \
-  '{branch:{repositoryNameWithOwner:$repository,refName:$branch},expectedHeadOid:$head,
+  '{branch:{repositoryNameWithOwner:$repository,branchName:$branch},expectedHeadOid:$head,
     message:{headline:"chore: updated release packages",body:"- Recorded the verified shared-version package references"},
     fileChanges:{additions:$additions[0]}}' >"$temporary/input.json"
 bash "$scripts/verified-commit.sh" "$repository" "$temporary/input.json"
