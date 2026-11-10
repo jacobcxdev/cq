@@ -85,7 +85,7 @@ jobs:
       - uses: actions/checkout@v5
       - name: Require reviewed main
         run: test "$GITHUB_REF" = refs/heads/main
-      - name: Inspect actual publication actor and assignment permissions
+      - name: Inspect actual publication actor and fork permissions
         env:
           GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
         run: bash .github/scripts/check-winget-permissions.sh
