@@ -3,6 +3,7 @@ package proxy
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -111,8 +112,18 @@ func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey
 	}
 	accountResolver := newCodexLeaseAccountResolver(store, accounts)
 
+	// Validated snapshots are ordered by scope. Restrict authority checks to
+	// its contiguous range, retaining constant-time equality before hydration.
+	laneStart := sort.Search(len(store.v2.Lanes), func(index int) bool {
+		lane := &store.v2.Lanes[index]
+		return compareCodexLeaseLaneScope(lane.SessionHash, lane.ThreadHash, lane.NamespaceHash, sessionHash, threadHash, namespaceHash) >= 0
+	})
 	laneFound := false
-	for _, lane := range store.v2.Lanes {
+	for index := laneStart; index < len(store.v2.Lanes); index++ {
+		lane := &store.v2.Lanes[index]
+		if compareCodexLeaseLaneScope(lane.SessionHash, lane.ThreadHash, lane.NamespaceHash, sessionHash, threadHash, namespaceHash) != 0 {
+			break
+		}
 		if !constantTimeCodexLeaseDigestEqual(lane.SessionHash, sessionHash) || !constantTimeCodexLeaseDigestEqual(lane.ThreadHash, threadHash) || !constantTimeCodexLeaseDigestEqual(lane.NamespaceHash, namespaceHash) {
 			continue
 		}
@@ -120,10 +131,10 @@ func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey
 			return blocked, fmt.Errorf("%w: duplicate matching lane", ErrCodexLeaseTrustLost)
 		}
 		laneFound = true
-		restored.Lane = lane
+		restored.Lane = *lane
 		restored.Fence.Lane = lane.Generation
-		restored.Fence.Current = codexLaneTupleIdentity(lane, true)
-		restored.Fence.Last = codexLaneTupleIdentity(lane, false)
+		restored.Fence.Current = codexLaneTupleIdentity(*lane, true)
+		restored.Fence.Last = codexLaneTupleIdentity(*lane, false)
 	}
 	if !laneFound {
 		restored.Fence.TouchedRecords = []CodexLeaseRecordFence{{Record: requestedIdentity}}
@@ -152,11 +163,19 @@ func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey
 	exactHistorical := false
 	shadowOnly := false
 	unrecognisedAuthority := false
-	for _, record := range store.v2.Records {
+	recordStart := sort.Search(len(store.v2.Records), func(index int) bool {
+		record := &store.v2.Records[index]
+		return compareCodexLeaseLaneScope(record.SessionHash, record.ThreadHash, record.NamespaceHash, sessionHash, threadHash, namespaceHash) >= 0
+	})
+	for index := recordStart; index < len(store.v2.Records); index++ {
+		record := &store.v2.Records[index]
+		if compareCodexLeaseLaneScope(record.SessionHash, record.ThreadHash, record.NamespaceHash, sessionHash, threadHash, namespaceHash) != 0 {
+			break
+		}
 		if !constantTimeCodexLeaseDigestEqual(record.SessionHash, sessionHash) || !constantTimeCodexLeaseDigestEqual(record.ThreadHash, threadHash) || !constantTimeCodexLeaseDigestEqual(record.NamespaceHash, namespaceHash) {
 			continue
 		}
-		clone := cloneCodexJournalRecordV2(record)
+		clone := cloneCodexJournalRecordV2(*record)
 		identity := clone.Identity()
 		fence := codexLeaseFenceForRestoredRecord(clone)
 		resolvedAccount, resolved := accountResolver.resolve(clone.AccountHash)
@@ -230,6 +249,16 @@ func (store *CodexLeaseStore) loadLane(key LeaseKey, accounts []codex.AccountKey
 		return codexRecordIdentityLess(restored.Fence.TouchedRecords[i].Record, restored.Fence.TouchedRecords[j].Record)
 	})
 	return cloneCodexRestoredLane(restored), nil
+}
+
+func compareCodexLeaseLaneScope(session, thread, namespace, otherSession, otherThread, otherNamespace string) int {
+	if order := strings.Compare(session, otherSession); order != 0 {
+		return order
+	}
+	if order := strings.Compare(thread, otherThread); order != 0 {
+		return order
+	}
+	return strings.Compare(namespace, otherNamespace)
 }
 
 func validateCodexLeaseAuthorityPolicy(policy CodexLeaseAuthorityPolicy) error {

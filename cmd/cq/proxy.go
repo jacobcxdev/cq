@@ -751,6 +751,15 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("resolve CQ directories: %w", err)
 	}
+	stopStderrRetention, stderrRetentionErr := startProxyServiceStderrRetention(roots.Logs)
+	if stderrRetentionErr != nil {
+		fmt.Fprintf(os.Stderr, "cq: service stderr retention unavailable: %v\n", stderrRetentionErr)
+	}
+	defer func() {
+		if err := stopStderrRetention(); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("service stderr shutdown: %w", err))
+		}
+	}()
 	var adoptedListener net.Listener
 	if supervisorRole == nil && workerRole == nil {
 		adoptedListener, err = adoptProxyListenerFn()
@@ -861,7 +870,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	} else if cacheProfiler != nil {
 		defer func() {
 			if err := cacheProfiler.Close(); err != nil {
-				fmt.Fprintln(os.Stderr, "cq: cache profiling close failed")
+				returnErr = errors.Join(returnErr, fmt.Errorf("cache profiling shutdown: %w", err))
 			}
 		}()
 	}
@@ -1342,7 +1351,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			fmt.Fprintf(os.Stderr, "cq: diagnostics enabled\n")
 			defer func() {
 				if err := diagnostics.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "cq: diagnostics: close: %v\n", err)
+					returnErr = errors.Join(returnErr, fmt.Errorf("diagnostics shutdown: %w", err))
 				}
 			}()
 		}
@@ -1360,7 +1369,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			fmt.Fprintf(os.Stderr, "cq: payload diagnostics enabled — WARNING: log contains raw request/response bodies and WebSocket frames\n")
 			defer func() {
 				if err := payloadDiag.Close(); err != nil {
-					fmt.Fprintf(os.Stderr, "cq: payload diagnostics: close: %v\n", err)
+					returnErr = errors.Join(returnErr, fmt.Errorf("payload diagnostics shutdown: %w", err))
 				}
 			}()
 		}

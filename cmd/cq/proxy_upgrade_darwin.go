@@ -355,6 +355,8 @@ func runDarwinRuntimeUpgradeEntry(args []string) (bool, error) {
 	if executable == selected.Path {
 		return false, nil
 	}
+	proxyStderrRetentionExecMu.Lock()
+	defer proxyStderrRetentionExecMu.Unlock()
 	return true, unix.Exec(selected.Path, append([]string{selected.Path}, args...), os.Environ())
 }
 

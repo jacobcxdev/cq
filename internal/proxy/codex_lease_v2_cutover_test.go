@@ -85,7 +85,7 @@ func TestCodexLeaseV2CompleteLegacyCutoverUsesPinnedHorizonAndCAS(t *testing.T) 
 		t.Fatal("cutover completion did not replace the journal")
 	}
 	var completed codexLeaseJournalEnvelopeV2
-	if err := decodeCodexLeaseStrictJSON(completedBytes, &completed); err != nil {
+	if err := decodeCodexLeaseStrictJSON(readCodexLeaseLogicalTestBytes(t, fsys, store.path, store.keyPath), &completed); err != nil {
 		t.Fatal(err)
 	}
 	if completed.Generation != 9 || completed.Cutover.JournalGeneration != 8 || completed.Cutover.State != CodexLeaseCutoverComplete || completed.Cutover.CompletedAt != horizon || completed.Cutover.CompletionGeneration != 9 || !completed.Cutover.NoLegacyAuthority {

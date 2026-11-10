@@ -4535,7 +4535,7 @@ func TestCodexLeaseRuntimeRestartNormalisesAndFencesOldHandles(t *testing.T) {
 			}
 			oldHandle := test.advance(t, prepared)
 			identity := oldHandle.identity
-			beforeClose := append([]byte(nil), coordinator.Store().journalBytes...)
+			beforeClose := fsysFileBytes(t, fsys, "/state/leases.json")
 			if err := coordinator.Close(); err != nil {
 				t.Fatal(err)
 			}

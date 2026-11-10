@@ -80,6 +80,11 @@ func (controller *RuntimeUpgradeController) Begin(ctx context.Context, request R
 	if request.SchemaVersion != 1 || !runtimeUpgradeTransactionPattern.MatchString(request.TransactionID) || request.WaitTimeoutSeconds < 0 || request.WaitTimeoutSeconds > 30 || request.Candidate.Validate() != nil {
 		return RuntimeUpgradeReceiptV1{}, ErrRuntimeUpgradeReceipt
 	}
+	// Protocol boundaries include durable storage recovery, not only control
+	// message syntax. Reject before preparing a receipt or pausing admissions.
+	if request.Candidate.ProtocolVersion != installer.RuntimeUpgradeProtocolVersion || controller.options.Previous.ProtocolVersion != installer.RuntimeUpgradeProtocolVersion {
+		return RuntimeUpgradeReceiptV1{}, ErrRuntimeUpgradeUnsupported
+	}
 	artifacts := installer.RuntimeArtifactStore{FS: controller.options.Store.FS, Roots: controller.options.Store.Roots}
 	artifactLock, err := artifacts.Lock()
 	if err != nil {

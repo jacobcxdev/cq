@@ -255,7 +255,12 @@ func TestCodexLeaseV2CompactCommitOutcomesPreserveInMemoryAuthority(t *testing.T
 			beforeBytes := append([]byte(nil), store.journalBytes...)
 			beforeGeneration := store.Generation()
 			beforeEnvelope := cloneCodexLeaseV2Envelope(*store.v2)
-			store.directory = &failingSecureDirectory{SecureDirectory: store.directory, fsys: test.fsys}
+			if test.wantOutcome == fsutil.CommitIndeterminate {
+				directory := store.directory
+				store.directory = &deltaFaultDirectory{SecureDirectory: directory, IdentityBoundRenamer: directory.(fsutil.IdentityBoundRenamer), IdentityBoundRemover: directory.(fsutil.IdentityBoundRemover), journal: store.journalName, stage: "head_sync", armed: true}
+			} else {
+				store.directory = &failingSecureDirectory{SecureDirectory: store.directory, fsys: test.fsys}
+			}
 
 			err := store.Compact(time.Time{}, 0)
 			if err == nil || fsutil.AtomicWriteOutcome(err) != test.wantOutcome {

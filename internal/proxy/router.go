@@ -3,7 +3,6 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
-	"regexp"
 	"strings"
 
 	"github.com/jacobcxdev/cq/internal/modelregistry"
@@ -82,13 +81,15 @@ func RouteModel(model string) Provider {
 	}
 }
 
-var oneMillionSuffix = regexp.MustCompile(`(?i)\[1m\]$`)
-
 // ParseModel normalises a model name by stripping a trailing [1m] suffix (case-insensitive).
 // No other transformations are applied: effort-like substrings such as "-xhigh" are
 // preserved as part of the model name and passed to upstream unchanged.
 func ParseModel(model string) string {
-	return oneMillionSuffix.ReplaceAllString(model, "")
+	const suffix = "[1m]"
+	if len(model) >= len(suffix) && strings.EqualFold(model[len(model)-len(suffix):], suffix) {
+		return model[:len(model)-len(suffix)]
+	}
+	return model
 }
 
 // extractModel performs a quick JSON parse to extract the "model" field

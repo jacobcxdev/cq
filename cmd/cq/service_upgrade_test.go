@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -69,8 +70,8 @@ func homebrewUpgradeServiceFixture(t *testing.T) (*serviceLifecycle, *retainedSe
 	lifecycle, original, store := newServiceHarness(t)
 	platform := &retainedServicePlatform{fakeServicePlatform: original}
 	lifecycle.Platform = platform
-	previous := installer.RuntimeArtifact{Path: filepath.Join(t.TempDir(), "retained-previous", "cq"), SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
-	candidate := installer.RuntimeArtifact{Path: filepath.Join(t.TempDir(), "retained-candidate", "cq"), SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+	previous := installer.RuntimeArtifact{Path: filepath.Join(t.TempDir(), "retained-previous", "cq"), SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
+	candidate := installer.RuntimeArtifact{Path: filepath.Join(t.TempDir(), "retained-candidate", "cq"), SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	lifecycle.RuntimeArtifacts = serviceUpgradeArtifacts{lifecycle.Executable: previous, previous.Path: previous, candidate.Path: candidate}
 	lifecycle.RuntimePreflight = func(context.Context, installstate.Record) error { return nil }
 	lifecycle.RuntimeApply = func(_ context.Context, artifact installer.RuntimeArtifact, _ time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
@@ -612,7 +613,7 @@ func TestDeferredRefreshKeepsTryingAfterInstallerLockRelease(t *testing.T) {
 
 func TestHomebrewInstallWaitsForOlderPendingRetry(t *testing.T) {
 	lifecycle, platform, store, previous, pending := homebrewUpgradeServiceFixture(t)
-	newer := installer.RuntimeArtifact{Path: filepath.Join(t.TempDir(), "retained-newer", "cq"), SHA256: strings.Repeat("c", 64), Version: "0.34.2", ProtocolVersion: 1}
+	newer := installer.RuntimeArtifact{Path: filepath.Join(t.TempDir(), "retained-newer", "cq"), SHA256: strings.Repeat("c", 64), Version: "0.34.2", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	artifacts := lifecycle.RuntimeArtifacts.(serviceUpgradeArtifacts)
 	artifacts[lifecycle.Executable], artifacts[newer.Path] = newer, newer
 	var installed atomic.Value
@@ -1065,5 +1066,35 @@ func TestServiceUpgradeParserRequiresNativeHomebrewCandidate(t *testing.T) {
 		if _, err := parseServiceCommand(args); err == nil {
 			t.Fatalf("accepted invalid candidate args: %v", args)
 		}
+	}
+}
+
+func TestHomebrewUpgradeProtocolBoundaryPreservesLivePredecessor(t *testing.T) {
+	lifecycle, platform, store, previous, candidate := homebrewUpgradeServiceFixture(t)
+	previous.ProtocolVersion = 1
+	candidate.ProtocolVersion = 2
+	lifecycle.RuntimeArtifacts = serviceUpgradeArtifacts{lifecycle.Executable: previous, previous.Path: previous, candidate.Path: candidate}
+	before, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := false
+	lifecycle.RuntimeApply = func(context.Context, installer.RuntimeArtifact, time.Duration) (proxy.RuntimeUpgradeReceiptV1, error) {
+		applied = true
+		return proxy.RuntimeUpgradeReceiptV1{}, nil
+	}
+	_, err = lifecycle.Upgrade(context.Background(), installstate.OwnerHomebrew, candidate.Path)
+	if !errors.Is(err, ErrServiceUpgradeMaintenance) {
+		t.Fatalf("protocol boundary error=%v, want maintenance before runtime RPC", err)
+	}
+	if applied || !reflect.DeepEqual(platform.calls, []string{"inspect"}) || platform.live != previous.Path || platform.refresh != previous.Path {
+		t.Fatalf("protocol rejection mutated service: applied=%v calls=%v live=%s", applied, platform.calls, platform.live)
+	}
+	after, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatal("protocol rejection changed package ownership")
 	}
 }

@@ -119,6 +119,68 @@ Current [routing-policy types and validation](../internal/proxy/routing_policy_s
 the implemented contracts. Historical planning and review documents are not
 runtime or clean-checkout verification dependencies.
 
+Codex continuity uses authenticated incremental storage (disk format 4). The
+canonical file is a small signed head pointing to an immutable checkpoint and a
+chain of signed segments. Deltas contain changed lanes and records, explicit
+deletions and signed journal metadata. The head authenticates the complete
+reconstructed schema-3 logical state. Missing files, altered bytes or identities,
+generation gaps and failed MACs stop recovery and mutations.
+
+Every mutation retains semantic validation and CAS fences. Candidates are
+created exclusively, synced and read back before the head's atomic replacement.
+That head is the sole acknowledgement point. Recovery replays only its published
+chain; unpublished candidates never gain routing authority. Referenced files are
+checked at the publication barrier and after publication. Uncertain head
+publication poisons the writer until recovery.
+
+Journal persistence is synchronous: candidate and head file syncs plus their
+directory syncs finish before acknowledgement. Coordinator/store close waits
+for in-flight operations to cross those barriers before releasing ownership.
+There is no pending journal buffer or full-snapshot rewrite on shutdown.
+Orderly proxy shutdown also syncs diagnostic files and their parent directories;
+flush failures propagate through the command result. Forced termination cannot
+run final diagnostic hooks, but acknowledged journal state does not depend on
+those hooks.
+
+Routine commits replace the current segment (64 KiB join target) and small head;
+sealed segments remain immutable. A single larger semantic delta may form a
+larger segment, proportional to changed data. Checkpoints occur only when
+accumulated encoded delta bytes pay for the new logical snapshot, rather than
+after a fixed number of commits. This bounds amortised checkpoint writes
+independently of retained history. Initial migration and genuine bulk changes
+can still write a full snapshot. Exact integrity reads and logical validation
+continue to depend on history size; constant CPU time is not promised.
+
+Integrity rechecks compare every referenced byte through a bounded streaming
+buffer, retaining the same descriptor, canonical-entry and ownership fences.
+Reads that need complete content use descriptor size only as an allocation hint;
+they still read to EOF and enforce their original byte limit. Delta construction
+merges already canonical snapshots without full-history lookup maps. These
+optimisations change resource use, not the authenticated format or commit
+barriers.
+
+Cleanup proves current authority and removes only identity-verified obsolete
+references or authenticated unpublished candidates in this journal's namespace.
+Errors retain evidence and report failure; authority changes fence cleanup.
+Legacy archives and unknown files remain untouched. Active references, socket
+lineage and continuity anchors retain their existing policy. Unchanged repeated
+HTTP/WebSocket admission metadata acknowledges installed authority without
+advancing generations, timestamps or disk writes.
+
+Runtime handoff protocol 2 is required for format-4 recovery. Mixed-protocol
+handoffs and incompatible snapshot restores reject before traffic drainage or
+job mutation. First adoption requires the approved maintenance procedure in
+[Homebrew upgrades](homebrew-upgrades.md#journal-recovery-protocol-boundary).
+Older readers cannot interpret a stale checkpoint as current authority.
+
+Run the bounded native comparison with
+`CQ_TEST_WRITE_WORKLOAD=1 GOTOOLCHAIN=go1.26.1 go test -race ./internal/proxy -run '^TestCodexLeaseSnapshotWriteWorkload$' -v -count=1`.
+It compares full-snapshot and incremental admission persistence with short and
+near-budget chains, using 878 synthetic lanes and 2,658 records. It measures
+submitted/native disk bytes, logical reads, CPU and elapsed time, then proves
+admission survives reopening. Fixtures use private temporary roots and never
+load installed credentials or live state.
+
 ## Banked resets
 
 `internal/provider/codex` owns `/wham` transport, exact account/credential

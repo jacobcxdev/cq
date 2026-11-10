@@ -41,12 +41,14 @@ File.symlink(File.join(root, "current"), package)
 status = {"owner" => "homebrew", "executable" => package,
           "proxy" => {"registered" => true, "running" => true, "healthy" => true, "pid" => 42, "listener" => "127.0.0.1:19280", "configured_executable" => retained[0], "live_executable" => retained[1]},
           "refresh" => {"registered" => true, "healthy" => true, "configured_executable" => retained[1]}, "active_runtime_version" => "0.34.99"}
-verify = lambda do |value, mode, expected|
-  output, error, result = Open3.capture3({"HOME" => File.join(root, "home"), "XDG_CONFIG_HOME" => "", "XDG_CACHE_HOME" => ""}, RbConfig.ruby, File.join(root, "status-validator.rb"), JSON.generate(value), package, runtime_root, "0.34.99", mode, architecture, go_executable)
+verify = lambda do |value, mode, expected, protocol = "2"|
+  output, error, result = Open3.capture3({"HOME" => File.join(root, "home"), "XDG_CONFIG_HOME" => "", "XDG_CACHE_HOME" => ""}, RbConfig.ruby, File.join(root, "status-validator.rb"), JSON.generate(value), package, runtime_root, "0.34.99", mode, architecture, go_executable, protocol)
   abort "status gate result differed: expected #{expected}, got #{result.success?}\n#{output}#{error}" unless result.success? == expected
 end
 copy = lambda { JSON.parse(JSON.generate(status)) }
 verify.call(status, "retained", true)
+verify.call(status, "retained", false, "1")
+verify.call(status, "retained", false, "3")
 legacy = copy.call
 legacy.delete("active_runtime_version")
 legacy["proxy"]["configured_executable"] = package
