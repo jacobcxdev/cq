@@ -86,6 +86,11 @@ func NewClientWithTransport(timeout time.Duration, version string, transport htt
 			if len(via) > 0 && req.URL.Host != via[0].URL.Host {
 				req.Header.Del("Authorization")
 			}
+			// Explicit Cookie headers no longer carry their original scope.
+			// Return the redirect instead of forwarding them to another resource.
+			if len(via) > 0 && via[0].Header.Get("Cookie") != "" {
+				return http.ErrUseLastResponse
+			}
 			return nil
 		},
 	}
