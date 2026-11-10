@@ -43,6 +43,8 @@ if [[ ! -f "$root/maintenance" && "$CQ_PROTOCOL_TEST_CASE" != compatible ]]; the
     unrelated) echo 'download failed' >&2; exit 1 ;;
     pid-changed) sed 's/101/102/' "$root/status.json" >"$root/changed"; mv "$root/changed" "$root/status.json" ;;
     receipt-changed) echo changed >"$root/config/state/runtime-upgrade.json" ;;
+    upgrade-auth-changed) echo changed >>"$root/codex/auth.json" ;;
+    upgrade-config-changed) echo changed >>"$root/config/proxy.json" ;;
     rollback-reconciled)
       echo '{"phase":"committed","previous":{"version":"0.48.3","protocol_version":1},"candidate":{"version":"0.48.3","protocol_version":1}}' >"$root/config/state/runtime-upgrade.json" ;;
     rollback-candidate)
@@ -118,7 +120,7 @@ CQ_PROTOCOL_TEST_CASE=compatible bash "$root/run.sh"
 reset_case
 CQ_PROTOCOL_TEST_CASE=downgrade bash "$root/run.sh"
 [[ "$(cat "$root/events")" == $'downgrade\nhealthy 0.48.4 protocol 2\nprobe' ]]
-for failure in unexpected-success unrelated pid-changed receipt-changed rollback-candidate rollback-unfinished unhealthy service-remains listener-remains auth-changed; do
+for failure in unexpected-success unrelated pid-changed receipt-changed upgrade-auth-changed upgrade-config-changed rollback-candidate rollback-unfinished unhealthy service-remains listener-remains auth-changed; do
   reset_case
   if CQ_PROTOCOL_TEST_CASE=$failure bash "$root/run.sh" >"$root/error" 2>&1; then
     echo "protocol lifecycle accepted $failure" >&2

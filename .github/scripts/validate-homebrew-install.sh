@@ -393,13 +393,14 @@ assert_protocol_rejection() {
 upgrade_cq_package() {
   if [[ "$previous_protocol" != "$current_protocol" ]]; then
     [[ "$previous_protocol:$current_protocol" == 1:2 ]] || { echo "unsupported runtime protocol transition" >&2; return 1; }
+    local config_before auth_before
+    config_before=$(shasum -a 256 "$config_root/proxy.json")
+    auth_before=$(shasum -a 256 "$codex_root/auth.json")
     # Exercise the real predecessor Cask transaction and Homebrew's rollback.
     # A failed candidate must leave the old runtime selected and serving.
     assert_protocol_rejection "$previous_version" "$previous_protocol" package-rollback \
       env HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask "$validation_tap/cq"
-    local config_before auth_before
-    config_before=$(shasum -a 256 "$config_root/proxy.json")
-    auth_before=$(shasum -a 256 "$codex_root/auth.json")
+    [[ "$(shasum -a 256 "$config_root/proxy.json")" == "$config_before" && "$(shasum -a 256 "$codex_root/auth.json")" == "$auth_before" ]]
     # The probe has completed and this disposable fixture has no other clients.
     # Follow the documented maintenance adoption using the owning stable binary.
     "$installed_cq" service uninstall --owner=homebrew --service-executable="$installed_cq"
