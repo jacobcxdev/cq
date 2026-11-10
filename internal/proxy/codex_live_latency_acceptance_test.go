@@ -197,6 +197,12 @@ func medianCodexLiveLatency(samples []time.Duration) time.Duration {
 func codexLiveLatencyConfinedCommand(command codexAcceptanceCommand, egress codexLiveAcceptanceEgress, root string, client codexInstalledExecutableProof) codexAcceptanceCommand {
 	if egress.proxyEndpoint != "" {
 		// Only the local relay is admitted; ignoring proxy policy cannot escape.
+		// An explicit environment proxy must outrank macOS system-direct routing.
+		for index, argument := range command.args {
+			if argument == "features.respect_system_proxy=true" {
+				command.args[index] = "features.respect_system_proxy=false"
+			}
+		}
 		command.endpoint = egress.proxyEndpoint
 		command.egressProxyURL = egress.proxyEndpoint
 		command.sandboxWriteRoot = root
@@ -212,7 +218,13 @@ func TestCodexLiveLatencyConfinedBaselineToRelay(t *testing.T) {
 		t.Fatal(err)
 	}
 	egress := codexLiveAcceptanceEgress{proxyURL: "http://cq-live-token:private-authority@127.0.0.1:4567", proxyEndpoint: "http://127.0.0.1:4567"}
-	command := codexLiveLatencyConfinedCommand(codexAcceptanceCommand{endpoint: DefaultCodexUpstream + legacyCodexResponsesPath}, egress, root, codexInstalledExecutableProof{})
+	command := codexLiveLatencyConfinedCommand(codexAcceptanceCommand{
+		endpoint: DefaultCodexUpstream + legacyCodexResponsesPath,
+		args:     []string{"exec", "-c", "features.respect_system_proxy=true", "prompt"},
+	}, egress, root, codexInstalledExecutableProof{})
+	if slices.Contains(command.args, "features.respect_system_proxy=true") || !slices.Contains(command.args, "features.respect_system_proxy=false") {
+		t.Fatal("system route could override the explicit configured relay")
+	}
 	profile, err := codexAcceptanceSandboxProfile(command)
 	if err != nil || !command.loopbackOnly || !strings.Contains(profile, `(deny network*)`) || !strings.Contains(profile, `localhost:4567`) || strings.Contains(profile, "chatgpt.com") {
 		t.Fatal("baseline could escape the configured relay")

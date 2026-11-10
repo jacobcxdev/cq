@@ -70,8 +70,10 @@ The script sets it automatically after resolving the installed configuration.
 HTTP, WebSocket, rescue, exact-executable and latency-baseline traffic borrow
 that broker's configured route. Broker failure stops validation; it does not
 select direct egress or start another WireGuard tunnel. The latency baseline
-bypasses CQ account routing while retaining this egress policy. Model discovery
-remains network-denied. The candidate executable uses a temporary, loopback-only
+bypasses CQ account routing while retaining this egress policy. Its isolated
+client uses environment-proxy handling so macOS system-direct routing cannot
+override the relay. Model discovery remains network-denied. The candidate
+executable uses a temporary, loopback-only
 CONNECT adapter for allowlisted Codex hosts; its private broker hop remains
 authenticated. Fixture cleanup closes the adapter and its tunnels.
 
