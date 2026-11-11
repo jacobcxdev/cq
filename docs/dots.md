@@ -79,6 +79,19 @@ The installation root must be private and outside source checkouts, app bundles 
 
 The qualified native app permits authenticated local proxy requests on `localhost:8000`. Dots therefore requires loopback port `8000` to be free. If another service owns it, startup stops without terminating that service or choosing an unsupported port.
 
+The native desktop retains `https://chatgpt.com` as its API origin so signed
+Remote enrollment challenges keep their public identity. Its private CONNECT
+transport carries those requests to the local adapter; an unavailable adapter
+fails without falling back to a different account or public connection. The
+local Codex host uses CQ's CLI wrapper, while durable hosts retain their native
+WebSocket transport and thread ownership. CQ does not force durable hosts into
+another local app-server against the same thread store.
+
+If a secondary owner's upstream authentication fails, the adapter returns
+`502` with code `dot_owner_authentication_unavailable`. It does not forward that
+owner's `401` as a request to refresh the desktop's primary account. Primary
+authentication failures keep their normal `401` behaviour.
+
 ## Sidebar order
 
 The native Dot rows do not support dragging. Set their persistent presentation order with CQ:

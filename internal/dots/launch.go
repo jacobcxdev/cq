@@ -186,9 +186,15 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 	env = setEnvironment(env, "CQ_DOTS_CONFIG", filepath.Join(filepath.Dir(s.RuntimeRoot), "settings.json"))
 	env = setEnvironment(env, "CQ_DOTS_CQ_PATH", executable)
 	env = setEnvironment(env, "OPENAI_BASE_URL", baseURL)
-	for _, key := range []string{"CODEX_API_BASE_URL", "CODEX_APP_SERVER_CHATGPT_BASE_URL"} {
-		env = setEnvironment(env, key, "https://localhost:"+strconv.Itoa(port)+"/backend-api")
+	// Desktop binds Remote enrollment signatures to its configured API origin.
+	// Keep the public identity; the existing CONNECT proxy routes its encrypted
+	// traffic to the private Probe without changing that origin.
+	apiBaseURL := "https://localhost:" + strconv.Itoa(port) + "/backend-api"
+	if native {
+		apiBaseURL = "https://chatgpt.com/backend-api"
 	}
+	env = setEnvironment(env, "CODEX_API_BASE_URL", apiBaseURL)
+	env = setEnvironment(env, "CODEX_APP_SERVER_CHATGPT_BASE_URL", "https://localhost:"+strconv.Itoa(port)+"/backend-api")
 	publicPath := environmentValue(env, "SSL_CERT_FILE")
 	if publicPath == "" {
 		publicPath = "/etc/ssl/cert.pem"
@@ -227,7 +233,11 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 	if err = launchWrite(launcher, []byte(script), 0o700); err != nil {
 		return nil, nil, err
 	}
-	env = setEnvironment(env, "CODEX_APP_SERVER_FORCE_CLI", "1")
+	// CODEX_CLI_PATH selects our local wrapper without forcing remote hosts to
+	// spawn another local app-server against the same thread store.
+	env = slices.DeleteFunc(env, func(entry string) bool {
+		return strings.HasPrefix(entry, "CODEX_APP_SERVER_FORCE_CLI=")
+	})
 	env = setEnvironment(env, "CODEX_CLI_PATH", launcher)
 	return args, env, nil
 }

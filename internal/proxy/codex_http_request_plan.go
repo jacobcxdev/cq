@@ -413,7 +413,8 @@ func (factory *CodexHTTPRequestPlanFactory) CyberEligibilityStore() *CyberEligib
 
 // A WebSocket delta cannot move its previous response to another account. If
 // Cyber was disabled and policy offers a cheaper account, ask Codex to replay
-// the turn with full history before planning the new route.
+// the turn with full history before planning the new route. Unknown capacity
+// cannot justify discarding a working continuation.
 func (factory *CodexHTTPRequestPlanFactory) ShouldResetCyberOff(ctx context.Context, protocol CodexProtocolRequest, active codex.AccountKey) bool {
 	if factory == nil || factory.CyberEligibility == nil || factory.SessionPolicy == nil ||
 		factory.PinnedAccountKey != "" || protocol.CyberEnabled() ||
@@ -448,7 +449,7 @@ func (factory *CodexHTTPRequestPlanFactory) ShouldResetCyberOff(ctx context.Cont
 	for _, candidate := range candidates {
 		account := candidate.Choice.AccountKey
 		candidate.Value = decision.AccountValues[account]
-		if account != active && candidate.Routable && candidate.Compatible && codexRoutePolicyCapacity(candidate).State != CapacityZero &&
+		if account != active && candidate.Routable && candidate.Compatible && codexRoutePolicyCapacity(candidate).State == CapacityPositive &&
 			containsCodexHTTPRequestAccountKey(decision.Allowed, account) &&
 			codexRoutePolicyAccountValueLess(candidate, activeCandidate) {
 			return true

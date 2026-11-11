@@ -224,6 +224,12 @@ type cloudWork struct {
 	initialize cloudMessage
 }
 
+type cloudLocalAccountRequest struct {
+	method                     string
+	includeToken, refreshToken bool
+	correlation                uint64
+}
+
 type cloudBridge struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -237,6 +243,10 @@ type cloudBridge struct {
 	outputErr     chan error
 	local         *cloudLocal
 	localWrite    sync.Mutex
+	accountMu     sync.Mutex
+	accountReads  map[string]cloudLocalAccountRequest
+	accountSeq    uint64
+	backendOrigin string
 	rootsMu       sync.Mutex
 	roots         map[string]string
 	sessionsMu    sync.Mutex
@@ -261,7 +271,16 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 	b := &cloudBridge{ctx: ctx, cancel: cancel, cfg: cfg, deps: deps, output: stdout,
 		outputErr: make(chan error, 1), owners: make(map[string]Account), roots: make(map[string]string),
 		sessions: make(map[string]*cloudSession), queues: make(map[string]chan cloudWork),
-		statusWatches: make(map[string]bool), statusSeen: make(map[string]json.RawMessage)}
+		statusWatches: make(map[string]bool), statusSeen: make(map[string]json.RawMessage),
+		accountReads: make(map[string]cloudLocalAccountRequest)}
+	if cfg.IntegrationMode == "native" && environmentValue(environment, "CODEX_API_BASE_URL") == "https://chatgpt.com/backend-api" {
+		if port, err := realtimePort(filepath.Join(cfg.RuntimeRoot, "port"), cfg.RuntimeRoot, false); err == nil {
+			origin := "https://localhost:" + strconv.Itoa(port)
+			if environmentValue(environment, "CODEX_APP_SERVER_CHATGPT_BASE_URL") == origin+"/backend-api" {
+				b.backendOrigin = origin
+			}
+		}
+	}
 	defer cancel()
 	b.event(map[string]any{"app_stdio_adapter_started": true, "read_only": false, "app_session": true, "integration_mode": "native"})
 	b.loadOwners(accounts)
@@ -340,7 +359,7 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 			raw, readErr := reader.ReadBytes('\n')
 			if len(raw) != 0 {
 				if !b.harness.observe(raw) {
-					b.emitRaw(raw)
+					b.emitRaw(b.localAccountResponse(raw))
 				}
 			}
 			if readErr != nil {
@@ -448,6 +467,7 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 					b.fail(request, prepareErr.Error())
 					continue
 				}
+				b.trackLocalAccountRequest(request)
 				b.localWrite.Lock()
 				_, err := b.local.input.Write(forward)
 				b.localWrite.Unlock()
@@ -457,6 +477,88 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 			}
 		}
 	}
+}
+
+func (b *cloudBridge) trackLocalAccountRequest(request cloudMessage) {
+	method := request.method()
+	if (method != "account/read" && method != "getAuthStatus") || len(request["id"]) == 0 {
+		return
+	}
+	var params struct{ IncludeToken, RefreshToken bool }
+	_ = json.Unmarshal(request["params"], &params)
+	b.accountMu.Lock()
+	b.accountSeq++
+	pending := cloudLocalAccountRequest{method: method, includeToken: params.IncludeToken, refreshToken: params.RefreshToken, correlation: b.accountSeq}
+	b.accountReads[cloudHarnessID(request["id"])] = pending
+	b.accountMu.Unlock()
+	b.localAccountEvent(pending, "request", nil)
+}
+
+func (b *cloudBridge) localAccountEvent(request cloudLocalAccountRequest, stage string, response cloudMessage) {
+	event := map[string]any{"operation": "local_account_rpc", "stage": stage, "source": "local_stock", "method": request.method,
+		"include_token": request.includeToken, "refresh_token": request.refreshToken, "correlation": request.correlation, "app_stdio_pid": os.Getpid()}
+	if stage == "result" {
+		var result struct {
+			AuthMethod json.RawMessage
+			AuthToken  string
+		}
+		_ = json.Unmarshal(response["result"], &result)
+		method := ""
+		if len(result.AuthMethod) != 0 && !bytes.Equal(bytes.TrimSpace(result.AuthMethod), []byte("null")) {
+			method = "unknown"
+			var value string
+			if json.Unmarshal(result.AuthMethod, &value) == nil {
+				switch value {
+				case "chatgpt", "chatgptAuthTokens", "apiKey":
+					method = value
+				}
+			}
+		}
+		event["auth_method"], event["has_token"] = method, result.AuthToken != ""
+		event["has_result_error"] = len(response["error"]) != 0 && !bytes.Equal(bytes.TrimSpace(response["error"]), []byte("null"))
+	}
+	b.event(event)
+}
+
+// The stock app-server discovers NO_CONSTRAINT workspaces against its private
+// transport URL. Publish the equivalent public identity only to the desktop;
+// the child's transport and explicit workspace residency stay unchanged.
+func (b *cloudBridge) localAccountResponse(raw []byte) []byte {
+	var response cloudMessage
+	if json.Unmarshal(raw, &response) != nil || response.method() != "" || len(response["id"]) == 0 {
+		return raw
+	}
+	key := cloudHarnessID(response["id"])
+	b.accountMu.Lock()
+	pending, ok := b.accountReads[key]
+	delete(b.accountReads, key)
+	b.accountMu.Unlock()
+	if !ok {
+		return raw
+	}
+	b.localAccountEvent(pending, "result", response)
+	if pending.method != "account/read" || b.backendOrigin == "" {
+		return raw
+	}
+	var result, routing cloudMessage
+	if json.Unmarshal(response["result"], &result) != nil || json.Unmarshal(result["workspaceRouting"], &routing) != nil {
+		return raw
+	}
+	var origin, account, override string
+	_ = json.Unmarshal(routing["backendOrigin"], &origin)
+	_ = json.Unmarshal(routing["chatgptAccountId"], &account)
+	_ = json.Unmarshal(routing["accountRoutingOverride"], &override)
+	if origin != b.backendOrigin || account == "" || account != b.cfg.SystemAccountID || override != "NO_CONSTRAINT" {
+		return raw
+	}
+	routing["backendOrigin"] = json.RawMessage(`"https://chatgpt.com"`)
+	result["workspaceRouting"], _ = json.Marshal(routing)
+	response["result"], _ = json.Marshal(result)
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return raw
+	}
+	return encoded
 }
 
 func (b *cloudBridge) loadOwners(accounts []Account) {

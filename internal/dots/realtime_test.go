@@ -35,7 +35,7 @@ func realtimeTestTLS(t *testing.T) (*tls.Config, *tls.Config) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Realtime test"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), DNSNames: []string{"realtime.chatgpt.com", "ws.chatgpt.com"}, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, BasicConstraintsValid: true}
+	template := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Realtime test"}, NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour), DNSNames: []string{"chatgpt.com", "realtime.chatgpt.com", "ws.chatgpt.com"}, KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, BasicConstraintsValid: true}
 	der, err := x509.CreateCertificate(rand.Reader, template, template, public, private)
 	if err != nil {
 		t.Fatal(err)
@@ -355,6 +355,76 @@ func TestRealtimeOpaqueConnectPreservesTraffic(t *testing.T) {
 	data := make([]byte, 5)
 	if _, err := io.ReadFull(reader, data); err != nil || string(data) != "proof" {
 		t.Fatalf("opaque tunnel %q %v", data, err)
+	}
+}
+
+func TestRealtimeCanonicalAPIOriginReachedOwnedProbe(t *testing.T) {
+	p, client, _ := realtimeTestProxy(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("canonical API request reached signalling upstream")
+	}))
+	probe, _, _ := probeFixtureForTest(t)
+	const challenge = `{"purpose":"remote_control_client_enrollment","target_origin":"https://chatgpt.com","target_path":"/backend-api/codex/remote/control/client/refresh/finish"}`
+	probe.options.HTTP = probeDoer(func(r *http.Request) (*http.Response, error) {
+		if r.URL.String() != "https://chatgpt.com/backend-api/codex/remote/control/client/refresh/start" || r.Header.Get("Authorization") != "Bearer native-token" {
+			t.Errorf("canonical enrollment request changed: %s", r.URL)
+		}
+		return probeSuccess(challenge), nil
+	})
+	local := httptest.NewUnstartedServer(probe)
+	local.TLS = p.dependencies.signallingTLS.Clone()
+	local.StartTLS()
+	t.Cleanup(local.Close)
+	_, port, err := net.SplitHostPort(local.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(p.settings.RuntimeRoot, "port"), []byte(port), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.dependencies.dial = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if address != local.Listener.Addr().String() {
+			return nil, fmt.Errorf("canonical API bypassed owned probe: %s", address)
+		}
+		return (&net.Dialer{}).DialContext(ctx, network, address)
+	}
+	r, err := http.NewRequest(http.MethodPost, "https://chatgpt.com/backend-api/codex/remote/control/client/refresh/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Authorization", "Bearer native-token")
+	response, err := client.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, err := httputil.ReadBody(response.Body)
+	if err != nil || response.StatusCode != 200 || string(body) != challenge || response.Request.URL.Host != "chatgpt.com" {
+		t.Fatalf("canonical challenge changed: status %d body %q error %v", response.StatusCode, body, err)
+	}
+}
+
+func TestRealtimeCanonicalAPIOriginRejectedUnavailableProbe(t *testing.T) {
+	for _, port := range []string{"", "443\nother", "0", "65536"} {
+		t.Run(port, func(t *testing.T) {
+			p, client, _ := realtimeTestProxy(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+			if port != "" {
+				if err := os.WriteFile(filepath.Join(p.settings.RuntimeRoot, "port"), []byte(port), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var dials atomic.Int32
+			p.dependencies.dial = func(context.Context, string, string) (net.Conn, error) {
+				dials.Add(1)
+				return nil, errors.New("must not dial")
+			}
+			if response, err := client.Get("https://chatgpt.com/backend-api/tbo"); err == nil {
+				response.Body.Close()
+				t.Fatal("unavailable probe accepted")
+			}
+			if dials.Load() != 0 {
+				t.Fatal("unavailable probe fell back to public upstream")
+			}
+		})
 	}
 }
 
