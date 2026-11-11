@@ -25,10 +25,11 @@ type explicitWebSocketDispatchExecutor interface {
 
 // CodexWebSocketAttemptExecutor resolves secrets only for one upstream dial.
 type CodexWebSocketAttemptExecutor struct {
-	Reserve   *CodexReserve
-	Inventory codex.CredentialInventory
-	Secrets   codex.ExactSecretResolver
-	Dialer    websocket.Dialer
+	ExtraCredits *CodexExtraCreditsGuard
+	Reserve      *CodexReserve
+	Inventory    codex.CredentialInventory
+	Secrets      codex.ExactSecretResolver
+	Dialer       websocket.Dialer
 }
 
 func NewCodexWebSocketAttemptExecutor(inventory codex.CredentialInventory, secrets codex.ExactSecretResolver) *CodexWebSocketAttemptExecutor {
@@ -71,6 +72,9 @@ func (e *CodexWebSocketAttemptExecutor) dialOnDispatch(ctx context.Context, choi
 		headers.Set("ChatGPT-Account-ID", material.AccountID)
 	} else {
 		headers.Del("ChatGPT-Account-ID")
+	}
+	if err := e.extraCreditsDispatchError(ctx, choice); err != nil {
+		return nil, nil, nil, actual, err
 	}
 	dialer := e.Dialer
 	if onDispatch != nil {

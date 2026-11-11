@@ -102,9 +102,10 @@ type CodexCapacityLedger struct {
 	includedWindows map[codex.AccountKey]map[quota.WindowName]codexWindowFact
 	resetPending    map[codex.AccountKey]*codexQuotaResetPending
 	// Reserve is bound before serving requests.
-	Reserve *CodexReserve
-	windows map[codex.AccountKey]map[quota.WindowName]codexWindowFact
-	mu      sync.RWMutex
+	Reserve      *CodexReserve
+	ExtraCredits *CodexExtraCreditsGuard
+	windows      map[codex.AccountKey]map[quota.WindowName]codexWindowFact
+	mu           sync.RWMutex
 
 	now    func() time.Time
 	maxAge time.Duration

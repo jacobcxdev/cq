@@ -1497,12 +1497,11 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		observation.ObserveClient(message)
 	}
 
-	guard := func(_ int, _ []byte) error {
-		if s.CodexRequests != nil && s.CodexRequests.Capacity != nil {
-			return reserveDispatchError(s.CodexRequests.Capacity.Reserve, choice.AccountKey)
-		}
-		return nil
+	var capacityLedger *CodexCapacityLedger
+	if s.CodexRequests != nil {
+		capacityLedger = s.CodexRequests.Capacity
 	}
+	guard := codexExtraCreditsFrameGuard(r.Context(), capacityLedger, choice)
 	if err := guard(messageType, message); err != nil {
 		_ = clientConn.WriteMessage(websocket.TextMessage, codexReserveWSLimitFrame)
 		return

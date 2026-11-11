@@ -71,6 +71,7 @@ type CodexCmd struct {
 	Switch   SwitchCmd       `cmd:"" help:"Switch active Codex account"`
 	Remove   RemoveCmd       `cmd:"" help:"Remove Codex account"`
 	Resets   CodexResetsCmd  `cmd:"" help:"Inspect and use banked reset credits"`
+	Credits  CodexCreditsCmd `cmd:"" help:"Control per-account extra credit spending"`
 }
 
 type CodexResetsCmd struct {
@@ -499,6 +500,12 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 		return err
 	case "codex accounts":
 		return app.RunAccounts(provider.Codex, cli.JSON)
+	case "codex credits enable <account-reference>":
+		return runDefaultCodexCredits("enable", cli.Codex.Credits.Enable.Reference, cli.JSON)
+	case "codex credits disable <account-reference>":
+		return runDefaultCodexCredits("disable", cli.Codex.Credits.Disable.Reference, cli.JSON)
+	case "codex credits status <account-reference>":
+		return runDefaultCodexCredits("status", cli.Codex.Credits.Status.Reference, cli.JSON)
 	case "codex switch <email>":
 		err := app.RunSwitch(provider.Codex, cli.Codex.Switch.Email, httputil.NewClient(10*time.Second, version))
 		if err == nil {

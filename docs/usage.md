@@ -119,6 +119,9 @@ cq codex login --activate
 cq codex accounts
 cq codex switch EMAIL
 cq codex remove EMAIL
+cq codex credits status EMAIL
+cq codex credits disable EMAIL
+cq codex credits enable EMAIL
 cq codex resets list
 cq codex resets recommend
 cq codex resets use EMAIL
@@ -126,6 +129,14 @@ cq codex resets use EMAIL --credit CREDIT_ID --yes
 ```
 
 Account selectors vary: `switch`/`remove` take an email; routing/reset commands accept their documented email, CQ alias or opaque AccountKey. Multiple matching identities require an unambiguous reference.
+
+`cq codex credits disable ACCOUNT` requires included quota for that logical account on CQ-routed requests. Other accounts keep their existing permission. The setting applies across managed, system and external credential candidates, persists across restarts, and takes effect without restarting CQ. `enable` restores extra credit permission; it does not buy credits or change OpenAI billing settings. `status` reports the permission, with `--json` available on all three commands.
+
+Disabled accounts require a fresh upstream included-allowance check before each inference dispatch. Pinned accounts, default fallbacks, credential retries, reused WebSockets, compaction and window priming follow the same rule. Missing or invalid allowance data refuses dispatch. The permission follows the upstream account-and-user identity even when adding or removing a credential changes CQ's routing key.
+
+Rescue cannot verify per-account allowance while its worker is unavailable, so any disabled account makes rescue refuse new traffic. Existing rescue WebSockets stop forwarding when a restriction is published. Requests already admitted upstream can finish; other clients that bypass CQ remain outside this local control. Concurrent usage and upstream reporting delays mean a local check cannot guarantee zero backend charges.
+
+Codex account headers show a green `󱏑` when extra credits are enabled and available, red `󰾯` when enabled with no available credits, and bold red `󰗤` when disabled. Quota and credit availability come from upstream usage; CQ's permission is independent of the native app's projected credit balance.
 
 CQ-owned Codex accounts live under `~/.codex/accounts/` with registry metadata. System `~/.codex/auth.json` remains distinct. Automatic quota/routing reads never switch the system account.
 

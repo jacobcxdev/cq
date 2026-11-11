@@ -167,6 +167,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 		if r.Email != "" {
 			header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
 		}
+		header += extraCreditsHeader(r, id)
 		header += " " + brightBlackStyle.Render("\u00b7") + " " + boldRedStyle.Render(errMsg)
 		return header, nil
 	}
@@ -203,6 +204,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 	if r.Email != "" {
 		header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
 	}
+	header += extraCreditsHeader(r, id)
 
 	if r.CacheAge > 0 && r.Error != nil {
 		errMsg := "error"
@@ -305,6 +307,20 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 	}
 
 	return header, rows
+}
+
+func extraCreditsHeader(result quota.Result, id provider.ID) string {
+	if id != provider.Codex || result.ExtraCredits == nil {
+		return ""
+	}
+	icon := boldRedStyle.Render("\U000F05E4")
+	if result.ExtraCredits.Enabled {
+		icon = redStyle.Render("\U000F0FAF")
+		if result.ExtraCredits.Available != nil && *result.ExtraCredits.Available {
+			icon = greenStyle.Render("\U000F13D1")
+		}
+	}
+	return " " + brightBlackStyle.Render("\u00b7") + " " + icon
 }
 
 // buildAggHeader builds the aggregate header line.

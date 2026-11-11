@@ -1107,6 +1107,22 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	codexWebSocketExecutor := proxy.NewCodexWebSocketAttemptExecutor(credentialControl, credentialControl)
 	codexWebSocketExecutor.Reserve = codexReserve
 	codexWebSocketExecutor.Dialer = codexEgress.WebSocket
+	extraCreditPolicy, err := codexprov.DefaultExtraCreditsPolicy()
+	if err != nil {
+		return fmt.Errorf("Codex extra credits policy: %w", err)
+	}
+	extraCreditUsageURL, err := proxy.CodexPrimerUsageURL(cfg.CodexUpstream)
+	if err != nil {
+		return err
+	}
+	extraCreditGuard := &proxy.CodexExtraCreditsGuard{
+		Policy:    extraCreditPolicy,
+		Inventory: credentialControl,
+		Usage:     &proxy.CodexPrimerUsageReader{Router: &codexUsageRouter, UsageURL: extraCreditUsageURL},
+	}
+	codexAttemptExecutor.ExtraCredits = extraCreditGuard
+	codexWebSocketExecutor.ExtraCredits = extraCreditGuard
+	codexCapacity.ExtraCredits = extraCreditGuard
 
 	if err := proxy.WriteClaudeCodeModelCapabilitiesCache(); err != nil {
 		fmt.Fprintf(os.Stderr, "cq: model capabilities cache: %v (continuing without cache write)\n", err)
@@ -1868,11 +1884,16 @@ func runtimeRescueConfiguration(ctx context.Context, admissions proxy.NormalCall
 		state.Close()
 		return nil, nil, err
 	}
+	extraCreditPolicy, err := codexprov.DefaultExtraCreditsPolicy()
+	if err != nil {
+		state.Close()
+		return nil, nil, err
+	}
 	configure := func(supervisor *proxy.RuntimeSupervisor) error {
 		if err := supervisor.SetCallerAuthority(authority); err != nil {
 			return err
 		}
-		return supervisor.ConfigureRescue(ctx, &proxy.RescueRelay{Origin: origin, Transport: egress.HTTP}, state.RuntimeMode)
+		return supervisor.ConfigureRescue(ctx, &proxy.RescueRelay{Origin: origin, Transport: egress.HTTP, ExtraCredits: extraCreditPolicy}, state.RuntimeMode)
 	}
 	return configure, state.Close, nil
 }

@@ -18,12 +18,14 @@ var (
 )
 
 type usageWindow struct {
-	UsedPercent        float64 `json:"used_percent"`
-	LimitWindowSeconds int64   `json:"limit_window_seconds"`
-	ResetAt            any     `json:"reset_at"`
+	UsedPercent        *float64 `json:"used_percent"`
+	LimitWindowSeconds int64    `json:"limit_window_seconds"`
+	ResetAt            any      `json:"reset_at"`
 }
 
 type usageRateLimit struct {
+	Allowed         *bool        `json:"allowed"`
+	LimitReached    *bool        `json:"limit_reached"`
 	PrimaryWindow   *usageWindow `json:"primary_window"`
 	SecondaryWindow *usageWindow `json:"secondary_window"`
 }
@@ -44,6 +46,15 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 			LimitName string          `json:"limit_name"`
 			RateLimit *usageRateLimit `json:"rate_limit"`
 		} `json:"additional_rate_limits"`
+		Credits *struct {
+			HasCredits          *bool `json:"has_credits"`
+			Unlimited           *bool `json:"unlimited"`
+			OverageLimitReached bool  `json:"overage_limit_reached"`
+		} `json:"credits"`
+		SpendControl *struct {
+			Reached bool `json:"reached"`
+		} `json:"spend_control"`
+		ModelUsage map[string]ModelUsage `json:"model_usage"`
 	}
 	if err := json.Unmarshal(body, &usage); err != nil {
 		return UsageObservation{Result: quota.ErrorResult("parse_error", fmt.Sprintf("parse: %v", err), 0)}
@@ -59,6 +70,7 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 
 	windows := make(map[quota.WindowName]quota.Window)
 	var descriptors []WindowDescriptor
+	includedUsageValid := true
 	addWindows := func(rateLimit *usageRateLimit, bucket string) error {
 		if rateLimit == nil {
 			return nil
@@ -81,8 +93,17 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 				return fmt.Errorf("conflicting rate limit window %q", name)
 			}
 			resetAtUnix := parseNumericResetAt(entry.window.ResetAt)
-			remaining := remainingPct(entry.window.UsedPercent)
-			exactRemaining := exactRemainingPct(entry.window.UsedPercent)
+			usedPercent := 0.0
+			if entry.window.UsedPercent == nil {
+				includedUsageValid = false
+			} else {
+				usedPercent = *entry.window.UsedPercent
+				if usedPercent < 0 || usedPercent > 100 {
+					includedUsageValid = false
+				}
+			}
+			remaining := remainingPct(usedPercent)
+			exactRemaining := exactRemainingPct(usedPercent)
 			windows[name] = quota.Window{RemainingPct: remaining, RemainingPctExact: &exactRemaining, ResetAtUnix: resetAtUnix}
 			if resetAtUnix > 0 {
 				rawLimitName := entry.slot
@@ -112,6 +133,13 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 		if err := addWindows(extra.RateLimit, extra.LimitName); err != nil {
 			return UsageObservation{Result: quota.ErrorResult("parse_error", fmt.Sprintf("parse: %v", err), 0)}
 		}
+		if usage.ModelUsage == nil {
+			usage.ModelUsage = make(map[string]ModelUsage)
+		}
+		model := usage.ModelUsage[extra.LimitName]
+		model.IncludedUsageAllowed = extra.RateLimit.Allowed
+		model.LimitReached = extra.RateLimit.LimitReached
+		usage.ModelUsage[extra.LimitName] = model
 	}
 
 	plan := usage.PlanType
@@ -123,9 +151,33 @@ func ParseUsageObservation(body []byte, email, accountID string) UsageObservatio
 	if rlt == "" {
 		rlt = rateLimitTierForPlan(plan, nowFunc())
 	}
+	credits := &quota.ExtraCredits{Enabled: true}
+	if usage.Credits != nil {
+		if usage.Credits.HasCredits != nil || usage.Credits.Unlimited != nil {
+			available := (usage.Credits.HasCredits != nil && *usage.Credits.HasCredits) || (usage.Credits.Unlimited != nil && *usage.Credits.Unlimited)
+			credits.Available = &available
+		}
+		if usage.Credits.OverageLimitReached {
+			available := false
+			credits.Available = &available
+		}
+	}
+	if usage.SpendControl != nil && usage.SpendControl.Reached {
+		available := false
+		credits.Available = &available
+	}
+	var allowed, reached *bool
+	if usage.RateLimit != nil {
+		allowed, reached = usage.RateLimit.Allowed, usage.RateLimit.LimitReached
+	}
 
 	return UsageObservation{
+		IncludedUsageAllowed: allowed,
+		IncludedUsageValid:   includedUsageValid && len(windows) > 0,
+		LimitReached:         reached,
+		ModelUsage:           usage.ModelUsage,
 		Result: quota.Result{
+			ExtraCredits:  credits,
 			Status:        quota.StatusFromWindows(windows),
 			Plan:          plan,
 			RateLimitTier: rlt,

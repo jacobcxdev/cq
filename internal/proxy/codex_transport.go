@@ -30,10 +30,11 @@ type explicitAccountDispatchExecutor interface {
 
 // CodexAttemptExecutor resolves secrets only inside attempt execution.
 type CodexAttemptExecutor struct {
-	Reserve   *CodexReserve
-	Inventory codex.CredentialInventory
-	Secrets   codex.ExactSecretResolver
-	Transport *CodexTokenTransport
+	ExtraCredits *CodexExtraCreditsGuard
+	Reserve      *CodexReserve
+	Inventory    codex.CredentialInventory
+	Secrets      codex.ExactSecretResolver
+	Transport    *CodexTokenTransport
 }
 
 // Do resolves exact candidate material and performs one request. It never selects or retries.
@@ -77,6 +78,11 @@ func (e *CodexAttemptExecutor) doOnDispatch(ctx context.Context, choice RouteCho
 	if err != nil {
 		return nil, actual, err
 	}
+	if req != nil && req.Method != http.MethodGet {
+		if err := e.admissionError(ctx, choice); err != nil {
+			return nil, actual, err
+		}
+	}
 	dispatch := func() {
 		if onDispatch != nil {
 			onDispatch(actual)
@@ -98,6 +104,11 @@ func (e *CodexAttemptExecutor) doFrozenOnDispatch(ctx context.Context, choice Ro
 	}
 	if req != nil {
 		req = req.WithContext(ctx)
+	}
+	if req != nil && req.Method != http.MethodGet {
+		if err := e.admissionError(ctx, choice); err != nil {
+			return nil, actual, err
+		}
 	}
 	dispatch := func() {
 		if onDispatch != nil {

@@ -1341,6 +1341,9 @@ func (broker *codexTerminatingWSBroker) servePrewarm(ctx context.Context, downst
 
 func (broker *codexTerminatingWSBroker) connectPrewarm(ctx context.Context, account CodexFrozenDispatchAccount, active *codexWSActiveUpstream) codexWSDialResult {
 	choice := account.Choice()
+	if err := broker.extraCreditsDispatchError(ctx, choice); err != nil {
+		return codexWSDialResult{err: err}
+	}
 	if codexWSActiveUpstreamMatchesFirstAttempt(active, account) {
 		return codexWSDialResult{response: &http.Response{StatusCode: http.StatusSwitchingProtocols, Header: make(http.Header)}}
 	}
@@ -1490,6 +1493,9 @@ func (broker *codexTerminatingWSBroker) cancelActivePrewarm(active *codexWSActiv
 
 func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *CodexLeaseRequestHandle, receipt *codexTurnReceiptHandle, account CodexFrozenDispatchAccount, active *codexWSActiveUpstream, anchored bool) codexWSDialResult {
 	choice := account.Choice()
+	if err := broker.extraCreditsDispatchError(ctx, choice); err != nil {
+		return codexWSDialResult{err: err}
+	}
 	if checker, ok := broker.config.Upstream.(interface{ reserveDispatchError(codex.AccountKey) error }); ok {
 		if err := checker.reserveDispatchError(choice.AccountKey); err != nil {
 			return codexWSDialResult{err: err}

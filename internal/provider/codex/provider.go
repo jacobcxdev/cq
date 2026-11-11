@@ -35,11 +35,12 @@ type logicalInventoryAccount struct {
 
 // Provider implements provider.Provider for Codex (OpenAI).
 type Provider struct {
-	client        httputil.Doer
-	fs            fsutil.FileSystem
-	inventory     CredentialInventory
-	secrets       ExactSecretResolver
-	refreshBroker CredentialRefreshBroker
+	ExtraCreditsPolicy *ExtraCreditsPolicy
+	client             httputil.Doer
+	fs                 fsutil.FileSystem
+	inventory          CredentialInventory
+	secrets            ExactSecretResolver
+	refreshBroker      CredentialRefreshBroker
 
 	inventoryMu      sync.RWMutex
 	lastInventory    []logicalInventoryAccount
@@ -112,6 +113,7 @@ func (p *Provider) Fetch(ctx context.Context, now time.Time) ([]quota.Result, er
 				}
 			}()
 			results[i] = p.fetchLogicalAccount(ctx, logical, inventoryReader, secrets, broker, now)
+			results[i].AccountKey = string(logical.Key)
 			results[i].Active = logical.Active
 		}(i, logical)
 	}
