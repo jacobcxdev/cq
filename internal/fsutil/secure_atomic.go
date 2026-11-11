@@ -803,8 +803,40 @@ func readSecureFileInDirectory(inspector SecurePathInspector, directory SecureDi
 	if maxBytes <= 0 {
 		return nil, SecureFileIdentity{}, fmt.Errorf("invalid secure file read limit")
 	}
-	if err := validateSecureEntryName(name); err != nil {
+	var data []byte
+	identity, err := inspectSecureFileInDirectory(inspector, directory, name, fence, func(file SecureReadFile, info os.FileInfo) error {
+		var err error
+		data, err = readSecureFileContent(file, maxBytes, info.Size())
+		return err
+	})
+	if err != nil {
 		return nil, SecureFileIdentity{}, err
+	}
+	return data, identity, nil
+}
+
+// MatchSecureFileInDirectoryWithIdentity verifies every expected byte without
+// retaining a second whole-file buffer. It uses the same no-follow, ownership,
+// descriptor, canonical-entry and directory fences as the secure reader.
+func MatchSecureFileInDirectoryWithIdentity(inspector SecurePathInspector, directory SecureDirectory, name string, expected []byte, expectedIdentity SecureFileIdentity) error {
+	identity, err := inspectSecureFileInDirectory(inspector, directory, name, nil, func(file SecureReadFile, _ os.FileInfo) error {
+		return matchSecureFileContent(file, expected)
+	})
+	if err != nil {
+		return err
+	}
+	if identity != expectedIdentity {
+		return fmt.Errorf("%w: secure file expected identity", ErrUnsafeSecurePath)
+	}
+	return nil
+}
+
+func inspectSecureFileInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, fence func() error, read func(SecureReadFile, os.FileInfo) error) (SecureFileIdentity, error) {
+	if inspector == nil || directory == nil {
+		return SecureFileIdentity{}, ErrSecureCapabilityUnavailable
+	}
+	if err := validateSecureEntryName(name); err != nil {
+		return SecureFileIdentity{}, err
 	}
 	validateDirectory := func() error {
 		return validateSecureDirectoryDescriptor(inspector, directory)
@@ -813,67 +845,95 @@ func readSecureFileInDirectory(inspector SecurePathInspector, directory SecureDi
 		validateDirectory = fence
 	}
 	if err := validateDirectory(); err != nil {
-		return nil, SecureFileIdentity{}, err
+		return SecureFileIdentity{}, err
 	}
 	file, err := directory.OpenNoFollow(name)
 	if err != nil {
-		return nil, SecureFileIdentity{}, err
+		return SecureFileIdentity{}, err
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil {
-		return nil, SecureFileIdentity{}, err
+		return SecureFileIdentity{}, err
 	}
 	if err := validateSecureRegularInfo(inspector, info); err != nil {
-		return nil, SecureFileIdentity{}, err
+		return SecureFileIdentity{}, err
 	}
 	identity, ok := inspector.FileIdentity(info)
 	if !ok {
-		return nil, SecureFileIdentity{}, fmt.Errorf("%w: secure file identity", ErrUnsafeSecurePath)
+		return SecureFileIdentity{}, fmt.Errorf("%w: secure file identity", ErrUnsafeSecurePath)
 	}
-	data, err := readSecureFileContent(file, maxBytes)
-	if err != nil {
-		return nil, SecureFileIdentity{}, err
+	if err := read(file, info); err != nil {
+		return SecureFileIdentity{}, err
 	}
 	afterInfo, err := file.Stat()
 	if err != nil {
-		return nil, SecureFileIdentity{}, err
+		return SecureFileIdentity{}, err
 	}
 	if err := validateSecureRegularInfo(inspector, afterInfo); err != nil {
-		return nil, SecureFileIdentity{}, err
+		return SecureFileIdentity{}, err
 	}
 	afterIdentity, ok := inspector.FileIdentity(afterInfo)
 	if !ok || afterIdentity != identity {
-		return nil, SecureFileIdentity{}, fmt.Errorf("%w: secure file descriptor identity", ErrUnsafeSecurePath)
+		return SecureFileIdentity{}, fmt.Errorf("%w: secure file descriptor identity", ErrUnsafeSecurePath)
 	}
 	canonical, err := directory.OpenNoFollow(name)
 	if err != nil {
-		return nil, SecureFileIdentity{}, err
+		return SecureFileIdentity{}, err
 	}
 	canonicalInfo, statErr := canonical.Stat()
 	closeErr := canonical.Close()
 	if statErr != nil {
-		return nil, SecureFileIdentity{}, statErr
+		return SecureFileIdentity{}, statErr
 	}
 	if closeErr != nil {
-		return nil, SecureFileIdentity{}, closeErr
+		return SecureFileIdentity{}, closeErr
 	}
 	if err := validateSecureRegularInfo(inspector, canonicalInfo); err != nil {
-		return nil, SecureFileIdentity{}, err
+		return SecureFileIdentity{}, err
 	}
 	canonicalIdentity, ok := inspector.FileIdentity(canonicalInfo)
 	if !ok || canonicalIdentity != identity {
-		return nil, SecureFileIdentity{}, fmt.Errorf("%w: secure file canonical entry identity", ErrUnsafeSecurePath)
+		return SecureFileIdentity{}, fmt.Errorf("%w: secure file canonical entry identity", ErrUnsafeSecurePath)
 	}
 	if err := validateDirectory(); err != nil {
-		return nil, SecureFileIdentity{}, err
+		return SecureFileIdentity{}, err
 	}
-	return data, identity, nil
+	return identity, nil
 }
 
-func readSecureFileContent(file io.Reader, maxBytes int64) ([]byte, error) {
-	data := make([]byte, 0, min(maxBytes, 32*1024))
-	buffer := make([]byte, 32*1024)
+func matchSecureFileContent(file io.Reader, expected []byte) error {
+	buffer := make([]byte, min(32*1024, len(expected)+1))
+	for {
+		n, err := file.Read(buffer[:min(len(buffer), len(expected)+1)])
+		if n > len(expected) || !bytes.Equal(buffer[:n], expected[:n]) {
+			return fmt.Errorf("%w: secure file content changed", ErrUnsafeSecurePath)
+		}
+		expected = expected[n:]
+		if errors.Is(err, io.EOF) {
+			if len(expected) != 0 {
+				return fmt.Errorf("%w: secure file content truncated", ErrUnsafeSecurePath)
+			}
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+}
+
+func readSecureFileContent(file io.Reader, maxBytes, sizeHint int64) ([]byte, error) {
+	capacity := min(maxBytes, 32*1024)
+	if sizeHint >= 0 && sizeHint <= maxBytes {
+		capacity = sizeHint
+	}
+	// Descriptor size is an allocation hint, not authority over the read. Keep
+	// reading to EOF and enforcing maxBytes if the file grows or shrinks.
+	data := make([]byte, 0, capacity)
+	buffer := make([]byte, min(maxBytes, 32*1024-1)+1)
 	for {
 		remaining := maxBytes - int64(len(data))
 		if remaining < int64(len(buffer)) {

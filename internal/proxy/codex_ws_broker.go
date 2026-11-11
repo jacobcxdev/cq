@@ -94,6 +94,10 @@ func classifyCodexWebSocketFailure(err error) codexWebSocketFailure {
 			plan:   true,
 		}
 	}
+	var transport *codexWSDialTransportError
+	if errors.As(err, &transport) {
+		return codexWebSocketFailure{Stage: "upstream_dial", Reason: codexWebSocketFailureReason(transport.reason)}
+	}
 	var brokerErr *codexWebSocketBrokerError
 	if errors.As(err, &brokerErr) {
 		return codexWebSocketFailure{
@@ -522,6 +526,9 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 		if err != nil {
 			releaseTurn()
 			failure := classifyCodexWebSocketFailure(err)
+			if failure.Stage == "upstream_dial" {
+				noteCodexObservation(frameCtx, codexObservationFields{Decision: "broker_failed", Reason: string(failure.Reason)})
+			}
 			closeCode, closeReason := codexTraceWebSocketClose(err)
 			emitCodexTrace(frameCtx, CodexTraceEvent{
 				Phase: "terminal", Stage: string(failure.Stage), Outcome: "error", Reason: string(failure.Reason),
@@ -1292,13 +1299,12 @@ func (broker *codexTerminatingWSBroker) servePrewarm(ctx context.Context, downst
 				continue
 			}
 			broker.cancelActivePrewarm(active)
-			reason, errorClass := codexWSProviderFailureClassification(dial.wrapped.HardUsageLimit, dial.wrapped.AuthFailure)
 			frame, status := canonicalCodexWSHandshakeError(dial.response, dial.wrapped, dial.body)
-			markCodexWSProviderTerminal(ctx, string(CodexSSEError), reason, errorClass, codexTraceAccountHint(account.Choice().AccountKey), status)
+			markCodexWSDialTerminal(ctx, dial, codexTraceAccountHint(account.Choice().AccountKey), status)
 			if err := writeCodexWSMessage(ctx, downstream, websocket.TextMessage, frame); err != nil {
 				return fmt.Errorf("Codex downstream WebSocket write failed")
 			}
-			reportCodexWSHandshakeFailure(ctx, dial.response, dial.wrapped)
+			reportCodexWSHandshakeFailure(ctx, dial.response, dial.wrapped, dial.err)
 			_ = downstream.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, http.StatusText(status)))
 			return nil
 		}
@@ -1362,7 +1368,8 @@ func (broker *codexTerminatingWSBroker) connectPrewarm(ctx context.Context, acco
 			return codexWSDialResult{response: response}
 		}
 		wrapped, providerBody, parseErr := codexWSDialError(response, body)
-		last = codexWSDialResult{wrapped: wrapped, response: response, body: providerBody, err: errors.Join(dialErr, parseErr)}
+		last = codexWSDialResult{wrapped: wrapped, response: response, body: providerBody, err: codexWSDialResultError(response, dialErr, parseErr)}
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "upstream_dial", Outcome: "error", Reason: codexTraceErrorReason(last.err), AccountHint: codexTraceAccountHint(choice.AccountKey), Attempt: actual.Ordinal})
 		if wrapped.AuthFailure && attemptIndex+1 == len(attempts) && !refreshConsidered {
 			refreshConsidered = true
 			refreshed, refreshErr := broker.refreshAccountAttempt(ctx, account, len(attempts)+1)
@@ -1531,7 +1538,7 @@ func (broker *codexTerminatingWSBroker) connect(ctx context.Context, handle *Cod
 			return codexWSDialResult{lifecycle: lifecycle, response: response}
 		}
 		wrapped, providerBody, parseErr := codexWSDialError(response, body)
-		last = codexWSDialResult{lifecycle: lifecycle, wrapped: wrapped, response: response, body: providerBody, err: errors.Join(dialErr, parseErr)}
+		last = codexWSDialResult{lifecycle: lifecycle, wrapped: wrapped, response: response, body: providerBody, err: codexWSDialResultError(response, dialErr, parseErr)}
 		if wrapped.AuthFailure && attemptIndex+1 == len(attempts) && !refreshConsidered {
 			refreshConsidered = true
 			refreshed, refreshErr := broker.refreshAccountAttempt(ctx, account, len(attempts)+1)
@@ -1851,7 +1858,7 @@ func (broker *codexTerminatingWSBroker) finishHandshakeFailure(ctx context.Conte
 			return false, err
 		}
 	} else if err := lifecycle.Indeterminate(ctx, lifecycle.upstreamGeneration); err != nil {
-		return false, err
+		return false, errors.Join(dial.err, err)
 	}
 	if dial.wrapped.AuthFailure && lifecycle.turnAdmitted && !resetAvailable {
 		if err := lifecycle.CompleteAccountUnavailableCycle(ctx, lifecycle.upstreamGeneration); err != nil {
@@ -1859,12 +1866,11 @@ func (broker *codexTerminatingWSBroker) finishHandshakeFailure(ctx context.Conte
 		}
 	}
 	frame, status := canonicalCodexWSHandshakeError(dial.response, dial.wrapped, dial.body)
-	reason, errorClass := codexWSProviderFailureClassification(dial.wrapped.HardUsageLimit, dial.wrapped.AuthFailure)
-	markCodexWSProviderTerminal(ctx, string(CodexSSEError), reason, errorClass, codexTraceAccountHint(accounts[*accountIndex].Choice().AccountKey), status)
+	markCodexWSDialTerminal(ctx, dial, codexTraceAccountHint(accounts[*accountIndex].Choice().AccountKey), status)
 	if err := writeCodexWSMessage(ctx, downstream, websocket.TextMessage, frame); err != nil {
 		return false, fmt.Errorf("Codex downstream WebSocket write failed")
 	}
-	reportCodexWSHandshakeFailure(ctx, dial.response, dial.wrapped)
+	reportCodexWSHandshakeFailure(ctx, dial.response, dial.wrapped, dial.err)
 	_ = downstream.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, http.StatusText(status)))
 	if active.conn != nil {
 		closeCodexWSActiveUpstream(active)
@@ -2039,7 +2045,7 @@ func codexWSMessageTooBig(err error) bool {
 	return errors.As(err, &closeErr) && closeErr.Code == websocket.CloseMessageTooBig
 }
 
-func reportCodexWSHandshakeFailure(ctx context.Context, response *http.Response, wrapped CodexWrappedError) {
+func reportCodexWSHandshakeFailure(ctx context.Context, response *http.Response, wrapped CodexWrappedError, dialErr error) {
 	status := 0
 	reason := string(codexWebSocketFailureReasonUpstreamOutcomeIndeterminate)
 	if response != nil {
@@ -2047,6 +2053,10 @@ func reportCodexWSHandshakeFailure(ctx context.Context, response *http.Response,
 	}
 	if status >= 400 && status <= 599 {
 		reason = "upstream_rejected"
+	}
+	var transport *codexWSDialTransportError
+	if errors.As(dialErr, &transport) {
+		reason = string(transport.reason)
 	}
 	noteCodexObservation(ctx, codexObservationFields{Decision: "broker_failed", Reason: reason})
 	fmt.Fprintf(

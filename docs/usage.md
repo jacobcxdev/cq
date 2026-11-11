@@ -14,6 +14,8 @@ This guide covers everyday operations and links to the operator procedures. Run 
 - **Z.ai** reads saved browser sessions or Coding Plan API keys. Paid subscriptions expose 5-hour and weekly quota; Start Plan routes expose their separate token pools and entitlement windows. Monthly MCP usage appears separately when supplied by the API. Reset times remain unknown when Z.ai omits them.
 - **Grok** reports included subscription quota for multiple CQ-owned or verified borrowed CodexBar accounts, preserving the actual allowance period. Its subscription model catalogue is account-specific; public xAI API keys and purchased balances are outside this integration. See [Grok setup and current limits](#grok-subscriptions).
 
+If the Codex usage endpoint returns 404 with an OpenAI routing cookie (`__oailb`), CQ retries the same read once through the configured egress. The cookie stays in memory for that fetch only; account and session cookies are excluded. Cookie-bearing retries do not follow redirects. Other errors and 404 responses without a usable routing cookie retain their normal error handling.
+
 ### Cache and history
 
 Successful quota rows are cached by provider. Default TTL is 30 seconds; `--refresh` bypasses it. If one account has a transient fetch failure and a matching usable cached row exists, cq shows stale quota with original error context instead of hiding that account. Auth errors are never written as fresh cache data.
@@ -184,6 +186,8 @@ For API-key authentication, run `cq zai login --api-key` and paste a Personal Co
 `ZAI_API_KEY` selects one account for that process. If its exact key has already been verified as belonging to a saved OAuth account, CQ uses that OAuth account; otherwise it uses only the supplied key. Remove the override to use the saved account pool. For scripts, `cq zai login --api-key-stdin` reads the key from standard input without putting it in command arguments.
 
 CQ supports individual Coding Plan subscriptions through Z.ai's global endpoint. Group plans and regional endpoints are not configured separately.
+
+Paid capacity uses Lite as its baseline: Lite is 1×, Pro is 6× and Max is 14×, matching the [published credit allowances](https://docs.z.ai/devpack/overview#usage-instruction). Two current Max subscriptions therefore show `2 × Max 14x = 28x`. If explicit quota caps conflict with those allowances or report legacy token units, CQ keeps the account's percentages visible but excludes its unknown capacity from weighted totals. Start Plan token pools remain separate from paid subscription capacity.
 
 ```bash
 cq zai login

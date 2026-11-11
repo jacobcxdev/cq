@@ -227,17 +227,26 @@ func runValidateCodexReleaseShellWithNormalAuth(t *testing.T, repositoryRoot, ho
 	return runValidateCodexReleaseShellOptions(t, repositoryRoot, home, codexHome, explicitAuth, normalAuth, "")
 }
 
-func runValidateCodexReleaseShellOptions(t *testing.T, repositoryRoot, home, codexHome, explicitAuth, normalAuth, omittedTest string) (string, string, error) {
+func runValidateCodexReleaseShellOptions(t *testing.T, repositoryRoot, home, codexHome, explicitAuth, normalAuth, omittedTest string, extraEnvironment ...string) (string, string, error) {
 	t.Helper()
 	root := t.TempDir()
 	bin := filepath.Join(root, "bin")
 	if err := os.Mkdir(bin, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	configPath := filepath.Join(home, ".config", "cq", "proxy.json")
+	if _, err := os.Stat(configPath); errors.Is(err, os.ErrNotExist) {
+		writeValidateCodexReleaseAuth(t, configPath, 0o600)
+	}
+	jq, err := exec.LookPath("jq")
+	if err != nil {
+		t.Fatal("jq is required for release validation shell tests")
+	}
 	authCapture := filepath.Join(root, "auth-capture")
 	eventsPath := filepath.Join(root, "events")
 
 	commands := map[string]string{
+		"jq":    "#!/bin/sh\nexec \"$CQ_TEST_JQ\" \"$@\"\n",
 		"uname": "#!/bin/sh\nprintf 'Darwin\\n'\n",
 		"git": `#!/bin/sh
 case "$*" in
@@ -264,6 +273,7 @@ case "$1" in
   build) printf 'build\n' >>"$CQ_TEST_EVENTS" ;;
   test)
 	printf 'acceptance-executable=%s\n' "$CQ_CODEX_ACCEPTANCE_EXECUTABLE" >>"$CQ_TEST_EVENTS"
+	printf 'egress-port=%s\n' "$CQ_CODEX_LIVE_EGRESS_PORT" >>"$CQ_TEST_EVENTS"
 	case "$*" in
 	  *TestCodexInstalledTaskAffinityUsesHardLimitOnlyFailover*) ;;
 	  *) printf 'hard-limit failover missing from test pattern\n' >&2; exit 96 ;;
@@ -295,7 +305,19 @@ case "$1" in
   *) printf 'unexpected go arguments: %s\n' "$*" >&2; exit 97 ;;
 esac
 `,
-		"lsof": "#!/bin/sh\nexit 0\n",
+		"lsof": `#!/bin/sh
+if [ "${CQ_TEST_LIVE_LISTENER:-}" = 1 ]; then
+ printf 'listener-args=%s\n' "$*" >>"$CQ_TEST_EVENTS"
+ printf '12345\n'
+fi
+`,
+		"cq": `#!/bin/sh
+printf 'rescue-args=%s\n' "$*" >>"$CQ_TEST_EVENTS"
+case "$*" in
+ "proxy rescue status --port 4567") printf '{"mode":"normal"}\n' ;;
+ *) printf 'unexpected rescue status target\n' >&2; exit 97 ;;
+esac
+`,
 	}
 	for name, body := range commands {
 		if err := os.WriteFile(filepath.Join(bin, name), []byte(body), 0o700); err != nil {
@@ -314,6 +336,7 @@ esac
 		"CQ_TEST_REPOSITORY_ROOT=" + repositoryRoot,
 		"CQ_TEST_AUTH_CAPTURE=" + authCapture,
 		"CQ_TEST_EVENTS=" + eventsPath,
+		"CQ_TEST_JQ=" + jq,
 		"CQ_RELEASE_VALIDATION_VERSION=0.24.20",
 		"CQ_CODEX_ACCEPTANCE_EXECUTABLE=/usr/bin/true",
 		"CQ_CODEXBAR_LIVE_ROOT=" + filepath.Join(home, "CodexBar"),
@@ -326,6 +349,7 @@ esac
 		env = append(env, "CQ_CODEX_RELEASE_NORMAL_CLIENT_AUTH_FILE="+normalAuth)
 	}
 
+	env = append(env, extraEnvironment...)
 	command := exec.Command(filepath.Join(repositoryRoot, "scripts", "validate-codex-release"))
 	command.Dir = repositoryRoot
 	command.Env = env
@@ -342,4 +366,59 @@ esac
 		err = fmt.Errorf("%w: %s", err, output)
 	}
 	return strings.TrimSpace(string(authBytes)), string(eventBytes), err
+}
+
+func TestValidateCodexReleaseSelectedConfiguredEgressPort(t *testing.T) {
+	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
+	for _, tt := range []struct {
+		name, configuration, override, want string
+		invalid                             bool
+	}{
+		{name: "missing", configuration: `{}`, want: "19280"},
+		{name: "null", configuration: `{"port":null}`, want: "19280"},
+		{name: "configured", configuration: `{"port":4567}`, want: "4567"},
+		{name: "explicit", configuration: `{"port":4567}`, override: "5678", want: "5678"},
+		{name: "boolean", configuration: `{"port":false}`, invalid: true},
+		{name: "string", configuration: `{"port":"4567"}`, invalid: true},
+		{name: "fraction", configuration: `{"port":4567.5}`, invalid: true},
+		{name: "out of range", configuration: `{"port":65536}`, invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeValidateCodexReleaseAuth(t, filepath.Join(home, ".codex", "auth.json"), 0o600)
+			configuration := filepath.Join(home, ".config", "cq", "proxy.json")
+			writeValidateCodexReleaseAuth(t, configuration, 0o600)
+			if err := os.WriteFile(configuration, []byte(tt.configuration), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var extraEnvironment []string
+			if tt.override != "" {
+				extraEnvironment = append(extraEnvironment, "CQ_CODEX_LIVE_EGRESS_PORT="+tt.override)
+			}
+			_, events, err := runValidateCodexReleaseShellOptions(t, repositoryRoot, home, t.TempDir(), "", "", "", extraEnvironment...)
+			if tt.invalid {
+				if err == nil || events != "" {
+					t.Fatal("invalid configured port reached validation")
+				}
+				return
+			}
+			if err != nil || !strings.Contains(events, "egress-port="+tt.want+"\n") {
+				t.Fatalf("selected port=%q err=%v events=%q", tt.want, err, events)
+			}
+		})
+	}
+}
+
+func TestValidateCodexReleaseSnapshotUsedSelectedLiveInstance(t *testing.T) {
+	repositoryRoot := validateCodexReleaseRepositoryRoot(t)
+	home := t.TempDir()
+	writeValidateCodexReleaseAuth(t, filepath.Join(home, ".codex", "auth.json"), 0o600)
+	_, events, err := runValidateCodexReleaseShellOptions(t, repositoryRoot, home, t.TempDir(), "", "", "",
+		"CQ_CODEX_LIVE_EGRESS_PORT=4567", "CQ_TEST_LIVE_LISTENER=1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(events, "rescue-args=proxy rescue status --port 4567\n") != 2 || strings.Count(events, "listener-args=-nP -tiTCP:4567 -sTCP:LISTEN\n") != 2 {
+		t.Fatalf("snapshot did not preserve selected instance: %q", events)
+	}
 }

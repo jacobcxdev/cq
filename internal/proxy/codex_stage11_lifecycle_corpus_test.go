@@ -1658,10 +1658,7 @@ func (h *codexStage11LifecycleHarness) waitForDurableJournalSettlement(t *testin
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		journal, err := h.fsys.ReadFile("/state/leases.json")
-		if err != nil {
-			t.Fatal(err)
-		}
+		journal := h.readDurableLogicalJournal(t)
 		var envelope codexLeaseJournalEnvelopeV2
 		if err := json.Unmarshal(journal, &envelope); err != nil {
 			t.Fatal(err)
@@ -1715,9 +1712,23 @@ func (h *codexStage11LifecycleHarness) assertEvidence(t *testing.T, expected cod
 	if err != nil {
 		t.Fatal(err)
 	}
-	journal, err := h.fsys.ReadFile("/state/leases.json")
+	journal := h.readDurableLogicalJournal(t)
+	// Retained segments can contain prior after-images; privacy proof includes
+	// every physical journal file, not only materialised current authority.
+	physical := bytes.Clone(journal)
+	entries, err := h.fsys.ReadDir("/state")
 	if err != nil {
 		t.Fatal(err)
+	}
+	prefix := fmt.Sprintf(".cq-lease-%x.", sha256.Sum256([]byte("leases.json")))
+	for _, entry := range entries {
+		if entry.Name() == "leases.json" || strings.HasPrefix(entry.Name(), prefix) {
+			data, err := h.fsys.ReadFile("/state/" + entry.Name())
+			if err != nil {
+				t.Fatal(err)
+			}
+			physical = append(physical, data...)
+		}
 	}
 	for _, private := range []string{
 		codexStage11PrivateMarker,
@@ -1734,7 +1745,7 @@ func (h *codexStage11LifecycleHarness) assertEvidence(t *testing.T, expected cod
 		if bytes.Contains(diagnostics, []byte(private)) {
 			t.Fatalf("diagnostics leaked %q", private)
 		}
-		if bytes.Contains(journal, []byte(private)) {
+		if bytes.Contains(physical, []byte(private)) {
 			t.Fatalf("lease journal leaked %q", private)
 		}
 	}
@@ -1886,4 +1897,12 @@ func (h *codexStage11LifecycleHarness) assertProtectedAuthoritySentinels(t *test
 			t.Fatalf("protected authority sentinel changed: %s", path)
 		}
 	}
+}
+
+func (h *codexStage11LifecycleHarness) readDurableLogicalJournal(t *testing.T) []byte {
+	t.Helper()
+	store := h.coordinator.Store()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	return readCodexLeaseLogicalTestBytes(t, h.fsys, "/state/leases.json", "/state/leases.key")
 }

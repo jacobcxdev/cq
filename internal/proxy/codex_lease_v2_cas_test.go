@@ -1173,7 +1173,7 @@ func TestCodexLeaseV2CommitLanePoisonsOnPreReplaceTrustLoss(t *testing.T) {
 	}
 }
 
-func TestCodexLeaseV2CommitLaneAvoidsRedundantJournalRevalidation(t *testing.T) {
+func TestCodexLeaseV2CommitLaneRevalidatesBoundedHead(t *testing.T) {
 	store, fence, _, streaming := openDispatchedCodexLeaseV2AffinityTestStore(t)
 	directory := &countCodexLeaseV2JournalReadsDirectory{
 		SecureDirectory: store.directory,
@@ -1184,8 +1184,8 @@ func TestCodexLeaseV2CommitLaneAvoidsRedundantJournalRevalidation(t *testing.T) 
 	if _, err := store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{streaming}}); err != nil {
 		t.Fatal(err)
 	}
-	if directory.journalReads != 7 {
-		t.Fatalf("journal reads = %d, want one pre-replace journal proof", directory.journalReads)
+	if store.delta == nil || directory.journalReads < 2 || directory.journalReads*len(store.delta.headBytes) > 16<<10 {
+		t.Fatalf("authority revalidation exceeded bounded head reads: %d", directory.journalReads)
 	}
 }
 
@@ -1548,6 +1548,7 @@ type failCodexLeaseV2PostSyncReadDirectory struct {
 	journalName           string
 	synced                bool
 	journalReadsAfterSync int
+	headPublished         bool
 }
 
 func forwardCodexLeaseRenameChecked(directory fsutil.SecureDirectory, oldName, newName string, expected fsutil.SecureFileIdentity) error {
@@ -1563,7 +1564,11 @@ func forwardCodexLeaseRemoveChecked(directory fsutil.SecureDirectory, name strin
 }
 
 func (directory *failCodexLeaseV2PostSyncReadDirectory) RenameChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
-	return forwardCodexLeaseRenameChecked(directory.SecureDirectory, oldName, newName, expected)
+	err := forwardCodexLeaseRenameChecked(directory.SecureDirectory, oldName, newName, expected)
+	if err == nil && newName == directory.journalName {
+		directory.headPublished = true
+	}
+	return err
 }
 
 func (directory *failCodexLeaseV2PostSyncReadDirectory) RenameNoReplaceChecked(oldName, newName string, expected fsutil.SecureFileIdentity) error {
@@ -1631,7 +1636,7 @@ func (directory *failCodexLeaseV2PostSyncReadDirectory) Sync() error {
 	if err := directory.SecureDirectory.Sync(); err != nil {
 		return err
 	}
-	directory.synced = true
+	directory.synced = directory.headPublished
 	return nil
 }
 
@@ -1684,10 +1689,7 @@ func findCodexLeaseV2CASTestLane(t *testing.T, lanes []CodexJournalLane, laneDig
 
 func readCodexLeaseV2CASTestEnvelope(t *testing.T, fsys *fsutil.MemFS) codexLeaseJournalEnvelopeV2 {
 	t.Helper()
-	data, err := fsys.ReadFile("/state/leases.json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	data := readCodexLeaseLogicalTestBytes(t, fsys, "/state/leases.json", "/state/leases.key")
 	var envelope codexLeaseJournalEnvelopeV2
 	if err := json.Unmarshal(data, &envelope); err != nil {
 		t.Fatal(err)

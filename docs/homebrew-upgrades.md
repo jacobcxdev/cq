@@ -60,6 +60,36 @@ to select the committed copy or recover an unfinished handoff. Compatible
 upgrade does not boot out the proxy job. Refresh changes only after runtime
 commit. Linux and Windows runtime upgrades are unsupported.
 
+## Journal recovery protocol boundary
+
+Runtime handoff protocol 2 includes recovery of incremental Codex lease
+journals. Protocol-1 executables and their retained upgrade guards cannot read
+that storage format. CQ therefore rejects a protocol-1/2 handoff before
+preparing its transaction or pausing admissions. The predecessor keeps serving;
+repeating a deferred upgrade cannot cross this boundary. Status, ownership
+inspection and maintenance removal can still read protocol-1 runtime records.
+Restoring a service snapshot also checks its executable protocols before
+changing jobs; a protocol-1 snapshot cannot select an incompatible reader.
+
+First adoption requires an approved maintenance window. Finish active turns and
+stop clients, then remove the Homebrew-owned services using the owning stable
+executable before upgrading/reinstalling the package:
+
+```sh
+cq service uninstall --owner=homebrew --service-executable="$(brew --prefix)/bin/cq"
+brew upgrade --cask jacobcxdev/tap/cq
+```
+
+If the protocol-2 package is already installed while the protocol-1 service
+remains active, keep clients stopped, run that same service uninstall, then
+`cq service install --owner=homebrew --service-executable="$(brew --prefix)/bin/cq"`.
+Do not edit the upgrade receipt or authenticated lease journal. Service removal
+preserves credentials, configuration and continuity state. Keep clients stopped
+until the new runtime and real routed traffic have been verified. This adoption
+has a listener gap; later protocol-2/2 handoffs retain the existing reversible
+upgrade protocol. Once an incremental journal has been written, recovery needs
+a protocol-2 reader; restoring an old executable alone is not a safe downgrade.
+
 ## First adoption
 
 Older CQ releases and previously installed cask metadata cannot use the new

@@ -21,7 +21,10 @@ import (
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
-const RuntimeUpgradeProtocolVersion uint32 = 1
+// Protocol 2 runtimes can recover incremental Codex lease journals. Crossing
+// from protocol 1 needs maintenance adoption: the previous executable and its
+// upgrade guard cannot recover a format-4 journal after a successor crash.
+const RuntimeUpgradeProtocolVersion uint32 = 2
 const runtimeArtifactCheckTimeout = 30 * time.Second
 const maxRuntimeArtifactBytes = 512 << 20
 
@@ -51,9 +54,11 @@ func (store RuntimeArtifactStore) artifactPath(digest string) string {
 	return filepath.Join(store.Roots.State, "runtime-artifacts", digest, "cq")
 }
 
+// Validate accepts known historical records for inspection and maintenance.
+// Admission to a reversible handoff separately requires the current protocol.
 func (artifact RuntimeArtifact) Validate() error {
 	digest, err := hex.DecodeString(artifact.SHA256)
-	if err != nil || len(digest) != sha256.Size || hex.EncodeToString(digest) != artifact.SHA256 || artifact.Version == "" || artifact.ProtocolVersion != RuntimeUpgradeProtocolVersion || !filepath.IsAbs(artifact.Path) {
+	if err != nil || len(digest) != sha256.Size || hex.EncodeToString(digest) != artifact.SHA256 || artifact.Version == "" || (artifact.ProtocolVersion < 1 || artifact.ProtocolVersion > RuntimeUpgradeProtocolVersion) || !filepath.IsAbs(artifact.Path) {
 		return ErrRuntimeArtifact
 	}
 	return nil
@@ -147,6 +152,7 @@ func (store RuntimeArtifactStore) Stage(ctx context.Context, source string) (Run
 		return RuntimeArtifact{}, err
 	}
 	artifact.Version = check.Version
+	artifact.ProtocolVersion = check.ProtocolVersion
 	// The probe already checked runtime identity. Retain the post-execution
 	// filesystem validation without launching that same probe again.
 	if err := store.verifyStored(ctx, artifact); err != nil {
@@ -196,7 +202,7 @@ func checkRuntimeExecutable(ctx context.Context, path string) (RuntimeCheckV1, e
 	if err := decoder.Decode(&check); err != nil {
 		return check, ErrRuntimeArtifact
 	}
-	if decoder.Decode(new(any)) != io.EOF || check.SchemaVersion != 1 || check.Version == "" || check.ProtocolVersion != RuntimeUpgradeProtocolVersion || check.GOOS != runtime.GOOS || check.GOARCH != runtime.GOARCH {
+	if decoder.Decode(new(any)) != io.EOF || check.SchemaVersion != 1 || check.Version == "" || (check.ProtocolVersion < 1 || check.ProtocolVersion > RuntimeUpgradeProtocolVersion) || check.GOOS != runtime.GOOS || check.GOARCH != runtime.GOARCH {
 		return check, ErrRuntimeArtifact
 	}
 	return check, nil

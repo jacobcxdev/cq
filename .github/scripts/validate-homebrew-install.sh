@@ -35,6 +35,7 @@ config_root="$HOME/.config/cq"
 codex_root="$HOME/.codex"
 logs_root="$HOME/Library/Logs/cq"
 temporary_root=$(mktemp -d "${TMPDIR:-/tmp}/cq-homebrew-install.XXXXXX")
+temporary_root=$(cd "$temporary_root" && pwd -P)
 probe_executable="$temporary_root/native-transport-probe"
 nativepackage_executable="$temporary_root/nativepackage"
 go_executable="$(go env GOROOT)/bin/go"
@@ -242,12 +243,14 @@ validation_cask="$tap_root/Casks/cq.rb"
 rewrite_cask "$previous_cask" "$previous_archive" "$validation_cask"
 
 validate_runtime_status() {
-  ruby - "$1" "$installed_cq" "$config_root/state/runtime-artifacts" "$2" "$3" "$("$go_executable" env GOHOSTARCH)" "$go_executable" <<'RUBY'
+  ruby - "$1" "$installed_cq" "$config_root/state/runtime-artifacts" "$2" "$3" "$("$go_executable" env GOHOSTARCH)" "$go_executable" "$4" <<'RUBY'
 require "digest"
 require "json"
 require "open3"
 
-status_json, package, runtime_root, expected_version, mode, architecture, go_executable = ARGV
+status_json, package, runtime_root, expected_version, mode, architecture, go_executable, expected_protocol = ARGV
+abort "unsupported expected runtime protocol" unless %w[1 2].include?(expected_protocol)
+expected_protocol = Integer(expected_protocol)
 status = JSON.parse(status_json)
 proxy, refresh = status.fetch("proxy"), status.fetch("refresh")
 abort "service ownership executable differs" unless status["owner"] == "homebrew" && status["executable"] == package
@@ -284,7 +287,7 @@ else
     verify_build.call(path)
     check, result = Open3.capture2(path, "proxy", "runtime-check", "--json")
     check = JSON.parse(check)
-    abort "retained runtime protocol differs" unless result.success? && check["schema_version"] == 1 && check["protocol_version"] == 1 && check["goos"] == "darwin" && check["goarch"] == architecture && !check.fetch("version", "").empty?
+    abort "retained runtime protocol differs" unless result.success? && check["schema_version"] == 1 && check["protocol_version"] == expected_protocol && check["goos"] == "darwin" && check["goarch"] == architecture && !check.fetch("version", "").empty?
     abort "selected runtime check version differs" if path == live && check["version"] != expected_version
   end
 end
@@ -294,6 +297,7 @@ RUBY
 assert_installed() {
   local expected_version=$1
   local runtime_mode=${2:-legacy-or-retained}
+  local expected_protocol=${3:-$current_protocol}
   [[ "$($installed_cq --version)" == "$expected_version" ]]
   if xattr -p com.apple.quarantine "$installed_cq" >/dev/null 2>&1; then
     echo "Homebrew Cask left cq quarantined" >&2
@@ -302,7 +306,7 @@ assert_installed() {
   local status_json=''
   for _ in $(seq 1 60); do
     status_json=$($installed_cq service status --json 2>/dev/null) || true
-    if validate_runtime_status "$status_json" "$expected_version" "$runtime_mode" >"$temporary_root/runtime-status.log" 2>&1; then
+    if validate_runtime_status "$status_json" "$expected_version" "$runtime_mode" "$expected_protocol" >"$temporary_root/runtime-status.log" 2>&1; then
       return 0
     fi
     sleep 1
@@ -334,19 +338,131 @@ if ! HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask "$validation_tap/cq"; then
     --predicate 'process == "launchd" AND eventMessage CONTAINS "dev.jacobcx.cq"' >&2 || true
   exit 1
 fi
-assert_installed "$previous_version"
+assert_installed "$previous_version" legacy-or-retained "$previous_protocol"
 }
+
+read_runtime_protocol() {
+  "$1" proxy runtime-check --json | jq -er 'select(.schema_version == 1 and .goos == "darwin" and (.version | length > 0)) | .protocol_version | select(. == 1 or . == 2)'
+}
+
+runtime_selection() {
+  "$installed_cq" service status --json | jq -ce '[.proxy.pid, .proxy.live_executable, .proxy.configured_executable, .refresh.configured_executable]'
+}
+
+runtime_receipt_digest() {
+  if [[ -f "$config_root/state/runtime-upgrade.json" ]]; then
+    shasum -a 256 "$config_root/state/runtime-upgrade.json"
+  else
+    printf '%s\n' absent
+  fi
+}
+
+assert_protocol_rejection() {
+  local expected_version=$1 expected_protocol=$2 receipt_policy=$3
+  shift 3
+  local selected_before receipt_before
+  selected_before=$(runtime_selection)
+  receipt_before=$(runtime_receipt_digest)
+  if "$@" >"$temporary_root/protocol-rejection.log" 2>&1; then
+    echo "cross-protocol runtime upgrade unexpectedly succeeded" >&2
+    return 1
+  fi
+  if ! grep -Fq 'predecessor needs maintenance adoption' "$temporary_root/protocol-rejection.log"; then
+    cat "$temporary_root/protocol-rejection.log" >&2
+    echo "upgrade failed without the required protocol-boundary rejection" >&2
+    return 1
+  fi
+  assert_installed "$expected_version" legacy-or-retained "$expected_protocol" || return 1
+  if [[ "$(runtime_selection)" != "$selected_before" ]]; then
+    echo "rejected upgrade changed the selected runtime" >&2
+    return 1
+  fi
+  if [[ "$(runtime_receipt_digest)" != "$receipt_before" ]]; then
+    # Homebrew replays the predecessor's install hook when restoring its backup.
+    # A fresh predecessor may commit its own same-binary handoff; the rejected
+    # candidate must never appear in that receipt. CLI rejection has no replay.
+    if [[ "$receipt_policy" != package-rollback ]] || ! jq -e --arg version "$expected_version" --argjson protocol "$expected_protocol" \
+      '.phase == "committed" and .previous == .candidate and .candidate.version == $version and .candidate.protocol_version == $protocol' \
+      "$config_root/state/runtime-upgrade.json" >/dev/null; then
+      echo "rejected upgrade changed the transaction outside predecessor package rollback" >&2
+      return 1
+    fi
+  fi
+  "$probe_executable" probe --address http://127.0.0.1:19280 --token cq-native-local
+}
+
+upgrade_cq_package() {
+  if [[ "$previous_protocol" != "$current_protocol" ]]; then
+    [[ "$previous_protocol:$current_protocol" == 1:2 ]] || { echo "unsupported runtime protocol transition" >&2; return 1; }
+    local config_before auth_before
+    config_before=$(shasum -a 256 "$config_root/proxy.json")
+    auth_before=$(shasum -a 256 "$codex_root/auth.json")
+    # Exercise the real predecessor Cask transaction and Homebrew's rollback.
+    # A failed candidate must leave the old runtime selected and serving.
+    assert_protocol_rejection "$previous_version" "$previous_protocol" package-rollback \
+      env HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask "$validation_tap/cq"
+    [[ "$(shasum -a 256 "$config_root/proxy.json")" == "$config_before" && "$(shasum -a 256 "$codex_root/auth.json")" == "$auth_before" ]]
+    # The probe has completed and this disposable fixture has no other clients.
+    # Follow the documented maintenance adoption using the owning stable binary.
+    "$installed_cq" service uninstall --owner=homebrew --service-executable="$installed_cq"
+    for label in "$proxy_label" "$refresh_label"; do
+      if launchctl print "gui/$UID/$label" >/dev/null 2>&1; then
+        echo "$label remains before maintenance adoption" >&2
+        return 1
+      fi
+    done
+    if lsof -nP -iTCP:19280 -sTCP:LISTEN >/dev/null 2>&1; then
+      echo "CQ listener remains before maintenance adoption" >&2
+      return 1
+    fi
+    [[ "$(shasum -a 256 "$config_root/proxy.json")" == "$config_before" && "$(shasum -a 256 "$codex_root/auth.json")" == "$auth_before" ]]
+  fi
+  HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask "$validation_tap/cq"
+}
+
+# Probe the actual published binaries, retaining the predecessor outside its
+# package/runtime directories for the rejected downgrade check after adoption.
+for entry in previous current; do
+  if [[ "$entry" == previous ]]; then archive=$previous_archive; else archive=$current_archive; fi
+  mkdir -p "$temporary_root/$entry"
+  /usr/bin/tar -xzf "$archive" -C "$temporary_root/$entry" cq
+  executable="$temporary_root/$entry/cq"
+  if /usr/bin/xattr -p com.apple.quarantine "$executable" >/dev/null 2>&1; then
+    /usr/bin/xattr -d com.apple.quarantine "$executable"
+  fi
+done
+previous_protocol=$(read_runtime_protocol "$temporary_root/previous/cq")
+current_protocol=$(read_runtime_protocol "$temporary_root/current/cq")
+[[ "$current_protocol" == 2 ]] || { echo "candidate lacks incremental-journal recovery protocol 2" >&2; exit 1; }
 with_previous_companion install_previous_cq
 
 rewrite_cask "$current_cask" "$current_archive" "$validation_cask"
-HOMEBREW_NO_AUTO_UPDATE=1 brew upgrade --cask "$validation_tap/cq"
+upgrade_cq_package
 assert_installed "$current_version" retained
 "$probe_executable" probe --address http://127.0.0.1:19280 --token cq-native-local
+
+# A fresh maintenance install has no receipt, so this exercises a real 2/2
+# handoff using the release executable, rather than only package reconciliation.
+"$installed_cq" service upgrade --owner=homebrew --service-executable="$installed_cq" \
+  --candidate-executable="$installed_cq" --json >"$temporary_root/compatible-upgrade.json"
+jq -e '.phase == "committed" and .previous.protocol_version == 2 and .candidate.protocol_version == 2' "$temporary_root/compatible-upgrade.json" >/dev/null
+assert_installed "$current_version" retained
+"$probe_executable" probe --address http://127.0.0.1:19280 --token cq-native-local
+if [[ "$previous_protocol" != "$current_protocol" ]]; then
+  assert_protocol_rejection "$current_version" "$current_protocol" unchanged \
+    "$installed_cq" service upgrade --owner=homebrew --service-executable="$installed_cq" \
+    --candidate-executable="$temporary_root/previous/cq" --json
+fi
 
 proxy_pid=$($installed_cq service status --json | jq -er '.proxy.pid')
 HOMEBREW_NO_AUTO_UPDATE=1 brew reinstall --cask "$validation_tap/cq"
 assert_installed "$current_version" retained
 [[ "$($installed_cq service status --json | jq -er '.proxy.pid')" == "$proxy_pid" ]]
+"$probe_executable" probe --address http://127.0.0.1:19280 --token cq-native-local
+
+# Restart must recover the committed protocol-2 selection and routed traffic.
+"$installed_cq" service restart
+assert_installed "$current_version" retained
 "$probe_executable" probe --address http://127.0.0.1:19280 --token cq-native-local
 
 preserved_config=$(shasum -a 256 "$config_root/proxy.json")

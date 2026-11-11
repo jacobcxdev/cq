@@ -74,6 +74,7 @@ type CodexLeaseStore struct {
 	journalID          fsutil.SecureFileIdentity
 	journalBytes       []byte
 	v2                 *codexLeaseJournalEnvelopeV2
+	delta              *codexLeaseDeltaStorage
 	policy             CodexLeasePolicy
 	modes              CodexModeAuthoritySnapshot
 	legacyArchive      string

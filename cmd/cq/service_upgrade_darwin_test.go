@@ -129,7 +129,7 @@ func TestDarwinRuntimePruningWaitsForOwnershipAndPreservesJobReferences(t *testi
 		if err := fsutil.EnsureSecureDirectory(artifacts.FS, filepath.Dir(path)); err != nil {
 			t.Fatal(err)
 		}
-		copies = append(copies, installer.RuntimeArtifact{Path: path, SHA256: digest, Version: "0.34.0", ProtocolVersion: 1})
+		copies = append(copies, installer.RuntimeArtifact{Path: path, SHA256: digest, Version: "0.34.0", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion})
 	}
 	platform := &darwinServicePlatform{home: root, roots: roots}
 	if err := os.MkdirAll(filepath.Dir(platform.plistPath(proxyAgentLabel)), 0o700); err != nil {
@@ -253,8 +253,8 @@ func TestDarwinRuntimeUpgradeSettlesAmbiguousSubmission(t *testing.T) {
 	for _, outcome := range []string{"transport", "body", "invalid-receipt"} {
 		t.Run(outcome, func(t *testing.T) {
 			store := proxy.RuntimeUpgradeStore{FS: fsutil.NewMemFS(), Roots: userdirs.Roots{State: "/fixture/state"}}
-			previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
-			candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+			previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
+			candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "lost-ack", Generation: 1, Phase: "prepared", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -301,8 +301,8 @@ func TestDarwinRuntimeUpgradeSettlesAmbiguousSubmission(t *testing.T) {
 
 func TestDarwinRuntimeUpgradeWaitsForKnownTransactionPastDiscoveryDeadline(t *testing.T) {
 	store := proxy.RuntimeUpgradeStore{FS: fsutil.NewMemFS(), Roots: userdirs.Roots{State: "/fixture/state"}}
-	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
-	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
+	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "long-drain", Generation: 1, Phase: "prepared", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
 	if err := store.Save(receipt); err != nil {
 		t.Fatal(err)
@@ -345,8 +345,8 @@ func TestDarwinRuntimeUpgradeWaitsForKnownTransactionPastDiscoveryDeadline(t *te
 
 func TestDarwinRuntimeUpgradePreparedOnlyKeepsDiscoveryBound(t *testing.T) {
 	store := proxy.RuntimeUpgradeStore{FS: fsutil.NewMemFS(), Roots: userdirs.Roots{State: "/fixture/state"}}
-	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
-	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
+	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "prepared-only", Generation: 1, Phase: "prepared", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
 	if err := store.Save(receipt); err != nil {
 		t.Fatal(err)
@@ -368,8 +368,8 @@ func TestDarwinRuntimeUpgradePreparedOnlyKeepsDiscoveryBound(t *testing.T) {
 
 func TestDarwinRuntimeUpgradeReportsStoppedControllerWithReadableWaitingReceipt(t *testing.T) {
 	store := proxy.RuntimeUpgradeStore{FS: fsutil.NewMemFS(), Roots: userdirs.Roots{State: "/fixture/state"}}
-	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
-	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
+	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "stopped-controller", Generation: 1, Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
 	for _, phase := range []string{"prepared", "waiting"} {
 		receipt.Phase = phase
@@ -457,8 +457,8 @@ func TestDarwinRuntimeUpgradeSurvivesReceiptReplacementAfterWaiting(t *testing.T
 	for _, replacement := range []string{"deferred", "conflicting transaction", "conflicting candidate"} {
 		t.Run(replacement, func(t *testing.T) {
 			store := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: userdirs.Roots{State: filepath.Join(t.TempDir(), "state")}}
-			previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
-			candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+			previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
+			candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 			receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "observed-waiting", Generation: 1, Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
 			for _, phase := range []string{"prepared", "waiting"} {
 				receipt.Phase = phase
@@ -522,8 +522,8 @@ func (fsys *upgradeReceiptReadFailureFS) OpenSecureDirectory(path string) (fsuti
 
 func TestDarwinRuntimeUpgradeReportsReceiptReadFailureAfterWaiting(t *testing.T) {
 	store := proxy.RuntimeUpgradeStore{FS: fsutil.NewMemFS(), Roots: userdirs.Roots{State: "/fixture/state"}}
-	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
-	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
+	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "unreadable-drain", Generation: 1, Phase: "prepared", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
 	for _, phase := range []string{"prepared", "waiting"} {
 		receipt.Phase = phase
@@ -728,8 +728,8 @@ func TestDarwinRuntimeUpgradeRejectionPreservesSafeFallback(t *testing.T) {
 }
 
 func TestDarwinRuntimeUpgradeStatusProbe(t *testing.T) {
-	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: 1}
-	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: 1}
+	previous := installer.RuntimeArtifact{Path: "/fixture/previous/cq", SHA256: strings.Repeat("a", 64), Version: "0.34.0", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
+	candidate := installer.RuntimeArtifact{Path: "/fixture/candidate/cq", SHA256: strings.Repeat("b", 64), Version: "0.34.1", ProtocolVersion: installer.RuntimeUpgradeProtocolVersion}
 	receipt := proxy.RuntimeUpgradeReceiptV1{SchemaVersion: 1, TransactionID: "status-probe", Generation: 1, Phase: "waiting", Previous: previous, Candidate: candidate, ListenerIdentity: "tcp|127.0.0.1:29280", SupervisorPID: 42}
 	body, err := json.Marshal(receipt)
 	if err != nil {
@@ -782,5 +782,36 @@ func TestDarwinRuntimeUpgradeStatusProbe(t *testing.T) {
 				t.Fatal("status probe changed submission")
 			}
 		})
+	}
+}
+
+func TestDarwinRuntimeSnapshotRejectsLegacyProtocolBeforeRestore(t *testing.T) {
+	lifecycle, platform, store := newServiceHarness(t)
+	legacy := installer.RuntimeArtifact{Path: "/fixture/legacy/cq", Version: "legacy", SHA256: strings.Repeat("a", 64), ProtocolVersion: 1}
+	definition, err := renderDarwinLaunchAgent(darwinLaunchAgentDefinition{Label: proxyAgentLabel, ProgramArguments: []string{legacy.Path, "proxy", "start"}, StandardErrorPath: "/fixture/proxy.log"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := persistedServiceSnapshot{SchemaVersion: serviceSnapshotSchemaVersion, Owner: installstate.OwnerHomebrew, Executable: lifecycle.Executable, Platform: servicePlatformSnapshot{Manager: "launchd", Components: []serviceComponentSnapshot{{ID: proxyAgentLabel, Exists: true, Definition: definition}, {ID: agentLabel}}}}
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(store.Roots.State, "legacy-snapshot.json")
+	if err := os.MkdirAll(store.Roots.State, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle.RuntimeSnapshotCheck = func(ctx context.Context, snapshot servicePlatformSnapshot) error {
+		return checkDarwinRuntimeSnapshot(ctx, snapshot, func(context.Context, string) (installer.RuntimeArtifact, error) { return legacy, nil })
+	}
+	err = lifecycle.Restore(context.Background(), installstate.OwnerHomebrew, path)
+	if !errors.Is(err, ErrServiceUpgradeMaintenance) {
+		t.Fatalf("legacy snapshot error=%v, want maintenance before platform restore", err)
+	}
+	if len(platform.calls) != 0 {
+		t.Fatalf("legacy snapshot changed platform: %v", platform.calls)
 	}
 }

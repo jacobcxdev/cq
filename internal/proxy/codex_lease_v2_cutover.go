@@ -249,7 +249,8 @@ func validateCodexLeaseRepresentedModes(represented []uint64, modes CodexModeAut
 
 func representedCodexLeaseAuthoritativeEpochs(records []CodexJournalRecordV2) []uint64 {
 	set := make(map[uint64]struct{})
-	for _, record := range records {
+	for index := range records {
+		record := &records[index]
 		if record.Authoritative {
 			set[record.ModeEpoch] = struct{}{}
 		}

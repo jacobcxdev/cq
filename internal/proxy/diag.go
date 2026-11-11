@@ -10,11 +10,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 type RouteEvent struct {
@@ -572,11 +575,12 @@ func encodeBody(raw []byte) json.RawMessage {
 // jsonlWriter is a low-level JSONL file writer with a mutex for concurrent safety.
 type jsonlWriter struct {
 	mu       sync.Mutex
-	file     *os.File
+	file     fsutil.DurableFile
 	path     string
 	size     int64
 	maxBytes int64
 	retained int
+	writeErr error
 }
 
 const (
@@ -627,11 +631,17 @@ func (w *jsonlWriter) encodeInternal(v any, syncWrite bool) error {
 	if err != nil {
 		return err
 	}
+	if w.maxBytes > 0 && int64(len(encoded))+1 > w.maxBytes {
+		encoded, err = boundedDiagnosticsRecord(v, encoded, w.maxBytes-1)
+		if err != nil {
+			return err
+		}
+	}
 	encoded = append(encoded, '\n')
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.file == nil {
-		return nil
+		return w.writeErr
 	}
 	if w.maxBytes > 0 && w.size > 0 && w.size+int64(len(encoded)) > w.maxBytes {
 		if err := w.rotateLocked(); err != nil {
@@ -652,16 +662,79 @@ func (w *jsonlWriter) encodeInternal(v any, syncWrite bool) error {
 	return nil
 }
 
+// Keep payload identity and original byte count when the body exceeds the
+// retained-file budget. A prefix is an encoded fragment, never a complete JSON
+// body; its encoding and truncation flags make that distinction explicit.
+func boundedDiagnosticsRecord(value any, encoded []byte, limit int64) ([]byte, error) {
+	if event, ok := value.(PayloadEvent); ok {
+		event.Truncated = true
+		event.Complete = false
+		event.BodyEncoding = "json-prefix"
+		prefix := event.Body
+		return fitDiagnosticsPrefix(prefix, limit, func(prefix []byte) ([]byte, error) {
+			event.Body, _ = json.Marshal(string(prefix))
+			return json.Marshal(event)
+		})
+	}
+	marker := map[string]any{"event_type": "diagnostics_record_truncated", "truncated": true, "record_bytes": len(encoded)}
+	var original map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &original); err == nil {
+		for _, name := range []string{"time", "trace_id", "connection_id", "session_key", "thread_key", "sequence", "transport"} {
+			if value, ok := original[name]; ok {
+				marker[name] = value
+			}
+		}
+		if value, ok := original["event_type"]; ok {
+			marker["original_event_type"] = value
+		}
+	}
+	return fitDiagnosticsPrefix(encoded, limit, func(prefix []byte) ([]byte, error) {
+		marker["record_prefix"] = string(prefix)
+		return json.Marshal(marker)
+	})
+}
+
+func fitDiagnosticsPrefix(prefix []byte, limit int64, encode func([]byte) ([]byte, error)) ([]byte, error) {
+	// Diagnostic capture already uses a 64 KiB prefix for Codex. Apply the same
+	// maximum to exceptional oversized records from other paths.
+	low, high := 0, min(len(prefix), 64<<10)
+	best, err := encode(nil)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(best)) > limit {
+		return nil, errors.New("diagnostics record metadata exceeds file limit")
+	}
+	for low <= high {
+		middle := low + (high-low)/2
+		candidate, err := encode(prefix[:middle])
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(candidate)) <= limit {
+			best = candidate
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	return best, nil
+}
+
 func (w *jsonlWriter) rotateLocked() error {
 	if w == nil || w.file == nil || w.path == "" {
 		return nil
 	}
-	if err := w.file.Close(); err != nil {
+	file := w.file
+	w.file = nil
+	if err := errors.Join(file.Sync(), file.Close()); err != nil {
+		w.writeErr = err
 		return err
 	}
-	w.file = nil
 	if w.retained > 0 {
-		_ = os.Remove(fmt.Sprintf("%s.%d", w.path, w.retained))
+		if err := os.Remove(fmt.Sprintf("%s.%d", w.path, w.retained)); err != nil && !os.IsNotExist(err) {
+			return errors.Join(err, w.reopenLocked())
+		}
 		for index := w.retained - 1; index >= 1; index-- {
 			from := fmt.Sprintf("%s.%d", w.path, index)
 			to := fmt.Sprintf("%s.%d", w.path, index+1)
@@ -678,7 +751,8 @@ func (w *jsonlWriter) rotateLocked() error {
 	return w.reopenLocked()
 }
 
-func (w *jsonlWriter) reopenLocked() error {
+func (w *jsonlWriter) reopenLocked() (result error) {
+	defer func() { w.writeErr = result }()
 	file, err := os.OpenFile(w.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
@@ -700,11 +774,20 @@ func (w *jsonlWriter) reopenLocked() error {
 func (w *jsonlWriter) close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	err := w.writeErr
+	w.writeErr = nil
 	if w.file == nil {
-		return nil
+		return err
 	}
-	err := w.file.Close()
+	file := w.file
 	w.file = nil
+	// Close alone does not flush the kernel's dirty pages. Keep shutdown and
+	// concurrent writes serialised until the final sync and close both finish.
+	err = errors.Join(err, file.Sync(), file.Close())
+	if w.path != "" {
+		// Persist file creation and retained-file renames at clean shutdown too.
+		err = errors.Join(err, (fsutil.OSFileSystem{}).SyncDir(filepath.Dir(w.path)))
+	}
 	return err
 }
 
@@ -1021,7 +1104,7 @@ func safeCodexReason(value string) bool {
 		return true
 	}
 	switch value {
-	case "", "request_decode", "metadata_parse", "turn_identity_missing", "response_event_invalid", "response_event_malformed", "response_event_unknown", "stale_turn", "concurrent_turn", "continuity", "lease_error", "lease_transition", "stale_generation", "upstream_rejected", "unadmitted_end", "upstream_closed", "upstream_outcome_indeterminate", "message_too_big", "invalid_frame", "downstream_read_failed", "response_unavailable", "cancelled", "deadline", "timeout", "dns", "connect", "connection_reset", "broken_pipe", "server_closed_idle", "unexpected_eof", "eof", "tls", "protocol", "unknown":
+	case "", "request_decode", "metadata_parse", "turn_identity_missing", "response_event_invalid", "response_event_malformed", "response_event_unknown", "stale_turn", "concurrent_turn", "continuity", "lease_error", "lease_transition", "stale_generation", "upstream_rejected", "unadmitted_end", "upstream_closed", "upstream_outcome_indeterminate", "message_too_big", "invalid_frame", "downstream_read_failed", "response_unavailable", "cancelled", "deadline", "timeout", "dns", "connect", "connection_refused", "connection_reset", "broken_pipe", "server_closed_idle", "unexpected_eof", "eof", "tls", "protocol", "unknown":
 		return true
 	}
 	if suffix, ok := strings.CutPrefix(value, "candidate_attempt_"); ok {
@@ -1196,7 +1279,7 @@ func (w *PayloadWriter) Write(event PayloadEvent) error {
 	return w.w.encode(event)
 }
 
-// Close closes the underlying file. Nil-safe and idempotent.
+// Close syncs and closes the underlying file. Nil-safe and idempotent.
 func (w *PayloadWriter) Close() error {
 	if w == nil || w.w == nil {
 		return nil

@@ -794,3 +794,24 @@ func TestRuntimeUpgradeRetainsOwnerUntilNormalAdmissionCompletes(t *testing.T) {
 		t.Fatalf("normal admission drain = %+v", receipt)
 	}
 }
+
+func TestRuntimeUpgradeProtocolBoundaryRejectsBeforePreparation(t *testing.T) {
+	controller, supervisor, worker, request := upgradeControllerFixture(t)
+	request.Candidate.ProtocolVersion = 2
+	controller.options.Previous.ProtocolVersion = 1
+	_, err := controller.Begin(context.Background(), request)
+	if !errors.Is(err, ErrRuntimeUpgradeUnsupported) {
+		t.Fatalf("mixed protocol error=%v, want unsupported", err)
+	}
+	if _, err := controller.options.Store.Load(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("protocol rejection prepared receipt: %v", err)
+	}
+	if worker.stopped != 0 || !supervisor.admissionReady || supervisor.upgradeBusy {
+		t.Fatal("protocol rejection altered live runtime")
+	}
+	admission, err := worker.gate.BeginRequest()
+	if err != nil {
+		t.Fatalf("protocol rejection paused admissions: %v", err)
+	}
+	admission()
+}

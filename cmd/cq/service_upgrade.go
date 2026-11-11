@@ -253,6 +253,12 @@ func (lifecycle *serviceLifecycle) upgradeWithWaitTimeout(ctx context.Context, o
 	if err := lifecycle.RuntimeArtifacts.Verify(ctx, previous); err != nil {
 		return proxy.RuntimeUpgradeReceiptV1{}, err
 	}
+	// This gate precedes the runtime RPC, receipt preparation and drainage. A
+	// protocol-1 predecessor/guard cannot recover the incremental journal that
+	// protocol-2 workers may write while booting, before any traffic is admitted.
+	if previous.ProtocolVersion != installer.RuntimeUpgradeProtocolVersion || candidate.ProtocolVersion != installer.RuntimeUpgradeProtocolVersion {
+		return proxy.RuntimeUpgradeReceiptV1{}, fmt.Errorf("%w: runtime protocol %d -> %d; after stopping clients, reinstall the Homebrew-owned services", ErrServiceUpgradeMaintenance, previous.ProtocolVersion, candidate.ProtocolVersion)
+	}
 	snapshot, err := lifecycle.Platform.Snapshot(ctx)
 	if err != nil {
 		return proxy.RuntimeUpgradeReceiptV1{}, err

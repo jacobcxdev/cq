@@ -49,17 +49,16 @@ verify_head() {
 }
 verify_submission() {
   local url=$1 pr head current
-  pr=$(gh pr view "$url" --repo "$repository" --json number,state,title,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,author,url,files,assignees)
+  pr=$(gh pr view "$url" --repo "$repository" --json number,state,title,baseRefName,headRefName,headRefOid,headRepository,headRepositoryOwner,author,url,files)
   jq -e --arg version "$version" --slurpfile additions "$temporary/additions.json" '
     .state == "OPEN" and .baseRefName == "master"
     and .author.login == "jacobcxdev" and .headRepositoryOwner.login == "jacobcxdev"
     and .headRepository.name == "winget-pkgs" and .headRefName == ("cq-"+$version)
     and .url == ("https://github.com/microsoft/winget-pkgs/pull/"+(.number|tostring))
     and (.title == ("New version: jacobcxdev.cq version "+$version) or .title == ("Update: jacobcxdev.cq to "+$version))
-    and (.assignees|map(.login)|index("jacobcxdev") != null)
     and (.headRefOid|test("^[0-9a-f]{40}$"))
     and ((.files|map(.path)|sort) == ($additions[0]|map(.path)|sort))
-  ' <<<"$pr" >/dev/null || { echo 'submission identity, assignment or files could not be verified' >&2; exit 1; }
+  ' <<<"$pr" >/dev/null || { echo 'submission identity or files could not be verified' >&2; exit 1; }
   head=$(jq -r .headRefOid <<<"$pr")
   current=$(gh api "repos/$fork/git/ref/heads/$branch" --jq .object.sha)
   [[ "$current" == "$head" ]] || { echo 'submission branch changed' >&2; exit 1; }
@@ -75,15 +74,18 @@ if [[ "$(jq length <<<"$existing")" == 1 ]]; then
   echo "$url"
   exit 0
 fi
-# No remote write occurs until the actual publication token can both assign the
-# requested user and add assignees. GitHub otherwise silently ignores assignment.
+# Public-fork submissions need a readable upstream and an owned writable fork,
+# not upstream push access or an upstream assignee.
 bash "$scripts/check-winget-permissions.sh"
 if ! gh api "repos/$fork" >"$temporary/fork.json" 2>/dev/null; then
   jq -e '.status == "404"' "$temporary/fork.json" >/dev/null || { echo 'fork state could not be verified' >&2; exit 1; }
   gh repo fork "$repository" --clone=false >/dev/null
   gh api "repos/$fork" >"$temporary/fork.json"
 fi
-jq -e '.fork == true and .owner.login == "jacobcxdev" and .parent.full_name == "microsoft/winget-pkgs"' "$temporary/fork.json" >/dev/null
+jq -e --arg fork "$fork" '.full_name == $fork and .fork == true and .owner.login == "jacobcxdev"
+  and .parent.full_name == "microsoft/winget-pkgs" and .permissions.push == true' "$temporary/fork.json" >/dev/null || {
+  echo 'owned writable fork could not be verified' >&2; exit 1;
+}
 base=$(gh api "repos/$fork/git/ref/heads/master" --jq .object.sha)
 [[ "$base" =~ ^[0-9a-f]{40}$ ]]
 if gh api "repos/$fork/git/ref/heads/$branch" >"$temporary/ref.json" 2>/dev/null; then
@@ -98,7 +100,7 @@ else
 fi
 if [[ "$head" == "$base" ]]; then
   jq -n --arg repository "$fork" --arg branch "$branch" --arg base "$base" --slurpfile additions "$temporary/additions.json" \
-    '{branch:{repositoryNameWithOwner:$repository,refName:$branch},expectedHeadOid:$base,
+    '{branch:{repositoryNameWithOwner:$repository,branchName:$branch},expectedHeadOid:$base,
       message:{headline:"chore: updated package manifests",body:"- Recorded the published version and installer checksums"},
       fileChanges:{additions:$additions[0]}}' >"$temporary/commit-input.json"
   head=$(bash "$scripts/verified-commit.sh" "$fork" "$temporary/commit-input.json")
@@ -111,6 +113,6 @@ jq -e --slurpfile additions "$temporary/additions.json" '
 ' "$temporary/comparison.json" >/dev/null || { echo 'upstream comparison contains unexpected changes' >&2; exit 1; }
 printf 'Published CQ %s MSI installers for x64 and ARM64.\n' "$version" >"$temporary/body.md"
 url=$(gh pr create --repo "$repository" --base master --head "jacobcxdev:$branch" \
-  --title "New version: jacobcxdev.cq version $version" --body-file "$temporary/body.md" --assignee jacobcxdev)
+  --title "New version: jacobcxdev.cq version $version" --body-file "$temporary/body.md")
 verify_submission "$url"
 echo "$url"

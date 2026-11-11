@@ -12,6 +12,8 @@ case "$1 $2" in
   'api graphql')
     [[ "$3" == --input && $# == 4 ]]
     cp "$4" "$CQ_COMMIT_TEST_ROOT/request.json"
+    jq -e '.variables.input.branch | keys == ["branchName","repositoryNameWithOwner"]
+      and .branchName == "cq-0.48.0"' "$4" >/dev/null
     echo mutation >>"$CQ_COMMIT_TEST_ROOT/writes"
     [[ ! -e "$CQ_COMMIT_TEST_ROOT/race" ]] || exit 1
     cat "$CQ_COMMIT_TEST_ROOT/response.json" ;;
@@ -22,7 +24,7 @@ esac
 SH
 chmod +x "$root/bin/gh"
 export CQ_COMMIT_TEST_ROOT="$root" PATH="$root/bin:$PATH" GH_TOKEN=fixture
-jq -n '{branch:{repositoryNameWithOwner:"jacobcxdev/winget-pkgs",refName:"cq-0.48.0"},
+jq -n '{branch:{repositoryNameWithOwner:"jacobcxdev/winget-pkgs",branchName:"cq-0.48.0"},
   expectedHeadOid:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   message:{headline:"chore: updated package manifests",body:"- Recorded the published installer checksums"},
   fileChanges:{additions:[{path:"manifests/j/jacobcxdev/cq/0.48.0/package.yaml",contents:"Zml4dHVyZQo="}]}}' >"$root/input.json"
@@ -48,7 +50,8 @@ if bash "$script" jacobcxdev/winget-pkgs "$root/input.json" >"$root/output" 2>"$
 [[ ! -s "$root/output" ]]
 rm "$root/race"
 cp "$root/input.json" "$root/valid-input.json"
-for mutation in '.branch.repositoryNameWithOwner="other/repository"' '.expectedHeadOid="invalid"' \
+for mutation in '.branch.repositoryNameWithOwner="other/repository"' '.branch.branchName=""' \
+  '.branch |= (.refName=.branchName | del(.branchName))' '.branch.refName="extra"' '.expectedHeadOid="invalid"' \
   '.fileChanges.additions[0].path="../outside"' '.fileChanges.additions += .fileChanges.additions' \
   '.fileChanges.deletions=[{path:"other"}]' '.message.body=""'; do
   jq "$mutation" "$root/valid-input.json" >"$root/input.json"

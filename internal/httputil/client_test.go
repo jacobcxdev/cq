@@ -218,6 +218,32 @@ func TestCheckRedirectLimit(t *testing.T) {
 	}
 }
 
+func TestClientDidNotRedirectExplicitCookies(t *testing.T) {
+	for _, destination := range []string{"https://chatgpt.com/backend-api/next", "https://chatgpt.com/unrelated", "https://other.chatgpt.com/next", "https://other.invalid/next", "https://chatgpt.com:8443/next", "http://chatgpt.com/next"} {
+		t.Run(destination, func(t *testing.T) {
+			calls := 0
+			transport := clientEgressRoundTripper(func(req *http.Request) (*http.Response, error) {
+				calls++
+				if calls != 1 {
+					t.Fatal("cookie-bearing request followed a redirect")
+				}
+				return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {destination}}, Body: io.NopCloser(strings.NewReader("redirect"))}, nil
+			})
+			client := NewClientWithTransport(time.Second, "test", transport)
+			req, _ := http.NewRequest(http.MethodGet, "https://chatgpt.com/backend-api/wham/usage", nil)
+			req.AddCookie(&http.Cookie{Name: "__oailb", Value: "route", Path: "/backend-api", Secure: true})
+			resp, err := client.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if calls != 1 || resp.StatusCode != http.StatusFound || req.Header.Get("Cookie") != "__oailb=route" {
+				t.Fatal("redirect changed the cookie-bearing request")
+			}
+		})
+	}
+}
+
 type clientEgressRoundTripper func(*http.Request) (*http.Response, error)
 
 func (f clientEgressRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

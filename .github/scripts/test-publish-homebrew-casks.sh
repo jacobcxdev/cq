@@ -20,6 +20,8 @@ case "$1 $2" in
       jq -n --rawfile body "$root/casks/$token.rb" '{content:($body|@base64)}'
     else echo '{"content":"b2xkCg=="}'; fi ;;
   'api graphql')
+    jq -e '.variables.input.branch | keys == ["branchName","repositoryNameWithOwner"]
+      and .branchName == "main"' "$4" >/dev/null
     cp "$4" "$root/request.json"; echo commit >>"$root/writes"
     [[ ! -e "$root/race" ]] || exit 1
     echo '{"data":{"createCommitOnBranch":{"commit":{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"ref":{"target":{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}}}' ;;
@@ -34,7 +36,7 @@ chmod +x "$root/bin/gh"
 export CQ_CASK_TEST_ROOT="$root" PATH="$root/bin:$PATH" GH_TOKEN=fixture RELEASE_TAG=v0.48.0
 bash "$script" "$root/casks" >"$root/output"
 [[ "$(cat "$root/writes")" == commit ]]
-jq -e '.variables.input.branch.refName == "main" and .variables.input.expectedHeadOid == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+jq -e '.variables.input.branch.branchName == "main" and .variables.input.expectedHeadOid == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   and (.variables.input.fileChanges.additions|map(.path)|sort) == ["Casks/cq-network.rb","Casks/cq.rb"]' "$root/request.json" >/dev/null
 rm "$root/writes"
 touch "$root/unchanged"
