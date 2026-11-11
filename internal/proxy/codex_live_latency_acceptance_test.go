@@ -146,7 +146,7 @@ func runCodexLiveDirectLatencyTurn(ctx context.Context, client codexInstalledExe
 		outputPath: outputPath,
 	}
 	command = codexLiveLatencyConfinedCommand(command, egress, isolation.root, client)
-	if _, err := (osCodexAcceptanceRunner{}).Run(ctx, command); err != nil {
+	if _, err := (codexTaskAffinityAcceptanceRunner{}).Run(ctx, command); err != nil {
 		return err
 	}
 	after, err := captureCodexInstalledExecutable(client.path)
