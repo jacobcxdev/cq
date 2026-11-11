@@ -13,7 +13,17 @@ catalogue requires the system Dot to be onboarded before it starts.
 
 `cq codex dots` defaults to the normal native app, using its existing profile, local tasks and signed-in account. Existing account-owned Dots share that app's sidebar. The packaged CQ binary includes the Go controller and runtime; installation creates private adapter state and loopback certificates. Python, pip and virtual environments are not needed. It uses the installed app bundle without patching or re-signing it. Account credential sources and CQ services remain unchanged.
 
-Native installation creates `~/Applications/ChatGPT via CQ.app` from the controller bundled in CQ. Launch it through Raycast, Spotlight or Finder for new sessions, or run `cq codex dots start`. Both routes preserve OpenAI's original app signature and use the existing profile. CQ sets `OPENAI_BASE_URL` to its configured local proxy even when `~/.codex/config.toml` contains no CQ entry. Direct launches of OpenAI's original app bypass the adapter. CQ does not quit an already-running normal app. Installation and account changes report `restart_required` until the user quits it and starts it through CQ. The launcher reports that instruction instead of silently opening an unmanaged app.
+Native installation creates `~/Applications/ChatGPT via CQ.app` from the controller bundled in CQ. Launch it through Raycast, Spotlight or Finder for new sessions, or run `cq codex dots start`. Both routes preserve OpenAI's original app signature and use the existing profile.
+
+The launcher sets `OPENAI_BASE_URL` to CQ's configured local proxy, normally
+`http://127.0.0.1:19280`. The app and its child Codex app-server inherit this
+endpoint and use the native OpenAI provider with the existing sign-in. CQ acts
+as that provider's proxy. Keep the native provider selected in
+`~/.codex/config.toml`; the launcher supplies endpoint routing through the
+process environment. See [client routing](usage.md#chatgpt-desktop-integrations)
+for verification.
+
+Direct launches of OpenAI's original app bypass the adapter. CQ does not quit an already-running normal app. Installation and account changes report `restart_required` until the user quits it and starts it through CQ. The launcher reports that instruction instead of silently opening an unmanaged app. Verify launcher routing with the running app and child app-server environments plus a real Desktop chat request and matching CQ trace.
 
 Native launching gives the signed ChatGPT app its own macOS privacy responsibility and removes inherited launcher identity variables. ChatGPT keeps its normal Dock identity while the Spotlight launcher stays hidden. CQ retains the private renderer pipe without modifying the app bundle. This uses a private macOS spawn attribute; if it is unavailable, startup reports an error instead of attributing ChatGPT's permissions to CQ.
 

@@ -432,58 +432,56 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:19280 claude
 
 For PowerShell, set `$env:ANTHROPIC_BASE_URL = 'http://127.0.0.1:19280'`, then start `claude`. The setting belongs to that shell/client process. Close the client and remove the variable to restore its ordinary endpoint. CQ accepts recognised Claude OAuth credentials or its generated local bearer; it does not forward that local bearer upstream. Anthropic model requests route to Claude; supported GPT/o-series Messages requests translate to Codex Responses.
 
-### Codex CLI with a local bearer
+### Codex CLI
 
-CQ's supported Codex route is the Responses API. This custom-provider configuration pattern is exercised by CQ's installed-client fixtures. Install a compatible Codex client separately; its configuration syntax is owned by that client. First obtain a model ID from `cq models list --provider codex`, `--provider zai` or `--provider grok` that your account can use. Grok requires an entitled Responses-backend model; follow its [provider-specific limits](#grok-subscriptions).
+CQ proxies the native OpenAI provider's Responses API. Keep the client's native
+provider and existing recognised OpenAI sign-in, then point a fresh client at
+CQ with `OPENAI_BASE_URL`. Install a compatible Codex client separately; its
+endpoint configuration syntax is owned by that client. First obtain a model ID
+from `cq models list --provider codex`, `--provider zai` or `--provider grok`
+that your account can use. Grok requires an entitled Responses-backend model;
+follow its [provider-specific limits](#grok-subscriptions).
 
-The following shell example requires `jq`. Set `CQ_CONFIG` to your existing platform `proxy.json` path from [configuration](configuration.md#important-paths). It reads the local token into an environment variable without displaying it; keep shell tracing disabled and do not paste the token into a command argument, issue or transcript.
+Start the client with the endpoint scoped to that process:
 
 ```sh
-CQ_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/cq/proxy.json"  # macOS/Linux default
-export CQ_LOCAL_TOKEN="$(jq -er '.local_token' "$CQ_CONFIG")"
-codex -c 'model_provider="cq"' \
-  -c 'model_providers.cq={name="CQ",base_url="http://127.0.0.1:19280",wire_api="responses",env_key="CQ_LOCAL_TOKEN",supports_websockets=true}'
-unset CQ_LOCAL_TOKEN
+OPENAI_BASE_URL=http://127.0.0.1:19280 codex
 ```
 
-On Windows PowerShell, use the CQ configuration known-folder path, for example `$cqConfig = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'cq\proxy.json'`, then `$env:CQ_LOCAL_TOKEN = (Get-Content -Raw $cqConfig | ConvertFrom-Json).local_token`. Run the same `codex -c` arguments on one line, and remove the variable afterwards with `Remove-Item Env:CQ_LOCAL_TOKEN`.
+For PowerShell, set `$env:OPENAI_BASE_URL = 'http://127.0.0.1:19280'`, then start
+`codex`. Close the client and remove the variable with
+`Remove-Item Env:OPENAI_BASE_URL` to restore that shell's ordinary endpoint.
 
-Choose a real model in the client. A prompt such as “Reply with PONG” sends an actual model request and uses that provider's quota. Inspect the client result and a matching CQ trace when diagnostics are enabled. Setting `supports_websockets=false` selects the HTTP variant for clients that support this option. API-key style clients use CQ's local bearer, while recognised native Codex credentials can use the OAuth-compatible routes. Never replace your provider credential file with CQ's local bearer.
-
-Persistent client configuration can use the same `[model_providers.cq]` fields in the client's own config. Keep the token in a private environment/credential mechanism, preserve unrelated configuration, and consult the installed client's help. Removing the CQ provider selection restores the prior client endpoint. A model registry entry does not itself connect a client to CQ.
+Choose a real model in the client. A prompt such as “Reply with PONG” sends an
+actual model request and uses that provider's quota. Inspect the client result
+and a matching CQ trace when diagnostics are enabled. CQ accepts recognised
+native Codex credentials on its OAuth-compatible routes. Keep native account
+credentials in their existing credential store. A model registry entry does
+not itself connect a client to CQ.
 
 ### ChatGPT Desktop integrations
 
-For ordinary **Codex chat account routing**, configure the app's actual Codex
-backend to use CQ's loopback Responses endpoint. A compatible app-server build
-can use a persistent custom-provider fragment in its Codex `config.toml`,
-normally beneath `~/.codex` unless its configuration home is overridden:
+For **Codex chat account routing** through the [CQ launcher](dots.md), open
+`ChatGPT via CQ` or run `cq codex dots start`. The launcher sets
+`OPENAI_BASE_URL` to CQ's configured loopback Responses endpoint, normally
+`http://127.0.0.1:19280`. The app and its child Codex app-server inherit that
+endpoint while using the native OpenAI provider and existing sign-in. CQ acts
+as that provider's proxy. Keep the native provider selected; endpoint routing
+belongs to the launch environment. Preserve the client's existing configuration
+and native account credentials.
 
-```toml
-model_provider = "cq"
-
-[model_providers.cq]
-name = "CQ"
-base_url = "http://127.0.0.1:19280"
-wire_api = "responses"
-requires_openai_auth = true
-supports_websockets = true
-```
-
-Merge these fields into the client's existing configuration; do not overwrite
-unrelated settings or duplicate an existing provider table. This variant uses
-the client's existing recognised OpenAI sign-in rather than embedding CQ's local
-bearer. API-key style clients can instead use the local-bearer pattern above,
-but their credential environment must reach the app-server process. Exporting
-a token or base URL in one terminal does not configure an app launched from
-the Dock. Never replace native account credentials with the local bearer.
+The endpoint must reach the app-server process. Exporting a base URL in one
+terminal does not configure an app launched from the Dock. Start through the
+CQ launcher to supply its routing environment.
 
 Check which provider/configuration the running app actually uses and coordinate
-any reload or restart with the user. Verify a request from a real Desktop Codex
-chat reaches CQ, then inspect configured/effective HTTP and WebSocket routing
-modes before claiming account load balancing. The normal app icon can be used;
-ordinary model-request routing does not require the Dots launcher, a US tunnel
-or CQ Network. It does not route cloud work that never reaches this Mac's proxy.
+any reload or restart with the user. For launcher-managed sessions, check
+`OPENAI_BASE_URL` in the app and child Codex app-server environments, then verify
+a request from a real Desktop Codex chat against a matching CQ trace. Inspect
+configured and effective HTTP and WebSocket routing modes before claiming
+account load balancing. Ordinary model-request routing does not require a US
+tunnel or CQ Network. It does not route cloud work that never reaches this
+Mac's proxy.
 
 Normal ChatGPT launches can use the optional [native network integration](configuration.md#native-chatgpt-network-routing). It requires the signed macOS companion, WireGuard and explicit activation. Usage response handling has an additional certificate-trust step. These are separate from account routing and from [multi-account Dots](dots.md), which requires launching through `ChatGPT via CQ` or `cq codex dots start`.
 

@@ -255,7 +255,7 @@ WireGuard keys in another VPN client.
 | `ZAI_API_KEY` | unset | Selects one account; a saved OAuth account wins when the exact key's ownership was verified. Otherwise uses only this key. Never put its value in shell history or logs. |
 | `CODEXBAR_CONFIG` | CodexBar provider configuration lookup | Explicit path for provider-scoped Grok/Z.ai discovery; `~/` is expanded and other paths must be absolute. Does not change Codex managed-account manifest lookup. |
 | `CODEX_THREAD_ID` | unset | Validated current chat identity for harness `--chat current`; CQ does not search transcripts to infer it. |
-| `OPENAI_BASE_URL` | unset | Native-client routing input; the Dots launcher sets it to CQ. This is separate from the native network extension. |
+| `OPENAI_BASE_URL` | unset | Routes the native OpenAI provider through CQ. The [CQ launcher](dots.md) sets this endpoint for the app and child Codex app-server, retaining the native provider and sign-in. Endpoint routing belongs to the process environment. This is separate from the native network extension. |
 
 ### Important paths
 
