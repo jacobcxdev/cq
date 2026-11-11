@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"os"
 	"strings"
@@ -124,7 +125,18 @@ func (store *CodexLeaseStore) signDelta(delta codexLeaseDelta) ([]byte, error) {
 }
 
 func decodeCodexLeaseStorageJSON(data []byte, destination any) error {
-	if err := decodeCodexLeaseStrictJSON(data, destination); err != nil {
+	// Record deletion identities use their exported field names on disk. The
+	// exact round trip below enforces the writer's schema, including casing,
+	// duplicate rejection and member order, without changing signed bytes.
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple JSON values")
+		}
 		return err
 	}
 	canonical, err := json.Marshal(destination)

@@ -7,7 +7,7 @@ CQ stages each executable in private, immutable storage before package cleanup.
 It stops admitting new work before waiting for active HTTP requests, SSE streams
 and WebSocket turns to finish. Each broker WebSocket session reconnects with
 `1012` after its current turn completes; idle sessions reconnect immediately.
-Normal package upgrades allow 15 seconds for drainage. If active work cannot
+Normal package upgrades allow one second for drainage. If active work cannot
 finish in that time, CQ resumes admissions on the previous runtime and defers
 the upgrade. The retained candidate refresh service automatically retries the
 handoff after deferral; repeating the package upgrade is not required. Inspect
@@ -36,7 +36,9 @@ contents. Cleanup errors emit a warning without reverting a completed upgrade.
 `cq service status` shows active and pending runtime versions. The JSON form
 adds `active_runtime_version`, `pending_runtime_version` and `upgrade_phase`.
 Normal package upgrades and explicit bounded upgrades can defer and keep their
-predecessor active. Package upgrades wait for the recorded transaction to finish.
+predecessor active. A safely retained deferred candidate counts as successful
+package installation; the refresh service activates it automatically after
+admitted work finishes.
 A failed package hook exits unsuccessfully instead of claiming the candidate
 became active.
 A failed successor resumes the retained predecessor. A refresh-job failure
@@ -52,7 +54,7 @@ cq service upgrade --owner=homebrew --candidate-executable=/absolute/path/to/cq 
 Add `--wait-timeout=15s` to defer if drainage takes longer than 15 seconds,
 keeping the previous runtime active. Valid values are whole seconds from `1s`
 through `30s`; for this explicit command, the default or `0` waits indefinitely
-for drainage. Normal `service install` and Homebrew upgrades use 15 seconds.
+for drainage. Normal `service install` and Homebrew upgrades use one second.
 
 The stable package executable remains the ownership identity. LaunchAgent
 arguments name retained runtime copies; the proxy's startup reads the journal

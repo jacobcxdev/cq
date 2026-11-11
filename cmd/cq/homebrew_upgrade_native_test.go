@@ -1173,7 +1173,7 @@ func (f *nativeUpgradeFixture) monitorOwners() func() {
 	return func() { close(stop); <-done }
 }
 
-func (f *nativeUpgradeFixture) assertPreviousRuntime() {
+func (f *nativeUpgradeFixture) assertLiveRuntime(version string) {
 	f.t.Helper()
 	path, err := exec.Command("/bin/ps", "-p", strconv.Itoa(f.pid()), "-o", "comm=").Output()
 	if err != nil {
@@ -1184,9 +1184,14 @@ func (f *nativeUpgradeFixture) assertPreviousRuntime() {
 		f.t.Fatal(err)
 	}
 	sum := sha256.Sum256(data)
-	if hex.EncodeToString(sum[:]) != f.evidence.Fixtures["0.34.1"] {
-		f.t.Fatal("rollback did not select previous executable digest")
+	if hex.EncodeToString(sum[:]) != f.evidence.Fixtures[version] {
+		f.t.Fatalf("live runtime did not select %s executable digest", version)
 	}
+}
+
+func (f *nativeUpgradeFixture) assertPreviousRuntime() {
+	f.t.Helper()
+	f.assertLiveRuntime("0.34.1")
 	linked, err := filepath.EvalSymlinks(filepath.Join(f.root, "prefix/bin/cq"))
 	if err != nil {
 		f.t.Fatal(err)
@@ -1255,45 +1260,54 @@ func (f *nativeUpgradeFixture) deadlineDeferral() {
 		}
 	}
 admitted:
-	observed := make(chan error, 1)
-	go func() {
-		defer func() {
-			if recover() != nil {
-				observed <- fmt.Errorf("deferral observer panic")
-			}
-		}()
-		deadline := time.Now().Add(45 * time.Second)
-		store := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: f.roots}
-		for time.Now().Before(deadline) {
-			r, err := store.Load()
-			if err == nil && r.Phase == "deferred" {
-				err = f.httpTurn("while-deferred", "", false)
-				close(f.hold)
-				observed <- err
-				return
-			}
-			time.Sleep(10 * time.Millisecond)
-		}
-		close(f.hold)
-		observed <- fmt.Errorf("busy upgrade did not defer")
-	}()
-	f.packageOperation("upgrade", "0.34.0", "0.34.1", true)
-	if err := <-observed; err != nil {
-		f.t.Fatal(err)
-	}
-	if err := <-held; err != nil {
-		f.t.Fatal(err)
-	}
-	receipt, err := (proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: f.roots}).Load()
+	// Homebrew retains a valid candidate package after a bounded deferral. Its
+	// refresh job activates that candidate once the admitted turn has finished.
+	release := sync.OnceFunc(func() { close(f.hold) })
+	defer release()
+	timer := time.AfterFunc(45*time.Second, release)
+	defer timer.Stop()
+	f.packageOperation("upgrade", "0.34.0", "0.34.1", false)
+	store := proxy.RuntimeUpgradeStore{FS: fsutil.OSFileSystem{}, Roots: f.roots}
+	receipt, err := store.Load()
 	if err != nil || receipt.Phase != "deferred" || receipt.ErrorCode != "quiet_deadline" {
 		f.t.Fatalf("package drain receipt: %+v %v", receipt, err)
 	}
 	if pause := time.Duration(receipt.AdmissionPauseNanos); pause <= 0 || pause > 25*time.Second {
 		f.t.Fatalf("package admission pause = %s, want bounded drainage", pause)
 	}
-	f.assertPreviousRuntime()
-	f.traffic("deferred-after")
+	f.assertLiveRuntime("0.34.1")
+	linked, err := filepath.EvalSymlinks(filepath.Join(f.root, "prefix/bin/cq"))
+	if err != nil || linked != filepath.Join(f.root, "caskroom/cq/0.34.0/cq") {
+		f.t.Fatalf("deferred candidate package was not retained: %s %v", linked, err)
+	}
+	if err := f.httpTurn("while-deferred", "", false); err != nil {
+		f.t.Fatal(err)
+	}
+	if !timer.Stop() {
+		f.t.Fatal("deferred busy proof timed out")
+	}
 	f.evidence.Outcomes = append(f.evidence.Outcomes, "deadline-deferred-old-worker-served")
+	release()
+	if err := <-held; err != nil {
+		f.t.Fatal(err)
+	}
+	deadline := time.Now().Add(45 * time.Second)
+	for {
+		current, err := store.Load()
+		if err == nil && current.Phase == "committed" && current.Candidate.SHA256 == f.evidence.Fixtures["0.34.0"] {
+			break
+		}
+		if time.Now().After(deadline) {
+			f.t.Fatalf("deferred candidate did not activate automatically: %+v %v", current, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	f.assertLiveRuntime("0.34.0")
+	f.traffic("deferred-after")
+	f.evidence.Outcomes = append(f.evidence.Outcomes, "deferred-package-activated-automatically")
+	// Restore the version used by the remaining snapshot and uninstall checks.
+	f.packageOperation("upgrade", "0.34.1", "0.34.0", false)
+	f.assertPreviousRuntime()
 }
 
 func (f *nativeUpgradeFixture) bootstrapAdoption() {
