@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
 	"golang.org/x/sys/unix"
 )
@@ -135,11 +136,15 @@ func runUnixProxyAdoptedRuntimeWithLifecycle(ctx context.Context, listener net.L
 	if err != nil {
 		return fmt.Errorf("parse rescue upstream: %w", err)
 	}
+	extraCreditPolicy, err := codexprov.DefaultExtraCreditsPolicy()
+	if err != nil {
+		return fmt.Errorf("Codex extra credits policy: %w", err)
+	}
 	return wrapUnixProxyRuntimeError("run configured supervisor", proxy.RunAdoptedRuntimeSupervisorConfigured(ctx, listener, holder, launcher, &proxy.RuntimeHashCheckpointStore{}, admissions, workerManifest, func(supervisor *proxy.RuntimeSupervisor) error {
 		if err := supervisor.SetCallerAuthority(callerAuthority); err != nil {
 			return err
 		}
-		relay := &proxy.RescueRelay{Transport: egress.HTTP, Origin: origin}
+		relay := &proxy.RescueRelay{Transport: egress.HTTP, Origin: origin, ExtraCredits: extraCreditPolicy}
 		if err := supervisor.ConfigureRescue(ctx, relay, state.RuntimeMode); err != nil {
 			return err
 		}

@@ -200,6 +200,9 @@ cq codex canary
 cq codex canary start
 cq codex canary status
 cq codex canary stop
+cq codex credits disable
+cq codex credits enable
+cq codex credits status
 cq codex dots board
 cq codex dots broadcast
 cq codex dots install

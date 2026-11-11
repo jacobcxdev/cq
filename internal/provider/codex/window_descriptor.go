@@ -24,6 +24,17 @@ type WindowDescriptor struct {
 }
 
 type UsageObservation struct {
-	Result  quota.Result
-	Windows []WindowDescriptor
+	Result               quota.Result
+	Windows              []WindowDescriptor
+	IncludedUsageAllowed *bool
+	IncludedUsageValid   bool
+	LimitReached         *bool
+	ModelUsage           map[string]ModelUsage
+}
+
+type ModelUsage struct {
+	Available            *bool `json:"available"`
+	CreditsWouldEnable   bool  `json:"credits_would_enable"`
+	IncludedUsageAllowed *bool `json:"-"`
+	LimitReached         *bool `json:"-"`
 }

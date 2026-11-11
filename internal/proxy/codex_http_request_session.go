@@ -230,6 +230,11 @@ func (executor *CodexAttemptExecutor) DispatchFrozen(
 		}
 	}()
 	applyCodexTransportCredentials(out, material)
+	if request.Method != http.MethodGet {
+		if err := executor.admissionError(ctx, choice); err != nil {
+			return nil, actual, false, err
+		}
+	}
 	if markDispatched == nil {
 		return nil, actual, false, errors.New("Codex dispatch fence unavailable")
 	}

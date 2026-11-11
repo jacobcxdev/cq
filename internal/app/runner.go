@@ -57,6 +57,11 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 				}
 			}()
 			results := r.fetchOne(ctx, now, req.Refresh, id)
+			if enricher, ok := r.Services[id].Usage.(interface {
+				EnrichResults(context.Context, []quota.Result) []quota.Result
+			}); ok {
+				results = enricher.EnrichResults(ctx, results)
+			}
 			mu.Lock()
 			fetched[id] = results
 			mu.Unlock()

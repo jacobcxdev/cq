@@ -15,7 +15,15 @@ type Window struct {
 	RecentBurnRate *float64 `json:"-"`
 }
 
+// ExtraCredits separates local permission from provider-reported availability.
+type ExtraCredits struct {
+	Enabled   bool  `json:"enabled"`
+	Available *bool `json:"available"`
+}
+
 type Result struct {
+	AccountKey    string                `json:"account_key,omitempty"`
+	ExtraCredits  *ExtraCredits         `json:"extra_credits,omitempty"`
 	AccountID     string                `json:"account_id,omitempty"`
 	Email         string                `json:"email,omitempty"`
 	Active        bool                  `json:"active"`
