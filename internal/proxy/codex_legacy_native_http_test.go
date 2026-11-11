@@ -185,6 +185,21 @@ func TestLegacyNativeHTTPRelaysUpstreamPayloadTooLarge(t *testing.T) {
 	}
 }
 
+func TestLegacyNativeHTTPReportsExtraCreditsLimit(t *testing.T) {
+	server := &Server{
+		Config: &Config{CodexUpstream: "https://codex.example"},
+		CodexTransport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, &codexExtraCreditsLimitError{&codexReserveLimitError{&CachedUsageLimitError{}}}
+		}),
+	}
+	request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"model":"gpt-5.4"}`))
+	response := httptest.NewRecorder()
+	server.handleNativeCodex(response, request)
+	if response.Code != http.StatusTooManyRequests || !strings.Contains(response.Body.String(), `"usage_limit_reached"`) {
+		t.Fatalf("local credit limit = %d/%s", response.Code, response.Body.String())
+	}
+}
+
 type codexLegacyNativeHTTPFallbackStub struct {
 	calls       int
 	status      int

@@ -133,6 +133,9 @@ func (handler *legacyCodexNativeHTTPHandler) Handle(w http.ResponseWriter, r *ht
 		if observation != nil {
 			observation.Finish(err)
 		}
+		if writeCodexCapacityError(w, err) {
+			return model
+		}
 		writeError(w, http.StatusBadGateway, "api_error", fmt.Sprintf("codex upstream error: %v", err))
 		return model
 	}

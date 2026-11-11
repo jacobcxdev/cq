@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
@@ -105,6 +106,43 @@ func TestExtraCreditsGuardKeepsPermissionAcrossLogicalKeyChanges(t *testing.T) {
 	}
 	if reads != 2 {
 		t.Fatalf("usage reads=%d", reads)
+	}
+}
+
+func TestExtraCreditsGuardUsesStrongSystemIdentity(t *testing.T) {
+	identity := codex.AccountIdentity{AccountID: "workspace", UserID: "user"}
+	canonical, err := codex.ExtraCreditsIdentityKey(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := &codex.ExtraCreditsPolicy{FS: fsutil.NewMemFS(), Path: "/state/credits.json"}
+	account := codex.LogicalAccount{Key: canonical, Identity: identity, Unstable: true}
+	inventory := &staticCredentialInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{account}}}
+	reads := 0
+	guard := &CodexExtraCreditsGuard{Policy: policy, Inventory: inventory, Usage: extraCreditUsageFunc(func(context.Context, codex.AccountKey) (codex.UsageObservation, error) {
+		reads++
+		return extraCreditsBypassObservation(0), nil
+	})}
+	choice := RouteChoice{AccountKey: account.Key, EffectiveModel: "gpt-5.4"}
+	if err := guard.Check(context.Background(), choice); err != nil || reads != 0 {
+		t.Fatalf("default-enabled system account rejected: error=%v usage reads=%d", err, reads)
+	}
+	if err := policy.Set(canonical, false); err != nil {
+		t.Fatal(err)
+	}
+	var limit *CachedUsageLimitError
+	if err := guard.Check(context.Background(), choice); !errors.As(err, &limit) || reads != 1 {
+		t.Fatalf("system account restriction lost: error=%v usage reads=%d", err, reads)
+	}
+	for _, accounts := range [][]codex.LogicalAccount{
+		{{Key: account.Key, Identity: codex.AccountIdentity{AccountID: "workspace"}, Unstable: true}},
+		{account, account},
+		nil,
+	} {
+		inventory.inventory.Accounts = accounts
+		if err := guard.Check(context.Background(), choice); !errors.As(err, &limit) || reads != 1 {
+			t.Fatalf("invalid identity admitted: error=%v usage reads=%d", err, reads)
+		}
 	}
 }
 

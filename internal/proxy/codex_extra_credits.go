@@ -54,7 +54,7 @@ func (g *CodexExtraCreditsGuard) Check(ctx context.Context, choice RouteChoice) 
 			if account.Key != choice.AccountKey {
 				continue
 			}
-			if found || account.Unstable {
+			if found {
 				return blocked()
 			}
 			policyKey, err = codex.ExtraCreditsIdentityKey(account.Identity)

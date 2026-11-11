@@ -77,7 +77,18 @@ func runCodexCredits(ctx context.Context, action, reference string, asJSON bool,
 	if err != nil {
 		return err
 	}
-	key, err := codexprov.ResolveAccountReference(inventory, aliases, reference)
+	// Spending permission uses the canonical workspace/user identity rather
+	// than a managed credential key. Complete system-only identities therefore
+	// remain resolvable here without weakening other commands' key stability
+	// requirements or changing the caller's shared inventory.
+	resolutionInventory := inventory
+	resolutionInventory.Accounts = append([]codexprov.LogicalAccount(nil), inventory.Accounts...)
+	for i := range resolutionInventory.Accounts {
+		if _, err := codexprov.ExtraCreditsIdentityKey(resolutionInventory.Accounts[i].Identity); err == nil {
+			resolutionInventory.Accounts[i].Unstable = false
+		}
+	}
+	key, err := codexprov.ResolveAccountReference(resolutionInventory, aliases, reference)
 	if err != nil {
 		return err
 	}
