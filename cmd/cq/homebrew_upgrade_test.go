@@ -24,6 +24,10 @@ func runGeneratedCQHomebrewArtifactsWithMetadata(t *testing.T, prelude string, w
 }
 
 func runGeneratedCQHomebrewArtifactsWithFormatting(t *testing.T, prelude string, wantFailure, metadata, format bool) string {
+	return runGeneratedCQHomebrewArtifactProbe(t, prelude, "", wantFailure, metadata, format)
+}
+
+func runGeneratedCQHomebrewArtifactProbe(t *testing.T, prelude, probe string, wantFailure, metadata, format bool) string {
 	t.Helper()
 	if runtime.GOOS != "darwin" {
 		t.Skip("native Homebrew test")
@@ -160,7 +164,7 @@ raise "installer true uninstall skipped removal" unless CQCommandRecorder.calls.
 CQCommandRecorder.calls = []
 installer.send(:uninstall_artifacts, successor: Cask::Cask.new("unrelated") { version "1.0" })
 raise "unrelated successor skipped removal" unless CQCommandRecorder.calls.length == 1
-`
+` + probe
 	path := filepath.Join(t.TempDir(), "homebrew-upgrade.rb")
 	if err := os.WriteFile(path, []byte(script), 0o600); err != nil {
 		t.Fatal(err)
@@ -176,6 +180,61 @@ raise "unrelated successor skipped removal" unless CQCommandRecorder.calls.lengt
 		t.Fatalf("Homebrew callback failed: %v\n%s", err, output)
 	}
 	return string(output)
+}
+
+func TestHomebrewLifecycleFailurePreservesConciseOutput(t *testing.T) {
+	root := t.TempDir()
+	prelude := `require "fileutils"
+Object.send(:remove_const, :HOMEBREW_PREFIX)
+HOMEBREW_PREFIX = Pathname(` + strconv.Quote(filepath.Join(root, "prefix")) + `)
+Object.send(:remove_const, :HOMEBREW_CASKROOM)
+HOMEBREW_CASKROOM = Pathname(` + strconv.Quote(filepath.Join(root, "caskroom")) + `)
+Cask::Caskroom.singleton_class.define_method(:path) { HOMEBREW_CASKROOM }
+`
+	probe := `
+FileUtils.mkdir_p(cask.staged_path)
+FileUtils.mkdir_p(HOMEBREW_PREFIX/"bin")
+source = cask.staged_path/"cq"
+source.write(<<~'SH')
+  #!/bin/bash
+  set -euo pipefail
+  root=$(dirname "$0")
+  printf '%s\n' "$*" >> "$root/calls"
+  if [[ -e "$root/fail-$2" ]]; then
+    echo "cq: synthetic $2 failure" >&2
+    exit 1
+  fi
+SH
+source.chmod(0755)
+installer = Cask::Installer.new(cask)
+installer.save_caskfile
+installer.install_artifacts
+raise "normal install did not link executable" unless (HOMEBREW_PREFIX/"bin/cq").symlink?
+# Reload the saved metadata before uninstall, as a later brew process does.
+metadata = cask.metadata_versioned_path.glob("**/cq.*").first
+saved = Cask::CaskLoader.load_from_installed_caskfile(metadata, api_fallback: false)
+saved.artifacts.find { |a| a.is_a?(Cask::Artifact::Uninstall) }.uninstall_phase(command: SystemCommand)
+raise "normal lifecycle calls missing" unless (cask.staged_path/"calls").read.lines.length == 2
+%w[install uninstall].each do |action|
+  (cask.staged_path/"fail-#{action}").write("")
+  begin
+    if action == "install"
+      cask.artifacts.find { |a| a.is_a?(Cask::Artifact::Installer) }.install_phase(command: SystemCommand)
+    else
+      saved.artifacts.find { |a| a.is_a?(Cask::Artifact::Uninstall) }.uninstall_phase(command: SystemCommand)
+    end
+    raise "failed lifecycle succeeded"
+  rescue ErrorDuringExecution => error
+    message = error.to_s
+    raise "failure lost CQ diagnostic" unless message.include?("cq: synthetic #{action} failure")
+    raise "failure dumped lifecycle source" if message.include?("set\\ -euo") || message.include?("cq_lifecycle_script") || message.include?("attributes=")
+    raise "failure omitted named hook" unless message.include?("cq-homebrew-lifecycle")
+  ensure
+    (cask.staged_path/"fail-#{action}").unlink
+  end
+end
+`
+	runGeneratedCQHomebrewArtifactProbe(t, prelude, probe, false, false, false)
 }
 
 func TestHomebrewUninstallCallbackReceivesSuccessor(t *testing.T) {

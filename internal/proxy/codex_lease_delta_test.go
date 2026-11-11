@@ -13,7 +13,104 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+func TestCodexLeaseStorageJSONPreservesCanonicalIdentityEncoding(t *testing.T) {
+	identity := CodexJournalRecordIdentity{LaneDigest: "lane", TurnDigest: "turn", ModeEpoch: 9, Authoritative: true}
+	encoded, err := json.Marshal(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded CodexJournalRecordIdentity
+	if err := decodeCodexLeaseStorageJSON(encoded, &decoded); err != nil || decoded != identity {
+		t.Fatalf("decode writer identity: %v", err)
+	}
+	for _, test := range []struct{ name, encoded string }{
+		{"case alias", strings.Replace(string(encoded), "LaneDigest", "lanedigest", 1)},
+		{"duplicate", strings.Replace(string(encoded), `"LaneDigest":"lane"`, `"LaneDigest":"lane","LaneDigest":"lane"`, 1)},
+		{"unknown", strings.Replace(string(encoded), `"LaneDigest":"lane"`, `"LaneDigest":"lane","extra":true`, 1)},
+		{"null", strings.Replace(string(encoded), `"LaneDigest":"lane"`, `"LaneDigest":null`, 1)},
+		{"member order", `{"TurnDigest":"turn","LaneDigest":"lane","ModeEpoch":9,"Authoritative":true}`},
+		{"trailing", string(encoded) + `{}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var decoded CodexJournalRecordIdentity
+			if err := decodeCodexLeaseStorageJSON([]byte(test.encoded), &decoded); err == nil {
+				t.Fatal("accepted non-canonical record identity")
+			}
+		})
+	}
+}
+
+func TestCodexLeaseDeltaRetentionDeletionSurvivesReopen(t *testing.T) {
+	for _, sweep := range []string{"compact", "commit"} {
+		t.Run(sweep, func(t *testing.T) {
+			coordinator, fsys, now := openSizedCodexDeltaCoordinator(t, 32)
+			store := coordinator.Store()
+			runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
+			current := *now
+			store.policy.Retention = time.Hour
+			*now = current.Add(-30 * time.Minute)
+			plan := codexLeaseRuntimeTestPlan("expired-turn", []CodexLeaseAttemptSlotPlan{{AccountKey: "account-a", CandidateID: "candidate-a", Kind: CodexAttemptSlotDirect}})
+			retired := completeCodexLeaseRuntimeTurn(t, runtimeLease, plan)
+			*now = current.Add(31 * time.Minute)
+			if sweep == "compact" {
+				if err := store.Compact(time.Time{}, 0); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				lane, err := store.LoadLane(
+					LeaseKey{Lane: LaneKey{Session: "session-0", Thread: "thread-0", Namespace: CodexResponsesNamespace}, Turn: "turn-0-0"},
+					[]codex.AccountKey{"account-a"}, plan.Authority,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fence, err := lane.MutationFence(lane.RequestedIdentity)
+				if err != nil {
+					t.Fatal(err)
+				}
+				record := codexLeaseV2CASTestMutationRecord(findCodexLeaseV2CASTestRecord(t, store.v2.Records, lane.RequestedIdentity))
+				if _, err := store.CommitLane(fence, CodexLaneMutation{UpsertRecords: []CodexJournalRecordV2{record}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, record := range store.v2.Records {
+				if record.Identity() == retired.identity {
+					t.Fatal("retention kept expired record")
+				}
+			}
+			deleted := false
+			persisted := map[string][]byte{"leases.json": fsysFileBytes(t, fsys, "/state/leases.json")}
+			for name, reference := range store.delta.refs {
+				persisted[name] = bytes.Clone(reference.data)
+				deleted = deleted || bytes.Contains(reference.data, []byte(`"delete_records":[{"LaneDigest":`))
+			}
+			if !deleted || store.delta.head.Tail == "" {
+				t.Fatal("retention did not persist record identity in delta segment")
+			}
+			want := bytes.Clone(store.journalBytes)
+			generation := store.Generation()
+			if err := coordinator.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened := reopenCodexLeaseRuntimeTestCoordinator(t, fsys, now)
+			if reopened.Store().Generation() != generation || !bytes.Equal(reopened.Store().journalBytes, want) {
+				t.Fatal("reopen changed committed journal authority")
+			}
+			for name, before := range persisted {
+				if !bytes.Equal(before, fsysFileBytes(t, fsys, "/state/"+name)) {
+					t.Fatalf("reopen rewrote authenticated storage %s", name)
+				}
+			}
+			lane, err := reopened.Store().LoadLane(plan.Key, []codex.AccountKey{"account-a"}, plan.Authority)
+			if err != nil || len(lane.Records) != 0 {
+				t.Fatalf("deleted lane reappeared after reopen: records=%d error=%v", len(lane.Records), err)
+			}
+		})
+	}
+}
 
 func TestCodexLeaseMutationPublishesIncrementalHead(t *testing.T) {
 	coordinator, fsys, _ := openCodexLeaseRuntimeTestCoordinator(t)

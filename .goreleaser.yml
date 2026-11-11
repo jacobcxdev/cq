@@ -74,60 +74,63 @@ homebrew_casks:
         depends_on cask: "jacobcxdev/tap/cq-network"
       end
 
-      cq_lifecycle_script = <<~'SH'
-        #!/bin/bash
-        set -euo pipefail
-        action=$1
-        source=$2
-        target=$3
-        if [[ "$action" == install ]]; then
-          attributes=$(/usr/bin/xattr "$source")
-          if grep -Fxq com.apple.quarantine <<<"$attributes"; then
-            /usr/bin/xattr -d com.apple.quarantine "$source"
-          fi
-          attributes=$(/usr/bin/xattr "$source")
-          if grep -Fxq com.apple.quarantine <<<"$attributes"; then
-            echo "cq remains quarantined after installation" >&2
-            exit 1
-          fi
-          linked=0
-          if [[ -e "$target" || -L "$target" ]]; then
-            if [[ ! -L "$target" || ! "$target" -ef "$source" ]]; then
-              echo "refusing to replace existing CQ executable: $target" >&2
+      preflight_steps do
+        write_file "cq-homebrew-lifecycle.sh", <<~'SH'
+          #!/bin/bash
+          set -euo pipefail
+          action=$1
+          source=$2
+          target=$3
+          if [[ "$action" == install ]]; then
+            attributes=$(/usr/bin/xattr "$source")
+            if grep -Fxq com.apple.quarantine <<<"$attributes"; then
+              /usr/bin/xattr -d com.apple.quarantine "$source"
+            fi
+            attributes=$(/usr/bin/xattr "$source")
+            if grep -Fxq com.apple.quarantine <<<"$attributes"; then
+              echo "cq remains quarantined after installation" >&2
               exit 1
             fi
-          else
-            /bin/ln -s "$source" "$target"
-            linked=1
-          fi
-          if ! "$source" service install --owner=homebrew "--service-executable=$target"; then
-            if [[ "$linked" == 1 && -L "$target" && "$target" -ef "$source" ]]; then
-              /bin/rm "$target"
+            linked=0
+            if [[ -e "$target" || -L "$target" ]]; then
+              if [[ ! -L "$target" || ! "$target" -ef "$source" ]]; then
+                echo "refusing to replace existing CQ executable: $target" >&2
+                exit 1
+              fi
+            else
+              /bin/ln -s "$source" "$target"
+              linked=1
             fi
-            exit 1
+            if ! "$source" service install --owner=homebrew "--service-executable=$target"; then
+              if [[ "$linked" == 1 && -L "$target" && "$target" -ef "$source" ]]; then
+                /bin/rm "$target"
+              fi
+              exit 1
+            fi
+          elif [[ "$action" == uninstall ]]; then
+            if [[ ! -x "$source" || ! "$target" -ef "$source" ]]; then
+              echo "CQ removal requires its verified package executable: $source" >&2
+              exit 1
+            fi
+            "$source" service uninstall --owner=homebrew "--service-executable=$target"
+          else
+            echo "unknown Homebrew lifecycle action: $action" >&2
+            exit 64
           fi
-        elif [[ "$action" == uninstall ]]; then
-          if [[ ! -x "$source" || ! "$target" -ef "$source" ]]; then
-            echo "CQ removal requires its verified package executable: $source" >&2
-            exit 1
-          fi
-          "$source" service uninstall --owner=homebrew "--service-executable=$target"
-        else
-          echo "unknown Homebrew lifecycle action: $action" >&2
-          exit 64
-        fi
-      SH
+        SH
+        set_permissions "cq-homebrew-lifecycle.sh", "0600", recursive: false
+      end
       installer script: {
         executable: "/bin/bash",
         args: [
-          "-c", cq_lifecycle_script, "cq-homebrew-lifecycle", "install",
+          "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq-homebrew-lifecycle.sh", "install",
           "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq",
         ],
       }
       uninstall(script: {
         executable: "/bin/bash",
         args: [
-          "-c", cq_lifecycle_script, "cq-homebrew-lifecycle", "uninstall",
+          "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq-homebrew-lifecycle.sh", "uninstall",
           "#{HOMEBREW_CASKROOM}/#{token}/{{ .Version }}/cq", "#{HOMEBREW_PREFIX}/bin/cq",
         ],
       }).tap do

@@ -7,8 +7,8 @@ export CQ_HOOK_TEST_ROOT="$root"
 ruby -ryaml - .goreleaser.yml "$root/staged/cq-homebrew-lifecycle.sh" <<'RUBY'
 config, destination = ARGV
 block = YAML.load_file(config).fetch("homebrew_casks").first.fetch("custom_block")
-script = block.match(/cq_lifecycle_script = <<~'SH'\n(.*?)^SH$/m).captures.first
-script = script.lines.map { |line| line.delete_prefix("  ") }.join
+script = block.match(/write_file "cq-homebrew-lifecycle.sh", <<~'SH'\n(.*?)^  SH$/m).captures.first
+script = script.lines.map { |line| line.delete_prefix("    ") }.join
 script.gsub!("/usr/bin/xattr", "\"$CQ_HOOK_TEST_ROOT/xattr\"")
 script.gsub!("/bin/launchctl", "\"$CQ_HOOK_TEST_ROOT/launchctl\"")
 File.write(destination, script)
