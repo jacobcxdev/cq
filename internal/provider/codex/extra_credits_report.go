@@ -43,7 +43,7 @@ func (p *Provider) EnrichResults(ctx context.Context, results []quota.Result) []
 			credits = *result.ExtraCredits
 		}
 		credits.Enabled = false
-		if inventoryErr == nil && policyErr == nil && policy != nil && matches == 1 && !matched.Unstable {
+		if inventoryErr == nil && policyErr == nil && policy != nil && matches == 1 {
 			if key, err := ExtraCreditsIdentityKey(matched.Identity); err == nil {
 				credits.Enabled, _ = policy.Allowed(key)
 				if result.AccountKey == "" {

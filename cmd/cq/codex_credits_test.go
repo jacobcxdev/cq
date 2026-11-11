@@ -134,3 +134,80 @@ func TestCodexCreditsDisabledPermissionSurvivesLogicalKeyChange(t *testing.T) {
 		t.Fatalf("enable did not clear canonical policy: %v, %v", allowed, err)
 	}
 }
+
+func TestCodexCreditsSupportsCompleteSystemOnlyIdentity(t *testing.T) {
+	fs := fsutil.NewMemFS()
+	identity := codexprov.AccountIdentity{AccountID: "system-workspace", UserID: "system-user", Email: "system@example.com", PlanType: "pro"}
+	document, err := json.Marshal(map[string]any{"tokens": map[string]any{
+		"access_token": "synthetic-token", "account_id": identity.AccountID, "id_token": registryCredentialJWT(identity),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.MkdirAll("/home/test/.codex", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.WriteFile("/home/test/.codex/auth.json", document, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	inventory := codexprov.DiscoverInventory(fs)
+	if len(inventory.Accounts) != 1 || !inventory.Accounts[0].Unstable || len(inventory.Accounts[0].Candidates) != 1 || inventory.Accounts[0].Candidates[0].Source != codexprov.SourceSystem {
+		t.Fatalf("fixture is not a system-only generated identity: %+v", inventory.Accounts)
+	}
+	if _, err := codexprov.ResolveAccountReference(inventory, codexprov.AccountAliasIndex{}, identity.Email); err == nil {
+		t.Fatal("generic resolver unexpectedly accepts unstable inventory")
+	}
+	policy := &codexprov.ExtraCreditsPolicy{FS: fs, Path: "/state/policy.json"}
+	canonical, err := codexprov.ExtraCreditsIdentityKey(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	deps := codexCreditsDependencies{Policy: policy, Out: &output,
+		Inventory: func(context.Context) (codexprov.Inventory, error) { return inventory, nil },
+		Aliases:   func() (codexprov.AccountAliasIndex, error) { return codexprov.AccountAliasIndex{}, nil },
+	}
+	for _, action := range []string{"disable", "status", "enable", "status"} {
+		output.Reset()
+		if err := runCodexCredits(context.Background(), action, identity.Email, true, deps); err != nil {
+			t.Fatalf("%s: %v", action, err)
+		}
+		var status codexCreditsStatus
+		if err := json.Unmarshal(output.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		allowed, err := policy.Allowed(canonical)
+		if err != nil || status.Enabled != allowed || status.AccountKey != inventory.Accounts[0].Key {
+			t.Fatalf("%s status = %+v, allowed=%v, err=%v", action, status, allowed, err)
+		}
+		if action != "status" && allowed != (action == "enable") {
+			t.Fatalf("%s allowed=%v", action, allowed)
+		}
+	}
+	if !inventory.Accounts[0].Unstable {
+		t.Fatal("mutated shared inventory")
+	}
+}
+
+func TestCodexCreditsRejectsWeakAndAmbiguousSystemIdentity(t *testing.T) {
+	for _, accounts := range [][]codexprov.LogicalAccount{
+		{{Key: "gen:weak", Unstable: true, Identity: codexprov.AccountIdentity{AccountID: "workspace", Email: "system@example.com"}}},
+		{{Key: "gen:first", Unstable: true, Identity: codexprov.AccountIdentity{AccountID: "first", UserID: "user", Email: "system@example.com"}}, {Key: "gen:second", Unstable: true, Identity: codexprov.AccountIdentity{AccountID: "second", UserID: "user", Email: "system@example.com"}}},
+	} {
+		policy := &codexprov.ExtraCreditsPolicy{FS: fsutil.NewMemFS(), Path: "/state/policy.json"}
+		deps := codexCreditsDependencies{Policy: policy, Out: new(bytes.Buffer),
+			Inventory: func(context.Context) (codexprov.Inventory, error) {
+				return codexprov.Inventory{Accounts: accounts}, nil
+			},
+			Aliases: func() (codexprov.AccountAliasIndex, error) { return codexprov.AccountAliasIndex{}, nil },
+		}
+		for _, action := range []string{"disable", "enable", "status"} {
+			if err := runCodexCredits(context.Background(), action, "system@example.com", false, deps); err == nil {
+				t.Fatalf("%s accepted weak/ambiguous account", action)
+			}
+		}
+		if restricted, err := policy.Restricted(); err != nil || restricted {
+			t.Fatalf("policy changed: %v, %v", restricted, err)
+		}
+	}
+}

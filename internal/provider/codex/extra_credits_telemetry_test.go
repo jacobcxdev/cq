@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/quota"
@@ -159,6 +160,47 @@ func TestExtraCreditsReportRejectsMissingOrAmbiguousStrongIdentity(t *testing.T)
 		if got[0].ExtraCredits.Enabled {
 			t.Fatalf("unverified inventory granted permission: %+v", accounts)
 		}
+	}
+}
+
+func TestExtraCreditsReportSystemOnlyStrongIdentityKeepsPolicyAcrossAdoption(t *testing.T) {
+	fs := newFakeFS()
+	now := time.Now()
+	jwt := fakeJWT(map[string]any{"email": "system@example.test", "https://api.openai.com/auth": map[string]any{"chatgpt_account_id": "workspace", "chatgpt_user_id": "user", "chatgpt_plan_type": "pro"}})
+	fs.files["/fake/home/.codex/auth.json"] = inventoryAuth("system-token", "workspace", jwt, now.Add(time.Hour).UnixMilli())
+	inventory := DiscoverInventory(fs)
+	if len(inventory.Accounts) != 1 || !inventory.Accounts[0].Unstable {
+		t.Fatalf("expected actual unstable system-only inventory: %+v", inventory)
+	}
+	logical := inventory.Accounts[0]
+	canonical, err := ExtraCreditsIdentityKey(logical.Identity)
+	if err != nil {
+		t.Fatalf("system-only identity incomplete: %v", err)
+	}
+	policy := &ExtraCreditsPolicy{FS: fsutil.NewMemFS(), Path: "/state/extra-credits.json"}
+	p := &Provider{ExtraCreditsPolicy: policy, inventory: staticCredentialInventory{inventory: inventory}}
+	rows := []quota.Result{{AccountKey: string(logical.Key), AccountID: logical.Identity.AccountID, Email: logical.Identity.Email, ExtraCredits: &quota.ExtraCredits{Enabled: true}}}
+	got := p.EnrichResults(context.Background(), rows)
+	if !got[0].ExtraCredits.Enabled {
+		t.Fatal("complete system-only identity did not default to enabled")
+	}
+	if err := policy.Set(canonical, false); err != nil {
+		t.Fatal(err)
+	}
+	got = p.EnrichResults(context.Background(), rows)
+	if got[0].ExtraCredits.Enabled {
+		t.Fatal("system-only identity bypassed explicit disabled policy")
+	}
+	adopted := logical
+	adopted.Key = "acct:managed"
+	adopted.Unstable = false
+	p.inventory = staticCredentialInventory{inventory: Inventory{Accounts: []LogicalAccount{adopted}}}
+	got = p.EnrichResults(context.Background(), rows)
+	if got[0].ExtraCredits.Enabled {
+		t.Fatal("managed adoption bypassed explicit disabled policy")
+	}
+	if got[0].AccountKey != rows[0].AccountKey {
+		t.Fatal("report rewrote original cached account key")
 	}
 }
 
