@@ -27,4 +27,4 @@ TTY and JSON renderers for quota reports.
 - `providerDisplayName` handles empty strings and non-ASCII via `utf8.DecodeRuneInString`
 - `buildThinSeparator` uses `max(0, width-2)` to prevent negative repeat counts
 
-- Provider/account/pool headers share the report-wide label width. Pool headers use the pool name alone, without UUIDs or a `Proxy` prefix.
+- Provider, account and pool titles start at the same terminal column. Leave the credit status slot blank when there is no status. Pool headers use the pool name alone, without UUIDs or a `Proxy` prefix.

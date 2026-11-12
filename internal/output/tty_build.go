@@ -26,7 +26,6 @@ var icons = map[provider.ID]string{
 // Sections are built first, then separators are sized to the widest rendered line.
 func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 	nowEpoch := now.Unix()
-	labelWidth := ttyLabelWidth(report)
 
 	model := TTYModel{
 		Sections: make([]TTYSection, 0, len(report.Providers)),
@@ -39,7 +38,7 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 		isFirst := true
 
 		for _, result := range accountDisplayOrder(pr, nowEpoch) {
-			header, rows := buildResultBlock(result, pr.ID, nowEpoch, labelWidth)
+			header, rows := buildResultBlock(result, pr.ID, nowEpoch)
 			if section.Header == "" {
 				section.Header = header
 				section.WindowRows = rows
@@ -57,18 +56,18 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 		}
 
 		if pr.Aggregate != nil {
-			section.AggHeader = buildAggHeader(pr.Aggregate, labelWidth)
+			section.AggHeader = buildAggHeader(pr.Aggregate)
 			section.AggRows = buildAggRows(pr.Aggregate.Windows)
 		}
 		if pr.ProxyEligibility != nil && pr.ProxyEligibility.ExcludedCount > 0 {
-			section.ProxyHeader = buildProxyEligibilityHeader(pr.ID, pr.ProxyEligibility, labelWidth)
+			section.ProxyHeader = buildProxyEligibilityHeader(pr.ID, pr.ProxyEligibility)
 			if pr.ProxyEligibility.Aggregate != nil {
 				section.ProxyRows = buildAggRows(pr.ProxyEligibility.Aggregate.Windows)
 			}
 		}
 		for i := range pr.ProxyPools {
 			pool := &pr.ProxyPools[i]
-			block := TTYProxyBlock{Header: buildProxyPoolHeader(pr.ID, pool, labelWidth)}
+			block := TTYProxyBlock{Header: buildProxyPoolHeader(pr.ID, pool)}
 			if pool.Aggregate != nil {
 				block.Rows = buildAggRows(pool.Aggregate.Windows)
 			}
@@ -104,30 +103,18 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 	return model
 }
 
-func ttyLabelWidth(report app.Report) int {
-	width := 7
-	for _, providerReport := range report.Providers {
-		if len(providerReport.Results) != 0 || providerReport.Aggregate != nil {
-			width = max(width, lipgloss.Width(providerDisplayName(providerReport.ID)))
-		}
-		if providerReport.ProxyEligibility != nil && providerReport.ProxyEligibility.ExcludedCount > 0 {
-			width = max(width, lipgloss.Width("Proxy"))
-		}
-		for _, pool := range providerReport.ProxyPools {
-			width = max(width, lipgloss.Width(pool.Name))
-		}
-	}
-	return width
-}
-
-func padTTYLabel(label string, width int) string {
-	return strings.Repeat(" ", max(0, width-lipgloss.Width(label))) + label
+func ttyHeader(icon, status, label string) string {
+	// Reserve room for "  <icon> · <status>    " even without a status.
+	const labelOffset = 11
+	prefix := "  " + icon + status
+	return prefix + strings.Repeat(" ", max(0, labelOffset-lipgloss.Width(prefix))) + boldStyle.Render(label)
 }
 
 // buildResultBlock builds the header and window rows for a single quota.Result.
-func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth int) (string, []TTYWindowRow) {
+func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, []TTYWindowRow) {
 	displayName := providerDisplayName(id)
 	icon := providerIcon(id)
+	status := extraCreditsStatus(r, id)
 
 	if !r.IsUsable() {
 		errMsg := "error"
@@ -143,10 +130,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 			}
 		}
 
-		header := fmt.Sprintf("  %s  %s",
-			boldRedStyle.Render(icon),
-			boldStyle.Render(padTTYLabel(displayName, labelWidth)),
-		)
+		header := ttyHeader(boldRedStyle.Render(icon), status, displayName)
 		label := r.Plan
 		if label == "" {
 			label = r.Tier
@@ -167,7 +151,6 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 		if r.Email != "" {
 			header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
 		}
-		header += extraCreditsHeader(r, id)
 		header += " " + brightBlackStyle.Render("\u00b7") + " " + boldRedStyle.Render(errMsg)
 		return header, nil
 	}
@@ -178,10 +161,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 		iconStyle = redStyle
 	}
 
-	header := fmt.Sprintf("  %s  %s",
-		iconStyle.Render(icon),
-		boldStyle.Render(padTTYLabel(displayName, labelWidth)),
-	)
+	header := ttyHeader(iconStyle.Render(icon), status, displayName)
 
 	label := r.Plan
 	if label == "" {
@@ -204,7 +184,6 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 	if r.Email != "" {
 		header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
 	}
-	header += extraCreditsHeader(r, id)
 
 	if r.CacheAge > 0 && r.Error != nil {
 		errMsg := "error"
@@ -309,7 +288,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64, labelWidth
 	return header, rows
 }
 
-func extraCreditsHeader(result quota.Result, id provider.ID) string {
+func extraCreditsStatus(result quota.Result, id provider.ID) string {
 	if id != provider.Codex || result.ExtraCredits == nil {
 		return ""
 	}
@@ -324,7 +303,7 @@ func extraCreditsHeader(result quota.Result, id provider.ID) string {
 }
 
 // buildAggHeader builds the aggregate header line.
-func buildAggHeader(agg *app.AggregateReport, labelWidth int) string {
+func buildAggHeader(agg *app.AggregateReport) string {
 	minPct := 100
 	for _, a := range agg.Windows {
 		if a.RemainingPct < minPct {
@@ -336,23 +315,19 @@ func buildAggHeader(agg *app.AggregateReport, labelWidth int) string {
 	if agg.Summary.Label != "" {
 		label = agg.Summary.Label
 	}
-	header := fmt.Sprintf("  %s  %s %s",
-		iconStyle.Render(providerIcon(agg.ProviderID)),
-		boldStyle.Render(padTTYLabel(providerDisplayName(agg.ProviderID), labelWidth)),
-		boldDimItalicStyle.Render(label),
-	)
-	return header
+	return ttyHeader(iconStyle.Render(providerIcon(agg.ProviderID)), "", providerDisplayName(agg.ProviderID)) +
+		" " + boldDimItalicStyle.Render(label)
 }
 
-func buildProxyEligibilityHeader(id provider.ID, eligibility *app.ProxyEligibilityReport, labelWidth int) string {
-	return buildProxyHeader(id, "Proxy", eligibility, labelWidth)
+func buildProxyEligibilityHeader(id provider.ID, eligibility *app.ProxyEligibilityReport) string {
+	return buildProxyHeader(id, "Proxy", eligibility)
 }
 
-func buildProxyPoolHeader(id provider.ID, pool *app.ProxyPoolReport, labelWidth int) string {
-	return buildProxyHeader(id, pool.Name, &pool.ProxyEligibilityReport, labelWidth)
+func buildProxyPoolHeader(id provider.ID, pool *app.ProxyPoolReport) string {
+	return buildProxyHeader(id, pool.Name, &pool.ProxyEligibilityReport)
 }
 
-func buildProxyHeader(id provider.ID, label string, eligibility *app.ProxyEligibilityReport, labelWidth int) string {
+func buildProxyHeader(id provider.ID, label string, eligibility *app.ProxyEligibilityReport) string {
 	iconStyle := boldStyle
 	if eligibility.Aggregate != nil {
 		minPct := 100
@@ -363,10 +338,7 @@ func buildProxyHeader(id provider.ID, label string, eligibility *app.ProxyEligib
 		}
 		iconStyle = pctStyle(minPct)
 	}
-	header := fmt.Sprintf("  %s  %s",
-		iconStyle.Render(providerIcon(id)),
-		boldStyle.Render(padTTYLabel(label, labelWidth)),
-	)
+	header := ttyHeader(iconStyle.Render(providerIcon(id)), "", label)
 	if eligibility.Aggregate != nil && eligibility.Aggregate.Summary.Label != "" {
 		header += " " + boldDimItalicStyle.Render(eligibility.Aggregate.Summary.Label)
 	}
