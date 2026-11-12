@@ -234,7 +234,7 @@ func TestBuildTTYModelShowsProxyEligibilityAndAggregate(t *testing.T) {
 
 	model := BuildTTYModel(report, now)
 	section := model.Sections[0]
-	if got, want := stripANSI(section.ProxyHeader), "      Proxy 2 × pro 20x = 40x"; got != want {
+	if got, want := stripANSI(section.ProxyHeader), "          Proxy 2 × pro 20x = 40x"; got != want {
 		t.Fatalf("proxy header = %q, want %q", got, want)
 	}
 	if want := yellowStyle.Render(providerIcon(provider.Codex)); !strings.HasPrefix(section.ProxyHeader, "  "+want) {
@@ -306,7 +306,7 @@ func TestBuildTTYModelShowsNamedProxyPoolAggregate(t *testing.T) {
 		t.Fatalf("write TTY: %v", err)
 	}
 	got := stripANSI(output.String())
-	if !strings.Contains(got, "      Cyber 2 × pro 20x = 40x") {
+	if !strings.Contains(got, "          Cyber 2 × pro 20x = 40x") {
 		t.Fatalf("named proxy pool missing from output:\n%s", got)
 	}
 	if strings.Contains(got, "Proxy Cyber") {
@@ -317,54 +317,34 @@ func TestBuildTTYModelShowsNamedProxyPoolAggregate(t *testing.T) {
 	}
 }
 
-func TestBuildTTYModelRightAlignsAllSummaryLabelsToLongestPoolName(t *testing.T) {
+func TestBuildTTYModelAlignsProviderAndSummaryTitles(t *testing.T) {
 	now := time.Unix(1_000, 0)
 	report := app.Report{Providers: []app.ProviderReport{{
-		ID:        provider.Codex,
-		Results:   []quota.Result{{Status: quota.StatusOK, Plan: "pro"}},
-		Aggregate: &app.AggregateReport{ProviderID: provider.Codex, Summary: aggregate.AccountSummary{Label: "3 × pro 20x = 60x"}},
-		ProxyPools: []app.ProxyPoolReport{{
-			Name: "Security Research",
-			ProxyEligibilityReport: app.ProxyEligibilityReport{ExcludedCount: 1, Aggregate: &app.AggregateReport{
-				ProviderID: provider.Codex, Summary: aggregate.AccountSummary{Label: "2 × pro 20x = 40x"},
-			}},
-		}},
+		ID:         provider.Codex,
+		Results:    []quota.Result{{Status: quota.StatusOK, Plan: "pro"}},
+		Aggregate:  &app.AggregateReport{ProviderID: provider.Codex, Summary: aggregate.AccountSummary{Label: "3 × pro 20x = 60x"}},
+		ProxyPools: []app.ProxyPoolReport{{Name: "Security Research"}, {Name: "安全研究"}},
 	}}}
-	section := BuildTTYModel(report, now).Sections[0]
-	header := stripANSI(section.Header)
-	aggregateHeader := stripANSI(section.AggHeader)
-	poolHeader := stripANSI(section.ProxyPools[0].Header)
-	wantPool := "    Security Research 2 × pro 20x = 40x"
-	if poolHeader != wantPool {
-		t.Fatalf("pool header = %q, want %q", poolHeader, wantPool)
+	for _, id := range []provider.ID{provider.Claude, provider.Gemini, provider.Grok, provider.ZAI} {
+		report.Providers = append(report.Providers, app.ProviderReport{ID: id, Results: []quota.Result{{}}})
 	}
-	if strings.Index(header, "pro") != strings.Index(aggregateHeader, "3 ×") || strings.Index(aggregateHeader, "3 ×") != strings.Index(poolHeader, "2 ×") {
-		t.Fatalf("summary columns differ:\n%q\n%q\n%q", header, aggregateHeader, poolHeader)
-	}
-}
-
-func TestBuildTTYModelRightAlignsUnicodePoolNameByTerminalWidth(t *testing.T) {
-	now := time.Unix(1_000, 0)
-	report := app.Report{Providers: []app.ProviderReport{{
-		ID:        provider.Codex,
-		Results:   []quota.Result{{Status: quota.StatusOK, Plan: "pro"}},
-		Aggregate: &app.AggregateReport{ProviderID: provider.Codex, Summary: aggregate.AccountSummary{Label: "3 × pro 20x = 60x"}},
-		ProxyPools: []app.ProxyPoolReport{{
-			Name: "安全研究",
-			ProxyEligibilityReport: app.ProxyEligibilityReport{ExcludedCount: 1, Aggregate: &app.AggregateReport{
-				ProviderID: provider.Codex, Summary: aggregate.AccountSummary{Label: "2 × pro 20x = 40x"},
-			}},
-		}},
-	}}}
-	section := BuildTTYModel(report, now).Sections[0]
-	header := stripANSI(section.Header)
-	aggregateHeader := stripANSI(section.AggHeader)
-	poolHeader := stripANSI(section.ProxyPools[0].Header)
-	accountColumn := lipgloss.Width(header[:strings.Index(header, "pro")])
-	aggregateColumn := lipgloss.Width(aggregateHeader[:strings.Index(aggregateHeader, "3 ×")])
-	poolColumn := lipgloss.Width(poolHeader[:strings.Index(poolHeader, "2 ×")])
-	if accountColumn != aggregateColumn || aggregateColumn != poolColumn {
-		t.Fatalf("summary terminal columns differ: account=%d aggregate=%d pool=%d\n%q\n%q\n%q", accountColumn, aggregateColumn, poolColumn, header, aggregateHeader, poolHeader)
+	model := BuildTTYModel(report, now)
+	section := model.Sections[0]
+	for _, pair := range []struct{ header, title string }{
+		{section.Header, "Codex pro"},
+		{section.AggHeader, "Codex 3 ×"},
+		{section.ProxyPools[0].Header, "Security Research"},
+		{section.ProxyPools[1].Header, "安全研究"},
+		{model.Sections[1].Header, "Claude"},
+		{model.Sections[2].Header, "Gemini"},
+		{model.Sections[3].Header, "Grok"},
+		{model.Sections[4].Header, "Z.ai"},
+	} {
+		header := stripANSI(pair.header)
+		prefix, _, found := strings.Cut(header, pair.title)
+		if !found || lipgloss.Width(prefix) != 11 || !strings.HasSuffix(prefix, "        ") {
+			t.Errorf("header %q does not put %q at column 12 with a blank status slot", header, pair.title)
+		}
 	}
 }
 

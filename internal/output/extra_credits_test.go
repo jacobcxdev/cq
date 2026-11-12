@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
 	"github.com/muesli/termenv"
@@ -27,16 +29,16 @@ func TestCodexExtraCreditsHeaderStates(t *testing.T) {
 			if err := json.Unmarshal([]byte(`{"status":"ok","email":"account@example.test","extra_credits":{`+tc.fields+`}}`), &result); err != nil {
 				t.Fatal(err)
 			}
-			header, _ := buildResultBlock(result, provider.Codex, 0, 7)
-			if !strings.HasSuffix(stripANSI(header), " · "+tc.glyph) || !strings.Contains(header, tc.style) {
-				t.Fatalf("header = %q, want suffix glyph %q with style %q", header, tc.glyph, tc.style)
+			model := BuildTTYModel(app.Report{Providers: []app.ProviderReport{
+				{ID: provider.Codex, Results: []quota.Result{result}},
+				{ID: provider.Claude, Results: []quota.Result{result}},
+			}}, time.Unix(0, 0))
+			header := model.Sections[0].Header
+			if want := "   · " + tc.glyph + "    Codex · account@example.test"; stripANSI(header) != want || !strings.Contains(header, tc.style) || tc.style == tc.glyph {
+				t.Fatalf("header = %q, want %q with style %q", header, want, tc.style)
 			}
-			if tc.style == tc.glyph {
-				t.Fatal("test must exercise ANSI colour/bold")
-			}
-			header, _ = buildResultBlock(result, provider.Claude, 0, 7)
-			if strings.Contains(header, tc.glyph) {
-				t.Fatal("credit marker leaked to non-Codex provider")
+			if got := stripANSI(model.Sections[1].Header); got != "  ✻        Claude · account@example.test" {
+				t.Fatalf("non-Codex header = %q, want a blank status slot", got)
 			}
 		})
 	}
