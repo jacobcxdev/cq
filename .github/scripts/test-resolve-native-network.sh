@@ -10,11 +10,13 @@ source_commit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 target_commit=cccccccccccccccccccccccccccccccccccccccc
 digest=$(printf 'b%.0s' {1..64})
 export RESOLVER_SOURCE_COMMIT="$source_commit" RESOLVER_TARGET_COMMIT="$target_commit" RESOLVER_TAG_VERIFIED=true
+export RESOLVER_RELEASE_API=https://api.github.com/repos/jacobcxdev/cq/releases/123
 
 cat >"$root/bin/gh" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  'api repos/jacobcxdev/cq/releases/tags/v1.2.3'|'api repos/jacobcxdev/cq/releases/tags/cq-native-stage-v1.2.3') cat "$RESOLVER_RELEASE_JSON" ;;
+  'release view v1.2.3 --repo jacobcxdev/cq --json apiUrl --jq .apiUrl'|'release view cq-native-stage-v1.2.3 --repo jacobcxdev/cq --json apiUrl --jq .apiUrl') printf '%s\n' "$RESOLVER_RELEASE_API" ;;
+  'api repos/jacobcxdev/cq/releases/123') cat "$RESOLVER_RELEASE_JSON" ;;
   'api repos/jacobcxdev/cq/git/ref/tags/cq-native-stage-v1.2.3') printf '{"object":{"type":"tag","sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}\n' ;;
   'api repos/jacobcxdev/cq/git/ref/tags/v1.2.3') printf '{"object":{"type":"tag","sha":"ffffffffffffffffffffffffffffffffffffffff"}}\n' ;;
   'api repos/jacobcxdev/cq/git/tags/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee') printf '{"tag":"cq-native-stage-v1.2.3","object":{"type":"commit","sha":"%s"},"verification":{"verified":%s}}\n' "$RESOLVER_SOURCE_COMMIT" "$RESOLVER_TAG_VERIFIED" ;;
@@ -92,4 +94,10 @@ if "$resolver" bad-tag "$root/manifest.json" >"$root/result" 2>&1; then
   echo 'native resolver accepted invalid tag' >&2
   exit 1
 fi
+for api in https://example.com/releases/123 https://api.github.com/repos/other/cq/releases/123 https://api.github.com/repos/jacobcxdev/cq/releases/0; do
+  if RESOLVER_RELEASE_API="$api" "$resolver" v1.2.3 "$root/manifest.json" >"$root/result" 2>&1; then
+    echo "native resolver accepted invalid API identity: $api" >&2
+    exit 1
+  fi
+done
 echo 'Native release resolution checks passed.'
