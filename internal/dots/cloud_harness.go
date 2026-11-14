@@ -467,11 +467,24 @@ func (h *cloudHarness) prepareFrom(source string, request cloudMessage, raw []by
 			}
 		}
 		h.mu.Unlock()
-		if err := h.refresh(id); err != nil {
-			return nil, errors.New("native harness current model unavailable")
+		// A completion from another subscribed source can invalidate a read
+		// while it is in flight. Bound retries before admitting the next turn.
+		stale := false
+		for range 3 {
+			if err := h.refresh(id); err != nil {
+				return nil, errors.New("native harness current model unavailable")
+			}
+			h.mu.Lock()
+			stale = h.threads[id] != nil && h.threads[id].refresh
+			h.mu.Unlock()
+			if !stale {
+				break
+			}
 		}
-		if err := h.reconcile(id, cloudHarnessRequestedModel(params), cloudHarnessString(params, "cwd")); err != nil {
-			return nil, err
+		if !stale {
+			if err := h.reconcile(id, cloudHarnessRequestedModel(params), cloudHarnessString(params, "cwd")); err != nil {
+				return nil, err
+			}
 		}
 	}
 	h.mu.Lock()

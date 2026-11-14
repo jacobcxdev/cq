@@ -3,6 +3,7 @@ package dots
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -218,6 +219,75 @@ func TestCloudHarnessPendingTurnRefreshedCachedActivity(t *testing.T) {
 				t.Fatalf("dispatch did not refresh pending activity: reads=%d active=%v pending=%d", reads, thread.active, thread.pendingTurns)
 			}
 		})
+	}
+}
+
+func TestCloudHarnessPendingTurnRechecksCompletionDuringRead(t *testing.T) {
+	h, _, id, methods := cloudHarnessFailureFixture(t)
+	thread := h.threads[id]
+	thread.active = true
+	thread.activeTurnID = "old"
+	thread.receiptState = "pending"
+	thread.subscriptions["gateway/background"] = true
+	var gatewayMethods []string
+	h.gateway = cloudHarnessSourceGateway{write: func(source string, raw []byte) error {
+		request := cloudHarnessObject(raw)
+		gatewayMethods = append(gatewayMethods, request.method())
+		var result any = map[string]string{"status": "unsubscribed"}
+		if request.method() == "thread/resume" {
+			result = map[string]any{"thread": map[string]string{"id": id}}
+		}
+		h.observeFrom(source, cloudHarnessRaw(map[string]any{"id": request["id"], "result": result}))
+		return nil
+	}}
+	original := h.b.local.input
+	reads := 0
+	h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+		request := cloudHarnessObject(raw)
+		if request.method() != "thread/read" {
+			return original.Write(raw)
+		}
+		reads++
+		status := "idle"
+		if reads == 1 {
+			status = "active"
+			h.observeFrom("gateway/background", []byte(`{"method":"turn/completed","params":{"threadId":"`+id+`","turn":{"id":"old"}}}`))
+		}
+		h.observe(cloudHarnessRaw(map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]any{"id": id, "model": "glm-5.3", "status": map[string]string{"type": status}}}}))
+		return len(raw), nil
+	}}
+	request := cloudHarnessObject([]byte(`{"id":7,"method":"turn/start","params":{"threadId":"` + id + `"}}`))
+	if _, err := h.prepare(request, cloudHarnessRaw(request)); err != nil {
+		t.Fatal(err)
+	}
+	if reads != 2 || thread.receiptState == "pending" || thread.pendingTurns != 1 || !strings.Contains(strings.Join(*methods, ","), "thread/resume") || !strings.Contains(strings.Join(gatewayMethods, ","), "thread/resume") {
+		t.Fatalf("next turn bypassed completed-turn application: reads=%d state=%s pending=%d stdio=%v gateway=%v", reads, thread.receiptState, thread.pendingTurns, *methods, gatewayMethods)
+	}
+}
+
+func TestCloudHarnessPendingTurnKeepsNewActivityAfterBoundedReads(t *testing.T) {
+	h, _, id, methods := cloudHarnessFailureFixture(t)
+	thread := h.threads[id]
+	thread.active = true
+	thread.activeTurnID = "old"
+	thread.receiptState = "pending"
+	reads := 0
+	h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+		request := cloudHarnessObject(raw)
+		if request.method() != "thread/read" {
+			t.Fatalf("unstable activity changed native state: %s", request.method())
+		}
+		reads++
+		started := fmt.Sprintf(`{"method":"turn/started","params":{"threadId":"%s","turn":{"id":"new-%d"}}}`, id, reads)
+		h.observe([]byte(started))
+		h.observe(cloudHarnessRaw(map[string]any{"id": request["id"], "result": map[string]any{"thread": map[string]any{"id": id, "model": "glm-5.3", "status": map[string]string{"type": "idle"}}}}))
+		return len(raw), nil
+	}}
+	request := cloudHarnessObject([]byte(`{"id":7,"method":"turn/start","params":{"threadId":"` + id + `"}}`))
+	raw := cloudHarnessRaw(request)
+	forwarded, err := h.prepare(request, raw)
+	if err != nil || string(forwarded) != string(raw) || reads != 3 || thread.receiptState != "pending" || thread.pendingTurns != 1 || len(*methods) != 0 {
+		t.Fatalf("unstable activity admitted reload: err=%v reads=%d state=%s pending=%d methods=%v", err, reads, thread.receiptState, thread.pendingTurns, *methods)
 	}
 }
 
