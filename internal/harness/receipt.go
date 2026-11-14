@@ -30,8 +30,16 @@ type Receipt struct {
 	Unsupported      []string            `json:"unsupported,omitempty"`
 	Issues           []string            `json:"issues,omitempty"`
 	Failure          *ApplicationFailure `json:"failure,omitempty"`
+	GoalHold         *GoalHold           `json:"goal_hold,omitempty"`
 	RetrySupported   bool                `json:"retry_supported,omitempty"`
 	UpdatedAt        time.Time           `json:"updated_at"`
+}
+
+// GoalHold identifies CQ's temporary continuation hold without storing the goal text.
+type GoalHold struct {
+	Fingerprint string `json:"fingerprint"`
+	UpdatedAt   int64  `json:"updated_at,omitempty"`
+	Yield       bool   `json:"yield,omitempty"`
 }
 
 // ApplicationContext identifies an attempted application separately from the
@@ -150,6 +158,11 @@ func (receipts Receipts) path(chatID, suffix string) (string, error) {
 }
 
 func validateReceipt(receipt Receipt) error {
+	if hold := receipt.GoalHold; hold != nil {
+		if receipt.Mode != "full" || len(hold.Fingerprint) != 64 || strings.Trim(hold.Fingerprint, "0123456789abcdef") != "" || hold.UpdatedAt < 0 {
+			return fmt.Errorf("invalid harness goal hold")
+		}
+	}
 	if attempt := receipt.AttemptedContext; attempt != nil {
 		if receipt.Mode != "full" || (receipt.State != "failed" && receipt.State != "pending" && receipt.State != "prepared") || attempt.Model == "" || len(attempt.Model) > 1024 || strings.ContainsRune(attempt.Model, '\x00') || !filepath.IsAbs(attempt.Cwd) || filepath.Clean(attempt.Cwd) != attempt.Cwd || strings.ContainsRune(attempt.Cwd, '\x00') {
 			return fmt.Errorf("invalid attempted harness context")

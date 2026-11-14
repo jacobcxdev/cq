@@ -302,8 +302,15 @@ qualified native process's relay to that same broker, preserving authentication,
 enrolment identity and public message sequences. At an idle boundary, CQ releases
 all known subscriptions for only the selected chat, reloads its configuration,
 then restores the other notification subscriptions without replaying history.
-Automatic goal continuations can keep a chat active across turn boundaries;
-pausing the goal lets a queued configuration reload reach an idle boundary.
+When automatic goal continuations keep a chat active, CQ temporarily pauses the
+goal, lets the running turn finish, applies the queued configuration, then
+reactivates the same goal automatically. This uses native pause accounting for
+all goals: the objective and token budget limit stay intact, but native Codex
+stops charging tokens and time for the remainder of the paused turn. Explicit
+goal edits or pauses take precedence over CQ's automatic restoration. A durable
+receipt records hold ownership without storing goal text, so a replacement
+broker can recover a verified hold. An interrupted pause without a verified
+native result remains paused rather than guessing ownership.
 Observed resume requests remain candidates when large history responses are
 chunked; native unsubscribe results establish which candidates were subscribed.
 Other chats and spawned children retain their subscriptions. Gateway reconnects

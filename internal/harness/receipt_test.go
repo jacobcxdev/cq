@@ -24,6 +24,31 @@ func receiptFixture() Receipt {
 	}
 }
 
+func TestReceiptGoalHoldRetainedBoundedRecoveryIdentity(t *testing.T) {
+	receipt := receiptFixture()
+	receipt.Mode = "full"
+	receipt.GoalHold = &GoalHold{Fingerprint: strings.Repeat("a", 64), UpdatedAt: 123}
+	store := Receipts{FS: fsutil.NewMemFS(), Dir: "/state/receipts"}
+	if err := store.Save(receipt); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.Load(testChat)
+	if err != nil || !reflect.DeepEqual(got.GoalHold, receipt.GoalHold) {
+		t.Fatalf("goal hold lost: %#v, %v", got.GoalHold, err)
+	}
+	for _, invalid := range []GoalHold{{}, {Fingerprint: strings.Repeat("g", 64)}, {Fingerprint: strings.Repeat("a", 65)}, {Fingerprint: strings.Repeat("a", 64), UpdatedAt: -1}} {
+		receipt.GoalHold = &invalid
+		if err := store.Save(receipt); err == nil {
+			t.Fatalf("accepted invalid recovery identity: %#v", invalid)
+		}
+	}
+	receipt.GoalHold = &GoalHold{Fingerprint: strings.Repeat("a", 64)}
+	receipt.Mode = "plugins"
+	if err := store.Save(receipt); err == nil {
+		t.Fatal("plugin-only owner accepted native goal hold")
+	}
+}
+
 func TestReceiptAttemptedContextWasBoundedAndSeparate(t *testing.T) {
 	receipt := receiptFixture()
 	receipt.Mode, receipt.State, receipt.Model, receipt.Cwd = "full", "failed", "observed", "/observed"

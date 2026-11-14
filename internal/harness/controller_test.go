@@ -16,6 +16,23 @@ import (
 
 const controllerOtherChat = "019c7714-3b77-74d1-9866-e1f484aae2ab"
 
+func TestControllerPreservedNativeGoalHoldForRecovery(t *testing.T) {
+	controller, desktop, _, receipts := controllerFixture()
+	receipt := receiptFixture()
+	receipt.Mode = "full"
+	receipt.GoalHold = &GoalHold{Fingerprint: strings.Repeat("a", 64)}
+	if err := receipts.Save(receipt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Reconcile(context.Background(), testChat, controllerPolicy()); err == nil {
+		t.Fatal("plugin-only controller overwrote a native goal hold")
+	}
+	got, err := receipts.Load(testChat)
+	if err != nil || !reflect.DeepEqual(got.GoalHold, receipt.GoalHold) || len(desktop.updates) != 0 {
+		t.Fatalf("goal recovery handoff lost: %#v, %v", got.GoalHold, err)
+	}
+}
+
 type controllerPluginUpdate struct {
 	snapshot Snapshot
 	plugins  []string

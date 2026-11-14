@@ -332,6 +332,7 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 		})
 	}
 	defer func() {
+		b.harness.restoreGoalHolds()
 		cancel()
 		b.sessionsMu.Lock()
 		closing := make([]*cloudSession, 0, len(b.sessions))
