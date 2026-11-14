@@ -8,10 +8,32 @@ import (
 	"github.com/jacobcxdev/cq/internal/harness"
 )
 
+// Active reconciliation may inspect the goal without changing native state.
+// Keep all other calls in the fixture's method log so its no-reload checks hold.
+func cloudHarnessNullGoalReadFixture(t *testing.T, h *cloudHarness, id string) *int {
+	t.Helper()
+	reads := new(int)
+	base := h.b.local.input
+	h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+		request := cloudHarnessObject(raw)
+		if request.method() == "thread/goal/get" {
+			if cloudThreadID(request["params"]) != id {
+				t.Fatal("goal read targeted another chat")
+			}
+			*reads++
+			h.calls[string(request["id"])] <- cloudMessage{"result": cloudHarnessRaw(map[string]any{"goal": nil})}
+			return len(raw), nil
+		}
+		return base.Write(raw)
+	}}
+	return reads
+}
+
 func TestCloudHarnessExplicitRetryWaitedForIdleAndRanOnce(t *testing.T) {
 	for _, recovered := range []bool{true, false} {
 		t.Run(fmt.Sprint(recovered), func(t *testing.T) {
 			h, store, id, methods := cloudHarnessFailureFixture(t)
+			goalReads := cloudHarnessNullGoalReadFixture(t, h, id)
 			policy := harness.Policy{Version: 2, Enabled: true, Tasks: map[string]harness.Scope{id: {All: harness.Binding{Changes: harness.Changes{Default: harness.Disabled}}}}}
 			h.b.deps.readHarnessPolicy = func() (harness.Policy, error) { return policy, nil }
 			h.b.deps.readHarnessInventory = func(string) (harness.Inventory, error) { return harness.Inventory{}, nil }
@@ -66,7 +88,7 @@ func TestCloudHarnessExplicitRetryWaitedForIdleAndRanOnce(t *testing.T) {
 			if err := h.reconcile(id, "", ""); err != nil {
 				t.Fatalf("explicit retry did not defer: %v", err)
 			}
-			if len(*methods) != before {
+			if len(*methods) != before || *goalReads != 1 {
 				t.Fatal("active retry touched native subscriptions")
 			}
 			h.threads[id].active = false
@@ -111,6 +133,7 @@ func TestCloudHarnessFailedContextSwitchRetriedAttemptedContext(t *testing.T) {
 		for _, recovered := range []bool{true, false} {
 			t.Run(fmt.Sprintf("%s/recovered=%t", target.name, recovered), func(t *testing.T) {
 				h, store, id, methods := cloudHarnessFailureFixture(t)
+				goalReads := cloudHarnessNullGoalReadFixture(t, h, id)
 				policy := harness.Policy{Version: 2, Enabled: true, Global: harness.Scope{All: harness.Binding{Changes: harness.Changes{Default: harness.Enabled}}, Models: map[string]harness.Binding{"glm-5.3-flash": {Changes: harness.Changes{Default: harness.Disabled}}}}, Workspaces: map[string]harness.Scope{"/other": {All: harness.Binding{Changes: harness.Changes{Default: harness.Disabled}}}}}
 				h.b.deps.readHarnessPolicy = func() (harness.Policy, error) { return policy, nil }
 				h.b.deps.readHarnessInventory = func(string) (harness.Inventory, error) { return harness.Inventory{}, nil }
@@ -162,7 +185,7 @@ func TestCloudHarnessFailedContextSwitchRetriedAttemptedContext(t *testing.T) {
 					t.Fatal(err)
 				}
 				thread.active = true
-				if err := h.reconcile(id, "", ""); err != nil || len(*methods) != before || thread.model != originalModel || thread.cwd != originalCwd {
+				if err := h.reconcile(id, "", ""); err != nil || len(*methods) != before || *goalReads != 1 || thread.model != originalModel || thread.cwd != originalCwd {
 					t.Fatalf("active retry changed native context: %v", err)
 				}
 				pending, err := store.Load(id)
