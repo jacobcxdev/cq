@@ -249,6 +249,38 @@ func TestNativeParentReleaseRequiresStableMatchingDescendant(t *testing.T) {
 	}
 }
 
+func TestPublishedCompanionFixtureKeepsAssetAndTagChecks(t *testing.T) {
+	m := testManifest()
+	m.SchemaVersion = 2
+	mockNativeSourceGit(t, m.SourceCommit, m.SourceCommit)
+	t.Setenv("NATIVE_ANCESTRY_ERROR", "1")
+	fixture := func(change func(map[string]any)) string {
+		return releaseFixture(t, m, func(release map[string]any) {
+			release["prerelease"] = false
+			if change != nil {
+				change(release)
+			}
+		})
+	}
+	if err := verifyRelease(m, fixture(nil), false); err == nil {
+		t.Fatal("fixture bypass applied to release verification")
+	}
+	if err := verifyReleaseWithFixture(m, fixture(nil), false, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(map[string]any){
+		func(r map[string]any) { r["draft"] = true },
+		func(r map[string]any) { r["target_commitish"] = strings.Repeat("d", 40) },
+		func(r map[string]any) {
+			r["assets"].([]any)[0].(map[string]any)["digest"] = "sha256:" + strings.Repeat("d", 64)
+		},
+	} {
+		if err := verifyReleaseWithFixture(m, fixture(change), false, true); err == nil {
+			t.Fatal("changed published fixture accepted")
+		}
+	}
+}
+
 func TestNativeParentStagingDraftRequiresExactNativeSource(t *testing.T) {
 	m := testManifest()
 	m.SchemaVersion = 2

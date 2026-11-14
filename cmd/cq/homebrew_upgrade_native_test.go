@@ -1095,7 +1095,7 @@ end
 		releaser = filepath.Join(f.root, "legacy-src/.goreleaser.yml")
 	}
 	inputs := map[string]string{"CQ_FIXTURE_PREFIX": filepath.Join(f.root, "prefix"), "CQ_FIXTURE_CASKROOM": filepath.Join(f.root, "caskroom"), "CQ_FIXTURE_COMMANDS": filepath.Join(f.output, "native-commands.jsonl"), "CQ_FIXTURE_RELEASER": releaser, "CQ_FIXTURE_VERSION": version, "CQ_FIXTURE_PREVIOUS": previous, "CQ_FIXTURE_ACTION": action, "CQ_FIXTURE_BINARY": f.binaries[version]}
-	inputs["CQ_FIXTURE_NATIVE_PIN"] = reviewedHomebrewNativePin(f.t)
+	inputs["CQ_FIXTURE_NATIVE_PIN"] = fixtureHomebrewNativePin(f.t)
 	data, _ := json.Marshal(inputs)
 	if err := os.WriteFile(filepath.Join(f.root, "operation-input.json"), data, 0o600); err != nil {
 		f.t.Fatal(err)

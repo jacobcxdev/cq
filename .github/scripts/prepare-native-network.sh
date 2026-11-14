@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 2 || $# -gt 3 || "$(uname -s)" != Darwin || ( $# -eq 3 && "${3:-}" != --allow-draft ) ]]; then
-  echo "usage (macOS): prepare-native-network.sh MANIFEST OUTPUT_DIRECTORY [--allow-draft]" >&2
+if [[ $# -lt 2 || $# -gt 3 || "$(uname -s)" != Darwin || ( $# -eq 3 && "${3:-}" != --allow-draft && "${3:-}" != --published-fixture ) ]]; then
+  echo "usage (macOS): prepare-native-network.sh MANIFEST OUTPUT_DIRECTORY [--allow-draft|--published-fixture]" >&2
   exit 64
 fi
 manifest=$1
 output=$2
+published_fixture=${3:-}
 mkdir -p "$output"
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/cq-native-release.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT
@@ -19,19 +20,23 @@ version=$(jq -er .version "$temporary/info.json")
 source_commit=$(jq -er .source_commit "$temporary/info.json")
 minimum_macos=$(jq -er .minimum_macos "$temporary/info.json")
 schema_version=$(jq -er .schema_version "$temporary/info.json")
-# Go-only releases may reuse a native pin, but changed native sources may not.
+# Release assets must match the current native tree; CI fixtures test packaging only.
 git fetch --no-tags origin "$source_commit"
 [[ "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" == "$source_commit" ]]
 if ! git diff --quiet HEAD -- native/macos-network || [[ -n "$(git ls-files --others --exclude-standard -- native/macos-network)" ]]; then
   echo "native sources have uncommitted changes; commit and sign a new companion before release" >&2
   exit 1
 fi
-if [[ "$(git rev-parse --verify "$source_commit:native/macos-network")" != "$(git rev-parse --verify HEAD:native/macos-network)" ]]; then
+if [[ "$published_fixture" != --published-fixture && "$(git rev-parse --verify "$source_commit:native/macos-network")" != "$(git rev-parse --verify HEAD:native/macos-network)" ]]; then
   echo "native sources differ from the pinned companion; sign and pin a new native release" >&2
   exit 1
 fi
 if [[ "${schema_version:-1}" == 2 ]]; then
-  "$temporary/nativepackage" verify-source "$manifest" "$(git rev-parse --verify 'HEAD^{commit}')"
+  if [[ "$published_fixture" == --published-fixture ]]; then
+    git merge-base --is-ancestor "$source_commit" HEAD
+  else
+    "$temporary/nativepackage" verify-source "$manifest" "$(git rev-parse --verify 'HEAD^{commit}')"
+  fi
 fi
 release_api=$(gh release view "$tag" --repo jacobcxdev/cq --json apiUrl --jq .apiUrl) || {
   # Only a confirmed absent parent release may use its fixed staging draft.
@@ -55,8 +60,10 @@ if [[ ! "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases
 fi
 gh api "${release_api#https://api.github.com/}" >"$temporary/release.json"
 gh api "repos/jacobcxdev/cq/releases/assets/$asset_id" --header 'Accept: application/octet-stream' >"$temporary/$asset"
-if [[ $# -eq 3 ]]; then
+if [[ "${3:-}" == --allow-draft ]]; then
   "$temporary/nativepackage" verify "$manifest" "$temporary/$asset" "$temporary/release.json" --allow-draft
+elif [[ "$published_fixture" == --published-fixture ]]; then
+  "$temporary/nativepackage" verify "$manifest" "$temporary/$asset" "$temporary/release.json" --published-fixture
 else
   "$temporary/nativepackage" verify "$manifest" "$temporary/$asset" "$temporary/release.json"
 fi

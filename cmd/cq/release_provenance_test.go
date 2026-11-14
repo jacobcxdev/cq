@@ -67,8 +67,10 @@ func TestReleaseBindsReviewedNativeCompanionToCask(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(workflow), `CQ_NATIVE_NETWORK_PIN=$(jq -c . .github/native-network-release.json)`) {
-			t.Fatalf("%s workflow does not derive the companion pin from the reviewed manifest", name)
+		if !strings.Contains(string(workflow), `CQ_NATIVE_NETWORK_PIN=$(jq -c . `) ||
+			!strings.Contains(string(workflow), `resolve-native-network.sh`) ||
+			strings.Contains(string(workflow), `.github/native-network-release.json`) {
+			t.Fatalf("%s workflow does not derive the companion pin from the release asset", name)
 		}
 		if !strings.Contains(string(workflow), "TestHomebrewCompanionReconciliation") {
 			t.Fatalf("%s workflow does not run the companion upgrade regression", name)
@@ -364,7 +366,7 @@ func TestNativeCompanionPinRejectsChangedSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, gate, ok := strings.Cut(string(script), "# Go-only releases may reuse a native pin, but changed native sources may not.\n")
+	_, gate, ok := strings.Cut(string(script), "# Release assets must match the current native tree; CI fixtures test packaging only.\n")
 	if !ok {
 		t.Fatal("native release has no source-tree gate")
 	}
@@ -401,7 +403,7 @@ esac
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			command := exec.Command("bash", "-c", "set -euo pipefail\n"+gate)
-			command.Env = append(os.Environ(), "PATH="+directory+string(os.PathListSeparator)+os.Getenv("PATH"), "source_commit="+strings.Repeat("a", 40))
+			command.Env = append(os.Environ(), "PATH="+directory+string(os.PathListSeparator)+os.Getenv("PATH"), "source_commit="+strings.Repeat("a", 40), "published_fixture=")
 			command.Env = append(command.Env, tc.env...)
 			output, err := command.CombinedOutput()
 			if (err != nil) != tc.fail {
