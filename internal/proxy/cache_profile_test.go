@@ -29,7 +29,7 @@ func TestCacheProfilerWebSocketWorksWithoutPayloadDiagnostics(t *testing.T) {
 	defer p.Close()
 	headers := make(http.Header)
 	headers.Set("Session_id", "private-websocket-session")
-	for index, request := range []string{`{"type":"response.create","model":"gpt-6","input":[{"role":"user","content":"test"}]}`, `{"type":"response.create","model":"gpt-6","previous_response_id":"private-response","input":[]}`} {
+	for index, request := range []string{`{"type":"response.create","model":"gpt-6","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"01234567-89ab-cdef-0123-456789abcdef","turn_id":"turn","request_kind":"turn"}},"input":[{"role":"user","content":"test"}]}`, `{"type":"response.create","model":"gpt-6","client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"01234567-89ab-cdef-0123-456789abcdef","turn_id":"turn","request_kind":"turn"}},"previous_response_id":"private-response","input":[]}`} {
 		ctx := withCacheProfile(context.Background(), p, headers)
 		ctx = withCodexTrace(ctx, nil, nil, CodexTraceStart{Transport: "websocket"})
 		emitCodexRawTracePayload(ctx, PayloadEvent{Direction: "downstream_request", Complete: true}, []byte(request))
@@ -52,6 +52,9 @@ func TestCacheProfilerWebSocketWorksWithoutPayloadDiagnostics(t *testing.T) {
 	if events[1].ModelHash == "" || events[0].ModelHash != events[1].ModelHash || events[1].PartitionHash == "" || events[0].PartitionHash != events[1].PartitionHash || events[1].Reason != "unknown_prefix" || !events[1].CachedTokensDecreased {
 		t.Fatalf("opaque WebSocket identity/drop lost: %+v", events[1])
 	}
+	if events[0].ChatHash != "88817f3ff2c51fb552153cdd803947d13a9f1d079f798aed008939a7302a0056" || events[1].ChatHash != events[0].ChatHash {
+		t.Fatalf("native chat attribution lost: %q, %q", events[0].ChatHash, events[1].ChatHash)
+	}
 }
 
 func TestCacheProfilerHTTPPreservesWireAndRecordsUsage(t *testing.T) {
@@ -61,7 +64,7 @@ func TestCacheProfilerHTTPPreservesWireAndRecordsUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer profiler.Close()
-	requestBody := `{"model":"private-model-value","instructions":"private-system-value","input":[{"role":"user","content":"private-user-value"}]}`
+	requestBody := `{"model":"private-model-value","instructions":"private-system-value","client_metadata":{"x-codex-turn-metadata":{"session_id":"private-session-value","thread_id":"01234567-89ab-cdef-0123-456789abcdef","turn_id":"turn","request_kind":"turn"}},"input":[{"role":"user","content":"private-user-value"}]}`
 	responseBody := `{"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":70},"output_tokens":5}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -95,6 +98,9 @@ func TestCacheProfilerHTTPPreservesWireAndRecordsUsage(t *testing.T) {
 	if events[0].Reason != "cold_start" || events[1].Reason != "stable_prefix" {
 		t.Fatalf("reasons=%q,%q", events[0].Reason, events[1].Reason)
 	}
+	if events[0].ChatHash != "88817f3ff2c51fb552153cdd803947d13a9f1d079f798aed008939a7302a0056" || events[1].ChatHash != events[0].ChatHash {
+		t.Fatalf("HTTP native chat attribution = %q, %q", events[0].ChatHash, events[1].ChatHash)
+	}
 	if !events[1].Usage.Known || events[1].Usage.InputTokens != 100 || events[1].Usage.CachedInputTokens != 70 || events[1].Usage.OutputTokens != 5 {
 		t.Fatalf("usage=%+v", events[1].Usage)
 	}
@@ -102,7 +108,7 @@ func TestCacheProfilerHTTPPreservesWireAndRecordsUsage(t *testing.T) {
 		t.Fatalf("comparison=%+v", events[1].Comparison)
 	}
 	data, _ := os.ReadFile(path)
-	for _, secret := range []string{"private-model-value", "private-system-value", "private-user-value", "private-session-value", "private-credential-value", server.URL} {
+	for _, secret := range []string{"private-model-value", "private-system-value", "private-user-value", "private-session-value", "01234567-89ab-cdef-0123-456789abcdef", "private-credential-value", server.URL} {
 		if bytes.Contains(data, []byte(secret)) {
 			t.Fatal("private value reached cache log")
 		}
@@ -405,7 +411,7 @@ func TestCacheProfilerZCodeGatewayKeepsNativeChatCorrelation(t *testing.T) {
 	})}
 	server := &Server{ZAIGateway: &zcode.Gateway{HTTP: p.WrapClient(upstream), Version: zcode.ClientVersion}}
 	accounts := []zaiprov.Account{{ID: "private-account", Transport: "zcode-start", OAuth: &zcode.LoginSession{ZCodeJWT: "private-start-token"}}}
-	native := []byte(`{"model":"glm-5.3","instructions":"stable instructions","client_metadata":{"x-codex-turn-metadata":{"session_id":"native-session","thread_id":"native-thread","turn_id":"native-turn","request_kind":"turn"}},"input":"test"}`)
+	native := []byte(`{"model":"glm-5.3","instructions":"stable instructions","client_metadata":{"x-codex-turn-metadata":{"session_id":"native-session","thread_id":"01234567-89ab-cdef-0123-456789abcdef","turn_id":"native-turn","request_kind":"turn"}},"input":"test"}`)
 	headers := make(http.Header)
 	headers.Set("X-Codex-Window-Id", "private-window")
 	for range 2 {
@@ -421,8 +427,11 @@ func TestCacheProfilerZCodeGatewayKeepsNativeChatCorrelation(t *testing.T) {
 		}
 	}
 	events := readCacheProfileTestEvents(t, path)
-	if len(events) != 2 || events[0].SessionHash == "" || events[0].SessionHash != events[1].SessionHash || events[1].Reason != "stable_prefix" || events[1].Route != "zcode-start" {
+	if len(events) != 2 || events[0].SessionHash == "" || events[0].SessionHash != events[1].SessionHash || events[1].Reason != "stable_prefix" || events[1].Route != "zcode-start" || events[0].ChatHash != "88817f3ff2c51fb552153cdd803947d13a9f1d079f798aed008939a7302a0056" || events[1].ChatHash != events[0].ChatHash {
 		t.Fatalf("events=%+v", events)
+	}
+	if data, err := os.ReadFile(path); err != nil || bytes.Contains(data, []byte("01234567-89ab-cdef-0123-456789abcdef")) {
+		t.Fatalf("raw native chat identifier reached profile log: %v", err)
 	}
 	if len(gatewaySessions) != 2 || gatewaySessions[0] == gatewaySessions[1] {
 		t.Fatalf("provider session behaviour changed: %q", gatewaySessions)

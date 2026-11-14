@@ -415,11 +415,13 @@ Invalidate reusable Codex account leases across all sessions.
 Active requests and required continuity remain unchanged. Each next eligible
 request re-runs account selection using current pool membership and capacity.
 `,
-	"proxy cache": `Usage: cq proxy cache [--since DURATION] [--session HASH] [--log PATH] [--events] [--json]
+	"proxy cache": `Usage: cq proxy cache [--since DURATION] [--session HASH] [--chat UUID] [--log PATH] [--events] [--json]
 
 Read default private cache profiles without contacting providers or changing the proxy.
-Default period is 24h. --session selects a reported session hash; --log reads an
-isolated profile log. --events emits typed JSONL records instead of a summary.
+Default period is 24h. --session selects a reported session hash; --chat selects
+one native chat UUID. --log reads an isolated profile log. --events emits typed
+JSONL records instead of a summary. Older or unattributed records do not match
+--chat.
 Reports distinguish provider-reported cached tokens from structural prefix reuse
 in bytes. Unknown usage remains unknown. Prefix changes and cached-token decreases
 are flagged for review; new input, curation, compaction, routing and provider cache

@@ -26,6 +26,7 @@ type CacheProfileEvent struct {
 	Route                 string                   `json:"route"`
 	OriginHash            string                   `json:"origin_hash,omitempty"`
 	SessionHash           string                   `json:"session_hash,omitempty"`
+	ChatHash              string                   `json:"chat_hash,omitempty"`
 	AccountHash           string                   `json:"account_hash,omitempty"`
 	AccountSource         string                   `json:"account_source"`
 	ModelHash             string                   `json:"model_hash,omitempty"`
@@ -138,17 +139,49 @@ func cacheProfileSession(headers http.Header) string {
 
 type cacheProfileSessionContextKey struct{}
 
-func cacheProfileRequestSession(headers http.Header, body []byte) string {
+type cacheProfileRequestIdentity struct {
+	session  string
+	chatHash string
+}
+
+// CacheProfileChatHash identifies a native chat across proxy restarts without
+// recording its raw ID. Restricting lookups to UUIDs excludes short,
+// easily guessed thread names from this user-computable digest.
+func CacheProfileChatHash(threadID string) string {
+	if len(threadID) != 36 {
+		return ""
+	}
+	for index, char := range threadID {
+		if index == 8 || index == 13 || index == 18 || index == 23 {
+			if char != '-' {
+				return ""
+			}
+		} else if char < '0' || char > '9' && (char < 'a' || char > 'f') && (char < 'A' || char > 'F') {
+			return ""
+		}
+	}
+	sum := sha256.Sum256([]byte("cq-cache-chat\x00" + strings.ToLower(threadID)))
+	return hex.EncodeToString(sum[:])
+}
+
+func cacheProfileIdentity(headers http.Header, body []byte) cacheProfileRequestIdentity {
 	metadata, err := parseCodexTurnMetadataWithNestedLimit(body, headers.Get(codexTurnMetadataKey), nil, cacheProfileRequestLimit)
 	if err == nil && metadata.Found && metadata.Metadata.ThreadID != "" {
-		return "native_thread:" + metadata.Metadata.SessionID + ":" + metadata.Metadata.ThreadID
+		return cacheProfileRequestIdentity{
+			session:  "native_thread:" + metadata.Metadata.SessionID + ":" + metadata.Metadata.ThreadID,
+			chatHash: CacheProfileChatHash(metadata.Metadata.ThreadID),
+		}
 	}
-	return cacheProfileSession(headers)
+	return cacheProfileRequestIdentity{session: cacheProfileSession(headers)}
+}
+
+func cacheProfileRequestSession(headers http.Header, body []byte) string {
+	return cacheProfileIdentity(headers, body).session
 }
 
 func withCacheProfileRequestSession(ctx context.Context, headers http.Header, body []byte) context.Context {
-	if session := cacheProfileRequestSession(headers, body); session != "" {
-		return context.WithValue(ctx, cacheProfileSessionContextKey{}, session)
+	if identity := cacheProfileIdentity(headers, body); identity.session != "" {
+		return context.WithValue(ctx, cacheProfileSessionContextKey{}, identity)
 	}
 	return ctx
 }
@@ -209,8 +242,10 @@ func (t *cacheProfileTransport) RoundTrip(r *http.Request) (*http.Response, erro
 	event := CacheProfileEvent{SchemaVersion: 1, Time: time.Now().UTC(), EventType: "cache_profile", Protocol: protocol, Route: route, Reason: "request_unavailable"}
 	event.OriginHash = p.hash("origin", r.URL.Scheme+"://"+r.URL.Host)
 	event.SessionHash = p.hash("session", cacheProfileSession(r.Header))
-	if session, _ := r.Context().Value(cacheProfileSessionContextKey{}).(string); session != "" {
-		event.SessionHash = p.hash("session", session)
+	identity, _ := r.Context().Value(cacheProfileSessionContextKey{}).(cacheProfileRequestIdentity)
+	if identity.session != "" {
+		event.SessionHash = p.hash("session", identity.session)
+		event.ChatHash = identity.chatHash
 	}
 	event.AccountHash, event.AccountSource = p.account(r.Context(), r.Header)
 	if r.GetBody != nil {
@@ -231,8 +266,10 @@ func (t *cacheProfileTransport) RoundTrip(r *http.Request) (*http.Response, erro
 				if protocol == cacheprofile.Gemini {
 					body = cacheProfileGeminiModelCopy(r, body)
 				}
-				if session, _ := r.Context().Value(cacheProfileSessionContextKey{}).(string); session == "" {
-					event.SessionHash = p.hash("session", cacheProfileRequestSession(r.Header, body))
+				if identity.session == "" {
+					identity = cacheProfileIdentity(r.Header, body)
+					event.SessionHash = p.hash("session", identity.session)
+					event.ChatHash = identity.chatHash
 				}
 				snapshot, captureErr := p.engine.Capture(protocol, body)
 				event.Snapshot = snapshot

@@ -86,6 +86,62 @@ func TestProxyCacheFiltersRotatedRecordsAndKeepsUnknown(t *testing.T) {
 	}
 }
 
+func TestProxyCacheFiltersExactChatWithoutAssigningUnknownRecords(t *testing.T) {
+	const chat = "01234567-89ab-cdef-0123-456789abcdef"
+	const hash = "88817f3ff2c51fb552153cdd803947d13a9f1d079f798aed008939a7302a0056"
+	path := filepath.Join(t.TempDir(), "cache.jsonl")
+	now := time.Now().UTC()
+	var data bytes.Buffer
+	for _, event := range []proxy.CacheProfileEvent{
+		{SchemaVersion: 1, EventType: "cache_profile", Time: now, SessionHash: "shared-session", ChatHash: hash},
+		{SchemaVersion: 1, EventType: "cache_profile", Time: now, SessionHash: "shared-session", ChatHash: "198748b6c11ef01acc09480dd4e2589e11f9a02473d2034aeb65b162cc14d14a"},
+		{SchemaVersion: 1, EventType: "cache_profile", Time: now, SessionHash: "shared-session"},
+	} {
+		if err := json.NewEncoder(&data).Encode(event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(path, data.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts, err := parseProxyCacheOptions([]string{"--chat", chat, "--events", "--json"})
+	if err != nil || opts.chatHash != hash {
+		t.Fatalf("chat filter = %+v, %v", opts, err)
+	}
+	opts.path = path
+	var output bytes.Buffer
+	if err := writeProxyCacheReport(&output, opts, now); err != nil {
+		t.Fatal(err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(output.Bytes()), []byte{'\n'})
+	if len(lines) != 1 || !bytes.Contains(lines[0], []byte(hash)) || bytes.Contains(lines[0], []byte(chat)) {
+		t.Fatalf("exact chat events = %s", output.String())
+	}
+	opts.events = false
+	output.Reset()
+	if err := writeProxyCacheReport(&output, opts, now); err != nil {
+		t.Fatal(err)
+	}
+	var report cacheProfileReport
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.ChatHash != hash || report.Requests != 1 || report.UnattributedRequests != 1 || len(report.Groups) != 1 {
+		t.Fatalf("exact chat report = %+v", report)
+	}
+	if bytes.Contains(output.Bytes(), []byte(chat)) {
+		t.Fatal("raw chat identifier reached cache report")
+	}
+	for _, invalid := range []string{"private-thread-id", "01234567-89ab-cdef-0123-456789abcde", strings.Replace(chat, "a", "g", 1), "-" + chat[:8] + chat[9:], strings.Repeat("a", 4096)} {
+		if _, err := parseProxyCacheOptions([]string{"--chat", invalid}); err == nil {
+			t.Fatalf("accepted invalid chat %q", invalid)
+		}
+	}
+	if upper, err := parseProxyCacheOptions([]string{"--chat", strings.ToUpper(chat)}); err != nil || upper.chatHash != hash {
+		t.Fatalf("uppercase chat filter = %+v, %v", upper, err)
+	}
+}
+
 func TestProxyCacheRejectsInvalidUsageAndCompleteMalformedRecords(t *testing.T) {
 	for _, line := range []string{
 		`{"schema_version":1,"event_type":"cache_profile","time":"2026-11-08T12:00:00Z","usage":{"known":true,"input_tokens":1,"cached_input_tokens":2}}` + "\n",
