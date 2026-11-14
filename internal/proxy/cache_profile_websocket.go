@@ -94,11 +94,11 @@ func beginCacheProfileWebSocket(ctx context.Context, raw []byte, accountHint str
 		return
 	}
 	p := profile.profiler
-	session := cacheProfileRequestSession(nil, raw)
-	if session == "" {
-		session = profile.session
+	identity := cacheProfileIdentity(nil, raw)
+	if identity.session == "" {
+		identity.session = profile.session
 	}
-	event := CacheProfileEvent{SchemaVersion: 1, EventType: "cache_profile", Time: time.Now().UTC(), Protocol: cacheprofile.Responses, Route: "codex_websocket", Reason: "request_unavailable", AccountSource: "missing", SessionHash: p.hash("session", session)}
+	event := CacheProfileEvent{SchemaVersion: 1, EventType: "cache_profile", Time: time.Now().UTC(), Protocol: cacheprofile.Responses, Route: "codex_websocket", Reason: "request_unavailable", AccountSource: "missing", SessionHash: p.hash("session", identity.session), ChatHash: identity.chatHash}
 	if accountHint != "" {
 		event.AccountHash = p.hash("account", accountHint)
 		event.AccountSource = "route_account"

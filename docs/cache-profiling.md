@@ -7,6 +7,7 @@ cq proxy cache --since 1h
 cq proxy cache --since 24h --json
 cq proxy cache --events --json
 cq proxy cache --session REPORTED_SESSION_HASH --events --json
+cq proxy cache --chat NATIVE_CHAT_UUID --events --json
 ```
 
 These commands read existing files. They do not contact a provider, warm a cache,
@@ -32,7 +33,16 @@ Keys change with the proxy process, so a restart starts a new observation period
 `cold_start` means no earlier comparison observation exists; it does not assert
 that the provider missed its cache.
 
-Profiles contain no prompt text, tool names, credentials or raw account/session
+Native Codex requests with a UUID-formatted chat ID also record a separate
+`chat_hash`: a domain-separated SHA-256 digest of that UUID. `--chat` computes
+the same digest locally and selects only matching events, even when the
+per-process session hash changes. Records without a native chat UUID, including
+older records, remain unattributed and are excluded from the filter. The JSON
+summary reports their count as `unattributed_requests`; it never assigns them
+to a chat by time, route or account. A stable chat hash links observations but
+does not make provider cache state continuous across a proxy restart.
+
+Profiles contain no prompt text, tool names, credentials or raw account/session/chat
 identifiers. They live in the platform log root under
 `cache-profiles/requests.jsonl`, with an 8 MiB target and two rotated files.
 The in-memory comparison history is bounded. Set

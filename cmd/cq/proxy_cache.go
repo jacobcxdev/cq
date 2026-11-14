@@ -34,11 +34,12 @@ func openDefaultCacheProfiler(cfg *proxy.Config, roots userdirs.Roots) (*proxy.C
 }
 
 type proxyCacheOptions struct {
-	since   time.Duration
-	session string
-	path    string
-	json    bool
-	events  bool
+	since    time.Duration
+	session  string
+	chatHash string
+	path     string
+	json     bool
+	events   bool
 }
 
 type cacheProfileTotals struct {
@@ -66,9 +67,11 @@ type cacheProfileGroup struct {
 }
 
 type cacheProfileReport struct {
-	SchemaVersion int       `json:"schema_version"`
-	Log           string    `json:"log"`
-	Since         time.Time `json:"since"`
+	SchemaVersion        int       `json:"schema_version"`
+	Log                  string    `json:"log"`
+	Since                time.Time `json:"since"`
+	ChatHash             string    `json:"chat_hash,omitempty"`
+	UnattributedRequests int       `json:"unattributed_requests,omitempty"`
 	cacheProfileTotals
 	Groups []cacheProfileGroup `json:"groups"`
 }
@@ -87,7 +90,7 @@ func parseProxyCacheOptions(args []string) (proxyCacheOptions, error) {
 			opts.json = true
 		case "--events":
 			opts.events = true
-		case "--since", "--session", "--log":
+		case "--since", "--session", "--chat", "--log":
 			if i+1 >= len(args) {
 				return opts, fmt.Errorf("proxy cache: %s requires a value", arg)
 			}
@@ -105,6 +108,11 @@ func parseProxyCacheOptions(args []string) (proxyCacheOptions, error) {
 					return opts, errors.New("proxy cache: --session requires a reported 64-character session hash")
 				}
 				opts.session = args[i]
+			case "--chat":
+				opts.chatHash = proxy.CacheProfileChatHash(args[i])
+				if opts.chatHash == "" {
+					return opts, errors.New("proxy cache: --chat requires a native chat UUID")
+				}
 			case "--log":
 				if !filepath.IsAbs(args[i]) || filepath.Clean(args[i]) != args[i] {
 					return opts, errors.New("proxy cache: --log requires a clean absolute path")
@@ -137,7 +145,7 @@ func writeProxyCacheReport(output io.Writer, opts proxyCacheOptions, now time.Ti
 	if output == nil {
 		return errors.New("proxy cache: output unavailable")
 	}
-	report := cacheProfileReport{SchemaVersion: 1, Log: opts.path, Since: now.Add(-opts.since), Groups: []cacheProfileGroup{}}
+	report := cacheProfileReport{SchemaVersion: 1, Log: opts.path, Since: now.Add(-opts.since), ChatHash: opts.chatHash, Groups: []cacheProfileGroup{}}
 	groups := make(map[string]*cacheProfileGroup)
 	for _, path := range proxy.DiagnosticsLogPaths(opts.path) {
 		file, err := os.Open(path)
@@ -150,6 +158,15 @@ func writeProxyCacheReport(output io.Writer, opts proxyCacheOptions, now time.Ti
 		err = readCacheProfileEvents(file, func(event proxy.CacheProfileEvent) error {
 			if event.Time.Before(report.Since) || opts.session != "" && event.SessionHash != opts.session {
 				return nil
+			}
+			if opts.chatHash != "" {
+				if event.ChatHash == "" {
+					report.UnattributedRequests++
+					return nil
+				}
+				if event.ChatHash != opts.chatHash {
+					return nil
+				}
 			}
 			if opts.events {
 				return json.NewEncoder(output).Encode(event)
@@ -189,6 +206,10 @@ func writeProxyCacheReport(output io.Writer, opts proxyCacheOptions, now time.Ti
 		return json.NewEncoder(output).Encode(report)
 	}
 	if report.Requests == 0 {
+		if opts.chatHash != "" {
+			_, err := fmt.Fprintf(output, "No cache profiles attributed to this chat in selected period; %d records lacked native chat attribution. Log: %s\n", report.UnattributedRequests, opts.path)
+			return err
+		}
 		_, err := fmt.Fprintf(output, "No cache profiles recorded in selected period. Log: %s\n", opts.path)
 		return err
 	}
@@ -198,6 +219,11 @@ func writeProxyCacheReport(output io.Writer, opts proxyCacheOptions, now time.Ti
 	}
 	if report.HitRate != nil {
 		if _, err := fmt.Fprintf(output, "Provider-reported cache hit rate (complete counters): %.2f%% (%d/%d)\n", *report.HitRate*100, report.CacheMeasuredCachedInputTokens, report.CacheMeasuredInputTokens); err != nil {
+			return err
+		}
+	}
+	if opts.chatHash != "" {
+		if _, err := fmt.Fprintf(output, "Unattributed records excluded: %d\n", report.UnattributedRequests); err != nil {
 			return err
 		}
 	}
