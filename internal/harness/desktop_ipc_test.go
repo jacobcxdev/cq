@@ -132,7 +132,28 @@ func desktopHandshakeTest(t *testing.T, conn net.Conn, owner string) {
 
 func desktopSnapshotTest(t *testing.T, conn net.Conn, owner string, settings map[string]any) {
 	t.Helper()
-	desktopWriteTest(t, conn, map[string]any{"type": "broadcast", "method": "thread-stream-state-changed", "sourceClientId": owner, "version": 11, "params": map[string]any{"hostId": "local", "conversationId": desktopTestChat, "change": map[string]any{"type": "snapshot", "conversationState": map[string]any{"id": desktopTestChat, "modelProvider": "openai", "latestThreadSettings": settings, "turns": []any{map[string]any{"turnId": "active-turn", "status": "inProgress", "items": []any{map[string]any{"text": "must never be retained"}}}}}}}})
+	desktopSnapshotVersionTest(t, conn, owner, settings, 11)
+}
+
+func desktopSnapshotVersionTest(t *testing.T, conn net.Conn, owner string, settings map[string]any, version int) {
+	t.Helper()
+	desktopWriteTest(t, conn, map[string]any{"type": "broadcast", "method": "thread-stream-state-changed", "sourceClientId": owner, "version": version, "params": map[string]any{"hostId": "local", "conversationId": desktopTestChat, "change": map[string]any{"type": "snapshot", "conversationState": map[string]any{"id": desktopTestChat, "modelProvider": "openai", "latestThreadSettings": settings, "turns": []any{map[string]any{"turnId": "active-turn", "status": "inProgress", "items": []any{map[string]any{"text": "must never be retained"}}}}}}}})
+}
+
+func TestDesktopIPCInspectCurrentSnapshotVersion(t *testing.T) {
+	client := desktopTestServer(t, func(conn net.Conn) {
+		desktopHandshakeTest(t, conn, desktopTestOwner)
+		_ = desktopReadTest(t, conn)
+		desktopSnapshotVersionTest(t, conn, desktopTestOwner, map[string]any{"model": "gpt-6-sol", "cwd": "/project", "disabledPluginIds": []string{}, "effort": "medium"}, 13)
+		_ = desktopReadTest(t, conn)
+	})
+	snapshot, err := client.Inspect(context.Background(), desktopTestChat)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Model != "gpt-6-sol" || snapshot.Cwd != "/project" || !snapshot.PluginBaselineKnown || !snapshot.ReasoningEffortKnown || !snapshot.Active {
+		t.Fatalf("version 13 snapshot fields missing: %+v", snapshot)
+	}
 }
 
 func TestDesktopIPCInspectCapturedBaselineAndUnfollowed(t *testing.T) {
@@ -342,7 +363,7 @@ func TestDesktopIPCUpdateRefusedUnknownBaselineBeforeDial(t *testing.T) {
 }
 
 func TestDesktopIPCInspectRejectedBadSnapshotAndUnfollowed(t *testing.T) {
-	for _, scenario := range []string{"invalid-plugins", "invalid-effort", "null-baseline", "wrong-version"} {
+	for _, scenario := range []string{"invalid-plugins", "invalid-effort", "null-baseline", "wrong-version", "future-version"} {
 		t.Run(scenario, func(t *testing.T) {
 			client := desktopTestServer(t, func(conn net.Conn) {
 				desktopHandshakeTest(t, conn, desktopTestOwner)
@@ -357,8 +378,10 @@ func TestDesktopIPCInspectRejectedBadSnapshotAndUnfollowed(t *testing.T) {
 					settings["disabledPluginIds"] = nil
 				case "wrong-version":
 					desktopWriteTest(t, conn, map[string]any{"type": "broadcast", "method": "thread-stream-state-changed", "sourceClientId": desktopTestOwner, "version": 10, "params": map[string]any{"conversationId": desktopTestChat, "hostId": "local"}})
+				case "future-version":
+					desktopSnapshotVersionTest(t, conn, desktopTestOwner, settings, 14)
 				}
-				if scenario != "wrong-version" {
+				if scenario != "wrong-version" && scenario != "future-version" {
 					desktopSnapshotTest(t, conn, desktopTestOwner, settings)
 				}
 				unfollow := desktopReadTest(t, conn)

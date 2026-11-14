@@ -104,8 +104,8 @@ func (client DesktopIPC) Inspect(ctx context.Context, chatID string) (Snapshot, 
 		if message.Type != "broadcast" || message.Method != "thread-stream-state-changed" || message.SourceClientID != session.ownerID || message.Params.ConversationID != chatID || message.Params.HostID != "local" {
 			continue
 		}
-		if message.Version != 11 {
-			return Snapshot{}, fmt.Errorf("unsupported desktop snapshot version")
+		if message.Version != 11 && message.Version != 13 {
+			return Snapshot{}, fmt.Errorf("unsupported desktop snapshot version %d", message.Version)
 		}
 		if message.Params.Change.Type != "snapshot" {
 			continue
