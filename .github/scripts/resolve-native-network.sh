@@ -39,7 +39,13 @@ verified_tag_commit() {
   printf '%s\n' "$commit"
 }
 
-gh api "repos/jacobcxdev/cq/releases/tags/$release_tag" >"$temporary/release.json"
+# Draft releases are discoverable by the CLI but not the REST tag endpoint.
+release_api=$(gh release view "$release_tag" --repo jacobcxdev/cq --json apiUrl --jq .apiUrl)
+if [[ ! "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]]; then
+  echo 'native release API identity differs' >&2
+  exit 1
+fi
+gh api "${release_api#https://api.github.com/}" >"$temporary/release.json"
 if ! jq -e --arg tag "$tag" --arg release_tag "$release_tag" --arg asset "$asset" '
   .tag_name == $release_tag and .name == $tag and .prerelease == false and
   (.draft | type == "boolean") and
