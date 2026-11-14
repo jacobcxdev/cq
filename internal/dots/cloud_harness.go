@@ -35,6 +35,7 @@ type cloudHarnessGatewayTransport interface {
 type cloudHarness struct {
 	b        *cloudBridge
 	op       sync.Mutex
+	receipts sync.Mutex
 	mu       sync.Mutex
 	threads  map[string]*cloudHarnessThread
 	requests map[string]cloudHarnessRequest
@@ -87,6 +88,13 @@ type cloudHarnessThread struct {
 	appliedPlugins       []string
 	runtimeIssues        []string
 	runtimeConfig        cloudMessage
+	goalHold             *harness.GoalHold
+	goalHoldLoaded       bool
+	goalHoldAttempt      string
+	goalCreatedAt        int64
+	goalHoldExternal     bool
+	goalMutationPending  bool
+	goalYieldResult      *bool
 }
 
 type cloudHarnessRequest struct {
@@ -158,6 +166,41 @@ func (h *cloudHarness) signal() {
 	}
 }
 
+func (h *cloudHarness) goalYieldFinished(id string, success bool) error {
+	h.mu.Lock()
+	if thread := h.threads[id]; thread != nil {
+		thread.goalYieldResult = &success
+	}
+	h.mu.Unlock()
+	return h.retryGoalYield(id)
+}
+
+func (h *cloudHarness) retryGoalYield(id string) error {
+	h.mu.Lock()
+	thread := h.threads[id]
+	var result *bool
+	if thread != nil {
+		result = thread.goalYieldResult
+	}
+	h.mu.Unlock()
+	if result == nil {
+		return nil
+	}
+	if err := h.completeGoalYield(id, *result); err != nil {
+		return err
+	}
+	h.mu.Lock()
+	if thread.goalYieldResult == result {
+		thread.goalYieldResult = nil
+		thread.goalMutationPending = false
+		if thread.pendingSettings > 0 {
+			thread.pendingSettings--
+		}
+	}
+	h.mu.Unlock()
+	return nil
+}
+
 func (h *cloudHarness) close() {
 	if h == nil {
 		return
@@ -173,6 +216,29 @@ func (h *cloudHarness) close() {
 	h.mu.Unlock()
 	for _, lease := range leases {
 		_ = lease.Close()
+	}
+}
+
+// Restore while the native reader is still available. Abrupt exits leave the
+// durable receipt for the next controller holding this chat's lease.
+func (h *cloudHarness) restoreGoalHolds() {
+	if h == nil {
+		return
+	}
+	h.op.Lock()
+	defer h.op.Unlock()
+	h.mu.Lock()
+	var ids []string
+	for id, thread := range h.threads {
+		if thread.goalHold != nil {
+			ids = append(ids, id)
+		}
+	}
+	h.mu.Unlock()
+	for _, id := range ids {
+		if err := h.finishGoalHold(id, true); err != nil {
+			h.b.event(map[string]any{"event": "harness_goal_restore_failed", "reason": "shutdown"})
+		}
 	}
 }
 
@@ -230,6 +296,8 @@ func (h *cloudHarness) acquire(id string) error {
 		return nil
 	}
 	thread.lease = lease
+	thread.goalHold = receipt.GoalHold
+	thread.goalHoldLoaded = true
 	recoverable := receipt.State == "applied" || receipt.State == "partial" || receipt.State == "prepared" || receipt.State == "pending"
 	// Full-mode plugin choices survive the broker. Even a failed assembly can
 	// have applied exclusions before its cold resume failed.
@@ -252,6 +320,8 @@ func (h *cloudHarness) acquire(id string) error {
 }
 
 func (h *cloudHarness) record(id string, selection harness.Selection, state string) error {
+	h.receipts.Lock()
+	defer h.receipts.Unlock()
 	h.mu.Lock()
 	thread := h.threads[id]
 	if thread == nil {
@@ -281,6 +351,15 @@ func (h *cloudHarness) record(id string, selection harness.Selection, state stri
 	}
 	var unsupported []string
 	issues := slices.Clone(thread.runtimeIssues)
+	var goalHold *harness.GoalHold
+	if thread.goalHold != nil {
+		copy := *thread.goalHold
+		goalHold = &copy
+		if state == "applied" {
+			issues = append(issues, "native_goal_resume_pending")
+			state = "partial"
+		}
+	}
 	var pendingPlugins []string
 	recordedPlan := thread.profilePlan
 	if thread.pendingProfile != nil {
@@ -298,7 +377,7 @@ func (h *cloudHarness) record(id string, selection harness.Selection, state stri
 	}
 	h.mu.Unlock()
 	if store := h.b.deps.harnessReceipts; store != nil {
-		receipt := harness.Receipt{Version: 1, ChatID: id, Mode: "full", Profile: selection.Profile, Source: selection.Source, State: state, BaselinePlugins: baseline, AppliedPlugins: plugins, PendingPlugins: pendingPlugins, UpdatedAt: time.Now().UTC(), Fingerprint: selection.Fingerprint, Model: model, Cwd: cwd, AttemptedContext: attemptedContext, Unsupported: unsupported, Issues: issues, Failure: failure, RetrySupported: true}
+		receipt := harness.Receipt{Version: 1, ChatID: id, Mode: "full", Profile: selection.Profile, Source: selection.Source, State: state, BaselinePlugins: baseline, AppliedPlugins: plugins, PendingPlugins: pendingPlugins, UpdatedAt: time.Now().UTC(), Fingerprint: selection.Fingerprint, Model: model, Cwd: cwd, AttemptedContext: attemptedContext, Unsupported: unsupported, Issues: issues, Failure: failure, GoalHold: goalHold, RetrySupported: true}
 		if err := store.Save(receipt); err != nil {
 			h.event(id, selection, "failed")
 			return errors.New("native harness receipt could not be saved")
@@ -379,7 +458,7 @@ func (h *cloudHarness) prepareFrom(source string, request cloudMessage, raw []by
 		return raw, nil
 	}
 	method := request.method()
-	if method != "thread/start" && method != "thread/resume" && method != "turn/start" && method != "thread/settings/update" && method != "thread/unsubscribe" && method != "thread/archive" {
+	if method != "thread/start" && method != "thread/resume" && method != "turn/start" && method != "thread/settings/update" && method != "thread/unsubscribe" && method != "thread/archive" && method != "thread/goal/set" && method != "thread/goal/clear" {
 		return raw, nil
 	}
 	if len(request["id"]) == 0 {
@@ -388,6 +467,32 @@ func (h *cloudHarness) prepareFrom(source string, request cloudMessage, raw []by
 	h.op.Lock()
 	defer h.op.Unlock()
 	params := cloudHarnessObject(request["params"])
+	if method == "thread/goal/set" || method == "thread/goal/clear" {
+		id := cloudThreadID(request["params"])
+		h.mu.Lock()
+		thread := h.threads[id]
+		busy := thread != nil && thread.goalMutationPending
+		h.mu.Unlock()
+		if busy {
+			return nil, errors.New("native goal mutation already pending")
+		}
+		status := cloudHarnessString(params, "status")
+		if err := h.beginGoalYield(id, method == "thread/goal/clear" || status != "" && status != "active"); err != nil {
+			return nil, err
+		}
+	}
+	if method == "thread/unsubscribe" || method == "thread/archive" {
+		id := cloudThreadID(request["params"])
+		h.mu.Lock()
+		thread := h.threads[id]
+		last := thread != nil && (method == "thread/archive" || len(thread.subscriptions) <= 1)
+		h.mu.Unlock()
+		if last {
+			if err := h.finishGoalHold(id, true); err != nil {
+				return nil, err
+			}
+		}
+	}
 	pending := cloudHarnessRequest{method: method, params: cloudHarnessClone(params)}
 	if method == "thread/start" {
 		model, cwd := cloudHarnessModel(params), cloudHarnessString(params, "cwd")
@@ -494,9 +599,12 @@ func (h *cloudHarness) prepareFrom(source string, request cloudMessage, raw []by
 		}
 	}
 	h.requests[cloudHarnessRequestKey(source, request["id"])] = pending
-	if method == "thread/settings/update" {
+	if method == "thread/settings/update" || method == "thread/goal/set" || method == "thread/goal/clear" {
 		if thread := h.threads[cloudThreadID(request["params"])]; thread != nil {
 			thread.pendingSettings++
+			if method != "thread/settings/update" {
+				thread.goalMutationPending = true
+			}
 		}
 	}
 	h.mu.Unlock()
@@ -767,7 +875,7 @@ func (h *cloudHarness) baselineConfig(native cloudMessage, originalRaw json.RawM
 func (h *cloudHarness) refresh(id string) error {
 	h.mu.Lock()
 	thread := h.threads[id]
-	needed := thread != nil && thread.owned && thread.refresh
+	needed := thread != nil && thread.owned && (thread.refresh || thread.goalHold != nil)
 	var revision uint64
 	if thread != nil {
 		revision = thread.activityRevision
@@ -940,13 +1048,27 @@ func (h *cloudHarness) event(threadID string, selection harness.Selection, state
 	h.b.event(event)
 }
 
-func (h *cloudHarness) reconcile(id, model, cwd string) error {
+func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
+	defer func() {
+		if err := h.finishGoalHold(id, resultErr != nil); err != nil && resultErr == nil {
+			resultErr = err
+		}
+	}()
+	if err := h.retryGoalYield(id); err != nil {
+		return err
+	}
+	if err := h.loadGoalHold(id); err != nil {
+		return err
+	}
 	requestedModel, requestedCwd := model, cwd
 	newBaseline := false
 	h.mu.Lock()
 	thread := h.threads[id]
 	if thread == nil || !thread.owned {
 		h.mu.Unlock()
+		if err := h.finishGoalHold(id, true); err != nil {
+			return err
+		}
 		h.release(id)
 		return nil
 	}
@@ -1074,7 +1196,12 @@ func (h *cloudHarness) reconcile(id, model, cwd string) error {
 				current.reportedPending = key
 			}
 			h.mu.Unlock()
-			_ = h.record(id, selection, "pending")
+			if err := h.record(id, selection, "pending"); err != nil {
+				return err
+			}
+		}
+		if !snapshot.ephemeral && snapshot.pendingTurns == 0 && snapshot.pendingSettings == 0 && (snapshot.profileFingerprint != selection.Fingerprint || minimal != snapshot.minimal || contextChanged || snapshot.restorePlugins || retryRuntime || snapshot.retryPending) {
+			return h.holdGoal(id, key)
 		}
 		return nil
 	}
@@ -1854,6 +1981,18 @@ func (h *cloudHarness) observeFrom(source string, raw []byte) bool {
 				thread.activityRevision++
 				thread.refresh = true
 			}
+		case "thread/goal/updated":
+			if thread.goalHold != nil && cloudHarnessString(params, "turnId") != "" {
+				thread.goalHoldExternal = true
+			}
+			var goal struct{ CreatedAt int64 }
+			if json.Unmarshal(params["goal"], &goal) == nil && goal.CreatedAt > thread.goalCreatedAt {
+				thread.goalCreatedAt = goal.CreatedAt
+				thread.goalHoldAttempt = ""
+			}
+			if thread.goalHold == nil && cloudHarnessString(cloudHarnessObject(params["goal"]), "status") == "active" {
+				thread.goalHoldAttempt = ""
+			}
 		}
 		cloudHarnessObserved(thread, params, source)
 		if message.method() == "thread/settings/updated" {
@@ -1865,7 +2004,14 @@ func (h *cloudHarness) observeFrom(source string, raw []byte) bool {
 		}
 	}
 	h.mu.Unlock()
-	if found || message.method() == "turn/completed" || message.method() == "thread/status/changed" || message.method() == "thread/settings/updated" {
+	if found && (pending.method == "thread/goal/set" || pending.method == "thread/goal/clear") {
+		id := cloudThreadID(cloudHarnessRaw(pending.params))
+		// Keep reconciliation blocked until the user mutation's journal is saved.
+		if err := h.goalYieldFinished(id, !failed); err != nil {
+			h.b.event(map[string]any{"event": "harness_goal_handoff_failed", "reason": "receipt"})
+		}
+	}
+	if found || message.method() == "turn/completed" || message.method() == "thread/status/changed" || message.method() == "thread/settings/updated" || message.method() == "thread/goal/updated" {
 		h.signal()
 	}
 	return false

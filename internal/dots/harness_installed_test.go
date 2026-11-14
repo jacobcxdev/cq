@@ -32,9 +32,13 @@ import (
 // home, fixture capabilities and a synthetic loopback provider. It never reads
 // account credentials, invokes a real model or changes the installed app.
 func TestHarnessInstalledChatCapabilityIsolation(t *testing.T) {
-	t.Run("native-controls", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, false, false) })
-	t.Run("bridge-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true, false) })
-	t.Run("selective-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true, true) })
+	t.Run("native-controls", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, false, false, false) })
+	t.Run("bridge-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true, false, false) })
+	t.Run("selective-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true, true, false) })
+}
+
+func TestHarnessInstalledGoalContinuationHold(t *testing.T) {
+	runHarnessInstalledChatCapabilityIsolation(t, true, false, true)
 }
 
 func TestHarnessInstalledInactiveMCPOverrides(t *testing.T) {
@@ -79,7 +83,7 @@ func TestHarnessInstalledInactiveMCPOverrides(t *testing.T) {
 	}
 }
 
-func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, selective bool) {
+func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, selective, goalProbe bool) {
 	if os.Getenv("CQ_DOTS_HARNESS_INSTALLED_ACCEPTANCE") != "1" {
 		t.Skip("set CQ_DOTS_HARNESS_INSTALLED_ACCEPTANCE=1 for isolated installed acceptance")
 	}
@@ -143,6 +147,14 @@ func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, sel
 	}
 	observed := make(chan harnessInstalledObservation, 32)
 	var spawnIssued atomic.Bool
+	var firstGoalGate, nextGoalGate atomic.Bool
+	firstGoalGate.Store(goalProbe)
+	firstGoalReached, nextGoalReached := make(chan struct{}, 1), make(chan struct{}, 1)
+	firstGoalRelease, nextGoalRelease := make(chan struct{}), make(chan struct{})
+	releaseFirstGoal := sync.OnceFunc(func() { close(firstGoalRelease) })
+	releaseNextGoal := sync.OnceFunc(func() { close(nextGoalRelease) })
+	t.Cleanup(releaseFirstGoal)
+	t.Cleanup(releaseNextGoal)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/responses" {
 			t.Error("unexpected synthetic provider route")
@@ -204,6 +216,13 @@ func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, sel
 			}
 		}
 		observed <- observation
+		if goalProbe && strings.Contains(string(body), "CQ_HARNESS_GOAL_HOLD") && firstGoalGate.CompareAndSwap(true, false) {
+			firstGoalReached <- struct{}{}
+			<-firstGoalRelease
+		} else if goalProbe && nextGoalGate.CompareAndSwap(true, false) {
+			nextGoalReached <- struct{}{}
+			<-nextGoalRelease
+		}
 		item := map[string]any{"id": "probe_message", "type": "message", "role": "assistant", "status": "completed", "content": []map[string]any{{"type": "output_text", "text": "CQ_HARNESS_REPLY", "annotations": []any{}}}}
 		if strings.Contains(string(body), "CQ_HARNESS_SPAWN_PARENT") && spawnIssued.CompareAndSwap(false, true) {
 			arguments, _ := json.Marshal(map[string]any{"message": "CQ_HARNESS_CHILD_IDENTITY", "fork_context": false})
@@ -220,7 +239,11 @@ func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, sel
 			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 		}
 	}))
-	defer upstream.Close()
+	defer func() {
+		releaseFirstGoal()
+		releaseNextGoal()
+		upstream.Close()
+	}()
 	configText := fmt.Sprintf(`model = "glm-5.3"
 model_provider = "cq_harness"
 approval_policy = "never"
@@ -257,9 +280,16 @@ startup_timeout_sec = 5
 CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 `, os.Args[0])
 	}
+	if goalProbe {
+		configText = strings.Replace(configText, "[features]\n", "[features]\ngoals = true\n", 1)
+	}
 	write("codex/config.toml", configText)
 	profile := `(version 1) (allow default) (deny network*) (deny file-write*) (allow network-outbound (remote ip "localhost:*")) (allow file-write* (literal "/dev/null")) (allow file-write* (subpath ` + fmt.Sprintf("%q", root) + `))`
-	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	timeout := 45 * time.Second
+	if goalProbe {
+		timeout = 90 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, "/usr/bin/sandbox-exec", "-p", profile, client, "app-server", "--stdio", "--strict-config")
 	command.Dir = filepath.Join(root, "work")
@@ -789,7 +819,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		t.Logf("selective installed accepted: same-chat-reloads=%d task-sibling-reloads=0 workspace-sibling-reloads=%d outsider-reloads=0 plugin-MCP-dependency=verified custom-receipt=applied external-cloud-requests=0", resumes, workspaceSiblingResumes)
 		return
 	}
-	if bridgeEnabled {
+	if bridgeEnabled && !goalProbe {
 		startAt := func(model, cwd string) string {
 			t.Helper()
 			result := rpc.call("thread/start", map[string]any{"cwd": cwd, "model": model, "modelProvider": "cq_harness"})
@@ -921,6 +951,162 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 	assertTools(first, true, true)
 	if first.SkillCatalogueItems != 1 || first.PluginCatalogueItems != 1 {
 		t.Fatal("full chat omitted fixture skill catalogues")
+	}
+	if goalProbe {
+		type goalState struct {
+			ThreadID        string `json:"threadId"`
+			Objective       string `json:"objective"`
+			Status          string `json:"status"`
+			CreatedAt       int64  `json:"createdAt"`
+			UpdatedAt       int64  `json:"updatedAt"`
+			TokensUsed      int64  `json:"tokensUsed"`
+			TimeUsedSeconds int64  `json:"timeUsedSeconds"`
+			TokenBudget     *int64 `json:"tokenBudget"`
+		}
+		decodeGoal := func(raw json.RawMessage) goalState {
+			t.Helper()
+			var response struct {
+				Goal goalState `json:"goal"`
+			}
+			if err := json.Unmarshal(raw, &response); err != nil || response.Goal.Objective == "" {
+				t.Fatalf("decode isolated native goal: %v", err)
+			}
+			return response.Goal
+		}
+		goal := func() goalState {
+			return decodeGoal(rpc.call("thread/goal/get", map[string]string{"threadId": full}))
+		}
+		active := decodeGoal(rpc.call("thread/goal/set", map[string]any{"threadId": full, "objective": "CQ_HARNESS_GOAL_HOLD Synthetic continuation qualification", "tokenBudget": 1000, "origin": "user"}))
+		if active.Status != "active" || active.TokenBudget == nil || *active.TokenBudget != 1000 {
+			t.Fatal("synthetic budgeted goal did not start active")
+		}
+		select {
+		case <-firstGoalReached:
+		case <-ctx.Done():
+			t.Fatal("first automatic goal turn did not reach the isolated provider")
+		}
+		assertTools(<-observed, true, true)
+		policyMu.Lock()
+		policy = harness.Policy{Version: 1, Enabled: true, Projects: map[string]harness.Profile{command.Dir: harness.Full}, Chats: map[string]harness.Profile{full: harness.Minimal}}
+		policyMu.Unlock()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			receipt, err := receipts.Load(full)
+			if err == nil && receipt.GoalHold != nil && receipt.GoalHold.UpdatedAt > 0 {
+				break
+			}
+			if time.Now().After(deadline) {
+				nativeMu.Lock()
+				var methods []string
+				for _, request := range nativeRequests {
+					if cloudThreadID(request["params"]) == full {
+						methods = append(methods, request.method()+":"+cloudHarnessString(cloudHarnessObject(request["params"]), "status"))
+					}
+				}
+				nativeMu.Unlock()
+				current := goal()
+				sameBudget := active.TokenBudget != nil && current.TokenBudget != nil && *active.TokenBudget == *current.TokenBudget
+				t.Fatalf("CQ did not verify running-goal hold: marker=%#v receipt=%s goal-status=%s same-thread=%t same-objective=%t same-created=%t same-budget=%t methods=%v err=%v", receipt.GoalHold, receipt.State, current.Status, current.ThreadID == active.ThreadID, current.Objective == active.Objective, current.CreatedAt == active.CreatedAt, sameBudget, methods, err)
+			}
+			// The fixture's client output is an unbuffered pipe. Drain native
+			// notifications so CQ can receive its private verification replies.
+			rpc.call("thread/read", map[string]any{"threadId": full, "includeTurns": false})
+			time.Sleep(10 * time.Millisecond)
+		}
+		paused := goal()
+		if paused.Status != "paused" || paused.Objective != active.Objective || paused.CreatedAt != active.CreatedAt || paused.TokenBudget == nil || *paused.TokenBudget != *active.TokenBudget {
+			t.Fatal("CQ hold changed the synthetic goal's intent, identity or budget")
+		}
+		var current struct {
+			Thread struct{ Status struct{ Type string } }
+		}
+		if err := json.Unmarshal(rpc.call("thread/read", map[string]any{"threadId": full, "includeTurns": false}), &current); err != nil || current.Thread.Status.Type != "active" {
+			t.Fatalf("CQ hold interrupted the running turn: status=%s err=%v", current.Thread.Status.Type, err)
+		}
+		nextGoalGate.Store(true)
+		releaseFirstGoal()
+		for {
+			message := rpc.next()
+			if message.Method == "turn/completed" && cloudThreadID(message.Params) == full {
+				break
+			}
+		}
+		reached := false
+		for !reached {
+			select {
+			case <-nextGoalReached:
+				reached = true
+			case <-ctx.Done():
+				t.Fatal("CQ did not resume the goal after applying the chat policy")
+			default:
+				rpc.call("thread/read", map[string]any{"threadId": full, "includeTurns": false})
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+		continuation := <-observed
+		assertTools(continuation, false, false)
+		if continuation.Identity["body.client_metadata.thread_id"] != full {
+			t.Fatal("automatic continuation changed chat identity")
+		}
+		deadline = time.Now().Add(10 * time.Second)
+		for {
+			receipt, err := receipts.Load(full)
+			if err == nil && receipt.GoalHold == nil && receipt.Profile == harness.Minimal && receipt.Source == "chat" && (receipt.State == "applied" || receipt.State == "partial") {
+				if receipt.State == "partial" && len(receipt.Issues) == 0 && len(receipt.Unsupported) == 0 {
+					t.Fatal("partial application omitted its explicit issue")
+				}
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("CQ did not clear its hold after application: receipt=%#v err=%v", receipt, err)
+			}
+			rpc.call("thread/read", map[string]any{"threadId": full, "includeTurns": false})
+			time.Sleep(10 * time.Millisecond)
+		}
+		restored := goal()
+		if restored.Status != "active" || restored.Objective != active.Objective || restored.CreatedAt != active.CreatedAt || restored.TokenBudget == nil || *restored.TokenBudget != *active.TokenBudget {
+			t.Fatal("CQ restoration changed the synthetic goal's intent, identity or budget")
+		}
+		// Native pause freezes accounting after the hold. The goal's original
+		// budget is retained, but the held turn's usage is not counted by native.
+		if restored.TokensUsed < paused.TokensUsed || restored.TimeUsedSeconds < paused.TimeUsedSeconds {
+			t.Fatal("CQ hold reset native goal accounting")
+		}
+		nativeMu.Lock()
+		requests := slices.Clone(nativeRequests)
+		nativeMu.Unlock()
+		var pauses, activations, unsubscribes, resumes int
+		for _, request := range requests {
+			if cloudThreadID(request["params"]) != full {
+				continue
+			}
+			switch request.method() {
+			case "thread/goal/set":
+				switch cloudHarnessString(cloudHarnessObject(request["params"]), "status") {
+				case "paused":
+					pauses++
+				case "active":
+					activations++
+				}
+			case "thread/unsubscribe":
+				unsubscribes++
+			case "thread/resume":
+				resumes++
+			}
+		}
+		if pauses == 0 || activations == 0 || unsubscribes == 0 || resumes == 0 {
+			t.Fatalf("CQ omitted a hold or reload step: pause=%d activate=%d unsubscribe=%d resume=%d", pauses, activations, unsubscribes, resumes)
+		}
+		rpc.call("thread/goal/clear", map[string]any{"threadId": full, "origin": "automatic"})
+		releaseNextGoal()
+		for {
+			message := rpc.next()
+			if message.Method == "turn/completed" && cloudThreadID(message.Params) == full {
+				break
+			}
+		}
+		t.Logf("bridge goal hold accepted: chat policy applied before automatic continuation; pause=%d activate=%d unsubscribe=%d resume=%d tokens=%d/%d time=%d/%d", pauses, activations, unsubscribes, resumes, paused.TokensUsed, restored.TokensUsed, paused.TimeUsedSeconds, restored.TimeUsedSeconds)
+		return
 	}
 	sibling := start(nil)
 	mini := start(minimal)

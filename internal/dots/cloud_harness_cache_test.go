@@ -20,6 +20,7 @@ func TestCloudHarnessReconciliationRetainedCacheContract(t *testing.T) {
 	for _, model := range []string{"gpt-6.1-sol", "glm-5.3"} {
 		t.Run(model, func(t *testing.T) {
 			h, store, id, methods := cloudHarnessFailureFixture(t)
+			goalReads := cloudHarnessNullGoalReadFixture(t, h, id)
 			thread := h.threads[id]
 			thread.model = model
 			policy := harness.Policy{Version: 2, Enabled: true, Tasks: map[string]harness.Scope{id: {All: harness.Binding{Changes: harness.Changes{Default: harness.Disabled, MCP: map[string]harness.Decision{"first": harness.Enabled}, Skills: map[string]harness.Decision{"user:keep": harness.Enabled}}}}}}
@@ -130,7 +131,7 @@ func TestCloudHarnessReconciliationRetainedCacheContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			thread.active = true
-			if err := h.reconcile(id, "", ""); err != nil || settings != 1 || len(*methods) != before {
+			if err := h.reconcile(id, "", ""); err != nil || settings != 1 || len(*methods) != before || *goalReads != 1 {
 				t.Fatalf("active retry touched native state: %v", err)
 			}
 			assertStable("retry_waited_for_idle")

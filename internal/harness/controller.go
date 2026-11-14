@@ -208,6 +208,9 @@ func (controller *Controller) Reconcile(ctx context.Context, chatID string, poli
 	if receiptErr != nil && !errors.Is(receiptErr, os.ErrNotExist) {
 		return Snapshot{}, receiptErr
 	}
+	if previous.GoalHold != nil {
+		return Snapshot{}, fmt.Errorf("native harness must restore its goal hold before plugin-only handoff")
+	}
 	snapshot, err := controller.Desktop.Inspect(ctx, chatID)
 	if err != nil {
 		return Snapshot{}, err

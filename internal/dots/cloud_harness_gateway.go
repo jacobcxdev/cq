@@ -478,9 +478,17 @@ func (g *cloudHarnessGateway) cancelPending(source string, id json.RawMessage) {
 	}
 	g.h.mu.Lock()
 	key := cloudHarnessRequestKey(source, id)
-	if pending, found := g.h.requests[key]; found {
+	pending, found := g.h.requests[key]
+	delete(g.h.requests, key)
+	g.h.mu.Unlock()
+	if found && (pending.method == "thread/goal/set" || pending.method == "thread/goal/clear") {
+		if err := g.h.goalYieldFinished(cloudHarnessString(pending.params, "threadId"), false); err != nil {
+			g.h.b.event(map[string]any{"event": "harness_goal_handoff_failed", "reason": "receipt"})
+		}
+	}
+	g.h.mu.Lock()
+	if found && pending.method != "thread/goal/set" && pending.method != "thread/goal/clear" {
 		cloudHarnessGatewayPendingCounters(g.h, pending)
-		delete(g.h.requests, key)
 	}
 	g.h.mu.Unlock()
 	g.h.signal()
@@ -491,8 +499,11 @@ func cloudHarnessGatewayPendingCounters(h *cloudHarness, pending cloudHarnessReq
 		if pending.method == "turn/start" && thread.pendingTurns > 0 {
 			thread.pendingTurns--
 		}
-		if pending.method == "thread/settings/update" && thread.pendingSettings > 0 {
+		if (pending.method == "thread/settings/update" || pending.method == "thread/goal/set" || pending.method == "thread/goal/clear") && thread.pendingSettings > 0 {
 			thread.pendingSettings--
+			if pending.method != "thread/settings/update" {
+				thread.goalMutationPending = false
+			}
 		}
 	}
 }
