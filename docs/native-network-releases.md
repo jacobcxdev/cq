@@ -22,16 +22,16 @@ internally, but both Casks select the same combined bundle URL and SHA-256 for
 the host architecture. Existing CLI-only archive names and contents remain
 available for installer compatibility.
 
-Build native sources from the current reviewed, merged `origin/main` tip, then
-review and merge their immutable asset pin before tagging the parent release.
-Validation proves the build source is an ancestor of the final parent source
-and both complete `native/macos-network` Git trees match. A changed native tree
-requires a fresh build and pin. Apple signing keys and notarisation credentials
-stay on the authorised release Mac; GitHub Actions downloads and verifies
-completed artefacts.
+Build native sources from a signed staging tag at the current reviewed, merged
+`origin/main` tip. After that ZIP passes, tag the final reviewed main commit as
+the parent release. The staging tag, draft release, asset ID and server digest
+produce a temporary manifest inside the release workflow. No asset pin is
+committed or reviewed through a second PR. Apple
+signing keys and notarisation credentials stay on the authorised release Mac;
+GitHub Actions downloads and verifies completed artefacts.
 
 The generated CQ Cask reconciles the companion during installation and upgrade.
-It checks the dependency against that release's reviewed native pin and uses
+It checks the dependency against that release's verified native manifest and uses
 Homebrew's own upgrade transaction when the installed companion is older.
 An already-current companion is left alone. Metadata inspection and download-only
 commands do not upgrade it. Existing native routing is restored after a companion
@@ -40,13 +40,12 @@ failures are reported explicitly. A previously disabled companion stays disabled
 
 ## Native source and documentation boundary
 
-The pin compares the entire `native/macos-network` Git tree, including its
-`README.md`, package manifest, tests and packaging files. A documentation-only
-edit inside that tree changes its identity even if executable behaviour is
-unchanged. Keep general maintainer guidance in this guide or
-[Architecture](architecture.md). After staging a native build, merge only changes
-that preserve its complete native tree; otherwise rebuild and review a new pin
-before continuing. Do not weaken the tree comparison. The existing
+The release manifest compares the entire `native/macos-network` Git tree,
+including its `README.md`, package manifest, tests and packaging files.
+Build from the staging tag after all intended native changes merge. Before the
+parent tag, verify its complete native tree still matches the staged source.
+Keep general maintainer
+guidance in this guide or [Architecture](architecture.md). The existing
 [native README](../native/macos-network/README.md) remains the build/signing entry
 point.
 
@@ -64,65 +63,45 @@ approval and installed provider version, then exercise selected TCP/UDP traffic
 and a normal standalone Codex launch. Broker readiness and a Homebrew stdio
 probe are separate from that installed admission evidence.
 
-## Stage the shared release
+## Build the shared release
 
 1. Inspect stable releases, tags, drafts and other release work. Select the next
    sequential parent version and account for failed or superseded attempts. Keep
    one active draft for that version. Merge all intended source changes first.
-2. Fetch immediately before creating a signed `cq-native-stage-vVERSION` tag and
-   verify its source is the current reviewed `origin/main` tip. Record this full
-   commit SHA as `NATIVE_SOURCE_COMMIT`. Keep the tag on that commit permanently.
-   Build those sources using the [signing instructions](../native/macos-network/README.md).
-   Set the host and provider short versions to the parent `VERSION`, use a new
-   increasing build number, and include both `arm64` and `x86_64` slices.
+2. Fetch `origin/main` immediately before creating the signed
+   `cq-native-stage-vVERSION` tag and prove its commit is the reviewed current
+   tip. Build those tagged sources using the
+   [signing instructions](../native/macos-network/README.md). Set the host and
+   provider short versions to `VERSION`, use a new increasing build number, and
+   include both `arm64` and `x86_64` slices.
 3. Notarise the app and staple its accepted ticket. Create
    `CQNetwork_VERSION_universal.zip`, preserving `CQNetwork.app` as the single
    top-level application. Create one unpublished stable GitHub draft with tag
-   `cq-native-stage-vVERSION`, title `vVERSION` and target equal to the full native
-   source SHA. Keep `draft=true` and `prerelease=false`. Upload the final ZIP once;
-   never replace it. This draft will become the parent release.
-4. Record the real positive uploaded asset ID, SHA-256 and app's
-   `LSMinimumSystemVersion` in a schema-2 base pin:
+   `cq-native-stage-vVERSION`, title `vVERSION`, target equal to the full staged
+   source SHA, and release notes headed `## Changelog`. Keep `draft=true` and
+   `prerelease=false`. Upload the final ZIP once; never replace it.
+4. Resolve the draft's uploaded asset ID and server digest into a temporary
+   schema-2 manifest, then validate the signed and notarised ZIP:
 
    ```sh
-   go run ./internal/tools/nativepackage pin-parent \
-     "$VERSION" "$NATIVE_SOURCE_COMMIT" "$NATIVE_ASSET_ID" \
-     "$NATIVE_ZIP_SHA256" "$NATIVE_MINIMUM_MACOS" \
-     > .github/native-network-release.json
-   ```
-
-5. Review and merge that pin through the normal PR process. Do not put generated
-   bundle digests in the source pin: those archives contain the final parent CLI
-   and are assembled later. Validate the staged native asset:
-
-   ```sh
+   mkdir -p /tmp/cq-native-cask
+   .github/scripts/resolve-native-network.sh "v$VERSION" /tmp/cq-native-cask/native-network-release.json --staging-draft
    .github/scripts/prepare-native-network.sh \
-     .github/native-network-release.json /tmp/cq-native-cask --allow-draft
+     /tmp/cq-native-cask/native-network-release.json /tmp/cq-native-cask --allow-draft
    ```
 
-6. Qualify the final parent source and fetch `origin/main` again. Prove the final
-   commit is its current tip, the native build source is its ancestor, and their
-   complete native trees match. Create and push the signed parent `vVERSION` tag
-   at that final commit. Retarget the same unpublished draft, retaining its
-   native asset ID and bytes:
+5. Complete final source qualification, fetch `origin/main` again, and prove its
+   current reviewed tip contains the staged source with an identical complete
+   native tree. Create and push the signed parent `vVERSION` tag at that tip.
+   Retarget the same unpublished draft to the parent tag and full final source
+   SHA, keeping its title, notes, native asset ID and bytes. Dispatch the
+   Release workflow against `vVERSION`. It derives and carries the same asset
+   identity without a metadata PR, adds CLI archives and combined macOS bundles
+   to that draft, and generates both Casks from the same bundle map. After
+   package gates pass, it publishes one stable release and paired Casks.
+   There is no separate native publication step.
 
-   ```sh
-   gh release edit "cq-native-stage-v$VERSION" \
-     --repo jacobcxdev/cq --tag "v$VERSION" \
-     --target "$FINAL_SOURCE_COMMIT" --title "v$VERSION"
-   ```
-
-   Keep the draft unpublished and stable. Do not move either Git tag or create a
-   second release. Before adding CLI assets, the workflow requires the draft's
-   tag and title to equal `vVERSION`, its target to equal the full final source
-   SHA, and `draft=true`.
-7. Dispatch the parent Release workflow against `vVERSION`. It verifies the
-   pinned ZIP, adds the CLI archives and combined macOS bundles to that draft,
-   and generates both Casks from the same per-architecture bundle map. After all
-   required package gates pass, it publishes one stable parent release and the
-   paired Casks. There is no separate native publication step.
-
-Missing, incomplete or mismatched pins fail the release gate. Validation checks
+Missing, incomplete or mismatched manifests fail the release gate. Validation checks
 GitHub tag, source ancestry and tree identity, asset ID and server digest, then
 verifies the downloaded ZIP digest, safe archive paths, company Developer ID
 signatures, stapled notarisation ticket, Gatekeeper acceptance, host/provider

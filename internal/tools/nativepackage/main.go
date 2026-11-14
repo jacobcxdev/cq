@@ -127,7 +127,7 @@ func run(args []string, output io.Writer) error {
 		return encoder.Encode(m)
 	}
 	if len(args) < 2 {
-		return errors.New("usage: nativepackage info MANIFEST | verify MANIFEST ZIP RELEASE_JSON [--allow-draft] | verify-install MANIFEST TAR RELEASE_JSON [--allow-draft] | verify-source MANIFEST COMMIT | published MANIFEST RELEASE_JSON | cask MANIFEST OUTPUT [--bundles BUNDLES_JSON] | pin[-parent] VERSION SOURCE_COMMIT ASSET_ID SHA256 MINIMUM_MACOS")
+		return errors.New("usage: nativepackage info MANIFEST | verify MANIFEST ZIP RELEASE_JSON [--allow-draft|--published-fixture] | verify-install MANIFEST TAR RELEASE_JSON [--allow-draft] | verify-source MANIFEST COMMIT | published MANIFEST RELEASE_JSON | cask MANIFEST OUTPUT [--bundles BUNDLES_JSON] | pin[-parent] VERSION SOURCE_COMMIT ASSET_ID SHA256 MINIMUM_MACOS")
 	}
 	var m manifest
 	if err := decodeFile(args[1], &m, 16<<10); err != nil {
@@ -157,8 +157,8 @@ func run(args []string, output io.Writer) error {
 		return json.NewEncoder(output).Encode(info)
 	case args[0] == "verify-source" && len(args) == 3:
 		return verifySource(m, args[2])
-	case args[0] == "verify" && (len(args) == 4 || len(args) == 5 && args[4] == "--allow-draft"):
-		if err := verifyRelease(m, args[3], len(args) == 5); err != nil {
+	case args[0] == "verify" && (len(args) == 4 || len(args) == 5 && (args[4] == "--allow-draft" || args[4] == "--published-fixture")):
+		if err := verifyReleaseWithFixture(m, args[3], len(args) == 5 && args[4] == "--allow-draft", len(args) == 5 && args[4] == "--published-fixture"); err != nil {
 			return err
 		}
 		return verifyArchive(m, args[2])
@@ -245,6 +245,10 @@ func decodeFile(file string, value any, limit int64) error {
 }
 
 func verifyRelease(m manifest, file string, allowDraft bool) error {
+	return verifyReleaseWithFixture(m, file, allowDraft, false)
+}
+
+func verifyReleaseWithFixture(m manifest, file string, allowDraft, publishedFixture bool) error {
 	// GitHub release responses contain additional fields. Decode those while
 	// keeping the reviewed manifest itself closed above.
 	info, err := os.Stat(file)
@@ -278,12 +282,17 @@ func verifyRelease(m manifest, file string, allowDraft bool) error {
 	if (release.Tag != m.tag() && !staging) || release.Draft && !allowDraft || release.Prerelease != (m.SchemaVersion == 1) {
 		return errors.New("native release tag, source commit or publication state differs from reviewed manifest")
 	}
+	if publishedFixture && (m.SchemaVersion != 2 || release.Draft || release.Target != m.SourceCommit) {
+		return errors.New("published native fixture must match its stable source")
+	}
 	if m.SchemaVersion == 1 {
 		if release.Target != m.SourceCommit {
 			return errors.New("native release source commit differs from reviewed manifest")
 		}
-	} else if err := verifySource(m, release.Target); err != nil {
-		return err
+	} else if !publishedFixture {
+		if err := verifySource(m, release.Target); err != nil {
+			return err
+		}
 	}
 	if m.SchemaVersion == 2 && !release.Draft {
 		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)

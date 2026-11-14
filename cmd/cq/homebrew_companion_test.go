@@ -12,9 +12,9 @@ import (
 	"testing"
 )
 
-func reviewedHomebrewNativePin(t *testing.T) string {
+func fixtureHomebrewNativePin(t *testing.T) string {
 	t.Helper()
-	data, err := os.ReadFile("../../.github/native-network-release.json")
+	data, err := os.ReadFile("testdata/native-network-release.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,10 +46,7 @@ func TestHomebrewCompanionReconciliation(t *testing.T) {
 		lines = append(lines, strings.TrimPrefix(line, "      "))
 	}
 	block = strings.ReplaceAll(strings.Join(lines, "\n"), "{{ .Version }}", "0.50.0")
-	pinData, err := os.ReadFile("../../.github/native-network-release.json")
-	if err != nil {
-		t.Fatal(err)
-	}
+	pinData := []byte(fixtureHomebrewNativePin(t))
 	var pin map[string]any
 	if err := json.Unmarshal(pinData, &pin); err != nil {
 		t.Fatal(err)

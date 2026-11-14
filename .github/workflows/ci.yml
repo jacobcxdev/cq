@@ -17,7 +17,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 15
     permissions:
-      contents: write # GitHub requires write access to inspect draft releases.
+      contents: read
     steps:
       - uses: actions/checkout@v5
         with:
@@ -25,12 +25,18 @@ jobs:
       - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
-      - name: Validate pinned native companion release
+      - name: Test current native source
+        run: swift test --package-path native/macos-network --sanitize thread
+      - name: Validate published native packaging fixture
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           go test -race -count=1 ./internal/tools/nativepackage
-          .github/scripts/prepare-native-network.sh .github/native-network-release.json dist/native --allow-draft
+          tag=$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1000 --json tagName |
+            jq -er 'map(.tagName | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+$"))) | sort_by(ltrimstr("v") | split(".") | map(tonumber)) | last')
+          mkdir -p dist/native
+          .github/scripts/resolve-native-network.sh "$tag" dist/native/native-network-release.json --published-fixture
+          .github/scripts/prepare-native-network.sh dist/native/native-network-release.json dist/native --published-fixture
       - uses: actions/upload-artifact@v7
         with:
           name: native-network-cask
@@ -39,6 +45,7 @@ jobs:
           retention-days: 1
 
   packages:
+    needs: native-network
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     outputs:
@@ -53,6 +60,11 @@ jobs:
       - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-network-cask
+          path: dist/native
 
       - name: Create isolated release candidate tag
         id: candidate
@@ -76,6 +88,7 @@ jobs:
             --jq '.[0].tagName')"
           test -n "$latest_tag"
           test -n "$previous_tag"
+          test "v$(jq -r .version dist/native/native-network-release.json)" = "$previous_tag"
           previous_version="${previous_tag#v}"
           latest_version="${latest_tag#v}"
           IFS=. read -r major minor patch <<<"$latest_version"
@@ -86,7 +99,7 @@ jobs:
             echo "PREVIOUS_VERSION=$previous_version"
             echo "CURRENT_VERSION=$current_version"
             echo "CODEX_STAGE11_PROVENANCE_SHA256=$(go run ./.github/scripts/codex-stage11-provenance.go "$current_version" ./internal/proxy/testdata/codex_stage11_reviewed_manifest.json)"
-            echo "CQ_NATIVE_NETWORK_PIN=$(jq -c . .github/native-network-release.json)"
+            echo "CQ_NATIVE_NETWORK_PIN=$(jq -c . dist/native/native-network-release.json)"
           } >> "$GITHUB_ENV"
           {
             echo "previous_tag=$previous_tag"
@@ -239,7 +252,7 @@ jobs:
             "$PWD/dist/cq_${CURRENT_VERSION}_darwin_${architecture}.tar.gz" \
             "$CURRENT_VERSION" \
             "$PWD/dist/homebrew/Casks/cq-network.rb" \
-            "$PWD/dist/homebrew/Casks/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' .github/native-network-release.json)"
+            "$PWD/dist/homebrew/Casks/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' dist/homebrew/Casks/native-network-release.json)"
 
   linux:
     timeout-minutes: 15
@@ -272,6 +285,7 @@ jobs:
       - name: Validate WinGet contributor agreement automation
         run: bash .github/scripts/test-ensure-winget-cla.sh
       - run: bash .github/scripts/test-verified-commit.sh
+      - run: bash .github/scripts/test-resolve-native-network.sh
       - run: bash .github/scripts/test-winget-permissions.sh
       - run: bash .github/scripts/test-publish-homebrew-casks.sh
       - run: bash .github/scripts/test-submit-winget-manifest.sh

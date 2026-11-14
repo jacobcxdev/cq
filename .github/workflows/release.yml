@@ -42,12 +42,14 @@ jobs:
       - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
-      - name: Validate pinned native companion release
+      - name: Validate tagged native companion release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           go test -race -count=1 ./internal/tools/nativepackage
-          .github/scripts/prepare-native-network.sh .github/native-network-release.json dist/native --allow-draft
+          mkdir -p dist/native
+          .github/scripts/resolve-native-network.sh "$GITHUB_REF_NAME" dist/native/native-network-release.json
+          .github/scripts/prepare-native-network.sh dist/native/native-network-release.json dist/native --allow-draft
       - uses: actions/upload-artifact@v7
         with:
           name: native-network-cask
@@ -134,6 +136,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: native-network-cask
+          path: ${{ runner.temp }}/native-network
+
       - name: Require live Codex routing validation
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -151,7 +158,7 @@ jobs:
         run: test -n "$GEMINI_ANTIGRAVITY_CLIENT_SECRET"
 
       - name: Bind reviewed native companion to the CQ Cask
-        run: echo "CQ_NATIVE_NETWORK_PIN=$(jq -c . .github/native-network-release.json)" >> "$GITHUB_ENV"
+        run: echo "CQ_NATIVE_NETWORK_PIN=$(jq -c . "$RUNNER_TEMP/native-network/native-network-release.json")" >> "$GITHUB_ENV"
 
       - name: Bind published stable changelog baseline
         env:
@@ -187,23 +194,19 @@ jobs:
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           GEMINI_ANTIGRAVITY_CLIENT_SECRET: ${{ secrets.GEMINI_ANTIGRAVITY_CLIENT_SECRET }}
 
-      - uses: actions/download-artifact@v8
-        with:
-          name: native-network-cask
-          path: dist/native
-
       - name: Assemble and verify shared-version macOS bundles
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           test "$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft)" = true
-          native_zip="dist/native/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' .github/native-network-release.json)"
-          test "$(shasum -a 256 "$native_zip" | awk '{print $1}')" = "$(jq -r .sha256 .github/native-network-release.json)"
+          native_zip="$RUNNER_TEMP/native-network/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' "$RUNNER_TEMP/native-network/native-network-release.json")"
+          test "$(shasum -a 256 "$native_zip" | awk '{print $1}')" = "$(jq -r .sha256 "$RUNNER_TEMP/native-network/native-network-release.json")"
           /usr/bin/ditto -x -k "$native_zip" "$RUNNER_TEMP/native-unpacked"
-          .github/scripts/package-macos-bundles.sh "${GITHUB_REF_NAME#v}" dist .github/native-network-release.json "$RUNNER_TEMP/native-unpacked/CQNetwork.app"
+          .github/scripts/package-macos-bundles.sh "${GITHUB_REF_NAME#v}" dist "$RUNNER_TEMP/native-network/native-network-release.json" "$RUNNER_TEMP/native-unpacked/CQNetwork.app"
           gh release upload "$GITHUB_REF_NAME" dist/cq_*_darwin_*_bundle.tar.gz dist/macos-bundles.json dist/checksums.txt --clobber
           cp "$native_zip" dist/
+          cp "$RUNNER_TEMP/native-network/native-network-release.json" dist/
 
       - uses: actions/upload-artifact@v7
         with:
@@ -211,6 +214,7 @@ jobs:
           path: |
             dist/cq_*_darwin_*.tar.gz
             dist/CQNetwork_*_universal.zip
+            dist/native-network-release.json
             dist/bundled-native-network.json
             dist/homebrew/Casks/*.rb
           if-no-files-found: error
@@ -555,8 +559,8 @@ jobs:
           release_api=$(gh release view "$GITHUB_REF_NAME" --json apiUrl --jq .apiUrl)
           [[ "$release_api" =~ ^https://api\.github\.com/repos/jacobcxdev/cq/releases/[1-9][0-9]*$ ]]
           gh api "${release_api#https://api.github.com/}" >"$RUNNER_TEMP/native-release.json"
-          native_zip="dist/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' .github/native-network-release.json)"
-          go run ./internal/tools/nativepackage verify .github/native-network-release.json "$native_zip" "$RUNNER_TEMP/native-release.json" --allow-draft
+          native_zip="dist/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' dist/native-network-release.json)"
+          go run ./internal/tools/nativepackage verify dist/native-network-release.json "$native_zip" "$RUNNER_TEMP/native-release.json" --allow-draft
           case "$(uname -m)" in
             arm64) architecture=arm64 ;;
             x86_64) architecture=amd64 ;;
@@ -576,6 +580,8 @@ jobs:
           release="$(gh release view "$RELEASE_TAG" --json tagName,isDraft,assets)"
           test "$(jq -r '.tagName' <<<"$release")" = "$RELEASE_TAG"
           test "$(jq '.assets | length' <<<"$release")" -ge 14
+          release_notes=$(gh release view "$RELEASE_TAG" --json body --jq .body)
+          grep -q '^## Changelog$' <<<"$release_notes"
           draft="$(jq -r '.isDraft' <<<"$release")"
           case "$draft" in
             true) gh release edit "$RELEASE_TAG" --draft=false ;;

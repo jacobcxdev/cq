@@ -25,14 +25,13 @@ companion assets. The executable configuration is
    before tagging and prove the final release commit is the current `origin/main`
    tip. Do not release a feature branch, pre-merge candidate, stale checkout or a
    different commit with equivalent changes.
-4. Stage the signed/notarised companion for that same version using the
-   [native release guide](native-network-releases.md), then merge its reviewed
-   schema-2 pin in `.github/native-network-release.json`. The pin records the
-   immutable native ZIP's source, asset ID and digest. Validation proves that
-   source is an ancestor of the final release commit and both native Git trees
-   match. A previous version's companion cannot qualify a new release.
-5. Complete the relevant build/vet/race, platform and installed-client gates.
+4. Complete the relevant build/vet/race, platform and installed-client gates.
    Retain the exact source, client version, package inputs and outcomes.
+5. Build and upload the freshly signed/notarised companion for that same version
+   from a signed staging tag using the [native release guide](native-network-releases.md).
+   After it passes, tag final main and retarget the same draft. The release
+   workflow derives its temporary asset manifest from that draft. A previous
+   version's companion cannot qualify a new release.
 
 Read-only provenance checks include:
 
@@ -102,12 +101,11 @@ tag for the selected stable version and push that tag. For example, substitute
 the selected version in `git tag -s vX.Y.Z` and `git push origin vX.Y.Z`.
 Never move a published tag or force-push shared release history.
 
-Retarget the existing unpublished staging draft to this parent tag and the full
-final commit SHA, keeping its title `vVERSION`, `draft=true` and
-`prerelease=false`. Keep the staging tag and uploaded native ZIP unchanged. This
-is the same draft, not a second release; the workflow adds the CLI packages and
-combined macOS bundles before publishing it. See the native guide for the exact
-staging and pin-review order.
+Retarget the existing unpublished staging draft to this parent tag and full
+final commit SHA. Keep its title `vVERSION`, notes headed `## Changelog`,
+`draft=true`, `prerelease=false`, and native ZIP unchanged. The workflow derives
+the asset ID and digest from that draft, adds CLI packages and combined macOS
+bundles, then publishes it. No asset pin PR is needed.
 
 The **Release** workflow is manually dispatched against the tag. Pushing the
 tag alone does not publish CQ. Its source preflight rejects a tag outside the
@@ -117,9 +115,9 @@ The workflow stages are:
 
 | Stage | Gate/output |
 | --- | --- |
-| `release-source` | Current reviewed main provenance, sequential stable version and matching schema-2 native pin |
-| `native-network`, `validate-codex` | Verify pinned signed/notarised native asset; installed Codex normal/compaction/hard-limit/rescue and reviewed corpus gates |
-| `draft-build` | Require the commit-bound live routing status, bind corpus provenance/native pin/Gemini secret, add CLI packages and verified combined macOS bundles to the existing draft |
+| `release-source` | Current reviewed main provenance and sequential stable version |
+| `native-network`, `validate-codex` | Derive and verify the tagged signed/notarised native asset; installed Codex normal/compaction/hard-limit/rescue and reviewed corpus gates |
+| `draft-build` | Require the commit-bound live routing status, bind corpus provenance/native manifest/Gemini secret, add CLI packages and verified combined macOS bundles to the existing draft |
 | `release` | macOS Cask formatting, quarantine and actual predecessor-to-candidate lifecycle checks |
 | `windows-packages`, `windows-acceptance` | Build AMD64/ARM64 per-user MSI and manifests, validate package/installer lifecycle |
 | `publish` | Publish the qualified parent release and paired companion/main Casks together |
@@ -208,7 +206,9 @@ and contents remain available for installer compatibility. The `cq` and
 same bundle URL and SHA-256 for the host architecture. The companion dependency
 applies on macOS 13 and later, preserving core CQ's macOS 12 support.
 
-CI downloads and verifies the reviewed companion before assembly, then verifies
+CI tests the current native source and downloads the latest published companion
+as a packaging fixture. The release workflow verifies the new same-version
+companion before assembly, then verifies
 its signatures and notarisation again after extracting the final bundle. It has
 no Apple signing or notarisation credentials. Preserve the third-party ZCode licence, published
 as the checksummed `ZCode-LICENSE.txt` asset, alongside the project's [MIT

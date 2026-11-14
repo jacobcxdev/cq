@@ -84,9 +84,10 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
 - Review the entire diff from the latest published release to `origin/main`.
   Include every merged fix and retain previously shipped changes. Passing tests
   on a stale branch does not establish a complete release.
-- Changed `native/macos-network` sources require a new signed, notarised native
-  companion and reviewed `.github/native-network-release.json` pin. A newer Go
-  version must not ship an older companion which omits merged native fixes.
+- Every release requires a freshly signed, notarised native companion at the
+  same version. Build it from a signed staging tag, then derive the asset
+  manifest from the draft release without a pin PR. Verify its complete native
+  source tree still matches final `main` before publishing.
 - Follow `CONTRIBUTING.md` and `docs/native-network-releases.md`. Verify published
   Casks, installed companion/provider versions and real affected traffic before
   claiming delivery. A merge, tag, draft or Go executable upgrade is insufficient.
