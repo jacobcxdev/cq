@@ -137,6 +137,15 @@ platform, installed-client and package gates are described in the release guide.
 
 All checks must pass before merge:
 
+The existing required **Build, vet and race tests** check includes both the Go
+suite and the reusable native harness matrix. Its final gate rejects a failed,
+cancelled or skipped dependency. The native matrix qualifies the latest official
+Codex client and a pinned desktop-version baseline using isolated homes and a
+synthetic loopback provider. Follow [the release guide](docs/releases.md#live-codex-qualification)
+to run the same gate against the actual desktop executable before deployment.
+The [harness qualification contract](docs/harness-qualification.md) records the
+required failure families and observable recovery outcomes.
+
 Cache prefix contracts are part of the required race suite. Inference adapters,
 tool projection and harness changes must preserve append-only reuse or include a
 reviewed, case-specific justification for intentional loss. New inference paths

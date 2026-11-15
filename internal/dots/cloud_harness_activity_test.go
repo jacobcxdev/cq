@@ -6,9 +6,63 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/harness"
 )
+
+func TestCloudHarnessGoalRefreshFailureReleasedTemporaryHold(t *testing.T) {
+	h, store, id, methods, goal := cloudHarnessGoalFixture(t)
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	h.b.ctx = ctx
+	h.b.deps.statusInterval = 5 * time.Millisecond
+	base := h.b.local.input
+	h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+		request := cloudHarnessObject(raw)
+		if request.method() == "thread/read" {
+			h.calls[string(request["id"])] <- cloudMessage{"error": cloudHarnessRaw(map[string]any{"code": -32000, "message": "private refresh failure"})}
+			return len(raw), nil
+		}
+		return base.Write(raw)
+	}}
+	released := make(chan struct{}, 1)
+	h.b.deps.event = func(event map[string]any) {
+		if event["state"] != "pending" {
+			return
+		}
+		h.mu.Lock()
+		held := h.threads[id].goalHold != nil
+		h.mu.Unlock()
+		if !held {
+			select {
+			case released <- struct{}{}:
+			default:
+			}
+		}
+	}
+	h.b.workers.Add(1)
+	go h.run()
+	t.Cleanup(func() { cancel(); h.b.workers.Wait() })
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("native activity read failure stranded CQ's verified goal hold")
+	}
+	cancel()
+	h.b.workers.Wait()
+	receipt, err := store.Load(id)
+	if err != nil || receipt.GoalHold != nil || receipt.State != "pending" || goal["status"] != "active" {
+		t.Fatalf("activity failure claimed application or stranded hold: goal=%v receipt=%#v err=%v", goal["status"], receipt, err)
+	}
+	for _, method := range *methods {
+		if method == "config/read" || method == "thread/unsubscribe" || method == "thread/resume" || method == "thread/settings/update" {
+			t.Fatalf("failed activity read reached configuration: %s", method)
+		}
+	}
+}
 
 func TestCloudHarnessFreshReadRespectedNewerActivity(t *testing.T) {
 	for _, event := range []string{"", `{"method":"turn/started","params":{"threadId":"chat","turn":{"id":"new"}}}`, `{"method":"thread/status/changed","params":{"threadId":"chat","status":{"type":"active"}}}`} {

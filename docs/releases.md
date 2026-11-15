@@ -48,6 +48,32 @@ Fetching is required again if `main` advances before the tag is created.
 
 ## Live Codex qualification
 
+The required **Harness compatibility** workflow first runs every
+`internal/dots` `TestHarnessInstalled*` conformance family against the current
+official Codex client and the pinned desktop-version baseline. It starts isolated native
+app-server processes with temporary homes, synthetic capabilities and a loopback
+provider; it does not read account credentials, call a real model or alter the
+running desktop app. Both clients must pass without skipped cases before a PR's
+existing required check succeeds or the release can build its draft packages.
+The same matrix runs weekly and on manual dispatch to detect upstream drift
+without waiting for a CQ release.
+
+Before deploying to a desktop version, qualify its actual executable too:
+
+```sh
+bash .github/scripts/validate-harness-installed.sh /absolute/path/to/native/codex
+```
+
+The validator records the CQ source commit, native version and executable
+SHA-256, discovers the installed harness tests, requires every case to run, and
+rejects a native executable replaced during qualification. The pinned archive
+version and per-architecture digests live in `.github/workflows/harness.yml`;
+update them only after the replacement passes the same conformance suite.
+Do not change test expectations or skip a client to work around a newly broken
+native contract. Diagnose the failing fixture before publication or deployment.
+The [harness qualification contract](harness-qualification.md) maps the happy
+and unhappy paths to their deciding fixtures and recovery outcomes.
+
 From the final source commit, run the existing release validator:
 
 ```sh

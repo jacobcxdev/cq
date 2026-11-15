@@ -1,6 +1,8 @@
 package dots
 
 import (
+	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -59,6 +61,33 @@ func TestCloudHarnessHeldGoalUntilConfigurationApplied(t *testing.T) {
 	}
 }
 
+func TestCloudHarnessGoalHoldPendingInactiveAwaitedApplication(t *testing.T) {
+	h, store, id, _, goal := cloudHarnessGoalFixture(t)
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	thread := h.threads[id]
+	thread.active, thread.activeTurnID = false, ""
+	if thread.receiptState != "pending" {
+		t.Fatalf("fixture did not retain pending application: %q", thread.receiptState)
+	}
+	if err := h.finishGoalHold(id, false); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.GoalHold == nil || goal["status"] != "paused" {
+		t.Fatalf("inactive pending application resumed goal early: goal=%v marker=%#v err=%v", goal["status"], receipt.GoalHold, err)
+	}
+	thread.receiptState = "applied"
+	if err := h.finishGoalHold(id, false); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = store.Load(id)
+	if err != nil || receipt.GoalHold != nil || goal["status"] != "active" {
+		t.Fatalf("verified application did not release goal: goal=%v marker=%#v err=%v", goal["status"], receipt.GoalHold, err)
+	}
+}
+
 func cloudHarnessGoalFixture(t *testing.T) (*cloudHarness, harness.Receipts, string, *[]string, map[string]any) {
 	t.Helper()
 	h, store, id, methods := cloudHarnessFailureFixture(t)
@@ -80,6 +109,38 @@ func cloudHarnessGoalFixture(t *testing.T) (*cloudHarness, harness.Receipts, str
 		return len(raw), nil
 	}}
 	return h, store, id, methods, goal
+}
+
+func TestCloudHarnessGoalResultRejectedInvalidNativeState(t *testing.T) {
+	const id = "00000000-0000-0000-0000-000000000001"
+	valid := map[string]any{"threadId": id, "objective": "private objective", "status": "active", "createdAt": 1, "updatedAt": 2, "tokenBudget": 1000}
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{"missing_goal", func(goal map[string]any) {}},
+		{"wrong_thread", func(goal map[string]any) { goal["threadId"] = "00000000-0000-0000-0000-000000000002" }},
+		{"unknown_status", func(goal map[string]any) { goal["status"] = "futureStatus" }},
+		{"negative_budget", func(goal map[string]any) { goal["tokenBudget"] = -1 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			goal := map[string]any{}
+			for key, value := range valid {
+				goal[key] = value
+			}
+			test.mutate(goal)
+			result := cloudMessage{"goal": cloudHarnessRaw(goal)}
+			if test.name == "missing_goal" {
+				delete(result, "goal")
+			}
+			if _, err := cloudHarnessGoalResult(id, result); err == nil {
+				t.Fatal("invalid native goal state was accepted")
+			}
+		})
+	}
+	if goal, err := cloudHarnessGoalResult(id, cloudMessage{"goal": cloudHarnessRaw(nil)}); err != nil || goal != nil {
+		t.Fatalf("valid null goal was rejected: %#v %v", goal, err)
+	}
 }
 
 func TestCloudHarnessGoalHoldRespectedExistingGoalState(t *testing.T) {
@@ -132,7 +193,12 @@ func TestCloudHarnessGoalHoldRecoveredAndRespectedUserChanges(t *testing.T) {
 			case "complete":
 				goal["status"] = "complete"
 			}
-			if err := h.reconcile(id, "", ""); err != nil {
+			err := h.reconcile(id, "", "")
+			if change == "intent-only" {
+				if err == nil {
+					t.Fatal("ambiguous stage-zero pause was reported as restored")
+				}
+			} else if err != nil {
 				t.Fatal(err)
 			}
 			want := "paused"
@@ -142,6 +208,21 @@ func TestCloudHarnessGoalHoldRecoveredAndRespectedUserChanges(t *testing.T) {
 				want = "complete"
 			}
 			receipt, err := store.Load(id)
+			if change == "intent-only" {
+				if err != nil || receipt.GoalHold == nil || receipt.State == "applied" || !slices.Contains(receipt.Issues, "native_goal_restore_ambiguous") || goal["status"] != "paused" {
+					t.Fatalf("ambiguous stage-zero pause lost recovery truth: goal=%v receipt=%#v err=%v", goal["status"], receipt, err)
+				}
+				h.release(id)
+				thread.goalHold, thread.goalHoldLoaded = nil, false
+				if err := h.reconcile(id, "", ""); err == nil {
+					t.Fatal("second recovery silently cleared ambiguous hold")
+				}
+				recovered, err := store.Load(id)
+				if err != nil || recovered.GoalHold == nil || recovered.State != "partial" || !slices.Contains(recovered.Issues, "native_goal_restore_ambiguous") {
+					t.Fatalf("second recovery lost ambiguous marker: %#v %v", recovered, err)
+				}
+				return
+			}
 			if err != nil || receipt.GoalHold != nil || goal["status"] != want {
 				t.Fatalf("goal recovery ignored ownership: goal=%v want=%s receipt=%#v err=%v", goal["status"], want, receipt.GoalHold, err)
 			}
@@ -194,12 +275,151 @@ func TestCloudHarnessGoalHoldReadFailureRetried(t *testing.T) {
 	if !failed || goal["status"] != "active" {
 		t.Fatalf("failed read changed goal: failed=%v status=%v", failed, goal["status"])
 	}
+	initial, err := store.Load(id)
+	if err != nil || slices.Contains(initial.Issues, "native_goal_api_unavailable") {
+		t.Fatalf("transient native rejection was classified as unsupported: %#v %v", initial, err)
+	}
 	if err := h.reconcile(id, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	receipt, err := store.Load(id)
 	if err != nil || receipt.GoalHold == nil || goal["status"] != "paused" || strings.Count(strings.Join(*methods, ","), "thread/goal/get") < 1 {
 		t.Fatalf("transient read was not retried: goal=%v marker=%#v methods=%v err=%v", goal["status"], receipt.GoalHold, *methods, err)
+	}
+}
+
+func TestCloudHarnessUnsupportedGoalReadExplainsPending(t *testing.T) {
+	for _, name := range []string{"method_not_found", "malformed_result"} {
+		t.Run(name, func(t *testing.T) {
+			h, store, id, methods, goal := cloudHarnessGoalFixture(t)
+			base := h.b.local.input
+			unsupported := true
+			h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+				request := cloudHarnessObject(raw)
+				if request.method() == "thread/goal/get" && unsupported {
+					response := cloudMessage{"result": cloudHarnessRaw(map[string]any{})}
+					if name == "method_not_found" {
+						response = cloudMessage{"error": cloudHarnessRaw(map[string]any{"code": -32601, "message": "private native error"})}
+					}
+					h.calls[string(request["id"])] <- response
+					return len(raw), nil
+				}
+				return base.Write(raw)
+			}}
+			if err := h.reconcile(id, "", ""); err == nil {
+				t.Fatal("unsupported native goal API was accepted")
+			}
+			receipt, err := store.Load(id)
+			if err != nil || receipt.State != "pending" || !slices.Contains(receipt.Issues, "native_goal_api_unavailable") || receipt.GoalHold != nil || goal["status"] != "active" || strings.Contains(strings.Join(*methods, ","), "thread/goal/set") || strings.Contains(string(cloudHarnessRaw(receipt)), "private native error") {
+				t.Fatalf("unsupported goal API hid pending reason or changed native state: goal=%v receipt=%#v methods=%v err=%v", goal["status"], receipt, *methods, err)
+			}
+			h.release(id)
+			h.threads[id].goalAPIUnavailable = false // Simulate a new broker acquiring the persisted receipt.
+			if err := h.acquire(id); err != nil || !h.threads[id].goalAPIUnavailable {
+				t.Fatalf("reacquired receipt lost unavailable native API: %v", err)
+			}
+			h.threads[id].active, h.threads[id].activeTurnID = false, ""
+			_ = h.reconcile(id, "", "")
+			receipt, err = store.Load(id)
+			if err != nil || receipt.State != "pending" || !slices.Contains(receipt.Issues, "native_goal_api_unavailable") || receipt.GoalHold != nil || goal["status"] != "active" || strings.Contains(strings.Join(*methods, ","), "thread/unsubscribe") || strings.Contains(strings.Join(*methods, ","), "thread/resume") || strings.Contains(strings.Join(*methods, ","), "thread/settings/update") {
+				t.Fatalf("idle signal bypassed unavailable goal safety: goal=%v receipt=%#v methods=%v err=%v", goal["status"], receipt, *methods, err)
+			}
+			h.threads[id].active, h.threads[id].activeTurnID = true, "current"
+			unsupported = false
+			if err := h.reconcile(id, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			receipt, err = store.Load(id)
+			if err != nil || slices.Contains(receipt.Issues, "native_goal_api_unavailable") || receipt.GoalHold == nil || goal["status"] != "paused" {
+				t.Fatalf("supported goal API did not recover: goal=%v receipt=%#v err=%v", goal["status"], receipt, err)
+			}
+		})
+	}
+}
+
+func TestCloudHarnessUnsupportedGoalSetExplainsPending(t *testing.T) {
+	for _, name := range []string{"method_not_found", "malformed_result"} {
+		t.Run(name, func(t *testing.T) {
+			h, store, id, methods, goal := cloudHarnessGoalFixture(t)
+			base := h.b.local.input
+			unsupported := true
+			h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+				request := cloudHarnessObject(raw)
+				if request.method() == "thread/goal/set" && unsupported {
+					response := cloudMessage{"result": cloudHarnessRaw(map[string]any{})}
+					if name == "method_not_found" {
+						response = cloudMessage{"error": cloudHarnessRaw(map[string]any{"code": -32601, "message": "private native error"})}
+					}
+					h.calls[string(request["id"])] <- response
+					return len(raw), nil
+				}
+				return base.Write(raw)
+			}}
+			if err := h.reconcile(id, "", ""); err == nil {
+				t.Fatal("unsupported native goal setter was accepted")
+			}
+			receipt, err := store.Load(id)
+			if err != nil || receipt.State != "pending" || !slices.Contains(receipt.Issues, "native_goal_api_unavailable") || receipt.GoalHold != nil || goal["status"] != "active" || strings.Contains(string(cloudHarnessRaw(receipt)), "private native error") {
+				t.Fatalf("unsupported goal setter hid pending reason or changed native state: goal=%v receipt=%#v err=%v", goal["status"], receipt, err)
+			}
+			h.threads[id].active, h.threads[id].activeTurnID = false, ""
+			_ = h.reconcile(id, "", "")
+			receipt, err = store.Load(id)
+			if err != nil || receipt.State != "pending" || !slices.Contains(receipt.Issues, "native_goal_api_unavailable") || strings.Contains(strings.Join(*methods, ","), "thread/unsubscribe") || strings.Contains(strings.Join(*methods, ","), "thread/resume") || strings.Contains(strings.Join(*methods, ","), "thread/settings/update") {
+				t.Fatalf("unavailable setter allowed idle configuration write: receipt=%#v methods=%v err=%v", receipt, *methods, err)
+			}
+			unsupported = false
+			h.threads[id].active, h.threads[id].activeTurnID = true, "current"
+			if err := h.reconcile(id, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			receipt, err = store.Load(id)
+			if err != nil || slices.Contains(receipt.Issues, "native_goal_api_unavailable") || receipt.GoalHold == nil || goal["status"] != "paused" {
+				t.Fatalf("recovered goal setter did not hold continuation: goal=%v receipt=%#v err=%v", goal["status"], receipt, err)
+			}
+		})
+	}
+}
+
+func TestCloudHarnessMalformedGoalSetAfterPauseRetainsAmbiguity(t *testing.T) {
+	h, store, id, methods, goal := cloudHarnessGoalFixture(t)
+	base := h.b.local.input
+	malformed := true
+	h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+		request := cloudHarnessObject(raw)
+		if request.method() == "thread/goal/set" && malformed {
+			goal["status"], goal["updatedAt"] = "paused", 3
+			h.calls[string(request["id"])] <- cloudMessage{"result": cloudHarnessRaw(map[string]any{})}
+			return len(raw), nil
+		}
+		return base.Write(raw)
+	}}
+	if err := h.reconcile(id, "", ""); err == nil {
+		t.Fatal("malformed pause reply was accepted")
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.State != "partial" || receipt.GoalHold == nil || receipt.GoalHold.UpdatedAt != 0 || !slices.Contains(receipt.Issues, "native_goal_api_unavailable") || !slices.Contains(receipt.Issues, "native_goal_restore_ambiguous") || goal["status"] != "paused" {
+		t.Fatalf("malformed pause reply lost ambiguous recovery: goal=%v receipt=%#v err=%v", goal["status"], receipt, err)
+	}
+	h.threads[id].active, h.threads[id].activeTurnID = false, ""
+	_ = h.reconcile(id, "", "")
+	receipt, err = store.Load(id)
+	if err != nil || receipt.GoalHold == nil || goal["status"] != "paused" || strings.Contains(strings.Join(*methods, ","), "thread/unsubscribe") {
+		t.Fatalf("ambiguous pause was discarded or configuration reached: goal=%v receipt=%#v methods=%v err=%v", goal["status"], receipt, *methods, err)
+	}
+	request := cloudMessage{"id": cloudHarnessRaw(12), "method": cloudHarnessRaw("thread/goal/set"), "params": cloudHarnessRaw(map[string]any{"threadId": id, "status": "active", "origin": "user"})}
+	if _, err := h.prepare(request, cloudHarnessRaw(request)); err != nil {
+		t.Fatal(err)
+	}
+	goal["status"], goal["updatedAt"] = "active", 4
+	h.observe(cloudHarnessRaw(map[string]any{"id": 12, "result": map[string]any{"goal": goal}}))
+	malformed = false
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = store.Load(id)
+	if err != nil || h.threads[id].goalAPIUnavailable || receipt.GoalHold == nil || receipt.GoalHold.UpdatedAt == 0 || goal["status"] != "paused" {
+		t.Fatalf("user resume left recovered goal API permanently pending: goal=%v receipt=%#v err=%v", goal["status"], receipt, err)
 	}
 }
 
@@ -232,6 +452,32 @@ func TestCloudHarnessGoalHoldPauseRejectionRetried(t *testing.T) {
 	}
 }
 
+func TestCloudHarnessGoalHoldUnknownPauseResultRemainsExplicit(t *testing.T) {
+	h, store, id, _, goal := cloudHarnessGoalFixture(t)
+	base := h.b.local.input
+	failed := false
+	h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+		request := cloudHarnessObject(raw)
+		if request.method() == "thread/goal/set" && !failed {
+			failed = true
+			goal["status"], goal["updatedAt"] = "paused", 3
+			return 0, errors.New("fixture lost reply after native pause")
+		}
+		return base.Write(raw)
+	}}
+	if err := h.reconcile(id, "", ""); err == nil {
+		t.Fatal("unknown pause result was accepted")
+	}
+	h.threads[id].active, h.threads[id].activeTurnID = false, ""
+	if err := h.reconcile(id, "", ""); err == nil {
+		t.Fatal("ambiguous paused goal was reported as restored")
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.GoalHold == nil || receipt.State != "partial" || !slices.Contains(receipt.Issues, "native_goal_restore_ambiguous") || goal["status"] != "paused" {
+		t.Fatalf("unknown pause result discarded ownership: goal=%v receipt=%#v err=%v", goal["status"], receipt, err)
+	}
+}
+
 func TestCloudHarnessGoalHoldSameIntentPausePreserved(t *testing.T) {
 	h, store, id, _, goal := cloudHarnessGoalFixture(t)
 	if err := h.reconcile(id, "", ""); err != nil {
@@ -245,6 +491,59 @@ func TestCloudHarnessGoalHoldSameIntentPausePreserved(t *testing.T) {
 	receipt, err := store.Load(id)
 	if err != nil || receipt.GoalHold != nil || goal["status"] != "paused" {
 		t.Fatalf("same-intent pause was overridden: goal=%v marker=%#v err=%v", goal["status"], receipt.GoalHold, err)
+	}
+}
+
+func TestCloudHarnessGoalHoldTerminalStatesNotReactivated(t *testing.T) {
+	for _, status := range []string{"complete", "blocked", "budgetLimited", "usageLimited"} {
+		t.Run(status, func(t *testing.T) {
+			h, store, id, methods, goal := cloudHarnessGoalFixture(t)
+			if err := h.reconcile(id, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			goal["status"], goal["updatedAt"] = status, 4
+			h.threads[id].active, h.threads[id].activeTurnID = false, ""
+			if err := h.finishGoalHold(id, true); err != nil {
+				t.Fatal(err)
+			}
+			receipt, err := store.Load(id)
+			if err != nil || receipt.GoalHold != nil || goal["status"] != status || strings.Count(strings.Join(*methods, ","), "thread/goal/set") != 1 {
+				t.Fatalf("terminal goal was overwritten: goal=%v marker=%#v methods=%v err=%v", goal["status"], receipt.GoalHold, *methods, err)
+			}
+		})
+	}
+}
+
+func TestCloudHarnessGoalHoldRestoreReadFailureRetainsMarker(t *testing.T) {
+	h, store, id, _, goal := cloudHarnessGoalFixture(t)
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	base := h.b.local.input
+	failed := false
+	h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+		request := cloudHarnessObject(raw)
+		if request.method() == "thread/goal/get" && !failed {
+			failed = true
+			h.calls[string(request["id"])] <- cloudMessage{"error": cloudHarnessRaw(map[string]any{"code": -32000})}
+			return len(raw), nil
+		}
+		return base.Write(raw)
+	}}
+	h.threads[id].active, h.threads[id].activeTurnID = false, ""
+	if err := h.finishGoalHold(id, true); err == nil {
+		t.Fatal("failed restore read was accepted")
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.GoalHold == nil || goal["status"] != "paused" {
+		t.Fatalf("failed restore read lost marker: goal=%v marker=%#v err=%v", goal["status"], receipt.GoalHold, err)
+	}
+	if err := h.finishGoalHold(id, true); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = store.Load(id)
+	if err != nil || receipt.GoalHold != nil || goal["status"] != "active" {
+		t.Fatalf("restore read did not retry: goal=%v marker=%#v err=%v", goal["status"], receipt.GoalHold, err)
 	}
 }
 

@@ -103,6 +103,8 @@ func newCloudHarnessFixture(t *testing.T) *cloudHarnessFixture {
 					var plugins []string
 					_ = json.Unmarshal(cloudHarnessRaw(params["disabledPluginIds"]), &plugins)
 					f.plugins[id] = plugins
+				case "thread/goal/get":
+					result = map[string]any{"goal": nil}
 				case "thread/read":
 					id, _ := params["threadId"].(string)
 					result = map[string]any{"thread": map[string]any{"id": id, "model": f.models[id], "cwd": "/project"}}

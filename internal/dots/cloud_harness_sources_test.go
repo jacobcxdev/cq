@@ -12,6 +12,33 @@ type cloudHarnessSourceGateway struct {
 	sources func(string) []string
 }
 
+func TestCloudHarnessDisconnectedGoalMutationRetainedRecoveryLease(t *testing.T) {
+	h, store, id, _, goal := cloudHarnessGoalFixture(t)
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	request := cloudMessage{"id": cloudHarnessRaw(91), "method": cloudHarnessRaw("thread/goal/set"), "params": cloudHarnessRaw(map[string]any{"threadId": id, "status": "paused"})}
+	if _, err := h.prepare(request, cloudHarnessRaw(request)); err != nil {
+		t.Fatal(err)
+	}
+	thread := h.threads[id]
+	thread.owned, thread.active, thread.activeTurnID = false, false, ""
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if thread.lease == nil || thread.goalHold == nil {
+		t.Fatal("last subscription released recovery ownership before the pending mutation completed")
+	}
+	h.observe(cloudHarnessRaw(map[string]any{"id": 91, "error": map[string]any{"code": -32000, "message": "fixture rejection"}}))
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.GoalHold != nil || thread.lease != nil || goal["status"] != "active" {
+		t.Fatalf("disconnected mutation stranded recovery: goal=%v marker=%#v lease=%v err=%v", goal["status"], receipt.GoalHold, thread.lease, err)
+	}
+}
+
 func (g cloudHarnessSourceGateway) Write(source string, raw []byte) error {
 	return g.write(source, raw)
 }

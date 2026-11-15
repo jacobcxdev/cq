@@ -12,8 +12,11 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  harness:
+    uses: ./.github/workflows/harness.yml
+
   build-vet-test:
-    name: Build, vet and race tests
+    name: Go build, vet and race tests
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
@@ -38,3 +41,16 @@ jobs:
       - run: bash .github/scripts/test-publish-homebrew-casks.sh
       - run: bash .github/scripts/test-submit-winget-manifest.sh
       - run: bash .github/scripts/test-homebrew-install-companion.sh
+      - run: bash .github/scripts/test-harness-installed-validator.sh
+
+  qualification:
+    name: Build, vet and race tests
+    needs: [build-vet-test, harness]
+    if: always()
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Require Go checks and both native harness clients
+        env:
+          GO_RESULT: ${{ needs.build-vet-test.result }}
+          HARNESS_RESULT: ${{ needs.harness.result }}
+        run: test "$GO_RESULT" = success && test "$HARNESS_RESULT" = success

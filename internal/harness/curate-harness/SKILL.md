@@ -60,9 +60,17 @@ Use CQ's CLI; make task-specific choices without another MCP or model service.
    selection. Inspect its stage/reason and address the underlying cause. If the
    CLI and full-mode receipt support retry, request one attempt with
    `retry --chat current --project ROOT`, adding the intended model only when
-   needed, then re-read explain. Pending work waits for native idle. If retry is
-   unsupported or the same failure persists, report that limit. Do not change
-   fingerprints or repeatedly bind an unchanged profile to force another attempt.
+   needed, then re-read explain. The full bridge can hold automatic goal
+   continuation, finish the current turn, apply the configuration and resume the
+   same goal. Native pause accounting preserves the objective and budget limit
+   while excluding the rest of the paused turn from usage counters.
+   `native_goal_api_unavailable` means native goal control needs a valid probe
+   before application. `native_goal_restore_ambiguous` retains a recovery marker
+   and a partial receipt until an explicit user goal update resolves ownership;
+   do not reactivate a possibly user-paused goal by guessing.
+   If retry is unsupported or the same failure persists, report that limit.
+   Do not change fingerprints or repeatedly bind an unchanged profile to force
+   another attempt.
 
 Keep CQ's small curation entrypoint and native core tools available. Native child
 agents inherit parent capabilities; independent model-based changes before an
