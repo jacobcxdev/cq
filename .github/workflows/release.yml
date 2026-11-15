@@ -57,6 +57,10 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  harness:
+    needs: [release-source]
+    uses: ./.github/workflows/harness.yml
+
   validate-codex:
     needs: [release-source]
     runs-on: macos-15
@@ -124,7 +128,7 @@ jobs:
         run: go test -race -count=1 ./internal/proxy -run '^(TestCodexStage11LifecycleCorpusUsesProductionHandlers|TestCodexStage11LifecycleCorpusSmoke|TestCodexStage11ReviewedManifestMatchesCorpusAuthority)$'
 
   draft-build:
-    needs: [validate-codex, native-network]
+    needs: [validate-codex, native-network, harness]
     runs-on: macos-15
     timeout-minutes: 30
     steps:

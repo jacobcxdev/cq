@@ -1,0 +1,60 @@
+name: Harness compatibility
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 6 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  native-harness:
+    name: Native harness (${{ matrix.client }})
+    runs-on: macos-15
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        client: [latest, desktop-0.169.0-alpha.11.1]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version-file: go.mod
+      - name: Install current official Codex
+        if: matrix.client == 'latest'
+        run: |
+          brew update
+          brew install --cask codex
+          echo "CQ_HARNESS_EXECUTABLE=$(command -v codex)" >> "$GITHUB_ENV"
+      - name: Fetch pinned desktop-version Codex baseline
+        if: matrix.client != 'latest'
+        run: |
+          set -euo pipefail
+          case $(uname -m) in
+            arm64)
+              target=aarch64-apple-darwin
+              digest=417f960595973ee1cac5ccb1a2532b0149e89d0ee52a6966a534c315d194145c
+              ;;
+            x86_64)
+              target=x86_64-apple-darwin
+              digest=d29dbf0c1db91bf0dc10aaa5f12231df35c831a0471ce0b95d744dc7565881ef
+              ;;
+            *) echo 'Unsupported macOS qualification architecture' >&2; exit 1 ;;
+          esac
+          root="$RUNNER_TEMP/cq-pinned-codex"
+          mkdir -p "$root"
+          curl --fail --location --retry 3 --max-time 180 \
+            "https://github.com/openai/codex/releases/download/rust-v0.169.0-alpha.11.1/codex-$target.tar.gz" \
+            --output "$root/codex.tar.gz"
+          test "$(shasum -a 256 "$root/codex.tar.gz" | awk '{print $1}')" = "$digest"
+          tar -xzf "$root/codex.tar.gz" -C "$root"
+          client="$root/codex-$target"
+          test "$("$client" --version)" = 'codex-cli 0.169.0-alpha.11.1'
+          echo "CQ_HARNESS_EXECUTABLE=$client" >> "$GITHUB_ENV"
+      - name: Qualify isolated native harness contracts
+        run: bash .github/scripts/validate-harness-installed.sh "$CQ_HARNESS_EXECUTABLE"

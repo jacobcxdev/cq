@@ -13,6 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  harness:
+    uses: ./.github/workflows/harness.yml
+
   native-network:
     runs-on: macos-15
     timeout-minutes: 15
