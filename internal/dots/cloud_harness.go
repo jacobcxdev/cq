@@ -1982,7 +1982,9 @@ func (h *cloudHarness) observeFrom(source string, raw []byte) bool {
 				thread.refresh = true
 			}
 		case "thread/goal/updated":
-			if thread.goalHold != nil && cloudHarnessString(params, "turnId") != "" {
+			// Native accounts the active turn before applying CQ's own pause.
+			// That turn-attributed active update does not yield the hold.
+			if thread.goalHold != nil && cloudHarnessString(params, "turnId") != "" && cloudHarnessString(cloudHarnessObject(params["goal"]), "status") == "paused" {
 				thread.goalHoldExternal = true
 			}
 			var goal struct{ CreatedAt int64 }

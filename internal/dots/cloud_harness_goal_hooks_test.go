@@ -90,6 +90,38 @@ func TestCloudHarnessGoalToolPauseWonWithinSameSecond(t *testing.T) {
 	}
 }
 
+func TestCloudHarnessGoalAccountingBeforeOwnPauseRestores(t *testing.T) {
+	h, store, id, _, goal := cloudHarnessGoalFixture(t)
+	base := h.b.local.input
+	h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+		request := cloudHarnessObject(raw)
+		if request.method() == "thread/goal/set" && cloudHarnessString(cloudHarnessObject(request["params"]), "status") == "paused" {
+			// Native accounts the current active goal before applying an external pause.
+			accounted := map[string]any{}
+			for key, value := range goal {
+				accounted[key] = value
+			}
+			accounted["tokensUsed"] = 33
+			h.observe(cloudHarnessRaw(map[string]any{"method": "thread/goal/updated", "params": map[string]any{"threadId": id, "turnId": "current", "goal": accounted}}))
+		}
+		return base.Write(raw)
+	}}
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if goal["status"] != "paused" || !h.threads[id].active {
+		t.Fatalf("current turn did not retain its pause: %v", goal["status"])
+	}
+	h.threads[id].active, h.threads[id].activeTurnID = false, ""
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.GoalHold != nil || goal["status"] != "active" {
+		t.Fatalf("accounting notification blocked owned restore: goal=%v marker=%#v err=%v", goal["status"], receipt.GoalHold, err)
+	}
+}
+
 func TestCloudHarnessCancelledUnsentGoalMutationRestoredHold(t *testing.T) {
 	h, _, id, _, goal := cloudHarnessGoalFixture(t)
 	if err := h.reconcile(id, "", ""); err != nil {

@@ -986,6 +986,14 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			t.Fatal("first automatic goal turn did not reach the isolated provider")
 		}
 		assertTools(<-observed, true, true)
+		// Native external mutations flush whole seconds of active goal usage.
+		// Let this turn accrue usage so pausing emits its attributed accounting
+		// notification as well as the explicit paused snapshot.
+		accountingBoundary := time.Now().Add(1200 * time.Millisecond)
+		for time.Now().Before(accountingBoundary) {
+			rpc.call("thread/read", map[string]any{"threadId": full, "includeTurns": false})
+			time.Sleep(10 * time.Millisecond)
+		}
 		policyMu.Lock()
 		policy = harness.Policy{Version: 1, Enabled: true, Projects: map[string]harness.Profile{command.Dir: harness.Full}, Chats: map[string]harness.Profile{full: harness.Minimal}}
 		policyMu.Unlock()
@@ -1017,6 +1025,9 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		if paused.Status != "paused" || paused.Objective != active.Objective || paused.CreatedAt != active.CreatedAt || paused.TokenBudget == nil || *paused.TokenBudget != *active.TokenBudget {
 			t.Fatal("CQ hold changed the synthetic goal's intent, identity or budget")
 		}
+		if paused.TimeUsedSeconds <= active.TimeUsedSeconds {
+			t.Fatal("hold did not flush active native goal accounting")
+		}
 		var current struct {
 			Thread struct{ Status struct{ Type string } }
 		}
@@ -1032,7 +1043,11 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			}
 		}
 		reached := false
+		deadline = time.Now().Add(10 * time.Second)
 		for !reached {
+			if time.Now().After(deadline) {
+				t.Fatal("CQ did not resume the accounted goal after applying the chat policy")
+			}
 			select {
 			case <-nextGoalReached:
 				reached = true
