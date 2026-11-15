@@ -332,7 +332,15 @@ func (h *cloudHarness) completeGoalYield(id string, success bool) error {
 		return nil
 	}
 	if success {
-		return h.saveGoalHold(id, nil)
+		if err := h.saveGoalHold(id, nil); err != nil {
+			return err
+		}
+		h.mu.Lock()
+		if thread := h.threads[id]; thread != nil {
+			thread.goalHoldAttempt = ""
+		}
+		h.mu.Unlock()
+		return nil
 	}
 	return h.saveGoalHold(id, marker)
 }

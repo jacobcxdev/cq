@@ -2063,8 +2063,32 @@ func (h *cloudHarness) observeFrom(source string, raw []byte) bool {
 	h.mu.Unlock()
 	if found && (pending.method == "thread/goal/set" || pending.method == "thread/goal/clear") {
 		id := cloudThreadID(cloudHarnessRaw(pending.params))
+		accepted := !failed
+		if accepted {
+			result := cloudHarnessObject(message["result"])
+			if pending.method == "thread/goal/set" {
+				goal, err := cloudHarnessGoalResult(id, result)
+				accepted = err == nil && goal != nil
+				if status := cloudHarnessString(pending.params, "status"); accepted && status != "" {
+					accepted = goal.Status == status
+				}
+				if objective := cloudHarnessString(pending.params, "objective"); accepted && objective != "" {
+					accepted = goal.Objective == strings.TrimSpace(objective)
+				}
+				if budget := pending.params["tokenBudget"]; accepted && len(budget) > 0 && !bytes.Equal(bytes.TrimSpace(budget), []byte("null")) {
+					var requested int64
+					accepted = json.Unmarshal(budget, &requested) == nil && goal.Budget != nil && *goal.Budget == requested
+				}
+			} else {
+				var cleared *bool
+				accepted = json.Unmarshal(result["cleared"], &cleared) == nil && cleared != nil
+			}
+		}
+		if !failed && !accepted {
+			h.b.event(map[string]any{"harness_goal_handoff_unverified": true, "thread_id": id})
+		}
 		// Keep reconciliation blocked until the user mutation's journal is saved.
-		if err := h.goalYieldFinished(id, !failed); err != nil {
+		if err := h.goalYieldFinished(id, accepted); err != nil {
 			h.b.event(map[string]any{"event": "harness_goal_handoff_failed", "reason": "receipt"})
 		}
 	}

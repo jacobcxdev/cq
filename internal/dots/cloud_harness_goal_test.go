@@ -384,9 +384,10 @@ func TestCloudHarnessUnsupportedGoalSetExplainsPending(t *testing.T) {
 func TestCloudHarnessMalformedGoalSetAfterPauseRetainsAmbiguity(t *testing.T) {
 	h, store, id, methods, goal := cloudHarnessGoalFixture(t)
 	base := h.b.local.input
+	malformed := true
 	h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
 		request := cloudHarnessObject(raw)
-		if request.method() == "thread/goal/set" {
+		if request.method() == "thread/goal/set" && malformed {
 			goal["status"], goal["updatedAt"] = "paused", 3
 			h.calls[string(request["id"])] <- cloudMessage{"result": cloudHarnessRaw(map[string]any{})}
 			return len(raw), nil
@@ -405,6 +406,20 @@ func TestCloudHarnessMalformedGoalSetAfterPauseRetainsAmbiguity(t *testing.T) {
 	receipt, err = store.Load(id)
 	if err != nil || receipt.GoalHold == nil || goal["status"] != "paused" || strings.Contains(strings.Join(*methods, ","), "thread/unsubscribe") {
 		t.Fatalf("ambiguous pause was discarded or configuration reached: goal=%v receipt=%#v methods=%v err=%v", goal["status"], receipt, *methods, err)
+	}
+	request := cloudMessage{"id": cloudHarnessRaw(12), "method": cloudHarnessRaw("thread/goal/set"), "params": cloudHarnessRaw(map[string]any{"threadId": id, "status": "active", "origin": "user"})}
+	if _, err := h.prepare(request, cloudHarnessRaw(request)); err != nil {
+		t.Fatal(err)
+	}
+	goal["status"], goal["updatedAt"] = "active", 4
+	h.observe(cloudHarnessRaw(map[string]any{"id": 12, "result": map[string]any{"goal": goal}}))
+	malformed = false
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = store.Load(id)
+	if err != nil || h.threads[id].goalAPIUnavailable || receipt.GoalHold == nil || receipt.GoalHold.UpdatedAt == 0 || goal["status"] != "paused" {
+		t.Fatalf("user resume left recovered goal API permanently pending: goal=%v receipt=%#v err=%v", goal["status"], receipt, err)
 	}
 }
 

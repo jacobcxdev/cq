@@ -50,6 +50,62 @@ func TestCloudHarnessGoalMutationRetainedHoldUntilReply(t *testing.T) {
 	}
 }
 
+func TestCloudHarnessMalformedUserGoalResultRetainedOwnedPause(t *testing.T) {
+	for _, name := range []string{"missing_goal", "wrong_status", "wrong_objective", "wrong_budget", "missing_clear_ack", "invalid_clear_ack"} {
+		t.Run(name, func(t *testing.T) {
+			h, store, id, _, goal := cloudHarnessGoalFixture(t)
+			if err := h.reconcile(id, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			params := map[string]any{"threadId": id, "status": "active", "origin": "user"}
+			method := "thread/goal/set"
+			if name == "wrong_objective" {
+				params["objective"] = "Requested user objective"
+			}
+			if name == "wrong_budget" {
+				params["tokenBudget"] = 1000
+			}
+			if strings.Contains(name, "clear_ack") {
+				method = "thread/goal/clear"
+				delete(params, "status")
+			}
+			request := cloudMessage{"id": cloudHarnessRaw(13), "method": cloudHarnessRaw(method), "params": cloudHarnessRaw(params)}
+			if _, err := h.prepare(request, cloudHarnessRaw(request)); err != nil {
+				t.Fatal(err)
+			}
+			// The native response claims success but made no goal change.
+			result := map[string]any{}
+			if name == "wrong_status" {
+				result["goal"] = goal
+			}
+			if name == "wrong_objective" || name == "wrong_budget" {
+				reported := map[string]any{}
+				for key, value := range goal {
+					reported[key] = value
+				}
+				reported["status"] = "active"
+				result["goal"] = reported
+			}
+			if name == "invalid_clear_ack" {
+				result["cleared"] = "yes"
+			}
+			h.observe(cloudHarnessRaw(map[string]any{"id": 13, "result": result}))
+			receipt, err := store.Load(id)
+			if err != nil || receipt.GoalHold == nil || goal["status"] != "paused" {
+				t.Fatalf("unverified user result discarded CQ's owned pause: goal=%v receipt=%#v err=%v", goal["status"], receipt, err)
+			}
+			h.threads[id].active, h.threads[id].activeTurnID = false, ""
+			if err := h.finishGoalHold(id, true); err != nil {
+				t.Fatal(err)
+			}
+			receipt, err = store.Load(id)
+			if err != nil || receipt.GoalHold != nil || goal["status"] != "active" {
+				t.Fatalf("unverified user result prevented verified recovery: goal=%v receipt=%#v err=%v", goal["status"], receipt, err)
+			}
+		})
+	}
+}
+
 func TestCloudHarnessReleasedGoalBeforeLastSubscription(t *testing.T) {
 	for _, method := range []string{"thread/unsubscribe", "thread/archive", "shutdown", "disconnected"} {
 		t.Run(method, func(t *testing.T) {
