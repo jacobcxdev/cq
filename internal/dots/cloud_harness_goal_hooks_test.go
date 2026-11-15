@@ -2,6 +2,7 @@ package dots
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/harness"
@@ -153,6 +154,39 @@ func (s *cloudHarnessFailingGoalStore) Save(receipt harness.Receipt) error {
 	return s.cloudHarnessReceiptStore.Save(receipt)
 }
 
+type cloudHarnessFailingHoldStore struct {
+	cloudHarnessReceiptStore
+	fail bool
+}
+
+func (s *cloudHarnessFailingHoldStore) Save(receipt harness.Receipt) error {
+	if s.fail && receipt.GoalHold != nil {
+		return errors.New("fixture goal hold write failure")
+	}
+	return s.cloudHarnessReceiptStore.Save(receipt)
+}
+
+func TestCloudHarnessGoalHoldWriteFailurePreventsNativePause(t *testing.T) {
+	h, store, id, methods, goal := cloudHarnessGoalFixture(t)
+	failing := &cloudHarnessFailingHoldStore{cloudHarnessReceiptStore: store, fail: true}
+	h.b.deps.harnessReceipts = failing
+	if err := h.reconcile(id, "", ""); err == nil {
+		t.Fatal("failed hold journal was accepted")
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.GoalHold != nil || goal["status"] != "active" || strings.Contains(strings.Join(*methods, ","), "thread/goal/set") {
+		t.Fatalf("native pause ran without durable intent: goal=%v marker=%#v methods=%v err=%v", goal["status"], receipt.GoalHold, *methods, err)
+	}
+	failing.fail = false
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = store.Load(id)
+	if err != nil || receipt.GoalHold == nil || goal["status"] != "paused" {
+		t.Fatalf("hold journal did not retry: goal=%v marker=%#v err=%v", goal["status"], receipt.GoalHold, err)
+	}
+}
+
 func TestCloudHarnessRetriedGoalHandoffJournalBeforeResuming(t *testing.T) {
 	h, store, id, _, goal := cloudHarnessGoalFixture(t)
 	if err := h.reconcile(id, "", ""); err != nil {
@@ -183,5 +217,65 @@ func TestCloudHarnessRetriedGoalHandoffJournalBeforeResuming(t *testing.T) {
 	receipt, err := store.Load(id)
 	if err != nil || thread.pendingSettings != 0 || thread.goalMutationPending || thread.goalYieldResult != nil || goal["status"] != "active" || receipt.GoalHold != nil {
 		t.Fatalf("handoff journal did not recover: status=%v receipt=%#v err=%v", goal["status"], receipt.GoalHold, err)
+	}
+}
+
+func TestCloudHarnessGoalRestoreReceiptFailureRetried(t *testing.T) {
+	h, store, id, methods, goal := cloudHarnessGoalFixture(t)
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	h.threads[id].active, h.threads[id].activeTurnID = false, ""
+	failing := &cloudHarnessFailingGoalStore{cloudHarnessReceiptStore: store, fail: true}
+	h.b.deps.harnessReceipts = failing
+	if err := h.finishGoalHold(id, true); err == nil {
+		t.Fatal("accepted native restore hid receipt failure")
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.GoalHold == nil || goal["status"] != "active" || strings.Count(strings.Join(*methods, ","), "thread/goal/set") != 2 {
+		t.Fatalf("accepted restore lost durable marker: goal=%v marker=%#v methods=%v err=%v", goal["status"], receipt.GoalHold, *methods, err)
+	}
+	failing.fail = false
+	if err := h.finishGoalHold(id, true); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = store.Load(id)
+	if err != nil || receipt.GoalHold != nil || goal["status"] != "active" || strings.Count(strings.Join(*methods, ","), "thread/goal/set") != 2 {
+		t.Fatalf("restore receipt retry repeated activation: goal=%v marker=%#v methods=%v err=%v", goal["status"], receipt.GoalHold, *methods, err)
+	}
+}
+
+func TestCloudHarnessAmbiguousHoldClearedByExplicitUserResume(t *testing.T) {
+	h, store, id, _, goal := cloudHarnessGoalFixture(t)
+	base := h.b.local.input
+	h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+		request := cloudHarnessObject(raw)
+		if request.method() == "thread/goal/set" {
+			goal["status"], goal["updatedAt"] = "paused", 3
+			return 0, errors.New("fixture lost reply after native pause")
+		}
+		return base.Write(raw)
+	}}
+	if err := h.reconcile(id, "", ""); err == nil {
+		t.Fatal("unknown native pause result was accepted")
+	}
+	h.threads[id].active, h.threads[id].activeTurnID = false, ""
+	if err := h.reconcile(id, "", ""); err == nil {
+		t.Fatal("ambiguous pause was reported as restored")
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.GoalHold == nil || receipt.State != "partial" || !strings.Contains(strings.Join(receipt.Issues, ","), "native_goal_restore_ambiguous") {
+		t.Fatalf("ambiguous pause lacks durable partial receipt: %#v %v", receipt, err)
+	}
+	objective, budget := goal["objective"], goal["tokenBudget"]
+	request := cloudMessage{"id": cloudHarnessRaw(11), "method": cloudHarnessRaw("thread/goal/set"), "params": cloudHarnessRaw(map[string]any{"threadId": id, "status": "active", "origin": "user"})}
+	if _, err := h.prepare(request, cloudHarnessRaw(request)); err != nil {
+		t.Fatal(err)
+	}
+	goal["status"], goal["updatedAt"] = "active", 4
+	h.observe(cloudHarnessRaw(map[string]any{"id": 11, "result": map[string]any{"goal": goal}}))
+	receipt, err = store.Load(id)
+	if err != nil || receipt.GoalHold != nil || strings.Contains(strings.Join(receipt.Issues, ","), "native_goal_restore_ambiguous") || goal["objective"] != objective || goal["tokenBudget"] != budget {
+		t.Fatalf("explicit user resume left ambiguous ownership: goal=%#v receipt=%#v err=%v", goal, receipt, err)
 	}
 }

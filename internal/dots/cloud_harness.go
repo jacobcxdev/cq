@@ -95,6 +95,7 @@ type cloudHarnessThread struct {
 	goalHoldExternal     bool
 	goalMutationPending  bool
 	goalYieldResult      *bool
+	goalAPIUnavailable   bool
 }
 
 type cloudHarnessRequest struct {
@@ -149,7 +150,20 @@ func (h *cloudHarness) run() {
 					if h.b.ctx.Err() != nil {
 						break
 					}
-					if h.refresh(id) != nil {
+					if err := h.refresh(id); err != nil {
+						h.mu.Lock()
+						held := h.threads[id] != nil && h.threads[id].goalHold != nil
+						h.mu.Unlock()
+						if held {
+							// A failed activity probe cannot qualify a reload. Release
+							// our verified hold so it does not block native goal work.
+							restoreErr := h.finishGoalHold(id, true)
+							h.mu.Lock()
+							pending := h.threads[id] != nil && h.threads[id].goalHold != nil
+							h.mu.Unlock()
+							reason, code := cloudHarnessFailureReason(err)
+							h.b.event(map[string]any{"harness_activity_read_failed": true, "thread_id": id, "reason": reason, "native_code": code, "goal_restore_failed": restoreErr != nil, "goal_restore_pending": pending})
+						}
 						continue
 					}
 					_ = h.reconcile(id, "", "")
@@ -297,6 +311,7 @@ func (h *cloudHarness) acquire(id string) error {
 	}
 	thread.lease = lease
 	thread.goalHold = receipt.GoalHold
+	thread.goalAPIUnavailable = slices.Contains(receipt.Issues, "native_goal_api_unavailable")
 	thread.goalHoldLoaded = true
 	recoverable := receipt.State == "applied" || receipt.State == "partial" || receipt.State == "prepared" || receipt.State == "pending"
 	// Full-mode plugin choices survive the broker. Even a failed assembly can
@@ -351,12 +366,22 @@ func (h *cloudHarness) record(id string, selection harness.Selection, state stri
 	}
 	var unsupported []string
 	issues := slices.Clone(thread.runtimeIssues)
+	if thread.goalAPIUnavailable {
+		issues = append(issues, "native_goal_api_unavailable")
+		if state == "applied" {
+			state = "partial"
+		}
+	}
 	var goalHold *harness.GoalHold
 	if thread.goalHold != nil {
 		copy := *thread.goalHold
 		goalHold = &copy
-		if state == "applied" {
-			issues = append(issues, "native_goal_resume_pending")
+		if state == "applied" || state == "partial" {
+			issue := "native_goal_resume_pending"
+			if thread.goalHold.UpdatedAt == 0 {
+				issue = "native_goal_restore_ambiguous"
+			}
+			issues = append(issues, issue)
 			state = "partial"
 		}
 	}
@@ -1069,6 +1094,12 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 		if err := h.finishGoalHold(id, true); err != nil {
 			return err
 		}
+		h.mu.Lock()
+		held := thread != nil && thread.goalHold != nil
+		h.mu.Unlock()
+		if held {
+			return nil // Keep recovery ownership until the pending mutation settles.
+		}
 		h.release(id)
 		return nil
 	}
@@ -1172,11 +1203,29 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 		}
 	}
 	key := string(cloudHarnessRaw(policy)) + "\n" + model + "\n" + cwd + "\n" + string(cloudHarnessRaw(selection)) + "\n" + strconv.FormatUint(snapshot.sourceEpoch, 10) + "\n" + snapshot.retryNonce
+	if snapshot.goalAPIUnavailable {
+		if snapshot.reportedPending != key {
+			if err := h.record(id, selection, "pending"); err != nil {
+				return err
+			}
+			h.mu.Lock()
+			if current := h.threads[id]; current != nil {
+				current.reportedPending = key
+			}
+			h.mu.Unlock()
+		}
+		// A valid goal read must precede another idle-boundary attempt. Refresh
+		// activity on the next tick before using a newly available native API.
+		return h.holdGoal(id, key)
+	}
 	if snapshot.failureKey == key {
 		return errors.New("native harness reload previously failed; profile was not applied")
 	}
 	if policy.Version != 2 && !snapshot.profileManaged && minimal == snapshot.minimal && !snapshot.restorePlugins && !contextChanged && !retryRuntime && !snapshot.retryPending {
 		state := cloudHarnessProfileState(nil, snapshot.runtimeIssues...)
+		if state == "applied" && snapshot.goalHold != nil {
+			state = "partial"
+		}
 		if selection.Managed && (snapshot.receiptState != state || snapshot.selection != selection) {
 			return h.record(id, selection, state)
 		}
@@ -1184,6 +1233,9 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 	}
 	if policy.Version == 2 && snapshot.profilePlan != nil && snapshot.profileFingerprint == selection.Fingerprint && !snapshot.profileRefresh && !snapshot.profileNeedsSettings && !snapshot.restorePlugins && !contextChanged && !retryRuntime && !snapshot.retryPending {
 		state := cloudHarnessProfileState(snapshot.profilePlan, snapshot.runtimeIssues...)
+		if state == "applied" && snapshot.goalHold != nil {
+			state = "partial"
+		}
 		if snapshot.receiptState != state || snapshot.selection != selection {
 			return h.record(id, selection, state)
 		}
@@ -1298,6 +1350,9 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 			}
 			h.mu.Unlock()
 			state := cloudHarnessProfileState(desiredPlan, snapshot.runtimeIssues...)
+			if state == "applied" && snapshot.goalHold != nil {
+				state = "partial"
+			}
 			if snapshot.receiptState != state || snapshot.selection != selection || snapshot.profileRefresh || snapshot.profileNeedsSettings {
 				return h.record(id, selection, state)
 			}

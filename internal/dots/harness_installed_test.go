@@ -32,13 +32,35 @@ import (
 // home, fixture capabilities and a synthetic loopback provider. It never reads
 // account credentials, invokes a real model or changes the installed app.
 func TestHarnessInstalledChatCapabilityIsolation(t *testing.T) {
-	t.Run("native-controls", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, false, false, false) })
-	t.Run("bridge-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true, false, false) })
-	t.Run("selective-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true, true, false) })
+	t.Run("native-controls", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, false, false, nil) })
+	t.Run("bridge-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true, false, nil) })
+	t.Run("selective-policy", func(t *testing.T) { runHarnessInstalledChatCapabilityIsolation(t, true, true, nil) })
+}
+
+type harnessInstalledGoalScenario struct {
+	budget   *int64
+	mutation string
 }
 
 func TestHarnessInstalledGoalContinuationHold(t *testing.T) {
-	runHarnessInstalledChatCapabilityIsolation(t, true, false, true)
+	budget := int64(1000)
+	for _, scenario := range []struct {
+		name   string
+		budget *int64
+	}{{"budgeted", &budget}, {"unbudgeted", nil}} {
+		t.Run(scenario.name, func(t *testing.T) {
+			runHarnessInstalledChatCapabilityIsolation(t, true, false, &harnessInstalledGoalScenario{budget: scenario.budget})
+		})
+	}
+}
+
+func TestHarnessInstalledGoalUserMutations(t *testing.T) {
+	for _, mutation := range []string{"pause", "clear", "complete", "objective"} {
+		t.Run(mutation, func(t *testing.T) {
+			budget := int64(1000)
+			runHarnessInstalledChatCapabilityIsolation(t, true, false, &harnessInstalledGoalScenario{budget: &budget, mutation: mutation})
+		})
+	}
 }
 
 func TestHarnessInstalledInactiveMCPOverrides(t *testing.T) {
@@ -83,7 +105,8 @@ func TestHarnessInstalledInactiveMCPOverrides(t *testing.T) {
 	}
 }
 
-func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, selective, goalProbe bool) {
+func runHarnessInstalledChatCapabilityIsolation(t *testing.T, bridgeEnabled, selective bool, goalScenario *harnessInstalledGoalScenario) {
+	goalProbe := goalScenario != nil
 	if os.Getenv("CQ_DOTS_HARNESS_INSTALLED_ACCEPTANCE") != "1" {
 		t.Skip("set CQ_DOTS_HARNESS_INSTALLED_ACCEPTANCE=1 for isolated installed acceptance")
 	}
@@ -297,7 +320,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 	for name, directory := range map[string]string{"HOME": "home", "CODEX_HOME": "codex", "TMPDIR": "tmp", "XDG_CACHE_HOME": "cache", "XDG_CONFIG_HOME": "config", "XDG_DATA_HOME": "data"} {
 		command.Env = append(command.Env, name+"="+filepath.Join(root, directory))
 	}
-	policyPath := filepath.Join(root, "policy", "harness.json")
+	policyPath := filepath.Join(root, "config", "cq", "harness.json")
 	var fullInventory func(context.Context, string) (harness.Inventory, error)
 	if selective {
 		// Reuse NativeInventory's production protocol reader with an executable
@@ -339,7 +362,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 	policy := harness.Policy{Version: 1, Enabled: true, Projects: map[string]harness.Profile{command.Dir: harness.Full}}
 	var policyMu, nativeMu sync.Mutex
 	var nativeRequests []cloudMessage
-	receipts := harness.Receipts{FS: fsutil.OSFileSystem{}, Dir: filepath.Join(root, "receipts")}
+	receipts := harness.Receipts{FS: fsutil.OSFileSystem{}, Dir: filepath.Join(root, "config", "cq", "state", "harness")}
 	if bridgeEnabled {
 		nativeInput, nativeOutput := input, output
 		bridgeInput, clientInput := io.Pipe()
@@ -513,10 +536,10 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		const researchOwnedSkill = "plugin:" + researchPlugin + ":probe-plugin:plugin-skill"
 		const designOwnedSkill = "plugin:" + designPlugin + ":design-plugin:design-plugin-skill"
 		fsys := fsutil.OSFileSystem{}
+		researchDefinition := harness.Definition{Changes: harness.Changes{
+			Plugins: map[string]harness.Decision{researchPlugin: harness.Enabled}, MCP: map[string]harness.Decision{"probe": harness.Enabled}, Skills: map[string]harness.Decision{researchSkill: harness.Enabled, researchOwnedSkill: harness.Enabled},
+		}}
 		userPolicy := harness.Policy{Version: 2, Enabled: true,
-			Profiles: map[string]harness.Definition{"research": {Changes: harness.Changes{
-				Plugins: map[string]harness.Decision{researchPlugin: harness.Enabled}, MCP: map[string]harness.Decision{"probe": harness.Enabled}, Skills: map[string]harness.Decision{researchSkill: harness.Enabled, researchOwnedSkill: harness.Enabled},
-			}}},
 			Global: harness.Scope{
 				All:    harness.Binding{Changes: harness.Changes{Plugins: map[string]harness.Decision{designPlugin: harness.Disabled}, MCP: map[string]harness.Decision{"design": harness.Disabled}, Skills: map[string]harness.Decision{designSkill: harness.Disabled, designOwnedSkill: harness.Disabled, "user:curate-harness": harness.Enabled}}},
 				Models: map[string]harness.Binding{"glm-*": {Changes: harness.Changes{Plugins: map[string]harness.Decision{researchPlugin: harness.Disabled}, MCP: map[string]harness.Decision{"probe": harness.Disabled, "design": harness.Disabled}, Skills: map[string]harness.Decision{researchSkill: harness.Disabled, researchOwnedSkill: harness.Disabled}}}},
@@ -525,13 +548,44 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		if err := harness.Save(fsys, policyPath, userPolicy); err != nil {
 			t.Fatal(err)
 		}
-		workspacePath := filepath.Join(command.Dir, ".cq", "harness.json")
-		if _, err := harness.UpdateWorkspace(fsys, workspacePath, func(policy *harness.WorkspacePolicy) error {
-			policy.Version = 2
-			policy.Rules.All.Profiles = []string{"research"}
-			return nil
-		}); err != nil {
+		// Exercise the curation CLI against the same isolated policy and native
+		// instance, rather than qualifying only direct policy writes.
+		cli := filepath.Join(root, "cq")
+		build := exec.CommandContext(ctx, "go", "build", "-o", cli, "./cmd/cq")
+		build.Dir = filepath.Join("..", "..")
+		if output, err := build.CombinedOutput(); err != nil {
+			t.Fatalf("build isolated curation CLI: %v\n%s", err, output)
+		}
+		runCLI := func(args ...string) ([]byte, error) {
+			t.Helper()
+			arguments := append([]string{"-p", profile, cli, "codex", "harness"}, args...)
+			cmd := exec.CommandContext(ctx, "/usr/bin/sandbox-exec", arguments...)
+			cmd.Dir, cmd.Env = command.Dir, command.Env
+			return cmd.CombinedOutput()
+		}
+		researchJSON, err := json.Marshal(researchDefinition)
+		if err != nil {
 			t.Fatal(err)
+		}
+		write("research.json", string(researchJSON))
+		if output, err := runCLI("profile", "save", "research", "--file", filepath.Join(root, "research.json")); err != nil {
+			t.Fatalf("save isolated curation profile: %v\n%s", err, output)
+		}
+		beforeInvalid, err := os.ReadFile(policyPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		write("invalid-profile.json", `{"unknown_field":true}`)
+		if _, err := runCLI("profile", "save", "invalid", "--file", filepath.Join(root, "invalid-profile.json")); err == nil {
+			t.Fatal("curation CLI accepted an invalid profile")
+		}
+		afterInvalid, err := os.ReadFile(policyPath)
+		if err != nil || string(beforeInvalid) != string(afterInvalid) {
+			t.Fatal("invalid profile changed the isolated policy")
+		}
+		workspacePath := filepath.Join(command.Dir, ".cq", "harness.json")
+		if output, err := runCLI("bind", "research", "--scope", "project", "--project", command.Dir, "--json"); err != nil {
+			t.Fatalf("bind isolated curation profile: %v\n%s", err, output)
 		}
 		var inventoryBaseline []string
 		checkInventory := func(label string) {
@@ -976,9 +1030,12 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		goal := func() goalState {
 			return decodeGoal(rpc.call("thread/goal/get", map[string]string{"threadId": full}))
 		}
-		active := decodeGoal(rpc.call("thread/goal/set", map[string]any{"threadId": full, "objective": "CQ_HARNESS_GOAL_HOLD Synthetic continuation qualification", "tokenBudget": 1000, "origin": "user"}))
-		if active.Status != "active" || active.TokenBudget == nil || *active.TokenBudget != 1000 {
-			t.Fatal("synthetic budgeted goal did not start active")
+		sameBudget := func(first, second *int64) bool {
+			return first == nil && second == nil || first != nil && second != nil && *first == *second
+		}
+		active := decodeGoal(rpc.call("thread/goal/set", map[string]any{"threadId": full, "objective": "CQ_HARNESS_GOAL_HOLD Synthetic continuation qualification", "tokenBudget": goalScenario.budget, "origin": "user"}))
+		if active.Status != "active" || !sameBudget(active.TokenBudget, goalScenario.budget) {
+			t.Fatal("synthetic goal did not start with its requested budget")
 		}
 		select {
 		case <-firstGoalReached:
@@ -1013,8 +1070,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 				}
 				nativeMu.Unlock()
 				current := goal()
-				sameBudget := active.TokenBudget != nil && current.TokenBudget != nil && *active.TokenBudget == *current.TokenBudget
-				t.Fatalf("CQ did not verify running-goal hold: marker=%#v receipt=%s goal-status=%s same-thread=%t same-objective=%t same-created=%t same-budget=%t methods=%v err=%v", receipt.GoalHold, receipt.State, current.Status, current.ThreadID == active.ThreadID, current.Objective == active.Objective, current.CreatedAt == active.CreatedAt, sameBudget, methods, err)
+				t.Fatalf("CQ did not verify running-goal hold: marker=%#v receipt=%s goal-status=%s same-thread=%t same-objective=%t same-created=%t same-budget=%t methods=%v err=%v", receipt.GoalHold, receipt.State, current.Status, current.ThreadID == active.ThreadID, current.Objective == active.Objective, current.CreatedAt == active.CreatedAt, sameBudget(active.TokenBudget, current.TokenBudget), methods, err)
 			}
 			// The fixture's client output is an unbuffered pipe. Drain native
 			// notifications so CQ can receive its private verification replies.
@@ -1022,7 +1078,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			time.Sleep(10 * time.Millisecond)
 		}
 		paused := goal()
-		if paused.Status != "paused" || paused.Objective != active.Objective || paused.CreatedAt != active.CreatedAt || paused.TokenBudget == nil || *paused.TokenBudget != *active.TokenBudget {
+		if paused.Status != "paused" || paused.Objective != active.Objective || paused.CreatedAt != active.CreatedAt || !sameBudget(paused.TokenBudget, active.TokenBudget) {
 			t.Fatal("CQ hold changed the synthetic goal's intent, identity or budget")
 		}
 		if paused.TimeUsedSeconds <= active.TimeUsedSeconds {
@@ -1034,7 +1090,23 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		if err := json.Unmarshal(rpc.call("thread/read", map[string]any{"threadId": full, "includeTurns": false}), &current); err != nil || current.Thread.Status.Type != "active" {
 			t.Fatalf("CQ hold interrupted the running turn: status=%s err=%v", current.Thread.Status.Type, err)
 		}
-		nextGoalGate.Store(true)
+		if goalScenario.mutation != "" {
+			params := map[string]any{"threadId": full, "origin": "user"}
+			method := "thread/goal/set"
+			switch goalScenario.mutation {
+			case "clear":
+				method = "thread/goal/clear"
+			case "pause":
+				params["status"] = "paused"
+			case "complete":
+				params["status"] = "complete"
+			case "objective":
+				params["objective"] = "Synthetic user-edited goal"
+			}
+			rpc.call(method, params)
+		} else {
+			nextGoalGate.Store(true)
+		}
 		releaseFirstGoal()
 		for {
 			message := rpc.next()
@@ -1044,7 +1116,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		}
 		reached := false
 		deadline = time.Now().Add(10 * time.Second)
-		for !reached {
+		for goalScenario.mutation == "" && !reached {
 			if time.Now().After(deadline) {
 				t.Fatal("CQ did not resume the accounted goal after applying the chat policy")
 			}
@@ -1058,10 +1130,12 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 				time.Sleep(10 * time.Millisecond)
 			}
 		}
-		continuation := <-observed
-		assertTools(continuation, false, false)
-		if continuation.Identity["body.client_metadata.thread_id"] != full {
-			t.Fatal("automatic continuation changed chat identity")
+		if reached {
+			continuation := <-observed
+			assertTools(continuation, false, false)
+			if continuation.Identity["body.client_metadata.thread_id"] != full {
+				t.Fatal("automatic continuation changed chat identity")
+			}
 		}
 		deadline = time.Now().Add(10 * time.Second)
 		for {
@@ -1078,8 +1152,37 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			rpc.call("thread/read", map[string]any{"threadId": full, "includeTurns": false})
 			time.Sleep(10 * time.Millisecond)
 		}
+		if goalScenario.mutation != "" {
+			var response struct{ Goal *goalState }
+			if err := json.Unmarshal(rpc.call("thread/goal/get", map[string]string{"threadId": full}), &response); err != nil {
+				t.Fatal(err)
+			}
+			if goalScenario.mutation == "clear" {
+				if response.Goal != nil {
+					t.Fatal("CQ restored a cleared goal")
+				}
+			} else {
+				wantStatus, wantObjective := "paused", active.Objective
+				if goalScenario.mutation == "complete" {
+					wantStatus = "complete"
+				}
+				if goalScenario.mutation == "objective" {
+					wantObjective = "Synthetic user-edited goal"
+				}
+				if response.Goal == nil || response.Goal.Status != wantStatus || response.Goal.Objective != wantObjective || response.Goal.CreatedAt != active.CreatedAt || !sameBudget(response.Goal.TokenBudget, active.TokenBudget) {
+					t.Fatal("CQ overwrote the user goal mutation")
+				}
+			}
+			select {
+			case <-observed:
+				t.Fatal("user goal mutation unexpectedly continued automatically")
+			default:
+			}
+			t.Logf("user goal mutation preserved after policy application: %s", goalScenario.mutation)
+			return
+		}
 		restored := goal()
-		if restored.Status != "active" || restored.Objective != active.Objective || restored.CreatedAt != active.CreatedAt || restored.TokenBudget == nil || *restored.TokenBudget != *active.TokenBudget {
+		if restored.Status != "active" || restored.Objective != active.Objective || restored.CreatedAt != active.CreatedAt || !sameBudget(restored.TokenBudget, active.TokenBudget) {
 			t.Fatal("CQ restoration changed the synthetic goal's intent, identity or budget")
 		}
 		// Native pause freezes accounting after the hold. The goal's original
