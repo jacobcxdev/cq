@@ -83,6 +83,22 @@ func TestCloudHarnessReconciliationRetainedCacheContract(t *testing.T) {
 				t.Logf("%s: shared_components=%d reusable_bytes=%d previous_bytes=%d wire_bytes=%d model=%s output_limit=4096", stage, comparison.SharedComponents, comparison.ReusableBytes, comparison.PreviousBytes, len(body), thread.model)
 			}
 
+			beforeRefresh, readsBeforeRefresh := len(*methods), reads
+			thread.active, thread.activeTurnID, thread.profileRefresh = true, "automatic-next-turn", true
+			if err := h.reconcile(id, "", ""); err != nil {
+				t.Fatal(err)
+			}
+			if reads != readsBeforeRefresh+1 || thread.profileRefresh || thread.receiptState == "pending" || !thread.active || *goalReads != 0 {
+				t.Fatal("unchanged active refresh changed application or goal state")
+			}
+			for _, method := range (*methods)[beforeRefresh:] {
+				if method != "config/read" {
+					t.Fatalf("active refresh changed native state: %v", (*methods)[beforeRefresh:])
+				}
+			}
+			assertStable("active_inventory_refresh")
+			thread.active, thread.activeTurnID = false, ""
+
 			// Discovery is not a curation decision. Neither new inventory nor
 			// repeated reconciliation may grow the profile or reload native state.
 			inventory.Capabilities = append(inventory.Capabilities, harness.Capability{Kind: harness.MCPKind, ID: "new", NativeID: "new", Enabled: true, Available: true})
@@ -156,10 +172,16 @@ func TestCloudHarnessReconciliationRetainedCacheContract(t *testing.T) {
 			// An ordinary ongoing native request retains exact bytes. Its input,
 			// model, reasoning and unknown native fields are not rebuilt by CQ.
 			thread.active = true
+			beforeTurn, readsBeforeTurn := len(*methods), reads
 			raw := []byte(`{"id":101,"method":"turn/start","params":{"threadId":"` + id + `","model":"` + model + `","effort":"high","input":[{"type":"text","text":"Continue the accepted task."}],"futureNativeField":{"retained":true}}}` + "\n")
 			forwarded, err := h.prepareFrom("stdio", cloudHarnessObject(raw), raw)
-			if err != nil || !bytes.Equal(forwarded, raw) || len(*methods) != before+1 || reads != inventoryBefore {
+			if err != nil || !bytes.Equal(forwarded, raw) || reads != readsBeforeTurn+1 {
 				t.Fatalf("ongoing turn changed bytes or native state: %v", err)
+			}
+			for _, method := range (*methods)[beforeTurn:] {
+				if method != "config/read" {
+					t.Fatalf("active inventory check mutated native state: %v", (*methods)[beforeTurn:])
+				}
 			}
 			assertStable("ordinary_active_turn")
 		})

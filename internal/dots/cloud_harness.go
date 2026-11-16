@@ -1241,7 +1241,10 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 		}
 		return nil
 	}
-	if snapshot.active || snapshot.pendingTurns > 0 || snapshot.pendingSettings > 0 {
+	// Inventory refresh can confirm an unchanged applied plan during a turn.
+	// Only an actual configuration change needs an idle boundary.
+	refreshPlan := policy.Version == 2 && snapshot.profilePlan != nil && snapshot.profileFingerprint == selection.Fingerprint && snapshot.profileRefresh && !snapshot.profileNeedsSettings && !snapshot.restorePlugins && !contextChanged && !retryRuntime && !snapshot.retryPending
+	if (snapshot.active || snapshot.pendingTurns > 0 || snapshot.pendingSettings > 0) && !refreshPlan {
 		if snapshot.reportedPending != key {
 			h.mu.Lock()
 			if current := h.threads[id]; current != nil {
@@ -1307,10 +1310,6 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 		if retrySuperseded(latest) {
 			return nil
 		}
-		if latest.active || latest.pendingTurns > 0 || latest.pendingSettings > 0 {
-			_ = h.record(id, selection, "pending")
-			return nil
-		}
 		if !bytes.Equal(compiledPlugins, latest.baseline["disabledPluginIds"]) || (requestedModel == "" && model != latest.model) || (requestedCwd == "" && cwd != latest.cwd) {
 			if newBaseline {
 				h.mu.Lock()
@@ -1321,7 +1320,17 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 		}
 		snapshot = latest
 		retryRuntime = len(snapshot.runtimeIssues) > 0 && snapshot.sourceEpoch != snapshot.lastAttemptEpoch
-		if snapshot.profilePlan != nil && snapshot.profilePlan.key == desiredPlan.key && !snapshot.restorePlugins && !retryRuntime {
+		unchanged := snapshot.profilePlan != nil && snapshot.profilePlan.key == desiredPlan.key && !snapshot.restorePlugins && !retryRuntime
+		if (snapshot.active || snapshot.pendingTurns > 0 || snapshot.pendingSettings > 0) && (!unchanged || snapshot.profileNeedsSettings) {
+			if err := h.record(id, selection, "pending"); err != nil {
+				return err
+			}
+			if !snapshot.ephemeral && snapshot.pendingTurns == 0 && snapshot.pendingSettings == 0 {
+				return h.holdGoal(id, key+"\n"+desiredPlan.key)
+			}
+			return nil
+		}
+		if unchanged {
 			if snapshot.profileNeedsSettings {
 				if err := h.record(id, selection, "prepared"); err != nil {
 					return err

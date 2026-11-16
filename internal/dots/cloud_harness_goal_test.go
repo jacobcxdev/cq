@@ -88,6 +88,88 @@ func TestCloudHarnessGoalHoldPendingInactiveAwaitedApplication(t *testing.T) {
 	}
 }
 
+func TestCloudHarnessActiveInventoryRefreshKeptAppliedGoal(t *testing.T) {
+	h, store, id, methods, goal := cloudHarnessGoalFixture(t)
+	thread := h.threads[id]
+	thread.active, thread.activeTurnID = false, ""
+	policy := harness.Policy{Version: 2, Enabled: true, Tasks: map[string]harness.Scope{id: {All: harness.Binding{Changes: harness.Changes{Default: harness.Disabled}}}}}
+	h.b.deps.readHarnessPolicy = func() (harness.Policy, error) { return policy, nil }
+	h.b.deps.readHarnessInventory = func(string) (harness.Inventory, error) { return harness.Inventory{}, nil }
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// This fixture does not model runtime attestation. Start from the
+	// previously verified receipt whose refresh is under test.
+	thread.runtimeIssues = nil
+	if err := h.record(id, thread.selection, "applied"); err != nil {
+		t.Fatal(err)
+	}
+	before := len(*methods)
+	plan := thread.profilePlan.key
+	thread.active, thread.activeTurnID, thread.profileRefresh = true, "automatic-next-turn", true
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.State != "applied" || receipt.GoalHold != nil || thread.profileRefresh || !thread.active || thread.activeTurnID != "automatic-next-turn" || thread.profilePlan.key != plan || goal["status"] != "active" {
+		t.Fatalf("unchanged refresh displaced applied state or active goal: receipt=%#v refresh=%v active=%v goal=%v err=%v", receipt, thread.profileRefresh, thread.active, goal["status"], err)
+	}
+	for _, method := range (*methods)[before:] {
+		if method != "config/read" {
+			t.Fatalf("unchanged active refresh mutated native state: %v", (*methods)[before:])
+		}
+	}
+}
+
+func TestCloudHarnessChangedInventoryHeldGoalUntilIdle(t *testing.T) {
+	h, store, id, methods, goal := cloudHarnessGoalFixture(t)
+	thread := h.threads[id]
+	thread.active, thread.activeTurnID = false, ""
+	policy := harness.Policy{Version: 2, Enabled: true, Tasks: map[string]harness.Scope{id: {All: harness.Binding{Changes: harness.Changes{Default: harness.Disabled}}}}}
+	inventory := harness.Inventory{}
+	h.b.deps.readHarnessPolicy = func() (harness.Policy, error) { return policy, nil }
+	h.b.deps.readHarnessInventory = func(string) (harness.Inventory, error) { return inventory, nil }
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	before := len(*methods)
+	plan := thread.profilePlan.key
+	inventory.Capabilities = []harness.Capability{{Kind: harness.MCPKind, ID: "new", NativeID: "new", Available: true}}
+	thread.active, thread.activeTurnID, thread.profileRefresh = true, "current", true
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err := store.Load(id)
+	if err != nil || receipt.State != "pending" || receipt.GoalHold == nil || goal["status"] != "paused" || thread.profilePlan.key != plan {
+		t.Fatalf("changed inventory did not hold continuation: receipt=%#v goal=%v err=%v", receipt, goal["status"], err)
+	}
+	for _, method := range (*methods)[before:] {
+		if method == "thread/unsubscribe" || method == "thread/resume" || method == "thread/settings/update" {
+			t.Fatalf("changed inventory reloaded active turn: %v", (*methods)[before:])
+		}
+	}
+	thread.active, thread.activeTurnID = false, ""
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = store.Load(id)
+	if err != nil || receipt.GoalHold != nil || goal["status"] != "active" || thread.profilePlan.key == plan || receipt.State == "pending" || receipt.State == "failed" {
+		t.Fatalf("idle refresh failed to apply and restore goal: receipt=%#v goal=%v err=%v", receipt, goal["status"], err)
+	}
+	// A later inventory change has the same policy fingerprint but needs its
+	// own hold even if the native active notification raced restoration.
+	thread.runtimeIssues = nil
+	thread.active, thread.activeTurnID, thread.profileRefresh = true, "next", true
+	inventory.Capabilities = append(inventory.Capabilities, harness.Capability{Kind: harness.MCPKind, ID: "another", NativeID: "another", Available: true})
+	if err := h.reconcile(id, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	receipt, err = store.Load(id)
+	if err != nil || receipt.GoalHold == nil || goal["status"] != "paused" {
+		t.Fatalf("second inventory change reused completed hold: receipt=%#v goal=%v err=%v", receipt, goal["status"], err)
+	}
+}
+
 func cloudHarnessGoalFixture(t *testing.T) (*cloudHarness, harness.Receipts, string, *[]string, map[string]any) {
 	t.Helper()
 	h, store, id, methods := cloudHarnessFailureFixture(t)
