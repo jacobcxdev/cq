@@ -13,6 +13,11 @@ actually applied. `pending`, `partial`, `failed` and an absent receipt are
 distinct from `applied`. Unknown runtime metadata, unsupported controls, missing
 dependencies or a lost acknowledgement must never become proof of application.
 
+An unchanged inventory refresh preserves the existing application state during
+an active turn. A changed compiled plan holds automatic continuation until the
+current turn finishes and the configuration is applied, even when the saved
+policy fingerprint has not changed.
+
 Profiles preserve chat identity, conversation history, native core tools, the
 available curation entrypoint, unselected chats and explicit user choices.
 Restoring Full or disabling policy restores the recorded native baseline rather
