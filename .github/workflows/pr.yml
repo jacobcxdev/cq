@@ -32,6 +32,9 @@ jobs:
       - run: go vet ./...
       - run: go test -race -count=1 ./...
       - run: bash .github/scripts/test-release-source.sh
+      - run: bash .github/scripts/test-prepare-native-ci-release.sh
+      - run: bash .github/scripts/test-native-sign-ci.sh
+      - run: bash .github/scripts/test-recover-native-notary-request.sh
       - run: bash .github/scripts/test-release-changelog.sh
       - run: bash .github/scripts/test-package-macos-bundles.sh
       - run: bash .github/scripts/test-close-superseded-winget-prs.sh

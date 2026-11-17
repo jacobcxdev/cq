@@ -85,9 +85,10 @@ Read `CONTRIBUTING.md` for the full git strategy. Key rules:
   Include every merged fix and retain previously shipped changes. Passing tests
   on a stale branch does not establish a complete release.
 - Every release requires a freshly signed, notarised native companion at the
-  same version. Build it from a signed staging tag, then derive the asset
-  manifest from the draft release without a pin PR. Verify its complete native
-  source tree still matches final `main` before publishing.
+  same version. The Release workflow builds, signs and notarises it from signed
+  staging and parent tags at current `origin/main`, using scoped Apple secrets.
+  Derive the asset manifest from its immutable draft ZIP without a pin PR;
+  resume an existing notarisation submission instead of submitting again.
 - Follow `CONTRIBUTING.md` and `docs/native-network-releases.md`. Verify published
   Casks, installed companion/provider versions and real affected traffic before
   claiming delivery. A merge, tag, draft or Go executable upgrade is insufficient.

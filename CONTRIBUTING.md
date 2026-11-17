@@ -158,6 +158,9 @@ go build ./...
 go vet ./...
 go test -race -count=1 ./...
 bash .github/scripts/test-release-source.sh
+bash .github/scripts/test-prepare-native-ci-release.sh
+bash .github/scripts/test-native-sign-ci.sh
+bash .github/scripts/test-recover-native-notary-request.sh
 bash .github/scripts/test-close-superseded-winget-prs.sh
 ```
 
@@ -173,7 +176,7 @@ Follow [the release guide](docs/releases.md). It covers sequential versions,
 reviewed current-main provenance, the live commit-bound routing status, signed
 tags, draft/package checks, native companion pins, publication and deployed
 validation. The [native release guide](docs/native-network-releases.md) owns the
-separate signing, notarisation and immutable native-asset procedure.
+CI signing, notarisation recovery and immutable native-asset procedure.
 
 ## Homebrew Cask Service Lifecycle
 

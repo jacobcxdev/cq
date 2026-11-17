@@ -27,11 +27,12 @@ companion assets. The executable configuration is
    different commit with equivalent changes.
 4. Complete the relevant build/vet/race, platform and installed-client gates.
    Retain the exact source, client version, package inputs and outcomes.
-5. Build and upload the freshly signed/notarised companion for that same version
-   from a signed staging tag using the [native release guide](native-network-releases.md).
-   After it passes, tag final main and retarget the same draft. The release
-   workflow derives its temporary asset manifest from that draft. A previous
-   version's companion cannot qualify a new release.
+5. Create signed staging and parent tags at that current main commit, then
+   dispatch the Release workflow with an increasing `native_build_number`, using
+   the [native release guide](native-network-releases.md). CI builds, signs and
+   notarises the companion at the same version, uploads its immutable ZIP to one
+   parent draft and derives the temporary asset manifest. A previous version's
+   companion cannot qualify a new release.
 
 Read-only provenance checks include:
 
@@ -127,22 +128,28 @@ tag for the selected stable version and push that tag. For example, substitute
 the selected version in `git tag -s vX.Y.Z` and `git push origin vX.Y.Z`.
 Never move a published tag or force-push shared release history.
 
-Retarget the existing unpublished staging draft to this parent tag and full
-final commit SHA. Keep its title `vVERSION`, notes headed `## Changelog`,
-`draft=true`, `prerelease=false`, and native ZIP unchanged. The workflow derives
-the asset ID and digest from that draft, adds CLI packages and combined macOS
-bundles, then publishes it. No asset pin PR is needed.
+Create the signed `cq-native-stage-vVERSION` tag at the same current-main commit
+as the parent tag. Dispatch with the next increasing native build number:
 
-The **Release** workflow is manually dispatched against the tag. Pushing the
-tag alone does not publish CQ. Its source preflight rejects a tag outside the
-current reviewed `origin/main` tip and rejects invalid stable version ordering.
+```sh
+gh workflow run release.yml --repo jacobcxdev/cq --ref vX.Y.Z -f native_build_number=BUILD_NUMBER
+```
+
+Replace both placeholders after inspecting the published release and native
+build. Pushing a tag alone does not publish CQ. CI validates both annotated tag
+signatures, current reviewed `origin/main`, stable version ordering and native
+build progression before using Apple credentials. It creates or reconciles one
+unpublished parent draft, builds/signs/notarises the companion, verifies its
+immutable ZIP and adds the CLI packages and combined macOS bundles.
+See the [native guide](native-network-releases.md) for secret setup and recovery
+of the exact existing notarisation submission.
 
 The workflow stages are:
 
 | Stage | Gate/output |
 | --- | --- |
 | `release-source` | Current reviewed main provenance and sequential stable version |
-| `native-network`, `validate-codex` | Derive and verify the tagged signed/notarised native asset; installed Codex normal/compaction/hard-limit/rescue and reviewed corpus gates |
+| `native-network`, `validate-codex` | Build, sign, notarise and verify the tagged native asset in CI; installed Codex normal/compaction/hard-limit/rescue and reviewed corpus gates |
 | `draft-build` | Require the commit-bound live routing status, bind corpus provenance/native manifest/Gemini secret, add CLI packages and verified combined macOS bundles to the existing draft |
 | `release` | macOS Cask formatting, quarantine and actual predecessor-to-candidate lifecycle checks |
 | `windows-packages`, `windows-acceptance` | Build AMD64/ARM64 per-user MSI and manifests, validate package/installer lifecycle |
@@ -255,7 +262,15 @@ Only names and purposes belong in repository documentation:
 | `HOMEBREW_TAP_TOKEN` | Write generated Casks to `jacobcxdev/homebrew-tap`; use a token authorised for that target repository |
 | `GEMINI_ANTIGRAVITY_CLIENT_SECRET` | Required release-link input for the direct Antigravity OAuth client |
 | `WINGET_PKGS_TOKEN` | Submit CQ's manifest PR through the authorised WinGet fork and manage superseded CQ candidates |
-| Authorised release Mac's Xcode account/signing environment | Native Developer ID signing, provisioning and notarisation, outside GitHub Actions |
+| `APPLE_DEVELOPER_ID_P12_BASE64`, `APPLE_DEVELOPER_ID_P12_PASSWORD` | Password-protected Developer ID Application signing identity for the company team |
+| `APPLE_HOST_PROFILE_BASE64`, `APPLE_PROVIDER_PROFILE_BASE64` | Matching Developer ID distribution profiles for the host and provider |
+| `APPLE_NOTARY_KEY_P8`, `APPLE_NOTARY_KEY_ID`, `APPLE_NOTARY_ISSUER_ID` | Company App Store Connect API key for Apple notarisation |
+
+Apple secrets belong to the `native-release` environment, restricted to release
+tags. Only the native job's signing or finishing step receives them,
+never to PR checks. CI imports the identity into a temporary keychain, removes
+private material and restores the keychain search list on exit. Fastlane and an
+interactive Apple account session are not required.
 
 Keep values out of logs, source, evidence and command examples. Release-time
 linking does not permit a runtime environment fallback for Gemini.
