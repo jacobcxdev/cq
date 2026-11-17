@@ -38,6 +38,7 @@ type CodexResetAttempts interface {
 }
 
 type CodexResetApp struct {
+	Reserve       func(context.Context, codexprov.ResetAccountSnapshot, []quota.Result, time.Time) (quota.ReservePolicy, error)
 	Schedule      *codexprov.ResetAutomationStore
 	ScheduleClaim func(context.Context, func() error) error
 	AfterReset    func(context.Context, codexprov.AccountKey, string) error
@@ -189,7 +190,14 @@ func (a *CodexResetApp) recommendConstrained(ctx context.Context, updateHistory 
 		input.Accounts = append(input.Accounts, accountInput)
 	}
 
-	schedule := aggregate.RecommendResetSchedule(input)
+	var policy quota.ReservePolicy
+	if a.Reserve != nil {
+		policy, err = a.Reserve(ctx, snapshot, usage, now)
+		if err != nil {
+			blockers = append(blockers, aggregate.ResetScheduleBlocker{Code: "reserve_unavailable"})
+		}
+	}
+	schedule := recommendResetReserve(input, policy)
 	if len(blockers) > 0 || !schedule.Complete {
 		schedule.Blockers = append(schedule.Blockers, blockers...)
 		sortResetScheduleBlockers(schedule.Blockers)

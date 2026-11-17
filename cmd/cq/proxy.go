@@ -21,6 +21,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/auth"
 	"github.com/jacobcxdev/cq/internal/cache"
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/history"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
@@ -1038,6 +1039,23 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		return fmt.Errorf("Codex reserve: %w", err)
 	}
 	codexCapacity.Reserve = codexReserve
+	// Bind reserve forecasting before the capacity refresher starts using it.
+	resetService, resetServiceErr := newCodexResetService(fsys, credentialControl, codexHTTPClient, roots)
+	if resetServiceErr != nil {
+		return fmt.Errorf("Codex reset scheduler: %w", resetServiceErr)
+	}
+	reserveHistory, err := history.New(fsys, roots.Cache)
+	if err != nil {
+		return fmt.Errorf("Codex reserve history: %w", err)
+	}
+	reserveForecast := newCodexReserveForecast(reserveHistory.ReadEstimates, time.Now)
+	codexReserve.Schedule = func() (codexprov.ResetAutomationState, error) {
+		return readCodexReserveSchedule(resetService.Schedule.Load, resetService.Attempts.Pending)
+	}
+	codexReserve.DrainRate = reserveForecast.DrainRate
+	resetService.Reserve = func(context.Context, codexprov.ResetAccountSnapshot, []quota.Result, time.Time) (quota.ReservePolicy, error) {
+		return codexReserve.Policy(), nil
+	}
 	codexObserver, codexWebSocketObserver, err := newProxyCodexV2Observers(proxyCodexV2ObserverDependencies{
 		Routing:    codexRouting,
 		Continuity: codexContinuity,
@@ -1081,7 +1099,11 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		return err
 	}
 	codexCapacityRefresher.IntervalForAccount = codexReserve.RefreshInterval
-	codexCapacityRefresher.OnInventory = codexReserve.ObserveInventory
+	codexCapacityRefresher.OnInventory = func(inventory codexprov.Inventory) {
+		reserveForecast.ObserveInventory(inventory)
+		codexReserve.ObserveInventory(inventory)
+	}
+	codexCapacityRefresher.OnUsage = reserveForecast.ObserveUsage
 	if codexContinuity != nil {
 		codexCapacity.OnReset = func(event proxy.CodexQuotaResetEvent) error {
 			_, err := codexContinuity.Coordinator.RedistributeTaskAffinitiesForReset(proxyCtx, event.AccountKey, event.EventID)
@@ -1391,12 +1413,6 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		}
 	}
 
-	// Create the private cache tree before a cache reader can create it with
-	// platform-default permissions, which Windows rejects for reset state.
-	resetService, resetServiceErr := newCodexResetService(fsys, credentialControl, codexHTTPClient, roots)
-	if resetServiceErr != nil {
-		return fmt.Errorf("Codex reset scheduler: %w", resetServiceErr)
-	}
 	zaiQuotaCache, zaiQuotaCacheErr := cache.New(fsys, roots.Cache, 5*time.Minute)
 	if zaiQuotaCacheErr != nil {
 		fmt.Fprintln(os.Stderr, "cq: Z.ai routing quota cache unavailable; using account fallback")

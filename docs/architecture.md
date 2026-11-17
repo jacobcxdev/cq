@@ -191,6 +191,20 @@ list/recommend/use. Recommendations consider the shared account snapshot,
 remaining quota, burn, natural resets, credit expiry and capacity multipliers.
 Missing portfolio inputs prevent a complete actionable recommendation.
 
+The system-account reserve remains protected unless the next executable reset
+in the enabled accepted schedule targets that account, or its natural refill
+is within the estimated reserve drain time plus five minutes. Natural drain
+uses pooled demand, including demand censored by depleted accounts. Unknown
+demand permits only the five-minute margin. Routing requires fresh identity,
+quota and reset evidence; advisory recommendations never unlock reserve.
+
+Reset forecasts keep physical quota separate from the reserve floor. Adaptive
+replanning retains the next accepted account while adjusting its time and
+reassesses after confirmed execution. Undated accepted entries bootstrap by
+comparing one first-account candidate per accepted account. Equal dates retain
+executor order. Stale, disabled, invalid or unresolved schedules cannot grant
+release. Refills rearm protection; reset waste uses physical remaining quota.
+
 Plain `recommend` is advisory. Manual `use` and explicitly accepted schedules
 are separate write authorities. New schedules default to fixed dates; adaptive
 timing is explicit. The scheduler executes accepted enabled entries, rather than

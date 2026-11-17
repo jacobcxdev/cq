@@ -114,6 +114,10 @@ type CodexReserveStatus struct {
 
 // CodexReserve is owned by the service; command mutations are atomic and durable.
 type CodexReserve struct {
+	// Schedule and DrainRate are bound before serving requests. Automatic
+	// release never changes the configured reserve or its explicit bypass.
+	Schedule   func() (codex.ResetAutomationState, error)
+	DrainRate  func(codex.AccountKey, quota.WindowName) float64
 	lastSystem codex.AccountKey
 	lastEmail  string
 	mu         sync.Mutex
@@ -190,16 +194,18 @@ func reserveSystemIdentity(inventory codex.Inventory) (codex.AccountKey, string,
 	return key, email, nil
 }
 func (r *CodexReserve) statusLocked() CodexReserveStatus {
-	return r.statusForIdentityLocked(r.systemAccount())
+	key, email, err := r.systemAccount()
+	return r.statusForIdentityLocked(key, email, err, true)
 }
 
 // ObserveInventory updates identity and reset state during service refresh.
 func (r *CodexReserve) ObserveInventory(inventory codex.Inventory) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.statusForIdentityLocked(reserveSystemIdentity(inventory))
+	key, email, err := reserveSystemIdentity(inventory)
+	r.statusForIdentityLocked(key, email, err, true)
 }
-func (r *CodexReserve) statusForIdentityLocked(key codex.AccountKey, email string, err error) CodexReserveStatus {
+func (r *CodexReserve) statusForIdentityLocked(key codex.AccountKey, email string, err error, allowAutomatic bool) CodexReserveStatus {
 	d := r.document
 	status := CodexReserveStatus{Configured: d.Window != "", Window: d.Window, Percent: d.Percent, Enabled: d.Window != ""}
 	if err != nil || key == "" {
@@ -245,8 +251,7 @@ func (r *CodexReserve) statusForIdentityLocked(key codex.AccountKey, email strin
 	}
 	if d.Bypass != nil {
 		b := d.Bypass
-		reset := ok && observed.After(b.ObservedAt) && ((r.now().Unix() >= b.ResetAt && w.ResetAtUnix > r.now().Unix()) || (w.ResetAtUnix != b.ResetAt && remaining > b.Remaining && time.Unix(w.ResetAtUnix, 0).Add(-quota.PeriodFor(d.Window)).Unix() >= b.ObservedAt.Unix()) || (remaining == 100 && b.Remaining < 100))
-		if key != b.Account || reset {
+		if key != b.Account || (ok && reserveBypassReset(b, w, d.Window, observed, r.now())) {
 			d.Bypass = nil
 			if err := r.saveLocked(d); err != nil {
 				status.Blocked = true
@@ -263,9 +268,26 @@ func (r *CodexReserve) statusForIdentityLocked(key codex.AccountKey, email strin
 			return status
 		}
 	}
-	if !ok || observed.IsZero() || r.now().Sub(observed) > reserveFreshnessLimit(remaining, d.Percent) || w.ResetAtUnix <= r.now().Unix() {
+	now := r.now()
+	if !ok || observed.IsZero() || observed.After(now) || now.Sub(observed) > reserveFreshnessLimit(remaining, d.Percent) || w.ResetAtUnix <= now.Unix() {
 		status.Blocked = true
 		status.Reason = "usage_stale"
+		return status
+	}
+	if allowAutomatic && r.Schedule != nil {
+		if schedule, err := r.Schedule(); err == nil {
+			if account, ok := schedule.NextResetAccount(now); ok && account == key {
+				status.Reason = "scheduled_reset"
+				return status
+			}
+		}
+	}
+	rate := 0.0
+	if allowAutomatic && r.DrainRate != nil {
+		rate = r.DrainRate(key, d.Window)
+	}
+	if allowAutomatic && !quota.ReserveReleaseAt(now, time.Unix(w.ResetAtUnix, 0), remaining, d.Percent, rate).After(now) {
+		status.Reason = "natural_reset"
 		return status
 	}
 	status.Blocked = remaining <= d.Percent
@@ -273,6 +295,67 @@ func (r *CodexReserve) statusForIdentityLocked(key codex.AccountKey, email strin
 		status.Reason = "reserve_reached"
 	}
 	return status
+}
+
+func reserveBypassReset(b *codexReserveBypass, w quota.Window, window quota.WindowName, observed, now time.Time) bool {
+	remaining := windowRemaining(w)
+	return observed.After(b.ObservedAt) && ((now.Unix() >= b.ResetAt && w.ResetAtUnix > now.Unix()) ||
+		(w.ResetAtUnix != b.ResetAt && remaining > b.Remaining && time.Unix(w.ResetAtUnix, 0).Add(-quota.PeriodFor(window)).Unix() >= b.ObservedAt.Unix()) ||
+		(remaining == 100 && b.Remaining < 100))
+}
+
+// Policy returns configured protection for forecasting, regardless of an
+// automatic release. An explicit, current bypass still disables protection.
+func (r *CodexReserve) Policy() quota.ReservePolicy {
+	if r == nil {
+		return quota.ReservePolicy{}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key, email, err := r.systemAccount()
+	status := r.statusForIdentityLocked(key, email, err, false)
+	if !status.Configured || (!status.Enabled && !status.Blocked) {
+		return quota.ReservePolicy{}
+	}
+	return quota.ReservePolicy{AccountKey: string(status.AccountKey), Window: status.Window, Percent: status.Percent}
+}
+
+// ReadCodexReservePolicy reads service-owned reserve state without reconciling
+// or writing it. The caller supplies current system identity and fresh usage.
+func ReadCodexReservePolicy(fs fsutil.FileSystem, path string, account codex.AccountKey, now time.Time, windows map[quota.WindowName]quota.Window) (quota.ReservePolicy, error) {
+	if fs == nil || path == "" {
+		return quota.ReservePolicy{}, errors.New("Codex reserve dependencies unavailable")
+	}
+	data, err := fs.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return quota.ReservePolicy{}, nil
+	}
+	if err != nil {
+		return quota.ReservePolicy{}, err
+	}
+	var document codexReserveDocument
+	if json.Unmarshal(data, &document) != nil {
+		return quota.ReservePolicy{}, errors.New("invalid Codex reserve state")
+	}
+	if document.Window == "" {
+		return quota.ReservePolicy{}, nil
+	}
+	if quota.PeriodFor(document.Window) <= 0 || !validReservePercent(document.Percent) || account == "" {
+		return quota.ReservePolicy{}, errors.New("invalid Codex reserve configuration or identity")
+	}
+	policy := quota.ReservePolicy{AccountKey: string(account), Window: document.Window, Percent: document.Percent}
+	if bypass := document.Bypass; bypass != nil && bypass.Account == account && now.Unix() < bypass.ResetAt {
+		for name, window := range windows {
+			if canonicalReserveWindow(name) != document.Window {
+				continue
+			}
+			remaining := windowRemaining(window)
+			if window.ResetAtUnix > now.Unix() && remaining >= 0 && remaining <= 100 && !reserveBypassReset(bypass, window, document.Window, now, now) {
+				return quota.ReservePolicy{}, nil
+			}
+		}
+	}
+	return policy, nil
 }
 func (r *CodexReserve) Status() CodexReserveStatus {
 	r.mu.Lock()
