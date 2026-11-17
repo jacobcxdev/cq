@@ -90,7 +90,14 @@ and provider identifiers are `dev.jacobcx.cq.network` and
 `dev.jacobcx.cq.network.proxy`. Their app group is
 `K2648T24P4.dev.jacobcx.cq.network`; the provider's Mach service adds `.proxy`.
 
-With the company account already signed into Xcode, build and export with:
+Releases use the CI workflow and authorised credentials described in the
+[native release guide](../../docs/native-network-releases.md). The CI helper
+`Packaging/build-sign-ci.sh` uses manual Developer ID signing with separate
+host/provider distribution profiles, a temporary keychain and Apple's
+`notarytool`/`stapler`. It needs no local Xcode account or Fastlane.
+
+For an explicitly local development/export check, with the company account
+already signed into Xcode, build and export with:
 
 ```sh
 CQ_VERSION=1.2.3 CQ_BUILD_NUMBER=123 \
@@ -124,8 +131,14 @@ release validation checks both versions and the declared service. This avoids
 stale service registration during extension replacement (`FB17032197`), following
 [Apple DTS guidance](https://developer.apple.com/forums/thread/779395).
 
-For a release, upload the actual archive using the account already signed into
-Xcode. Copy the export options and change only its destination:
+The Release workflow submits its signed payload once, retains its exact ZIP and
+submission receipt before waiting, then staples Apple's accepted ticket. A retry
+resumes that submission ID; it does not rebuild and resubmit the app. The
+[native release guide](../../docs/native-network-releases.md) owns recovery.
+
+For an explicitly local notarisation check, upload the actual archive using the
+account already signed into Xcode. Copy the export options and change only its
+destination:
 
 ```sh
 cp native/macos-network/Packaging/ExportOptions.plist /tmp/CQNetwork-upload.plist
@@ -148,7 +161,6 @@ codesign --verify --deep --strict /tmp/cq-network-release/notarised/CQNetwork.ap
 
 Do not distribute an unaccepted upload as notarised. This workflow uses Xcode's
 account session; it does not extract an Apple ID password, signing key or stored
-notary credential. An unattended CI runner needs its own authorised signing and
-notarisation credentials; the existing CQ release workflow does not supply them.
+notary credential. The unattended release path uses the `native-release` environment's Apple secrets in its native job steps; it removes private material from disposable runner storage on exit.
 See Apple's [Developer ID distribution guide](https://developer.apple.com/developer-id/)
 and [notarisation guide](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution).

@@ -8,6 +8,11 @@ on:
         type: string
         required: false
         default: ''
+      native_build_number:
+        description: Increasing native build number for this release (required except WinGet recovery)
+        type: string
+        required: false
+        default: ''
 
 concurrency:
   group: release-publication
@@ -34,14 +39,74 @@ jobs:
   native-network:
     needs: [release-source]
     runs-on: macos-15
-    timeout-minutes: 15
+    timeout-minutes: 90
+    environment: native-release
+    permissions:
+      contents: write
+      actions: read
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: ./.github/actions/setup-go
         with:
           go-version-file: go.mod
+      - name: Record native toolchain
+        run: xcodebuild -version && swift --version
+      - name: Validate native release authority and immutable draft
+        id: native
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CQ_BUILD_NUMBER: ${{ inputs.native_build_number }}
+        run: bash .github/scripts/prepare-native-ci-release.sh "$GITHUB_REF_NAME" "$CQ_BUILD_NUMBER" "$RUNNER_TEMP/native-ci"
+      - name: Recover the same notarisation submission
+        if: steps.native.outputs.skip_build != 'true'
+        id: recovery
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: bash .github/scripts/recover-native-notary-request.sh "$RUNNER_TEMP/native-ci"
+      - name: Build, sign and submit the native companion
+        if: steps.native.outputs.skip_build != 'true' && steps.recovery.outputs.restored != 'true'
+        env:
+          CQ_VERSION: ${{ github.ref_name }}
+          CQ_BUILD_NUMBER: ${{ inputs.native_build_number }}
+          CQ_PREVIOUS_BUILD_NUMBER: ${{ steps.native.outputs.previous_build_number }}
+          CQ_SIGNING_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          CQ_SIGNING_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          CQ_HOST_PROFILE_BASE64: ${{ secrets.APPLE_HOST_PROFILE_BASE64 }}
+          CQ_PROVIDER_PROFILE_BASE64: ${{ secrets.APPLE_PROVIDER_PROFILE_BASE64 }}
+          CQ_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          CQ_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          CQ_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: native/macos-network/Packaging/build-sign-ci.sh prepare "$RUNNER_TEMP/native-ci"
+      - name: Retain the exact submission before waiting
+        if: always() && steps.native.outputs.skip_build == 'false' && steps.recovery.outputs.restored == 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-notary-request-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/native-ci/native-request/*
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Wait for Apple, staple and verify
+        if: success() && steps.native.outputs.skip_build != 'true'
+        env:
+          CQ_VERSION: ${{ github.ref_name }}
+          CQ_BUILD_NUMBER: ${{ inputs.native_build_number }}
+          CQ_PREVIOUS_BUILD_NUMBER: ${{ steps.native.outputs.previous_build_number }}
+          CQ_NOTARY_KEY_P8: ${{ secrets.APPLE_NOTARY_KEY_P8 }}
+          CQ_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          CQ_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: native/macos-network/Packaging/build-sign-ci.sh finish "$RUNNER_TEMP/native-ci"
+      - name: Upload the immutable notarised native asset
+        if: steps.native.outputs.skip_build != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" "$RUNNER_TEMP/native-ci/CQNetwork_${GITHUB_REF_NAME#v}_universal.zip" --repo "$GITHUB_REPOSITORY"
       - name: Validate tagged native companion release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
