@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/proxy"
 )
 
 const nativeUploadLimit = 20*1024*1024 + 65536
@@ -35,6 +36,7 @@ type ProbeOptions struct {
 	Event            func(map[string]any)
 	ComputerTarget   func(context.Context, string, []byte, *CatalogueFixture) (string, error)
 	ProjectComputers func(string, string, []byte) ([]byte, error)
+	VoiceProxy       string
 }
 
 type probeChallenge struct {
@@ -92,10 +94,10 @@ func NewProbe(settings Settings, options ProbeOptions) (*Probe, error) {
 }
 
 // RunProbe serves the qualified native origin; it never alters the signed app.
-func RunProbe(ctx context.Context, settings Settings) error {
+func RunProbe(ctx context.Context, settings Settings, voiceProxy string) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	p, err := NewProbe(settings, ProbeOptions{})
+	p, err := NewProbe(settings, ProbeOptions{VoiceProxy: voiceProxy})
 	if err != nil {
 		return err
 	}
@@ -778,6 +780,24 @@ func (p *Probe) forward(w http.ResponseWriter, r *http.Request, owner *Account) 
 	}
 	req.Header = probeHeaders(r.Header)
 	req.ContentLength = r.ContentLength
+	var voiceOffer []byte
+	if owner == nil && p.options.VoiceProxy != "" && proxy.IsCodexNativeVoiceCall(r) {
+		const maxVoiceOffer = 1 << 20
+		prefix, err := probeReadPrefix(r.Body, maxVoiceOffer)
+		if err != nil {
+			summary["error_type"] = "voice_request"
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		req.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(bytes.NewReader(prefix), r.Body), r.Body}
+		if len(prefix) > 0 && len(prefix) <= maxVoiceOffer {
+			voiceOffer = prefix
+			req.Header.Set("Accept-Encoding", "identity")
+		}
+	}
 	if owner != nil {
 		req.Header = OwnerHeaders(req.Header, *owner)
 	}
@@ -797,6 +817,15 @@ func (p *Probe) forward(w http.ResponseWriter, r *http.Request, owner *Account) 
 		return
 	}
 	summary["status"] = response.StatusCode
+	if len(voiceOffer) != 0 && response.StatusCode == http.StatusTooManyRequests {
+		if fallback := p.retryNativeVoice(r, response, voiceOffer); fallback != nil {
+			defer fallback.Body.Close()
+			summary["status"] = fallback.StatusCode
+			summary["voice_quota_failover"] = true
+			p.stream(w, r, fallback, true)
+			return
+		}
+	}
 	if (observe || usage) && response.StatusCode == 200 {
 		data, err := probeReadPrefix(response.Body, 1<<20)
 		if err == nil && len(data) <= 1<<20 {

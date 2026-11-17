@@ -847,8 +847,11 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		resetPlan := dispatch
 		if boundAccountKey != "" {
 			resetInput := dispatchInput
-			resetInput.UnavailableAccountKeys = dispatchUnavailable
-			resetInput.ProbeUnavailableWhenAll = false
+			// Plan for the selected account becoming unavailable. A historical
+			// quota mark can be probed on a new lease when live capacity returns.
+			resetInput.UnavailableAccountKeys = mergeCodexHTTPRequestAccountKeys(dispatchUnavailable, []codex.AccountKey{choice.AccountKey})
+			resetInput.ProbeUnavailableAccountKeys = excludeCodexHTTPRequestAccountKeys(dispatchInput.ProbeUnavailableAccountKeys, []codex.AccountKey{choice.AccountKey})
+			resetInput.requireConfirmedQuotaProbe = true
 			resetInput.Inventory = resetInventory
 			resetInput.AffinityAccountKey = ""
 			resetInput.AffinityEffectiveModel = ""

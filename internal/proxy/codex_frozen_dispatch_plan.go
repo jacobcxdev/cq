@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"time"
 
@@ -22,6 +23,7 @@ type CodexFrozenDispatchInput struct {
 	UnavailableAccountKeys      []codex.AccountKey
 	ProbeUnavailableAccountKeys []codex.AccountKey
 	ProbeUnavailableWhenAll     bool
+	requireConfirmedQuotaProbe  bool
 	AcceptedRevision            codex.Revision
 	Now                         time.Time
 }
@@ -56,6 +58,7 @@ type CodexFrozenDispatchPlan struct {
 	accountUnavailableResetCandidates []codex.AccountKey
 	accountUnavailablePortable        bool
 	quotaRecoveryRetry                bool
+	quotaProbe                        bool
 	policyCandidates                  []CodexRoutePolicyCandidate
 	status                            CodexRoutePlanStatus
 	probe                             codexInstalledHTTPDispatchFacts
@@ -98,6 +101,7 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 		input.UnavailableAccountKeys,
 		input.ProbeUnavailableAccountKeys,
 		input.ProbeUnavailableWhenAll && input.BoundAccountKey == "",
+		input.requireConfirmedQuotaProbe,
 		input.DefaultAccountKey,
 	)
 	policyBoundAccountKey := input.BoundAccountKey
@@ -110,7 +114,7 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 		DefaultAccountKey:      input.DefaultAccountKey,
 		BoundAccountKey:        policyBoundAccountKey,
 	})
-	plan := CodexFrozenDispatchPlan{status: policy.Status(), policyCandidates: candidates}
+	plan := CodexFrozenDispatchPlan{status: policy.Status(), policyCandidates: candidates, quotaProbe: unavailableProbe != ""}
 	if policy.Status() != CodexRoutePlanReady && (len(policy.Choices()) == 0 || input.BoundAccountKey != "") && input.Capacity != nil {
 		var reservedAccount codex.AccountKey
 		switch policy.Status() {
@@ -420,6 +424,11 @@ func (p CodexFrozenDispatchPlan) withAccountUnavailableResetCandidates(candidate
 
 func (p CodexFrozenDispatchPlan) withAccountUnavailableFallbacks(fallbacks CodexFrozenDispatchPlan, primary RouteChoice) CodexFrozenDispatchPlan {
 	p.accountUnavailablePortable = true
+	// A quota probe needs a fresh lease after rejection. It cannot be included
+	// as a replacement attempt in the current lease.
+	if fallbacks.quotaProbe {
+		return p
+	}
 	seen := make(map[codex.AccountKey]struct{}, len(p.accounts))
 	for _, account := range p.accounts {
 		seen[account.choice.AccountKey] = struct{}{}
@@ -491,7 +500,7 @@ func cloneCodexFrozenDispatchAccounts(source []CodexFrozenDispatchAccount) []Cod
 	return accounts
 }
 
-func filterCodexFrozenDispatchUnavailableCandidates(candidates []CodexRoutePolicyCandidate, unavailable, probeAccounts []codex.AccountKey, probeWhenAll bool, defaultAccountKey codex.AccountKey) ([]CodexRoutePolicyCandidate, codex.AccountKey) {
+func filterCodexFrozenDispatchUnavailableCandidates(candidates []CodexRoutePolicyCandidate, unavailable, probeAccounts []codex.AccountKey, probeWhenAll, requireConfirmedQuota bool, defaultAccountKey codex.AccountKey) ([]CodexRoutePolicyCandidate, codex.AccountKey) {
 	if len(unavailable) == 0 {
 		return candidates, ""
 	}
@@ -521,6 +530,9 @@ func filterCodexFrozenDispatchUnavailableCandidates(candidates []CodexRoutePolic
 			!candidate.Compatible || !candidate.Routable || candidate.Choice.AccountKey == "" {
 			continue
 		}
+		if requireConfirmedQuota && !codexFrozenDispatchHasConfirmedQuota(candidate) {
+			continue
+		}
 		if _, duplicate := seen[candidate.Choice.AccountKey]; duplicate {
 			continue
 		}
@@ -531,10 +543,10 @@ func filterCodexFrozenDispatchUnavailableCandidates(candidates []CodexRoutePolic
 		return filtered, ""
 	}
 	sort.SliceStable(probeCandidates, func(i, j int) bool {
-		leftEligible := codexFrozenDispatchPolicyCandidateEligible(probeCandidates[i])
-		rightEligible := codexFrozenDispatchPolicyCandidateEligible(probeCandidates[j])
-		if leftEligible != rightEligible {
-			return leftEligible
+		leftCapacity := codexRoutePolicyCapacityRank(codexRoutePolicyCapacity(probeCandidates[i]).State)
+		rightCapacity := codexRoutePolicyCapacityRank(codexRoutePolicyCapacity(probeCandidates[j]).State)
+		if leftCapacity != rightCapacity {
+			return leftCapacity > rightCapacity
 		}
 		if probeCandidates[i].SystemAccount != probeCandidates[j].SystemAccount {
 			return !probeCandidates[i].SystemAccount
@@ -559,4 +571,11 @@ func filterCodexFrozenDispatchUnavailableCandidates(candidates []CodexRoutePolic
 func codexFrozenDispatchPolicyCandidateEligible(candidate CodexRoutePolicyCandidate) bool {
 	return candidate.Choice.AccountKey != "" && candidate.Compatible && candidate.Routable &&
 		codexRoutePolicyCapacity(candidate).State != CapacityZero
+}
+
+func codexFrozenDispatchHasConfirmedQuota(candidate CodexRoutePolicyCandidate) bool {
+	return !candidate.IncludedQuotaExhausted && codexRoutePolicyCapacity(candidate).State == CapacityPositive &&
+		!slices.ContainsFunc(candidate.RequiredCapacity, func(view CapacityView) bool {
+			return view.Source == CapacitySourceUsageCache
+		})
 }

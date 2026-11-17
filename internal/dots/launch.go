@@ -220,6 +220,11 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 	}
 	env = setEnvironment(env, "SSL_CERT_FILE", filepath.Join(s.RuntimeRoot, "native-trust.pem"))
 	env = setEnvironment(env, "NODE_EXTRA_CA_CERTS", filepath.Join(s.RuntimeRoot, "native-extra-ca.pem"))
+	if native {
+		// Electron's Node WebSockets also need the macOS trust store when
+		// CQ Network's separately approved usage certificate is presented.
+		env = setEnvironment(env, "NODE_USE_SYSTEM_CA", "1")
+	}
 	bypass, seen := []string{}, map[string]bool{}
 	for _, host := range append(strings.Split(environmentValue(env, "NO_PROXY"), ","), "localhost", "127.0.0.1") {
 		if host != "" && !seen[host] {

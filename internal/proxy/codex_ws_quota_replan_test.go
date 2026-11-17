@@ -63,6 +63,42 @@ func TestCodexTerminatingWSBrokerReplansAuthenticatedPortableQuotaRejection(t *t
 	}
 }
 
+func TestCodexTerminatingWSBrokerReplansToRecoveredQuotaAccount(t *testing.T) {
+	coordinator, seed, factory, ctx := codexWSQuotaReplanFixture(t, "account-b")
+	factory.Capacity = NewCodexCapacityLedger(factory.Now, time.Hour)
+	frozenDispatchObserveCapacity(t, factory.Capacity, "account-b", CapacityBucketBase, 97, factory.Now())
+	frame := codexTerminatingWSFrame("turn-a", "")
+	created := []byte(`{"type":"response.created","response":{"id":"response-b"}}`)
+	completed := []byte(`{"type":"response.completed","response":{"id":"response-b","end_turn":true}}`)
+	dialer := &codexWSBrokerDialerStub{connections: map[codex.AccountKey][]websocketRelayConn{
+		"account-a": {&codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+			{messageType: websocket.TextMessage, payload: codexWSBrokerHard429()},
+		}}},
+		"account-b": {&codexWSBrokerConnStub{reads: []codexWSBrokerRead{
+			{messageType: websocket.TextMessage, payload: created},
+			{messageType: websocket.TextMessage, payload: completed},
+		}}},
+	}}
+	downstream := codexWSQuotaReplanServe(t, ctx, factory, dialer, frame)
+	if got := dialer.accounts; !reflect.DeepEqual(got, []codex.AccountKey{"account-a", "account-b"}) {
+		t.Fatalf("dial accounts = %v, want bound account then recovered account", got)
+	}
+	if got := downstream.writtenPayloads(); !reflect.DeepEqual(got, [][]byte{created, completed}) {
+		t.Fatalf("downstream writes = %q, want only recovered account response", got)
+	}
+	if len(downstream.controlWrites) != 0 {
+		t.Fatal("transparent recovery sent downstream control frame")
+	}
+	snapshot, err := coordinator.LoadRouteSnapshot(ctx, seed.Key, []codex.AccountKey{"account-a", "account-b"}, seed.Authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.BoundAccountKey != "account-b" || !snapshot.BoundRequestCompleted ||
+		!reflect.DeepEqual(snapshot.QuotaExhaustedAccountKeys, []codex.AccountKey{"account-a"}) {
+		t.Fatalf("snapshot after recovered account completed = %#v", snapshot)
+	}
+}
+
 func TestCodexTerminatingWSBrokerBoundsAuthenticatedPortableQuotaReplans(t *testing.T) {
 	_, _, factory, ctx := codexWSQuotaReplanFixture(t)
 	inventory := factory.Inventory.(*codexHTTPRequestPlanTestInventory)
@@ -96,7 +132,7 @@ func TestCodexTerminatingWSBrokerDoesNotReplanAuthenticatedQuotaAfterAdmission(t
 	}
 }
 
-func codexWSQuotaReplanFixture(t *testing.T) (*CodexContinuityCoordinator, CodexLeaseRequestPlan, *CodexHTTPRequestPlanFactory, context.Context) {
+func codexWSQuotaReplanFixture(t *testing.T, previouslyExhausted ...codex.AccountKey) (*CodexContinuityCoordinator, CodexLeaseRequestPlan, *CodexHTTPRequestPlanFactory, context.Context) {
 	t.Helper()
 	coordinator, _, now := openCodexLeaseRuntimeTestCoordinator(t)
 	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
@@ -105,6 +141,25 @@ func codexWSQuotaReplanFixture(t *testing.T) (*CodexContinuityCoordinator, Codex
 	seed.Key.Lane.Thread = "thread-a"
 	seed.RequestedModel = "gpt-5.6-sol"
 	seed.EffectiveModel = "gpt-5.6-sol"
+	for _, account := range previouslyExhausted {
+		exhausted := codexLeaseRuntimeTestPlan("previous-"+string(account), []CodexLeaseAttemptSlotPlan{
+			{AccountKey: account, CandidateID: "candidate-b", Kind: CodexAttemptSlotDirect},
+		})
+		exhausted.Key.Lane = seed.Key.Lane
+		exhausted.RequestedModel = seed.RequestedModel
+		exhausted.EffectiveModel = seed.EffectiveModel
+		handle, err := runtimeLease.BeginRequest(exhausted)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err = handle.MarkDispatched()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := handle.RecordQuotaExhausted(0); err != nil {
+			t.Fatal(err)
+		}
+	}
 	handle, err := runtimeLease.BeginRequest(seed)
 	if err != nil {
 		t.Fatal(err)

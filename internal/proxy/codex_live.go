@@ -14,11 +14,13 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 const (
-	codexLiveSidebandRoot = "https://api.openai.com/v1"
-	codexLiveCallTTL      = time.Hour
+	CodexNativeVoiceCallPath = "/backend-api/wham/realtime/calls"
+	codexLiveSidebandRoot    = "https://api.openai.com/v1"
+	codexLiveCallTTL         = time.Hour
 )
 
 var codexLiveProtocolHeaders = []string{
@@ -51,6 +53,18 @@ type codexLiveSidebandTarget struct {
 	style  string
 }
 
+// IsCodexNativeVoiceCall identifies the desktop's client-owned call creation.
+func IsCodexNativeVoiceCall(r *http.Request) bool {
+	query, err := url.ParseQuery(r.URL.RawQuery)
+	return err == nil && r.Method == http.MethodPost && r.URL.EscapedPath() == CodexNativeVoiceCallPath &&
+		query.Encode() == "architecture=avas&intent=quicksilver" && r.Header.Get("OpenAI-Alpha") == "quicksilver=v2"
+}
+
+func IsCodexNativeVoiceQuotaRejection(body []byte) bool {
+	wrapped, err := parseCodexHTTPError(body, http.StatusTooManyRequests)
+	return err == nil && wrapped.HardUsageLimit
+}
+
 func (s *Server) handleCodexLiveCall(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	statusCode := 0
@@ -73,6 +87,36 @@ func (s *Server) handleCodexLiveCall(w http.ResponseWriter, r *http.Request) {
 		s.emitDiagnostics(event)
 	}()
 
+	native := r.URL.Path == CodexNativeVoiceCallPath
+	var exclusions []codex.SelectionExclusion
+	if native {
+		caller, authenticated := runtimeCallerAuthority(ctx)
+		identity, _ := runtimeCallerIdentity(ctx)
+		account, _, _ := strings.Cut(identity, "\x00")
+		if !authenticated || caller.Domain != NormalCallerCodex || account == "" {
+			statusCode = http.StatusUnauthorized
+			writeError(w, statusCode, "authentication_error", "native voice caller required")
+			return
+		}
+		if !IsCodexNativeVoiceCall(r) {
+			statusCode = http.StatusBadRequest
+			writeError(w, statusCode, "invalid_request_error", "unsupported native voice call")
+			return
+		}
+		// Preserve explicit session policies. Voice has no capability permit
+		// for a bound pool, so only the default shared pool can recover here.
+		if s.SessionPolicy != nil {
+			for _, header := range []string{"Session-Id", "Thread-Id"} {
+				if id := r.Header.Get(header); id != "" &&
+					s.SessionPolicy.Resolve([]byte(id), nil).Status != PolicyDecisionUnbound {
+					statusCode = http.StatusConflict
+					writeError(w, statusCode, "invalid_request_error", "native voice failover unavailable for this session policy")
+					return
+				}
+			}
+		}
+		exclusions = []codex.SelectionExclusion{{AccountKey: codex.AccountKey(account)}}
+	}
 	body, err := codexLiveBackendBody(r)
 	if err != nil {
 		statusCode = http.StatusBadRequest
@@ -83,6 +127,22 @@ func (s *Server) handleCodexLiveCall(w http.ResponseWriter, r *http.Request) {
 
 	upstreamURL := strings.TrimRight(s.Config.CodexUpstream, "/") +
 		"/realtime/calls?intent=quicksilver&architecture=avas"
+	if native {
+		var call struct {
+			Session struct {
+				Delegation struct {
+					Type string `json:"type"`
+				} `json:"delegation"`
+			} `json:"session"`
+		}
+		if err := json.Unmarshal(body, &call); err != nil || call.Session.Delegation.Type != "client" {
+			statusCode = http.StatusBadRequest
+			writeError(w, statusCode, "invalid_request_error", "native voice requires client delegation")
+			return
+		}
+		upstreamURL = strings.TrimSuffix(strings.TrimRight(s.Config.CodexUpstream, "/"), "/codex") +
+			"/wham/realtime/calls?intent=quicksilver&architecture=avas"
+	}
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		statusCode = http.StatusInternalServerError
@@ -92,12 +152,20 @@ func (s *Server) handleCodexLiveCall(w http.ResponseWriter, r *http.Request) {
 	}
 	upReq.Header.Set("Content-Type", "application/json")
 	copyCodexLiveProtocolHeaders(upReq.Header, r.Header)
+	if native {
+		for _, header := range []string{"Voice-Session-Id", "X-Codex-Turn-Metadata"} {
+			if value := r.Header.Get(header); value != "" {
+				upReq.Header.Set(header, value)
+			}
+		}
+		upReq.Header.Del("X-OAI-Attestation")
+	}
 	upReq.ContentLength = int64(len(body))
 	upReq.GetBody = func() (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(body)), nil
 	}
 
-	resp, choice, attempt, err := s.doCodexRequest(r.Context(), "", upReq)
+	resp, choice, attempt, err := s.doCodexRequestExcluding(r.Context(), "", upReq, exclusions)
 	if err != nil {
 		statusCode = http.StatusBadGateway
 		diagError = diagnosticsErrorCode("api_error", "codex live upstream error")

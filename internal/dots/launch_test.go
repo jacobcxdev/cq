@@ -118,7 +118,7 @@ func TestPrepareLaunchPreservedNormalProfileTrustAndCQRouting(t *testing.T) {
 	if !slices.Equal(before, input) {
 		t.Fatal("input environment mutated")
 	}
-	for key, want := range map[string]string{"CODEX_HOME": filepath.Dir(s.SystemAuth), "OPENAI_BASE_URL": "http://127.0.0.1:12345", "CQ_DOTS_CQ_PATH": "/stable/cq link", "CODEX_API_BASE_URL": "https://chatgpt.com/backend-api", "CODEX_APP_SERVER_CHATGPT_BASE_URL": "https://localhost:32123/backend-api", "NO_PROXY": "internal.example,localhost,127.0.0.1", "UNCHANGED": "value with spaces"} {
+	for key, want := range map[string]string{"CODEX_HOME": filepath.Dir(s.SystemAuth), "OPENAI_BASE_URL": "http://127.0.0.1:12345", "CQ_DOTS_CQ_PATH": "/stable/cq link", "NODE_USE_SYSTEM_CA": "1", "CODEX_API_BASE_URL": "https://chatgpt.com/backend-api", "CODEX_APP_SERVER_CHATGPT_BASE_URL": "https://localhost:32123/backend-api", "NO_PROXY": "internal.example,localhost,127.0.0.1", "UNCHANGED": "value with spaces"} {
 		if got := environmentValue(env, key); got != want {
 			t.Fatalf("%s = %q, want %q", key, got, want)
 		}
