@@ -22,6 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          fetch-depth: 0 # The native release preflight fixture fetches from local Git history.
           persist-credentials: false
 
       - uses: ./.github/actions/setup-go
