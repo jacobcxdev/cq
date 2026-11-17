@@ -966,6 +966,11 @@ func codexHTTPRequestDetachPortableUnavailableRoute(snapshot CodexLeaseRouteSnap
 	if expected != nil || snapshot.RestartableFailedHead || snapshot.BoundRequestCompleted || !codexHTTPRequestAccountUnavailablePortable(protocol) {
 		return snapshot
 	}
+	// A stale quota marker cannot release continuity after a later uncertain
+	// dispatch. Only a drained account rejection permits that portable reset.
+	if snapshot.BoundRequiresAccount && !snapshot.BoundPortableReset {
+		return snapshot
+	}
 	unavailable := mergeCodexHTTPRequestAccountKeys(snapshot.UnavailableAccountKeys, snapshot.QuotaExhaustedAccountKeys)
 	if containsCodexHTTPRequestAccountKey(unavailable, snapshot.BoundAccountKey) {
 		snapshot.BoundAccountKey = ""
