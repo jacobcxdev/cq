@@ -24,6 +24,7 @@ type CodexRoutingCapacityRefresher struct {
 	Interval           time.Duration
 	IntervalForAccount func(codex.AccountKey, map[quota.WindowName]quota.Window) time.Duration
 	OnInventory        func(codex.Inventory)
+	OnUsage            func(codex.AccountKey, quota.Result, time.Time)
 
 	mu          sync.Mutex
 	nextRefresh map[codex.AccountKey]time.Time
@@ -158,6 +159,12 @@ func (r *CodexRoutingCapacityRefresher) refresh(ctx context.Context, accounts []
 			r.Capacity.ObserveQuotaSnapshot(outcome.account, snapshot)
 			positive := r.Capacity.observeLivePositiveQuotaSnapshot(outcome.stream, outcome.account, snapshot)
 			published = published || !requirePositive || positive
+			if r.OnUsage != nil {
+				func() {
+					defer func() { _ = recover() }()
+					r.OnUsage(outcome.account, snapshot.Result, snapshot.FetchedAt)
+				}()
+			}
 		}
 		r.mu.Lock()
 		delete(r.inFlight, outcome.account)

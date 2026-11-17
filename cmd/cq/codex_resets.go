@@ -140,6 +140,9 @@ func newCodexResetService(fs fsutil.DurableFileSystem, control *codexprov.Creden
 		Credits: codexprov.ResetCreditClient{HTTP: httpClient}, Now: time.Now,
 	}
 	return &app.CodexResetApp{
+		Reserve: func(_ context.Context, snapshot codexprov.ResetAccountSnapshot, usage []quota.Result, now time.Time) (quota.ReservePolicy, error) {
+			return readCodexResetReserve(fs, filepath.Join(roots.State, "codex-reserve.json"), snapshot, usage, now)
+		},
 		Schedule:   codexprov.NewResetAutomationStore(fs, filepath.Join(roots.State, "codex-reset-schedule.json")),
 		AfterReset: notifyProxyCodexReset, Backend: backend, Usage: codexprov.New(httpClient), History: historyStore, Attempts: attempts, Cache: quotaCache, Clock: systemClock{},
 	}, nil

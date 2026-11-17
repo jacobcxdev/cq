@@ -357,6 +357,16 @@ func (a *CodexResetApp) replanAutomationState(ctx context.Context, state *codex.
 	}
 
 	constraints := &aggregate.ResetScheduleConstraints{}
+	if a.Reserve != nil && state.PlanValid {
+		// Replanning refreshes a valid accepted order; expiry of its forecast
+		// must not silently change which account may spend reserve first.
+		accepted := *state
+		accepted.LastReplanAt = resetTimePointer(now)
+		accepted.NextReplanAt = resetTimePointer(now.Add(5 * time.Minute))
+		if next, ok := accepted.NextResetAccount(now); ok && !unresolved[next] {
+			constraints.NextAccountKey = string(next)
+		}
+	}
 	for _, entry := range state.Entries {
 		if unresolved[entry.AccountKey] || entry.Terminal() || entry.State == codex.ResetAutomationRunning || entry.State == codex.ResetAutomationRetrying {
 			continue
@@ -403,6 +413,20 @@ func (a *CodexResetApp) replanAutomationState(ctx context.Context, state *codex.
 			}
 		}
 		entry.UpdatedAt = now
+	}
+	if state.PlanValid && recommendation.NextAccountKey != "" {
+		next, ok := state.NextResetAccount(now)
+		if !ok || string(next) != recommendation.NextAccountKey {
+			state.PlanValid = false
+			state.PlanError = "reserve_order_changed"
+			for i := range state.Entries {
+				entry := &state.Entries[i]
+				if !entry.Terminal() && !entry.Pinned && entry.State == codex.ResetAutomationPending {
+					entry.State = codex.ResetAutomationBlocked
+					entry.LastError = state.PlanError
+				}
+			}
+		}
 	}
 }
 

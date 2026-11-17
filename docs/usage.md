@@ -592,7 +592,7 @@ cq proxy reserve set --window 7d --percent 2   # Protect the final 2% of weekly 
 cq proxy reserve status
 cq proxy reserve status --json
 cq proxy reserve disable                     # Release the reserve until this window resets
-cq proxy reserve enable                      # Restore protection immediately
+cq proxy reserve enable                      # Re-enable the reserve policy
 cq proxy reserve clear                       # Remove the configuration
 ```
 
@@ -602,6 +602,19 @@ The commands require the running service. Changes apply immediately and survive 
 At or below the threshold, the system account becomes unavailable to routing. Pools can continue through their other eligible accounts.
 Pinned work receives HTTP 429 or the equivalent WebSocket usage-limit error when its account reaches the reserve.
 The reserve applies to the account, not to a pool or its aggregate percentage.
+
+CQ makes reserve available for useful work when the next executable reset in
+your enabled accepted schedule targets the system account. A reset for another
+account keeps it protected. It also releases reserve before a natural reset when
+the estimated time needed to consume it, plus five minutes, reaches that reset's
+deadline. With no usable demand estimate, only the final five-minute margin
+applies. `reserve status` reports `scheduled_reset` or `natural_reset` during
+automatic release; the configured reserve remains enabled.
+
+Adaptive reset planning excludes protected capacity from ordinary availability,
+so it can reset an empty account without waiting for the system reserve to drain.
+Stale or invalid plans, earlier blocked resets and unresolved reset attempts do
+not authorise scheduled release. Fresh refill evidence restores protection.
 
 `disable` requires fresh usage and reset evidence. A confirmed natural or forced reset restores protection automatically.
 CQ never consumes a reset credit for this feature. A system account change also removes the previous account's temporary bypass.
