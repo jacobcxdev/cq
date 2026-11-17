@@ -76,7 +76,13 @@ func RunHelper(ctx context.Context, role, root string, args []string, stdin io.R
 	defer cancel()
 	switch role {
 	case "probe":
-		return RunProbe(worker, *settings)
+		voiceProxy := ""
+		if settings.IntegrationMode == "native" {
+			if cfg, err := proxy.LoadExistingConfig(); err == nil && cfg.Port > 0 && cfg.Port <= 65535 {
+				voiceProxy = "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
+			}
+		}
+		return RunProbe(worker, *settings, voiceProxy)
 	case "realtime":
 		return RunRealtimeProxy(worker, settings)
 	case "relay":

@@ -435,6 +435,7 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("POST /v1/live", s.handleCodexLiveCall)
 	mux.HandleFunc("POST /realtime/calls", s.handleCodexLiveCall)
 	mux.HandleFunc("POST /v1/realtime/calls", s.handleCodexLiveCall)
+	mux.HandleFunc("POST "+CodexNativeVoiceCallPath, s.handleCodexLiveCall)
 	mux.HandleFunc("GET /live/", s.handleCodexLiveSideband)
 	mux.HandleFunc("GET /v1/live/", s.handleCodexLiveSideband)
 	mux.HandleFunc("GET /realtime/calls/", s.handleCodexLiveSideband)

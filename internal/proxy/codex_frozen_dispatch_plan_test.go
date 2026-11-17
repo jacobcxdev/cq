@@ -450,7 +450,9 @@ func TestBuildCodexFrozenDispatchPlanProbesRecoveredUnavailableAccountBeforeExha
 		t.Fatalf("initial dispatch accounts = %#v, want deterministic default account-a", accounts)
 	}
 
-	observe("account-a", 0, CapacitySourceHardLimit)
+	// Once earlier hard-limit evidence ages out, account A is still excluded
+	// with unknown capacity. Confirmed capacity must beat the configured default.
+	now = now.Add(time.Hour)
 	observe("account-b", 75, CapacitySourceLiveRateLimits)
 	plan, err = BuildCodexFrozenDispatchPlan(context.Background(), input)
 	if err != nil {
@@ -458,7 +460,7 @@ func TestBuildCodexFrozenDispatchPlanProbesRecoveredUnavailableAccountBeforeExha
 	}
 	accounts = plan.Accounts()
 	if len(accounts) != 1 || accounts[0].Choice().AccountKey != "account-b" {
-		t.Fatalf("dispatch accounts = %#v, want recovered account-b before exhausted default", accounts)
+		t.Fatalf("dispatch accounts = %#v, want recovered account-b before unknown default", accounts)
 	}
 }
 

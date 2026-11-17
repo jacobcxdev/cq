@@ -105,7 +105,7 @@ func isNormalClaudeRoute(path string) bool {
 
 func isNormalCodexRoute(path string) bool {
 	switch path {
-	case "/models", "/v1/responses", "/responses", "/v1/responses/compact", "/responses/compact", "/app-server", "/alpha/search", "/live", "/v1/live", "/realtime/calls", "/v1/realtime/calls", "/realtime", "/v1/realtime":
+	case "/models", "/v1/responses", "/responses", "/v1/responses/compact", "/responses/compact", "/app-server", "/alpha/search", "/live", "/v1/live", "/realtime/calls", "/v1/realtime/calls", "/realtime", "/v1/realtime", CodexNativeVoiceCallPath:
 		return true
 	}
 	for _, prefix := range []string{"/v1/images/", "/images/", "/live/", "/v1/live/", "/realtime/calls/", "/v1/realtime/calls/"} {

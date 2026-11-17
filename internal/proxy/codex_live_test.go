@@ -287,6 +287,85 @@ func TestServer_CodexLiveSideband_UsesCallAccountAffinity(t *testing.T) {
 	}
 }
 
+func TestServerNativeVoiceRecoveryBindsAlternateAccount(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case CodexNativeVoiceCallPath:
+			if r.Header.Get("Authorization") != "Bearer alternate-token" ||
+				r.Header.Get("ChatGPT-Account-Id") != "alternate-account" ||
+				r.Header.Get("Voice-Session-Id") != "voice-session" ||
+				r.Header.Get("X-OAI-Attestation") != "" {
+				t.Error("alternate voice call authority or metadata changed")
+			}
+			w.Header().Set("Location", "/v1/realtime/calls/rtc_alternate")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, "answer")
+		case "/v1/realtime":
+			if r.URL.Query().Get("call_id") != "rtc_alternate" ||
+				r.Header.Get("Authorization") != "Bearer alternate-token" {
+				t.Error("voice sideband used a different account or call")
+			}
+			upgrader := websocket.Upgrader{}
+			conn, err := upgrader.Upgrade(w, r, nil)
+			if err != nil {
+				t.Errorf("upgrade alternate call sideband: %v", err)
+				return
+			}
+			_ = conn.Close()
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+
+	primary := &codex.CodexAccount{AccessToken: "primary-token", AccountID: "primary-account"}
+	selector := &rotatingCodexSelector{accounts: []*codex.CodexAccount{
+		primary,
+		{AccessToken: "alternate-token", AccountID: "alternate-account"},
+	}}
+	router := testCodexRequestRouter(selector, http.DefaultTransport)
+	srv := &Server{
+		Config: &Config{
+			ClaudeUpstream: "https://api.anthropic.com",
+			CodexUpstream:  upstream.URL + "/backend-api/codex",
+		},
+		CodexRequests:             router,
+		CodexWebSocketExecutor:    testCodexWebSocketExecutor(router),
+		codexLiveSidebandUpstream: upstream.URL + "/v1",
+	}
+	handler, err := srv.handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(handler)
+	defer proxy.Close()
+	offer := `{"sdp":"offer","session":{"delegation":{"type":"client"}}}`
+	req := httptest.NewRequest(http.MethodPost, CodexNativeVoiceCallPath+"?intent=quicksilver&architecture=avas", strings.NewReader(offer))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("OpenAI-Alpha", "quicksilver=v2")
+	req.Header.Set("Voice-Session-Id", "voice-session")
+	req.Header.Set("X-OAI-Attestation", "primary-attestation")
+	ctx := withRuntimeCallerAuthority(req.Context(), RuntimeCallerAuthorityV1{Domain: NormalCallerCodex})
+	accountKey := codexRoutingAccountKey(primary)
+	ctx = withRuntimeCallerIdentity(ctx, string(accountKey)+"\x00candidate\x00revision")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req.WithContext(ctx))
+	if w.Code != http.StatusCreated || w.Body.String() != "answer" {
+		t.Fatalf("native voice response = %d %q", w.Code, w.Body.String())
+	}
+	conn, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(proxy.URL, "http")+"/realtime?call_id=rtc_alternate", nil)
+	if err != nil {
+		if resp != nil {
+			defer resp.Body.Close()
+		}
+		t.Fatalf("native voice sideband: %v", err)
+	}
+	_ = conn.Close()
+	if got := selector.callCount(); got != 1 {
+		t.Fatalf("selector calls = %d, want one call routing decision", got)
+	}
+}
+
 func TestCodexLiveSidebandURL(t *testing.T) {
 	srv := &Server{codexLiveSidebandUpstream: "https://example.test/v1"}
 	tests := []struct {

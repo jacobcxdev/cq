@@ -7,7 +7,68 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+func TestNativeVoiceOnlyRetriesDefinitiveQuotaRejection(t *testing.T) {
+	const limit = `{"error":{"type":"usage_limit_reached"},"voice_limit_message":{"title":"Limit reached"}}`
+	const offer = `{"sdp":"v=0 offer","session":{"delegation":{"type":"client"},"voice_session_id":"voice-session"}}`
+	for _, item := range []struct {
+		name   string
+		status int
+		body   string
+		bearer string
+		want   bool
+	}{
+		{name: "quota rejection", status: 429, body: limit, bearer: "native-token", want: true},
+		{name: "uncertain throttling", status: 429, body: `{"error":{"type":"rate_limit_exceeded"}}`, bearer: "native-token"},
+		{name: "unauthenticated caller", status: 429, body: limit, bearer: "foreign"},
+		{name: "success", status: 201, body: "original-answer", bearer: "native-token"},
+	} {
+		t.Run(item.name, func(t *testing.T) {
+			p, _, _ := probeFixtureForTest(t)
+			p.options.VoiceProxy = "http://127.0.0.1:19280"
+			calls := 0
+			path := proxy.CodexNativeVoiceCallPath + "?intent=quicksilver&architecture=avas"
+			p.options.HTTP = probeDoer(func(r *http.Request) (*http.Response, error) {
+				calls++
+				body, err := io.ReadAll(r.Body)
+				if err != nil || string(body) != offer || r.URL.RequestURI() != path {
+					t.Fatal("native voice offer changed")
+				}
+				if calls == 1 {
+					response := probeSuccess(item.body)
+					response.StatusCode = item.status
+					return response, nil
+				}
+				if calls != 2 || r.URL.Host != "127.0.0.1:19280" ||
+					r.Header.Get("Authorization") != "Bearer native-token" || r.Header.Get("Cookie") != "" {
+					t.Fatal("unexpected native voice fallback authority")
+				}
+				response := probeSuccess("alternate-answer")
+				response.StatusCode = http.StatusCreated
+				response.Header.Set("Location", "/v1/realtime/calls/rtc_alternate")
+				return response, nil
+			})
+			r := probeRequest(http.MethodPost, path, offer)
+			r.Header.Set("Authorization", "Bearer "+item.bearer)
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("OpenAI-Alpha", "quicksilver=v2")
+			r.Header.Set("Cookie", "primary=fixture")
+			w := httptest.NewRecorder()
+			p.ServeHTTP(w, r)
+			if item.want {
+				if calls != 2 || w.Code != http.StatusCreated || w.Body.String() != "alternate-answer" ||
+					w.Header().Get("Location") != "/v1/realtime/calls/rtc_alternate" {
+					t.Fatalf("native voice failover: calls=%d code=%d", calls, w.Code)
+				}
+			} else if calls != 1 || w.Code != item.status || w.Body.String() != item.body {
+				t.Fatalf("native voice passthrough changed: calls=%d code=%d", calls, w.Code)
+			}
+		})
+	}
+}
 
 func TestProbeSecondaryVoiceLifecycleUsedOwnerIdentity(t *testing.T) {
 	for _, operation := range []struct{ path, body string }{
