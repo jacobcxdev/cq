@@ -52,7 +52,7 @@ func TestPrintCodexAccountsIncludesPlanMultiplier(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(out), "pro 10x") || !strings.Contains(string(out), "business premium 5x") {
+	if !strings.Contains(string(out), "Pro 10x") || !strings.Contains(string(out), "Business Premium 5x") {
 		t.Fatalf("missing account plan label or multiplier: %s", out)
 	}
 }

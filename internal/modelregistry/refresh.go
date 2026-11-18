@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -12,6 +14,8 @@ import (
 
 // RefreshDiagnostics summarises what happened during a Refresh call.
 type RefreshDiagnostics struct {
+	// Replaced reports whether refresh published a new in-memory snapshot.
+	Replaced bool
 	// Counts is the number of native entries fetched per provider.
 	Counts map[string]int
 	// Prunable contains overlay entries that conflicted with native entries.
@@ -31,6 +35,15 @@ type OverlayStore interface {
 	Load() ([]Entry, error)
 }
 
+// SharedBudgetSource registers a catalogue for a shared-budget subscription.
+// The source's entries must carry SharedBudgetModel metadata and the same Provider.
+type SharedBudgetSource struct {
+	Provider Provider
+	Source   NativeSource
+	// RequireFresh suppresses stale routes when workspace permission cannot be verified.
+	RequireFresh bool
+}
+
 // Refresher fetches fresh model data from all configured sources and updates
 // the Catalog atomically. It is safe for concurrent use; concurrent Refresh
 // calls are coalesced via an internal mutex so sources are not called in
@@ -48,6 +61,8 @@ type Refresher struct {
 	ZAI NativeSource
 	// Grok fetches account-scoped subscription model metadata.
 	Grok NativeSource
+	// SharedBudgets fetches third-party subscription catalogues in priority order.
+	SharedBudgets []SharedBudgetSource
 	// Now returns the current time. Defaults to time.Now when nil.
 	Now func() time.Time
 
@@ -60,8 +75,8 @@ type Refresher struct {
 //
 // Partial failures are tolerated: if a source fails, the previous snapshot's
 // entries for that provider are preserved in the new snapshot.
-// If all sources fail, the existing snapshot is left unchanged and the errors
-// are returned in RefreshDiagnostics.
+// Workspace catalogues marked RequireFresh drop cached routes on error.
+// RefreshDiagnostics reports source errors.
 func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -84,14 +99,28 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 		err      error
 	}
 
-	sources := []struct {
+	type registrySource struct {
 		provider Provider
 		source   NativeSource
-	}{
+	}
+	sources := []registrySource{
 		{ProviderAnthropic, r.Anthropic},
 		{ProviderCodex, r.Codex},
 		{ProviderZAI, r.ZAI},
 		{ProviderGrok, r.Grok},
+	}
+	sharedProviders := make(map[Provider]bool, len(r.SharedBudgets))
+	requireFresh := make(map[Provider]bool, len(r.SharedBudgets))
+	for _, s := range r.SharedBudgets {
+		if s.Source == nil {
+			continue
+		}
+		if !s.Provider.isSharedBudgetID() || sharedProviders[s.Provider] {
+			return diag, fmt.Errorf("invalid or duplicate shared-budget source provider %q", s.Provider)
+		}
+		sharedProviders[s.Provider] = true
+		requireFresh[s.Provider] = s.RequireFresh
+		sources = append(sources, registrySource{s.Provider, s.Source})
 	}
 
 	configuredSources := 0
@@ -134,15 +163,21 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 
 	// Categorise results.
 	freshByProvider := make(map[Provider][]Entry)
-	codexClientVersion := r.Catalog.Snapshot().CodexClientVersion
+	prev := r.Catalog.Snapshot()
+	codexClientVersion := prev.CodexClientVersion
 	freshCodexRaw := make(map[string]json.RawMessage)
 	freshAnthropicRaw := make(map[string]json.RawMessage)
 	allFailed := true
-	clearedUnconfigured := false
+	publishRemovals := false
 
 	for _, fr := range results {
 		if fr.err != nil {
 			diag.SourceErrors[fr.provider] = fr.err
+			if requireFresh[fr.provider] {
+				freshByProvider[fr.provider] = nil
+				diag.Counts[string(fr.provider)] = 0
+				publishRemovals = true
+			}
 			continue
 		}
 		if fr.provider == ProviderCodex {
@@ -151,14 +186,28 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 		if fr.result.NotConfigured {
 			freshByProvider[fr.provider] = []Entry{}
 			diag.Counts[string(fr.provider)] = 0
-			clearedUnconfigured = true
+			publishRemovals = true
 			continue
 		}
 		allFailed = false
+		if sharedProviders[fr.provider] {
+			entries := make([]Entry, 0, len(fr.result.Entries))
+			for _, e := range fr.result.Entries {
+				if e.Provider != fr.provider || e.SharedBudget == nil || e.Validate() != nil {
+					fr.result.MalformedEntries++
+					continue
+				}
+				entries = append(entries, e)
+			}
+			fr.result.Entries = entries
+		}
 		freshByProvider[fr.provider] = fr.result.Entries
 		diag.Counts[string(fr.provider)] = len(fr.result.Entries)
 		if fr.result.MalformedEntries > 0 {
 			diag.MalformedCounts[fr.provider] = fr.result.MalformedEntries
+		}
+		if sharedProviders[fr.provider] {
+			continue
 		}
 		for k, v := range fr.result.CodexRawByID {
 			freshCodexRaw[k] = v
@@ -169,8 +218,8 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 	}
 
 	// If every configured source failed, preserve their previous entries.
-	// A newly unconfigured source still needs its obsolete entries removed,
-	// but that housekeeping is not a successful upstream fetch.
+	// Unconfigured sources and workspace catalogues with unverified permissions
+	// still need obsolete entries removed.
 	// Build the error list using the stable sources slice order so the message
 	// is deterministic regardless of map iteration order.
 	var allSourcesErr error
@@ -182,29 +231,47 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 			}
 		}
 		allSourcesErr = fmt.Errorf("all model sources failed: %w", errors.Join(errs...))
-		if !clearedUnconfigured {
+		if !publishRemovals {
 			return diag, allSourcesErr
 		}
 	}
 
 	// For providers that failed, fall back to stale entries from the current snapshot.
-	prev := r.Catalog.Snapshot()
 	prevByProvider := make(map[Provider][]Entry)
 	for _, e := range prev.Entries {
-		prevByProvider[e.Provider] = append(prevByProvider[e.Provider], e)
+		if e.SharedBudget == nil {
+			prevByProvider[e.Provider] = append(prevByProvider[e.Provider], e)
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(prev.SharedBudgetModels)) {
+		for _, e := range prev.SharedBudgetModels[id] {
+			prevByProvider[e.Provider] = append(prevByProvider[e.Provider], e)
+		}
 	}
 
 	// Build a case-insensitive set of IDs that are present in fresh data from
 	// each provider. Used below to filter stale entries when a source fails.
 	freshIDs := make(map[string]Provider) // lower-cased ID → provider that owns it freshly
 	for prov, entries := range freshByProvider {
+		if sharedProviders[prov] {
+			continue
+		}
 		for _, e := range entries {
 			freshIDs[strings.ToLower(e.ID)] = prov
 		}
 	}
 
 	var natives []Entry
+	var shared []Entry
 	for _, s := range sources {
+		if sharedProviders[s.provider] {
+			entries, fresh := freshByProvider[s.provider]
+			if !fresh {
+				entries = prevByProvider[s.provider]
+			}
+			shared = append(shared, entries...)
+			continue
+		}
 		if fresh, ok := freshByProvider[s.provider]; ok {
 			natives = append(natives, fresh...)
 		} else if stale, ok := prevByProvider[s.provider]; ok {
@@ -253,8 +320,10 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 		anthropicRaw[k] = v
 	}
 
+	active, sharedModels := mergeSharedBudgetModels(merged.Active, shared)
 	snap := Snapshot{
-		Entries:            merged.Active,
+		Entries:            active,
+		SharedBudgetModels: sharedModels,
 		CodexRawByID:       codexRaw,
 		AnthropicRawByID:   anthropicRaw,
 		FetchedAt:          now,
@@ -266,6 +335,32 @@ func (r *Refresher) Refresh(ctx context.Context) (RefreshDiagnostics, error) {
 	}
 
 	r.Catalog.Replace(snap)
+	diag.Replaced = true
 
 	return diag, allSourcesErr
+}
+
+// mergeSharedBudgetModels keeps one picker row per ID and indexes every route.
+// Callers supply the first-party catalogue followed by shared models in priority order.
+func mergeSharedBudgetModels(active, shared []Entry) ([]Entry, map[string][]Entry) {
+	if len(shared) == 0 {
+		return active, nil
+	}
+	claimed := make(map[string]bool, len(active))
+	for _, e := range active {
+		claimed[strings.ToLower(e.ID)] = true
+	}
+	routes := make(map[string][]Entry)
+	for _, e := range shared {
+		id := strings.ToLower(e.ID)
+		if slices.ContainsFunc(routes[id], func(other Entry) bool { return other.Provider == e.Provider }) {
+			continue
+		}
+		routes[id] = append(routes[id], e)
+		if !claimed[id] {
+			active = append(active, e)
+			claimed[id] = true
+		}
+	}
+	return active, routes
 }

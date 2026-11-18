@@ -341,7 +341,7 @@ cq agent install
 cq agent uninstall
 ```
 
-`cq refresh` refreshes eligible Claude, Codex and CQ-owned Grok OAuth credentials before expiry. Borrowed CodexBar Grok credentials remain read-only. Complete installers schedule this work using the platform user service manager. `cq agent install` remains a focused macOS maintenance command. Expired accounts or uncertain rotating-token outcomes can still require interactive login with their credential owner.
+`cq refresh` refreshes eligible Claude, Codex, CQ-owned Grok and OpenCode Go OAuth credentials before expiry. Borrowed CodexBar Grok credentials remain read-only. Complete installers schedule this work using the platform user service manager. `cq agent install` remains a focused macOS maintenance command. Expired accounts or uncertain rotating-token outcomes can still require interactive login with their credential owner.
 
 Ordinary quota and account commands do not change background service registration. Complete installers use `cq service install`; focused `cq agent` commands remain available for maintenance.
 
@@ -805,6 +805,7 @@ cq models list --provider codex
 cq models list --provider anthropic
 cq models list --provider zai
 cq models list --provider grok
+cq models list --provider opencode-go
 
 cq models overlay add --provider codex --id NEW_MODEL_ID --clone-from NATIVE_MODEL_ID
 cq models overlay remove --provider codex --id NEW_MODEL_ID
@@ -815,7 +816,7 @@ The running proxy refreshes upstream models every five minutes. Each Codex fetch
 
 Registry refresh merges provider sources with local overlays, validates entries, and publishes:
 
-- CQ-owned native Codex/Z.ai/Grok registry metadata at `model-registry.json` beneath the CQ cache root;
+- CQ-owned Codex, Z.ai, Grok and OpenCode Go registry metadata at `model-registry.json` beneath the CQ cache root;
 - Claude Code capability cache at `~/.claude/cache/model-capabilities.json` when Anthropic entries are present;
 - managed Claude Code picker entries in `~/.claude.json`.
 
@@ -825,6 +826,72 @@ Replace `NATIVE_MODEL_ID` with an existing native ID from `models list`; `NEW_MO
 
 Proxy endpoints also expose model metadata and authenticated registry refresh/snapshot APIs for local clients.
 
+
+### OpenCode Go
+
+Run `cq opencode login` and approve the browser sign-in for your OpenCode Go
+workspace. CQ verifies the workspace's Go allowance before saving the login.
+CQ uses the verified account email and renews access automatically for
+inference, allowance checks, and `cq refresh`.
+
+For API-key auth, create a personal key in a
+[workspace subscribed to Go](https://opencode.ai/docs/console/harnesses/#get-an-api-key).
+Set `OPENCODE_API_KEY` in the CQ process environment for a foreground proxy.
+For a managed background proxy, store the key in `opencode-go.key` in the
+[platform CQ configuration directory](configuration.md#important-paths).
+If a browser login is already saved, set `"auth": "api_key"` in
+`opencode-go.json` and restart the proxy to select the key explicitly. A saved
+browser login takes priority by default, including when it needs sign-in again.
+Remove the auth override to switch back to browser sign-in.
+
+On Unix, the key and settings files must be owner-only (`0600`) in a private
+directory (`0700`). On Windows, set a protected ACL granting Full Control to
+the current user, SYSTEM and Administrators with inherited entries removed.
+
+Run `cq models refresh` to publish Go models, then start a fresh Codex session
+through your existing CQ connection. The Codex model picker uses the same
+Responses route for both Go and provider subscriptions. CQ lists the Go models
+enabled for the signed-in workspace. Refresh models after changing access in
+OpenCode Console.
+
+A model offered by both Go and a first-party Responses subscription appears
+once. CQ prefers the first-party route. Automatic fallback to Go is opt-in.
+After a definite pre-generation rejection or known lack of an eligible
+first-party account, CQ can retry with full input. Provider response IDs and
+encrypted reasoning state prevent fallback. A WebSocket stays on its selected
+provider once generation begins. CQ also keeps recognised OpenCode response
+IDs and encrypted reasoning on their original account between HTTP requests
+while the proxy is running. OAuth refresh keeps that account binding. After a
+restart, workspace change or API-key rotation, resume with full readable input.
+
+Use `cq check opencode-go` to inspect the 5h, 7d and monthly allowance windows.
+CQ shows the remaining percentages and reset times supplied by OpenCode.
+These windows have no pace or burn projections. If CQ cannot read the limits,
+the report shows `Allowance unavailable`.
+
+Put optional settings in `opencode-go.json` in the CQ configuration directory.
+Use `extra_usage` to display the workspace's Extra Usage setting:
+
+```json
+{
+  "email": "you@example.com",
+  "workspace_id": "your-workspace-id",
+  "extra_usage": false,
+  "allow_fallback": false
+}
+```
+
+All fields are optional. Under API-key auth, `email` supplies the account label
+and `workspace_id` identifies the workspace when checking usage. Browser
+login supplies both. Set `extra_usage` to match the OpenCode Console setting
+and update it if the setting changes.
+
+Set `allow_fallback` to `true` and restart the CQ proxy to authorise automatic
+requests to Go when the preferred route is unavailable. Go's own
+[Extra Usage setting](https://opencode.ai/docs/console/go/#usage-beyond-limits)
+controls whether those requests, and requests for Go-only models, can spend
+from the workspace balance. For included usage only, turn Extra Usage off in
+OpenCode Console.
 
 ## Multi-account Dots
 

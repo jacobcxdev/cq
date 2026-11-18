@@ -2,13 +2,18 @@ package modelregistry
 
 import (
 	"encoding/json"
+	"slices"
+	"strings"
 	"sync/atomic"
 	"time"
 )
 
 // Snapshot is an immutable point-in-time view of the registry.
 type Snapshot struct {
-	Entries            []Entry
+	Entries []Entry
+	// SharedBudgetModels holds every shared-budget route per lower-case model ID
+	// in source registration order, including models selectable from Entries.
+	SharedBudgetModels map[string][]Entry
 	CodexRawByID       map[string]json.RawMessage
 	AnthropicRawByID   map[string]json.RawMessage
 	FetchedAt          time.Time
@@ -47,10 +52,44 @@ func (c *Catalog) Snapshot() Snapshot {
 	return deepCopySnapshot(*stored)
 }
 
+// SharedBudgetModels returns a copy of the registered routes for model.
+func (c *Catalog) SharedBudgetModels(model string) []Entry {
+	if stored := c.ptr.Load(); stored != nil {
+		return copyEntries(stored.SharedBudgetModels[strings.ToLower(model)])
+	}
+	return nil
+}
+
+// HasSharedBudgetModels reports whether any shared-budget models are known.
+func (c *Catalog) HasSharedBudgetModels() bool {
+	stored := c.ptr.Load()
+	return stored != nil && len(stored.SharedBudgetModels) > 0
+}
+
 // deepCopySnapshot returns a fresh Snapshot with independently allocated
 // slices, maps, and json.RawMessage byte slices.
 func deepCopySnapshot(s Snapshot) Snapshot {
+	var sharedBudgetModels map[string][]Entry
+	if s.SharedBudgetModels != nil {
+		sharedBudgetModels = make(map[string][]Entry, len(s.SharedBudgetModels))
+		for id, entries := range s.SharedBudgetModels {
+			sharedBudgetModels[id] = copyEntries(entries)
+		}
+	} else {
+		// The persisted public catalogue can seed selectable routes at startup.
+		for _, e := range s.Entries {
+			if e.SharedBudget == nil {
+				continue
+			}
+			if sharedBudgetModels == nil {
+				sharedBudgetModels = make(map[string][]Entry)
+			}
+			id := strings.ToLower(e.ID)
+			sharedBudgetModels[id] = append(sharedBudgetModels[id], copyEntry(e))
+		}
+	}
 	return Snapshot{
+		SharedBudgetModels: sharedBudgetModels,
 		Entries:            copyEntries(s.Entries),
 		CodexRawByID:       copyRawMap(s.CodexRawByID),
 		AnthropicRawByID:   copyRawMap(s.AnthropicRawByID),
@@ -72,6 +111,11 @@ func copyEntries(src []Entry) []Entry {
 
 func copyEntry(e Entry) Entry {
 	out := e
+	if e.SharedBudget != nil {
+		meta := *e.SharedBudget
+		meta.ReasoningEfforts = slices.Clone(meta.ReasoningEfforts)
+		out.SharedBudget = &meta
+	}
 	if e.Aliases != nil {
 		out.Aliases = make([]string, len(e.Aliases))
 		copy(out.Aliases, e.Aliases)

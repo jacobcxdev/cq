@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"reflect"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -29,81 +28,7 @@ type grokBoundState struct {
 	Model   string
 }
 type grokStateBindings struct {
-	mu             sync.Mutex
-	responses      map[string]grokBoundState
-	opaque         map[string]grokBoundState
-	reasoning      map[string]json.RawMessage
-	reasoningBytes int
-}
-
-// Bind native opaque state to the exact subscription that produced it. A
-// restart forgets these ephemeral bindings and requires a fresh plaintext chain.
-func (b *grokStateBindings) record(state grokBoundState, id string, output []json.RawMessage) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.responses == nil {
-		b.responses = make(map[string]grokBoundState)
-		b.opaque = make(map[string]grokBoundState)
-		b.reasoning = make(map[string]json.RawMessage)
-	}
-	if len(b.responses) >= 4096 {
-		for k := range b.responses {
-			delete(b.responses, k)
-			break
-		}
-	}
-	if id != "" {
-		if previous, exists := b.responses[id]; exists && previous != state {
-			b.responses[id] = grokBoundState{}
-		} else {
-			b.responses[id] = state
-		}
-	}
-	for _, raw := range output {
-		var item struct {
-			Encrypted string `json:"encrypted_content"`
-			Type      string `json:"type"`
-		}
-		if json.Unmarshal(raw, &item) == nil && item.Encrypted != "" {
-			if len(b.opaque) >= 4096 {
-				for k := range b.opaque {
-					delete(b.opaque, k)
-					b.reasoningBytes -= len(b.reasoning[k])
-					delete(b.reasoning, k)
-					break
-				}
-			}
-			sum := sha256.Sum256([]byte(item.Encrypted))
-			key := hex.EncodeToString(sum[:])
-			if previous, exists := b.opaque[key]; exists && previous != state {
-				b.opaque[key] = grokBoundState{}
-				b.reasoningBytes -= len(b.reasoning[key])
-				delete(b.reasoning, key)
-			} else {
-				b.opaque[key] = state
-				if item.Type == "reasoning" {
-					b.reasoningBytes -= len(b.reasoning[key])
-					delete(b.reasoning, key)
-					for b.reasoningBytes+len(raw) > maxRequestBody {
-						for old, value := range b.reasoning {
-							b.reasoningBytes -= len(value)
-							delete(b.reasoning, old)
-							delete(b.opaque, old)
-							break
-						}
-						if len(raw) > maxRequestBody {
-							delete(b.opaque, key)
-							break
-						}
-					}
-					if len(raw) <= maxRequestBody {
-						b.reasoning[key] = append(json.RawMessage(nil), raw...)
-						b.reasoningBytes += len(raw)
-					}
-				}
-			}
-		}
-	}
+	responsesStateBindings[grokBoundState]
 }
 
 // Codex reserializes reasoning and adds private bookkeeping. Replay the
@@ -215,36 +140,7 @@ func (s *Server) hasGrokCatalog() bool {
 	return false
 }
 
-func (s *Server) tryHandleGrok(w http.ResponseWriter, r *http.Request) (bool, string) {
-	if r.Body == nil {
-		return false, ""
-	}
-	body, err := readCodexNativeHTTPRequest(r)
-	if err != nil {
-		writeError(w, 400, "invalid_request_error", "failed to read request body")
-		return true, ""
-	}
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	return s.tryHandleGrokEncoded(w, r, body)
-}
-
-func (s *Server) tryHandleGrokEncoded(w http.ResponseWriter, r *http.Request, body []byte) (bool, string) {
-	encoding, err := parseCodexContentEncoding(r.Header)
-	if err != nil {
-		return false, ""
-	}
-	decoded := body
-	if encoding == "zstd" || encoding == "" && codexZstdFrame(body) {
-		envelope, err := DecodeCodexRequest(body, encoding, codexHTTPZstdLimits())
-		if err != nil {
-			return false, ""
-		}
-		decoded = envelope.Decoded()
-	}
-	model := extractModel(decoded)
-	if RouteModelWithCatalog(model, s.Catalog) != ProviderGrok {
-		return false, ""
-	}
+func (s *Server) serveGrokHTTP(w http.ResponseWriter, r *http.Request, body, decoded []byte, model string) (bool, string) {
 	s.observeHarness(r.Header, model, decoded)
 	if len(body) > maxRequestBody || len(decoded) > maxRequestBody {
 		writeError(w, 413, "invalid_request_error", "Grok request body exceeds 10 MiB")
@@ -252,10 +148,15 @@ func (s *Server) tryHandleGrokEncoded(w http.ResponseWriter, r *http.Request, bo
 	}
 	result, err := s.grokResponse(r.Context(), r.Header, decoded, strings.HasSuffix(r.URL.Path, "/responses/compact"))
 	if err != nil {
+		if grokCanTrySharedBudget(err) {
+			if selected, ok := s.selectSharedBudgetFallback(r.Context(), decoded); ok {
+				s.serveSelectedSharedBudgetHTTP(w, r, decoded, selected)
+				return true, model
+			}
+		}
 		writeGrokError(w, err)
 		return true, model
 	}
-	defer result.Response.Body.Close()
 	if result.Compact != nil {
 		w.Header().Set("Content-Type", "application/json")
 		var req struct {
@@ -272,6 +173,14 @@ func (s *Server) tryHandleGrokEncoded(w http.ResponseWriter, r *http.Request, bo
 			_ = json.NewEncoder(w).Encode(result.Compact)
 		}
 		return true, model
+	}
+	defer result.Response.Body.Close()
+	if firstPartyRejectedBeforeGeneration(result.Response.StatusCode) {
+		if selected, ok := s.selectSharedBudgetFallback(r.Context(), decoded); ok {
+			_ = result.Response.Body.Close()
+			s.serveSelectedSharedBudgetHTTP(w, r, decoded, selected)
+			return true, model
+		}
 	}
 	for _, name := range []string{"Content-Type", "Cache-Control", "Retry-After", "X-Request-Id"} {
 		if value := result.Response.Header.Get(name); value != "" {
@@ -328,6 +237,14 @@ type grokRouteError struct {
 }
 
 func (e grokRouteError) Error() string { return e.message }
+
+var errGrokSubscriptionUnavailable = errors.New("Grok has no eligible subscription accounts")
+
+func grokCanTrySharedBudget(err error) bool {
+	var route grokRouteError
+	return errors.Is(err, errGrokSubscriptionUnavailable) || errors.As(err, &route) && firstPartyRejectedBeforeGeneration(route.status)
+}
+
 func writeGrokError(w http.ResponseWriter, err error) {
 	var typed grokRouteError
 	if errors.As(err, &typed) {
@@ -348,7 +265,7 @@ func (a grokScopedAuthority) Accounts(context.Context) ([]grok.Account, error) {
 
 func (s *Server) selectGrokAccount(ctx context.Context, body []byte, model string) (grokBoundState, error) {
 	if s.GrokAuthority == nil {
-		return grokBoundState{}, grokRouteError{503, "Grok subscription login unavailable; run cq grok login"}
+		return grokBoundState{}, errors.Join(grokRouteError{503, "Grok subscription login unavailable; run cq grok login"}, errGrokSubscriptionUnavailable)
 	}
 	bound, err := s.grokBindings.requestState(body, model)
 	if err != nil {
@@ -412,7 +329,7 @@ func (s *Server) selectGrokAccount(ctx context.Context, body []byte, model strin
 	if exhausted {
 		return bound, grokRouteError{429, "Grok included subscription quota exhausted"}
 	}
-	return bound, grokRouteError{503, "no eligible Grok subscription account for this model"}
+	return bound, errors.Join(grokRouteError{503, "no eligible Grok subscription account for this model"}, errGrokSubscriptionUnavailable)
 }
 
 type grokResponseResult struct {
@@ -524,12 +441,15 @@ func (s *Server) grokResponse(ctx context.Context, header http.Header, body []by
 
 func (s *Server) serveGrokWebSocket(ctx context.Context, downstream *websocket.Conn, header http.Header, kind int, first []byte) error {
 	var bound grokBoundState
-	return s.serveResponsesHTTPWebSocket(ctx, downstream, header, kind, first, responsesHTTPBridge{Name: "Grok", PrewarmPrefix: "cq_grok_prewarm_", AcceptsModel: func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) == ProviderGrok }, Compaction: zaiCompactionRequested, Stream: func(ctx context.Context, downstream *websocket.Conn, header http.Header, body []byte) (string, []json.RawMessage, error) {
+	return s.serveResponsesHTTPWebSocket(ctx, downstream, header, kind, first, responsesHTTPBridge{Name: "Grok", PrewarmPrefix: "cq_grok_prewarm_", AcceptsModel: func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) == ProviderGrok }, Compaction: zaiCompactionRequested, Stream: s.withSharedBudgetWebSocketFallback(func(ctx context.Context, downstream *websocket.Conn, header http.Header, body []byte) (string, []json.RawMessage, error) {
 		if bound.Account != "" {
 			ctx = context.WithValue(ctx, grokPinnedAccountContextKey{}, bound)
 		}
 		result, err := s.grokResponse(ctx, header, body, false)
 		if err != nil {
+			if grokCanTrySharedBudget(err) && s.canFallbackToSharedBudget(ctx, body) {
+				return "", nil, errSharedBudgetFallback
+			}
 			return "", nil, err
 		}
 		defer result.Response.Body.Close()
@@ -547,6 +467,9 @@ func (s *Server) serveGrokWebSocket(ctx context.Context, downstream *websocket.C
 			return result.Compact.ID, result.Compact.Output, nil
 		}
 		if result.Response.StatusCode < 200 || result.Response.StatusCode >= 300 {
+			if firstPartyRejectedBeforeGeneration(result.Response.StatusCode) && s.canFallbackToSharedBudget(ctx, body) {
+				return "", nil, errSharedBudgetFallback
+			}
 			return "", nil, errors.New("Grok subscription stream rejected")
 		}
 		id, output, err := relayResponsesSSE(result.Response.Body, "Grok", result.Codec.normaliseResponse, func(_ string, data []byte) error { return downstream.WriteMessage(websocket.TextMessage, data) })
@@ -554,5 +477,5 @@ func (s *Server) serveGrokWebSocket(ctx context.Context, downstream *websocket.C
 			s.grokBindings.record(result.State, id, output)
 		}
 		return id, output, err
-	}})
+	})})
 }

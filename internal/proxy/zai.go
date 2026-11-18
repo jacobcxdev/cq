@@ -107,6 +107,7 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "Z.ai request body exceeds 10 MiB")
 		return true, model
 	}
+	originalBody := decodedBody
 	decodedBody, err = normaliseZAIRequest(decodedBody)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -118,6 +119,10 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 	}
 	accounts, err := s.zaiAccounts()
 	if err != nil || len(accounts) == 0 {
+		if selected, ok := s.selectSharedBudgetFallback(r.Context(), originalBody); ok {
+			s.serveSelectedSharedBudgetHTTP(w, r, originalBody, selected)
+			return true, model
+		}
 		writeError(w, http.StatusServiceUnavailable, "api_error", "Z.ai API key unavailable")
 		return true, model
 	}
@@ -131,6 +136,13 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "api_error", "Z.ai upstream request failed")
 		return true, model
+	}
+	if s.zaiRejectedBeforeGeneration(r.Context(), originalBody, response) {
+		if selected, ok := s.selectSharedBudgetFallback(r.Context(), originalBody); ok {
+			_ = response.Body.Close()
+			s.serveSelectedSharedBudgetHTTP(w, r, originalBody, selected)
+			return true, model
+		}
 	}
 	defer response.Body.Close()
 	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
@@ -192,11 +204,16 @@ func (w zaiFlushWriter) Write(p []byte) (int, error) {
 // Z.ai accepts a WebSocket handshake but rejects native response.create
 // frames. Execute each Codex frame over HTTP SSE and retain connection history
 // because Coding Plan responses with store:false cannot be resumed upstream.
+func (s *Server) zaiRejectedBeforeGeneration(ctx context.Context, body []byte, response *http.Response) bool {
+	return firstPartyRejectedBeforeGeneration(response.StatusCode) ||
+		s.hasSharedBudgetFallback(ctx, body) && zaiInitialSSERejection(response)
+}
+
 func (s *Server) serveZAIWebSocket(ctx context.Context, downstream *websocket.Conn, header http.Header, kind int, first []byte) error {
 	return s.serveResponsesHTTPWebSocket(ctx, downstream, header, kind, first, responsesHTTPBridge{
 		Name: "Z.ai", PrewarmPrefix: "cq_zai_prewarm_",
 		AcceptsModel: func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) == ProviderZAI },
-		Stream:       s.streamZAIWebSocketResponse, Compaction: zaiCompactionRequested,
+		Stream:       s.withSharedBudgetWebSocketFallback(s.streamZAIWebSocketResponse), Compaction: zaiCompactionRequested,
 	})
 }
 
@@ -228,6 +245,7 @@ func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *web
 		}
 		return response.ID, response.Output, nil
 	}
+	originalBody := body
 	body, err = normaliseZAIRequest(body)
 	if err != nil {
 		data, _ := json.Marshal(map[string]any{"type": "error", "status": http.StatusBadRequest, "error": map[string]string{"type": "invalid_request_error", "code": "zai_invalid_request", "message": err.Error()}})
@@ -242,6 +260,9 @@ func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *web
 	}
 	accounts, err := s.zaiAccounts()
 	if err != nil || len(accounts) == 0 {
+		if s.canFallbackToSharedBudget(ctx, originalBody) {
+			return "", nil, errSharedBudgetFallback
+		}
 		return "", nil, errors.New("Z.ai API key unavailable")
 	}
 	target, err := s.zaiResponsesURL()
@@ -257,7 +278,10 @@ func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *web
 	if err != nil {
 		return "", nil, errors.New("Z.ai HTTP stream request failed")
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
+	if s.zaiRejectedBeforeGeneration(ctx, originalBody, response) && s.canFallbackToSharedBudget(ctx, originalBody) {
+		return "", nil, errSharedBudgetFallback
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		data, _ := json.Marshal(map[string]any{"type": "error", "status": response.StatusCode, "error": map[string]string{"type": "api_error", "code": "zai_upstream_error", "message": "Z.ai request failed"}})
 		_ = downstream.WriteMessage(websocket.TextMessage, data)

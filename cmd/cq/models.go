@@ -178,11 +178,13 @@ func defaultLocalRegistryRefresh(roots userdirs.Roots) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	diag, err := reg.Refresher.Refresh(ctx)
+	if err == nil || diag.Replaced {
+		reg.Publish()
+	}
 	if err != nil {
 		return fmt.Errorf("local registry refresh: %w", err)
 	}
 	writeRegistrySourceDiagnostics(os.Stderr, diag)
-	reg.Publish()
 	total := 0
 	for _, count := range diag.Counts {
 		total += count
@@ -338,6 +340,9 @@ func runModelsList(args []string, deps modelsDeps) error {
 		} else if entry.Provider == modelregistry.ProviderGrok {
 			route = "Grok subscription"
 			origin = "Grok catalogue"
+		} else if entry.SharedBudget != nil {
+			route = entry.SharedBudget.ProviderName
+			origin = route + " catalogue"
 		}
 		if entry.Source == modelregistry.SourceOverlay {
 			origin = "User overlay"
@@ -542,28 +547,8 @@ func claudeModelCachePath(deps modelsDeps) string {
 // to native Codex cache before the first CQ refresh. Claude capabilities retain
 // their existing cache. Native Codex writes cannot discard CQ provider identity.
 func loadCachedNativeEntries(deps modelsDeps) ([]modelregistry.Entry, error) {
-	all, present, err := modelregistry.LoadCodexRegistryCache(deps.FS, deps.Roots)
-	if err != nil {
-		return nil, err
-	}
-
-	if path := codexModelCachePath(deps); !present && path != "" {
-		codex, err := modelregistry.LoadCodexEntriesFromCache(deps.FS, path)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, codex...)
-	}
-
-	if path := claudeModelCachePath(deps); path != "" {
-		claude, err := modelregistry.LoadClaudeEntriesFromCapabilities(deps.FS, path)
-		if err != nil {
-			return nil, err
-		}
-		all = append(all, claude...)
-	}
-
-	return all, nil
+	snap, err := loadCachedRegistrySnapshot(deps)
+	return snap.Entries, err
 }
 
 func removeNativesShadowedByOverlays(natives, overlays []modelregistry.Entry) []modelregistry.Entry {
@@ -599,8 +584,14 @@ func filterModelEntries(entries []modelregistry.Entry, provider modelregistry.Pr
 
 func parseModelsProvider(value string) (modelregistry.Provider, error) {
 	provider := modelregistry.Provider(value)
-	if provider != modelregistry.ProviderAnthropic && provider != modelregistry.ProviderCodex && provider != modelregistry.ProviderZAI && provider != modelregistry.ProviderGrok {
-		return "", fmt.Errorf("models: unknown provider %q (want anthropic, codex, zai or grok)", value)
+	switch provider {
+	case modelregistry.ProviderAnthropic, modelregistry.ProviderCodex, modelregistry.ProviderZAI, modelregistry.ProviderGrok:
+		return provider, nil
 	}
-	return provider, nil
+	for _, adapter := range sharedBudgetAdapters {
+		if adapter.ID == provider {
+			return provider, nil
+		}
+	}
+	return "", fmt.Errorf("models: unknown provider %q", value)
 }

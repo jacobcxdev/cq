@@ -108,9 +108,11 @@ func writeWindowRow(ew *errWriter, row TTYWindowRow) {
 	ew.write(row.Pct)
 	ew.write("  ")
 	ew.write(row.Reset)
-	ew.write("  ")
-	ew.write(row.PaceDiff)
-	ew.write("  ")
-	ew.write(row.Burndown)
+	if row.PaceDiff != "" || row.Burndown != "" {
+		ew.write("  ")
+		ew.write(row.PaceDiff)
+		ew.write("  ")
+		ew.write(row.Burndown)
+	}
 	ew.write("\n")
 }

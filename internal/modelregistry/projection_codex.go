@@ -3,6 +3,7 @@ package modelregistry
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // codexModelsResponseOut is the shape written to models_cache.json and
@@ -29,7 +30,7 @@ const codexFallbackContextWindow = 272000
 const codexFallbackTruncationBytesLimit = 10000
 
 // CodexModelsResponse builds the models response payload from the snapshot.
-// Codex, Z.ai and supported Grok Responses entries are included.
+// Includes first-party and shared-budget Responses models.
 //
 // Native fields are preserved, with a model-specific compaction cap for GLM-5.3.
 //
@@ -40,7 +41,8 @@ const codexFallbackTruncationBytesLimit = 10000
 func CodexModelsResponse(snap Snapshot) codexModelsResponseOut {
 	models := make([]json.RawMessage, 0)
 	for _, e := range snap.Entries {
-		if e.Provider != ProviderCodex && e.Provider != ProviderZAI && e.Provider != ProviderGrok {
+		e = codexProjectionEntry(e, snap.SharedBudgetModels)
+		if !isCodexProjectionEntry(e) {
 			continue
 		}
 		raw := codexEntryRaw(e, snap.CodexRawByID)
@@ -66,6 +68,7 @@ func AugmentCodexModels(body []byte, snap Snapshot) ([]byte, error) {
 	}
 
 	rawByID := make(map[string]json.RawMessage, len(models))
+	seen := make(map[string]bool, len(models))
 	for _, raw := range models {
 		var info codexModelInfo
 		if err := json.Unmarshal(raw, &info); err != nil || info.Slug == "" {
@@ -75,16 +78,15 @@ func AugmentCodexModels(body []byte, snap Snapshot) ([]byte, error) {
 			return nil, fmt.Errorf("duplicate Codex model")
 		}
 		rawByID[info.Slug] = raw
+		seen[strings.ToLower(info.Slug)] = true
 	}
-	added := make(map[string]bool)
 	for _, e := range snap.Entries {
-		if e.Provider != ProviderZAI && e.Provider != ProviderGrok && (e.Provider != ProviderCodex || e.Source != SourceOverlay) {
+		e = codexProjectionEntry(e, snap.SharedBudgetModels)
+		if !isCodexProjectionEntry(e) || (e.Provider == ProviderCodex && e.Source != SourceOverlay) {
 			continue
 		}
-		if _, exists := rawByID[e.ID]; exists {
-			continue
-		}
-		if added[e.ID] {
+		id := strings.ToLower(e.ID)
+		if seen[id] {
 			continue
 		}
 		raw := codexEntryRaw(e, rawByID)
@@ -92,7 +94,7 @@ func AugmentCodexModels(body []byte, snap Snapshot) ([]byte, error) {
 			continue
 		}
 		models = append(models, raw)
-		added[e.ID] = true
+		seen[id] = true
 	}
 	encodedModels, err := json.Marshal(models)
 	if err != nil {
@@ -102,8 +104,26 @@ func AugmentCodexModels(body []byte, snap Snapshot) ([]byte, error) {
 	return json.Marshal(envelope)
 }
 
+func isCodexProjectionEntry(e Entry) bool {
+	return e.Provider == ProviderCodex || e.Provider == ProviderZAI || e.Provider == ProviderGrok || e.SharedBudget != nil
+}
+
+// Anthropic's local route speaks Messages. Codex can use the first available
+// shared-budget Responses route for that model.
+func codexProjectionEntry(e Entry, sharedModels map[string][]Entry) Entry {
+	if e.Provider == ProviderAnthropic {
+		if routes := sharedModels[strings.ToLower(e.ID)]; len(routes) > 0 {
+			return routes[0]
+		}
+	}
+	return e
+}
+
 // codexEntryRaw returns the JSON bytes for a single Codex entry.
 func codexEntryRaw(e Entry, rawByID map[string]json.RawMessage) json.RawMessage {
+	if e.SharedBudget != nil {
+		return sharedBudgetCodexEntryRaw(e)
+	}
 	if e.Provider == ProviderGrok {
 		return grokCodexEntryRaw(e)
 	}
@@ -126,6 +146,37 @@ func codexEntryRaw(e Entry, rawByID map[string]json.RawMessage) json.RawMessage 
 
 	// Fallback: synthesise from Entry fields.
 	return synthesiseCodexEntry(e)
+}
+
+func sharedBudgetCodexEntryRaw(e Entry) json.RawMessage {
+	if e.ContextWindow <= 0 {
+		return nil
+	}
+	var record map[string]any
+	if json.Unmarshal(synthesiseCodexEntry(e), &record) != nil {
+		return nil
+	}
+	levels := make([]map[string]string, 0, len(e.SharedBudget.ReasoningEfforts))
+	for _, effort := range e.SharedBudget.ReasoningEfforts {
+		switch effort {
+		case "none", "minimal", "low", "medium", "high", "xhigh":
+			levels = append(levels, map[string]string{"effort": effort, "description": effort})
+		}
+	}
+	if len(levels) > 0 {
+		record["default_reasoning_level"] = levels[0]["effort"]
+	}
+	record["supported_reasoning_levels"] = levels
+	record["apply_patch_tool_type"] = nil
+	record["default_verbosity"] = nil
+	record["default_reasoning_summary"] = "none"
+	record["web_search_tool_type"] = "text"
+	record["truncation_policy"] = map[string]any{"mode": "bytes", "limit": codexFallbackTruncationBytesLimit}
+	if e.MaxOutputTokens > 0 {
+		record["max_output_tokens"] = e.MaxOutputTokens
+	}
+	body, _ := json.Marshal(record)
+	return body
 }
 
 // cloneRawWithOverrides deep-copies the base raw JSON object and overrides

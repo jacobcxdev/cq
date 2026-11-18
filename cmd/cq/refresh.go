@@ -57,7 +57,7 @@ func runRefresh() error {
 	return errors.Join(refreshErr, reconcileRefreshRuntimeFn(context.Background(), refreshAccounts))
 }
 
-func refreshAccounts() error {
+func refreshAccounts() (returnErr error) {
 	accounts := discoverClaudeAccountsFn()
 	httpClient := newHTTPClientFn(10*time.Second, version)
 	ctx := context.Background()
@@ -133,6 +133,11 @@ func refreshAccounts() error {
 	if grokChanged {
 		invalidateProviderCacheFn(provider.Grok)
 	}
+	defer func() {
+		if err := refreshOpenCodeOAuth(ctx, httpClient); err != nil {
+			returnErr = errors.Join(returnErr, err)
+		}
+	}()
 	if len(accounts) == 0 {
 		return nil
 	}

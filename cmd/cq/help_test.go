@@ -709,7 +709,7 @@ func TestPureGlobalInspectionHandlesCompleteInterceptedLexicalErrors(t *testing.
 		{name: "proxy endpoint command", args: []string{"proxy", "endpoint", "unknown"}, want: "unknown proxy endpoint command: unknown"},
 		{name: "models command", args: []string{"models", "unknown"}, want: "unknown models command: unknown"},
 		{name: "models list provider value", args: []string{"models", "list", "--provider"}, want: "models list: --provider requires a value"},
-		{name: "models list provider", args: []string{"models", "list", "--provider", "invalid"}, want: "models: unknown provider \"invalid\" (want anthropic, codex, zai or grok)"},
+		{name: "models list provider", args: []string{"models", "list", "--provider", "invalid"}, want: "models: unknown provider \"invalid\""},
 		{name: "models list flag", args: []string{"models", "list", "--bad"}, want: "models list: unknown argument --bad"},
 		{name: "models overlay command", args: []string{"models", "overlay", "unknown"}, want: "unknown models overlay command: unknown"},
 		{name: "models overlay add flags", args: []string{"models", "overlay", "add", "--provider"}, want: "--provider requires a value"},
@@ -966,6 +966,9 @@ func TestRunModelsHelpDoesNotRefresh(t *testing.T) {
 					t.Errorf("runModels(%v) help omitted registry provider %s", args, id)
 				}
 			}
+		}
+		if args[0] == "list" && !strings.Contains(stdout.String(), "Run cq models list --json to see provider IDs") {
+			t.Error("models list help omitted how to find subscription provider IDs")
 		}
 		if !strings.Contains(stdout.String(), "Usage: cq models") {
 			t.Fatalf("runModels(%v) did not print models help:\n%s", args, stdout.String())

@@ -27,11 +27,38 @@ func TestBuildTTYModelCodexBusinessPremium(t *testing.T) {
 		t.Fatalf("sections = %d, want 1", len(model.Sections))
 	}
 	header := model.Sections[0].Header
-	if !strings.Contains(header, "business premium") || !strings.Contains(header, "member@example.com") {
+	if !strings.Contains(header, "Business Premium") || !strings.Contains(header, "member@example.com") {
 		t.Fatalf("missing business account label: %s", header)
 	}
 	if strings.Contains(header, "self_serve_business") || !strings.Contains(header, "5x") || strings.Contains(header, "10x") {
 		t.Fatalf("raw slug or incorrect multiplier in header: %s", header)
+	}
+}
+
+func TestBuildTTYModelCodexPlanMultipliers(t *testing.T) {
+	for _, tt := range []struct {
+		plan string
+		tier string
+		want string
+	}{
+		{plan: "plus", want: "Plus"},
+		{plan: "plus", tier: "provider_10x", want: "Plus"},
+		{plan: "prolite", want: "Pro 10x"},
+		{plan: "pro", want: "Pro 20x"},
+		{plan: "promax", want: "Pro 50x"},
+		{plan: "self_serve_business_prolite", want: "Business Premium 5x"},
+	} {
+		t.Run(tt.want, func(t *testing.T) {
+			model := BuildTTYModel(app.Report{Providers: []app.ProviderReport{{
+				ID: provider.Codex,
+				Results: []quota.Result{{
+					Status: quota.StatusOK, Plan: tt.plan, RateLimitTier: tt.tier,
+				}},
+			}}}, time.Unix(1000, 0))
+			if got, want := stripANSI(model.Sections[0].Header), "          Codex "+tt.want; got != want {
+				t.Fatalf("header = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -64,6 +91,9 @@ func TestBuildTTYModel_SingleProvider(t *testing.T) {
 	}
 
 	sec := model.Sections[0]
+	if !strings.Contains(stripANSI(sec.Header), "Claude Max · test@example.com") {
+		t.Fatalf("unexpected Claude account label: %s", sec.Header)
+	}
 	if sec.Separator == "" {
 		t.Error("first section should have a separator")
 	}
@@ -331,7 +361,7 @@ func TestBuildTTYModelAlignsProviderAndSummaryTitles(t *testing.T) {
 	model := BuildTTYModel(report, now)
 	section := model.Sections[0]
 	for _, pair := range []struct{ header, title string }{
-		{section.Header, "Codex pro"},
+		{section.Header, "Codex Pro"},
 		{section.AggHeader, "Codex 3 ×"},
 		{section.ProxyPools[0].Header, "Security Research"},
 		{section.ProxyPools[1].Header, "安全研究"},

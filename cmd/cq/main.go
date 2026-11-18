@@ -36,21 +36,36 @@ type CLI struct {
 	Refresh bool             `help:"Bypass cache" short:"r"`
 	Version kong.VersionFlag `help:"Print version" short:"v"`
 
-	Check     CheckCmd   `cmd:"" default:"withargs" help:"Check provider quota usage"`
-	Claude    ClaudeCmd  `cmd:"" help:"Manage Claude accounts"`
-	Codex     CodexCmd   `cmd:"" help:"Manage Codex accounts"`
-	Gemini    GeminiCmd  `cmd:"" help:"Show Gemini account configuration"`
-	Grok      GrokCmd    `cmd:"" help:"Manage Grok subscription accounts"`
-	ZAI       ZAICmd     `cmd:"" help:"Manage Z.ai Coding Plan accounts"`
-	RefreshFn RefreshCmd `cmd:"" name:"refresh" help:"Refresh stored OAuth tokens"`
-	Agent     AgentCmd   `cmd:"" help:"Manage background quota refresh agent"`
-	Proxy     ProxyCmd   `cmd:"" help:"Run and configure local API proxy"`
-	Models    ModelsCmd  `cmd:"" help:"Manage local model registry"`
+	Check     CheckCmd    `cmd:"" default:"withargs" help:"Check provider quota usage"`
+	Claude    ClaudeCmd   `cmd:"" help:"Manage Claude accounts"`
+	Codex     CodexCmd    `cmd:"" help:"Manage Codex accounts"`
+	Gemini    GeminiCmd   `cmd:"" help:"Show Gemini account configuration"`
+	Grok      GrokCmd     `cmd:"" help:"Manage Grok subscription accounts"`
+	OpenCode  OpenCodeCmd `cmd:"" name:"opencode" help:"Sign in to OpenCode Go"`
+	ZAI       ZAICmd      `cmd:"" help:"Manage Z.ai Coding Plan accounts"`
+	RefreshFn RefreshCmd  `cmd:"" name:"refresh" help:"Refresh stored OAuth tokens"`
+	Agent     AgentCmd    `cmd:"" help:"Manage background quota refresh agent"`
+	Proxy     ProxyCmd    `cmd:"" help:"Run and configure local API proxy"`
+	Models    ModelsCmd   `cmd:"" help:"Manage local model registry"`
 }
 
 // CheckCmd is the default command that checks provider quota usage.
 type CheckCmd struct {
-	Providers []string `arg:"" optional:"" enum:"claude,codex,gemini,grok,zai" help:"Providers to check"`
+	Providers []string `arg:"" optional:"" help:"Providers to check"`
+}
+
+var checkProviderIDs = []provider.ID{provider.Claude, provider.Codex, provider.Gemini, provider.Grok, provider.ZAI}
+
+func (c CheckCmd) Validate() error {
+	for _, id := range c.Providers {
+		if slices.Contains(checkProviderIDs, provider.ID(id)) || slices.ContainsFunc(sharedBudgetAdapters, func(adapter sharedBudgetAdapter) bool {
+			return string(adapter.ID) == id
+		}) {
+			continue
+		}
+		return fmt.Errorf("unknown provider %q", id)
+	}
+	return nil
 }
 
 // ClaudeCmd groups Claude-specific subcommands.
@@ -541,6 +556,8 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 			return runCodexResetScheduleCommand(context.Background(), ctx.Command(), cli.Codex.Resets.Schedule, cli.JSON, deps)
 		})
 
+	case "opencode login":
+		return runOpenCodeLogin(context.Background())
 	case "grok login", "grok accounts", "grok switch <reference>", "grok remove <reference>", "grok resets list", "grok resets list <reference>":
 		deps, err := defaultGrokCommandDependencies()
 		if err != nil {
@@ -575,10 +592,11 @@ func runCheck(cli *CLI) (returnErr error) {
 	if err != nil {
 		return fmt.Errorf("resolve CQ directories: %w", err)
 	}
-	providerIDs := []provider.ID{provider.Claude, provider.Codex, provider.Gemini, provider.Grok, provider.ZAI}
+	providerIDs := checkProviderIDs
+	selected, sharedBudget := sharedBudgetChecks(fsutil.OSFileSystem{}, os.Getenv, roots.Config, cli.Check.Providers)
 	if len(cli.Check.Providers) > 0 {
-		providerIDs = make([]provider.ID, len(cli.Check.Providers))
-		for i, p := range cli.Check.Providers {
+		providerIDs = make([]provider.ID, len(selected))
+		for i, p := range selected {
 			providerIDs[i] = provider.ID(p)
 		}
 	}
@@ -637,11 +655,12 @@ func runCheck(cli *CLI) (returnErr error) {
 	}
 
 	runner := &app.Runner{
-		Clock:    systemClock{},
-		Cache:    c,
-		History:  hist,
-		Services: services,
-		Renderer: renderer,
+		Clock:         systemClock{},
+		Cache:         c,
+		History:       hist,
+		Services:      services,
+		Renderer:      renderer,
+		SharedBudgets: sharedBudget,
 	}
 
 	ctx := context.Background()

@@ -8,6 +8,7 @@ import (
 )
 
 type responsesProviderRouteContextKey struct{}
+type codexHTTPSubscriptionFallbackKey struct{}
 
 // responsesProviderRoute inspects a body already read under native admission.
 // A decline leaves the encoded bytes intact for the existing Codex planner.
@@ -21,7 +22,7 @@ func (s *Server) serveSubscriptionThroughNativeAdmission(w http.ResponseWriter, 
 		return false
 	}
 	route := responsesProviderRoute(func(w http.ResponseWriter, request *http.Request, encoded []byte) (bool, string) {
-		if handled, model := s.tryHandleGrokEncoded(w, request, encoded); handled {
+		if handled, model := s.tryHandleProviderResponsesEncoded(w, request, encoded); handled {
 			return true, model
 		}
 		// Z.ai's adapter can reuse the already bounded body as well. It must
@@ -30,11 +31,54 @@ func (s *Server) serveSubscriptionThroughNativeAdmission(w http.ResponseWriter, 
 		buffered.Body = io.NopCloser(bytes.NewReader(encoded))
 		return s.tryHandleZAI(w, buffered)
 	})
-	r = r.WithContext(context.WithValue(r.Context(), responsesProviderRouteContextKey{}, route))
+	ctx := context.WithValue(r.Context(), responsesProviderRouteContextKey{}, route)
+	ctx = context.WithValue(ctx, codexHTTPSubscriptionFallbackKey{}, responsesProviderRoute(s.tryCodexSharedBudgetFallback))
+	r = r.WithContext(ctx)
 	if compact {
 		s.handleNativeCodexCompact(w, r, r.URL.Path)
 	} else {
 		s.handleNativeCodex(w, r)
 	}
 	return true
+}
+
+func (s *Server) tryHandleProviderResponses(w http.ResponseWriter, r *http.Request) (bool, string) {
+	if r.Body == nil {
+		return false, ""
+	}
+	body, err := readCodexNativeHTTPRequest(r)
+	if err != nil {
+		writeError(w, 400, "invalid_request_error", "failed to read request body")
+		return true, ""
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return s.tryHandleProviderResponsesEncoded(w, r, body)
+}
+
+func (s *Server) tryHandleProviderResponsesEncoded(w http.ResponseWriter, r *http.Request, body []byte) (bool, string) {
+	encoding, err := parseCodexContentEncoding(r.Header)
+	if err != nil {
+		return false, ""
+	}
+	decoded := body
+	if encoding == "zstd" || encoding == "" && codexZstdFrame(body) {
+		envelope, err := DecodeCodexRequest(body, encoding, codexHTTPZstdLimits())
+		if err != nil {
+			return false, ""
+		}
+		decoded = envelope.Decoded()
+	}
+	model := extractModel(decoded)
+	if s.serveSharedBudgetContinuation(w, r, decoded, model) {
+		return true, model
+	}
+	provider := s.routeCodexModel(model)
+	if provider == ProviderSharedBudget {
+		s.serveSharedBudgetHTTP(w, r, decoded)
+		return true, model
+	}
+	if provider == ProviderGrok {
+		return s.serveGrokHTTP(w, r, body, decoded, model)
+	}
+	return false, ""
 }

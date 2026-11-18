@@ -59,11 +59,12 @@ func Compute(results []quota.Result, nowEpoch int64, providerID string, burnRate
 	}
 
 	labelResults := valid
-	if providerID == string(provider.Codex) {
+	displayProvider := provider.ID(providerID)
+	if displayProvider == provider.Codex || displayProvider == provider.Claude {
 		labelResults = append([]quota.Result(nil), valid...)
 		for i := range labelResults {
-			labelResults[i].Plan = provider.CodexPlanLabel(labelResults[i].Plan)
-			if labelResults[i].RateLimitTier == "" {
+			labelResults[i].Plan = provider.PlanDisplayLabel(displayProvider, labelResults[i].Plan)
+			if displayProvider == provider.Codex {
 				labelResults[i].RateLimitTier = fmt.Sprintf("codex_usage_%dx", accounts[i].multiplier)
 			}
 		}
