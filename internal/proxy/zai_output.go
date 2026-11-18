@@ -13,20 +13,24 @@ const zaiMaxSSEEventBytes = 1 << 20
 // Z.ai emits plaintext reasoning and collaboration arguments in shapes Codex
 // cannot safely replay to other providers without normalisation.
 func normaliseZAIResponse(data []byte) ([]byte, error) {
+	return normaliseResponsesOutput(data, normaliseZAIResponseItem)
+}
+
+func normaliseResponsesOutput(data []byte, itemNormaliser func(json.RawMessage) (json.RawMessage, bool, error)) ([]byte, error) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		if !json.Valid(data) {
-			return nil, errors.New("invalid Z.ai response JSON")
+			return nil, errors.New("invalid Responses JSON")
 		}
 		return data, nil
 	}
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(data, &envelope); err != nil {
-		return nil, errors.New("invalid Z.ai response JSON")
+		return nil, errors.New("invalid Responses JSON")
 	}
 	changed := false
 	if item, ok := envelope["item"]; ok {
-		updated, itemChanged, err := normaliseZAIResponseItem(item)
+		updated, itemChanged, err := itemNormaliser(item)
 		if err != nil {
 			return nil, err
 		}
@@ -48,7 +52,7 @@ func normaliseZAIResponse(data []byte) ([]byte, error) {
 		}
 		outputChanged := false
 		for i, item := range output {
-			updated, itemChanged, err := normaliseZAIResponseItem(item)
+			updated, itemChanged, err := itemNormaliser(item)
 			if err != nil {
 				return nil, err
 			}
@@ -83,7 +87,7 @@ func normaliseZAIResponseItem(raw json.RawMessage) (json.RawMessage, bool, error
 	if err := json.Unmarshal(raw, &call); err != nil || call == nil {
 		return raw, false, nil
 	}
-	var kind, namespace, name string
+	var kind string
 	if json.Unmarshal(call["type"], &kind) != nil {
 		return raw, false, nil
 	}
@@ -123,14 +127,17 @@ func normaliseZAIResponseItem(raw json.RawMessage) (json.RawMessage, bool, error
 		updated, err := json.Marshal(call)
 		return updated, err == nil, err
 	}
-	if kind != "function_call" ||
+	return markPlaintextCollaborationCall(raw, call)
+}
+
+func markPlaintextCollaborationCall(raw json.RawMessage, call map[string]json.RawMessage) (json.RawMessage, bool, error) {
+	var kind, namespace, name string
+	if json.Unmarshal(call["type"], &kind) != nil || kind != "function_call" ||
 		json.Unmarshal(call["namespace"], &namespace) != nil || namespace != "collaboration" ||
 		json.Unmarshal(call["name"], &name) != nil {
 		return raw, false, nil
 	}
-	switch name {
-	case "spawn_agent", "send_message", "followup_task":
-	default:
+	if !plaintextCollaborationTool(name) {
 		return raw, false, nil
 	}
 	if marker, ok := call["encrypted_function_args"]; ok && !bytes.Equal(bytes.TrimSpace(marker), []byte("null")) {
@@ -141,40 +148,66 @@ func normaliseZAIResponseItem(raw json.RawMessage) (json.RawMessage, bool, error
 	return updated, err == nil, err
 }
 
+func plaintextCollaborationTool(name string) bool {
+	return name == "spawn_agent" || name == "send_message" || name == "followup_task"
+}
+
 // Buffer individual SSE events so data can be normalised without changing
 // comments, event metadata, line endings, or an unfinished final event.
 func copyZAIResponseSSE(dst io.Writer, src io.Reader) error {
+	return copyNormalisedResponsesSSE(dst, src, normaliseZAIResponse, false)
+}
+
+func copyNormalisedResponsesSSE(dst io.Writer, src io.Reader, normalise func([]byte) ([]byte, error), passOversized bool) error {
 	reader := bufio.NewReaderSize(src, 32<<10)
 	var event []byte
-	lineStart := 0
+	var lineContinues, oversized bool
+	write := func(data []byte) error {
+		if len(data) == 0 {
+			return nil
+		}
+		if n, err := dst.Write(data); err != nil {
+			return err
+		} else if n != len(data) {
+			return io.ErrShortWrite
+		}
+		return nil
+	}
 	for {
 		fragment, readErr := reader.ReadSlice('\n')
-		if len(fragment) > zaiMaxSSEEventBytes-len(event) {
-			return errors.New("Z.ai SSE event exceeds 1 MiB")
-		}
-		event = append(event, fragment...)
-		if readErr == bufio.ErrBufferFull {
-			continue
-		}
-		line := event[lineStart:]
-		complete := bytes.Equal(line, []byte("\n")) || bytes.Equal(line, []byte("\r\n"))
-		if complete || readErr != nil {
-			if len(event) != 0 {
-				updated, err := normaliseZAISSEEvent(event)
+		complete := !lineContinues && (bytes.Equal(fragment, []byte("\n")) || bytes.Equal(fragment, []byte("\r\n")))
+		lineContinues = readErr == bufio.ErrBufferFull
+		if oversized || len(fragment) > zaiMaxSSEEventBytes-len(event) {
+			if !passOversized {
+				return errors.New("Z.ai SSE event exceeds 1 MiB")
+			}
+			// Go already accepts arbitrarily large HTTP events. Stream
+			// overflow in place, then resume rewriting at the next event.
+			if err := write(event); err != nil {
+				return err
+			}
+			event = event[:0]
+			if err := write(fragment); err != nil {
+				return err
+			}
+			oversized = !complete
+		} else {
+			event = append(event, fragment...)
+			if len(event) != 0 && (complete || readErr != nil && !lineContinues) {
+				updated, err := normaliseResponsesSSEEvent(event, normalise)
 				if err != nil {
 					return err
 				}
-				if n, err := dst.Write(updated); err != nil {
-					return err
-				} else if n != len(updated) {
-					return io.ErrShortWrite
+				if len(updated) > zaiMaxSSEEventBytes && !passOversized {
+					return errors.New("Z.ai SSE event exceeds 1 MiB")
 				}
+				if err := write(updated); err != nil {
+					return err
+				}
+				event = event[:0]
 			}
-			event, lineStart = event[:0], 0
-		} else {
-			lineStart = len(event)
 		}
-		if readErr != nil {
+		if readErr != nil && !lineContinues {
 			if readErr == io.EOF {
 				return nil
 			}
@@ -183,7 +216,7 @@ func copyZAIResponseSSE(dst io.Writer, src io.Reader) error {
 	}
 }
 
-func normaliseZAISSEEvent(event []byte) ([]byte, error) {
+func normaliseResponsesSSEEvent(event []byte, normalise func([]byte) ([]byte, error)) ([]byte, error) {
 	type dataSpan struct{ start, end int }
 	var spans []dataSpan
 	var data []byte
@@ -214,7 +247,7 @@ func normaliseZAISSEEvent(event []byte) ([]byte, error) {
 	if anchor < 0 || !json.Valid(data) {
 		return event, nil
 	}
-	updated, err := normaliseZAIResponse(data)
+	updated, err := normalise(data)
 	if err != nil || bytes.Equal(updated, data) {
 		return event, err
 	}
@@ -228,8 +261,5 @@ func normaliseZAISSEEvent(event []byte) ([]byte, error) {
 		offset = span.end
 	}
 	output.Write(event[offset:])
-	if output.Len() > zaiMaxSSEEventBytes {
-		return nil, errors.New("Z.ai SSE event exceeds 1 MiB")
-	}
 	return output.Bytes(), nil
 }

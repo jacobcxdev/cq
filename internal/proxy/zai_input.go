@@ -8,11 +8,15 @@ import (
 // normaliseZAIRequest translates plaintext Codex agent messages into the
 // ordinary user messages understood by Z.ai's Responses endpoint.
 func normaliseZAIRequest(body []byte) ([]byte, error) {
+	return normaliseSubscriptionAgentMessages(body, "Z.ai")
+}
+
+func normaliseSubscriptionAgentMessages(body []byte, name string) ([]byte, error) {
 	var request map[string]json.RawMessage
 	if err := json.Unmarshal(body, &request); err != nil || request == nil {
-		return nil, errors.New("invalid Z.ai request body")
+		return nil, errors.New("invalid " + name + " request body")
 	}
-	input, err := zaiResponseInput(request["input"])
+	input, err := responsesBridgeInput(request["input"], name)
 	if err != nil {
 		return nil, err
 	}
@@ -27,11 +31,11 @@ func normaliseZAIRequest(body []byte) ([]byte, error) {
 			continue
 		}
 		if len(agent.EncryptedContent) != 0 {
-			return nil, errors.New("Z.ai does not support encrypted agent messages")
+			return nil, errors.New(name + " does not support encrypted agent messages")
 		}
 		var content []json.RawMessage
 		if err := json.Unmarshal(agent.Content, &content); err != nil || len(content) == 0 {
-			return nil, errors.New("invalid Z.ai agent message content")
+			return nil, errors.New("invalid " + name + " agent message content")
 		}
 		for _, rawPart := range content {
 			var part struct {
@@ -40,16 +44,16 @@ func normaliseZAIRequest(body []byte) ([]byte, error) {
 				EncryptedContent json.RawMessage `json:"encrypted_content"`
 			}
 			if err := json.Unmarshal(rawPart, &part); err != nil {
-				return nil, errors.New("invalid Z.ai agent message content")
+				return nil, errors.New("invalid " + name + " agent message content")
 			}
 			if part.Type == "encrypted_content" || len(part.EncryptedContent) != 0 {
-				return nil, errors.New("Z.ai does not support encrypted agent messages")
+				return nil, errors.New(name + " does not support encrypted agent messages")
 			}
 			if part.Type != "input_text" {
-				return nil, errors.New("unsupported Z.ai agent message content")
+				return nil, errors.New("unsupported " + name + " agent message content")
 			}
 			if part.Text == nil {
-				return nil, errors.New("invalid Z.ai agent message content")
+				return nil, errors.New("invalid " + name + " agent message content")
 			}
 		}
 		input[i], err = json.Marshal(map[string]json.RawMessage{
@@ -58,7 +62,7 @@ func normaliseZAIRequest(body []byte) ([]byte, error) {
 			"content": agent.Content,
 		})
 		if err != nil {
-			return nil, errors.New("invalid Z.ai agent message content")
+			return nil, errors.New("invalid " + name + " agent message content")
 		}
 		changed = true
 	}
@@ -67,11 +71,11 @@ func normaliseZAIRequest(body []byte) ([]byte, error) {
 	}
 	request["input"], err = json.Marshal(input)
 	if err != nil {
-		return nil, errors.New("invalid Z.ai response input")
+		return nil, errors.New("invalid " + name + " response input")
 	}
 	normalised, err := json.Marshal(request)
 	if err != nil {
-		return nil, errors.New("invalid Z.ai request body")
+		return nil, errors.New("invalid " + name + " request body")
 	}
 	return normalised, nil
 }

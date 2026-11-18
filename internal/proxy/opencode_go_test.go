@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -154,6 +155,227 @@ func TestOpenCodeGoFallbackAfterZCodeWithEmptyToolResultIDs(t *testing.T) {
 	s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
 	if w.Code != http.StatusOK || primaryCalls != 1 || goCalls != 1 || !strings.Contains(w.Body.String(), "go-answer") {
 		t.Fatalf("status %d, ZCode calls %d, Go calls %d, body %q", w.Code, primaryCalls, goCalls, w.Body.String())
+	}
+}
+
+func TestOpenCodeGoWorkersInheritParentsRoute(t *testing.T) {
+	var primaryCalls, goCalls atomic.Int32
+	s := &Server{
+		Config: &Config{ClaudeUpstream: "https://claude.test"}, Catalog: openCodeGoTestCatalog(),
+		ZAIAPIKey: func() (string, error) { return "zai-key", nil },
+		ZAITransport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			w := httptest.NewRecorder()
+			if primaryCalls.Add(1) == 1 {
+				w.WriteHeader(http.StatusTooManyRequests)
+			}
+			return w.Result(), nil
+		}),
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
+			var request struct {
+				Tools json.RawMessage
+				Input []struct {
+					Type, Role string
+					Content    []struct{ Type, Text string }
+				}
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Error(err)
+			}
+			call := goCalls.Add(1)
+			if call > 1 && (len(request.Input) != 1 || request.Input[0].Type != "message" ||
+				request.Input[0].Role != "user" || len(request.Input[0].Content) != 1 || request.Input[0].Content[0].Text != "Report the fixture marker.") {
+				t.Errorf("worker task was not forwarded as a plaintext user message: %+v", request.Input)
+			}
+			w := httptest.NewRecorder()
+			if call == 1 {
+				if bytes.Contains(request.Tools, []byte(`"encrypted"`)) || !bytes.Contains(request.Tools, []byte(`"spawn_agent"`)) {
+					t.Errorf("unexpected Go tool schema: %s", request.Tools)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "event: response.output_item.done\ndata: "+`{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","call_id":"spawn-1","arguments":"{\"message\":\"Report the fixture marker.\"}"}}`+"\n\n")
+			}
+			writeZAITestSSE(w, "go-answer", nil)
+			return w.Result(), nil
+		}),
+	}
+	parent := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"glm-5.3","input":[],"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"properties":{"message":{"type":"string","encrypted":true}}}}]}]}`))
+	parent.Header.Set(codexTurnMetadataKey, `{"session_id":"session","thread_id":"parent","turn_id":"parent-turn","request_kind":"turn"}`)
+	w := httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, parent)
+	if w.Code != http.StatusOK || primaryCalls.Load() != 1 || goCalls.Load() != 1 {
+		t.Fatalf("parent status=%d Z.ai=%d Go=%d", w.Code, primaryCalls.Load(), goCalls.Load())
+	}
+	if !strings.Contains(w.Body.String(), `"encrypted_function_args":[]`) {
+		t.Fatalf("Codex did not receive the plaintext collaboration marker: %s", w.Body.String())
+	}
+	worker := http.Header{"X-Openai-Subagent": {"collab_spawn"}}
+	worker.Set(codexTurnMetadataKey, `{"session_id":"session","thread_id":"worker","turn_id":"worker-turn","parent_thread_id":"parent","parent_turn_id":"parent-turn","request_kind":"turn"}`)
+	const task = `{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Report the fixture marker."}]}`
+	r := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"glm-5.3","input":[`+task+`]}`))
+	r.Header = worker
+	w = httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("HTTP worker status=%d body=%q", w.Code, w.Body.String())
+	}
+	c := openZAITestWebSocket(t, s, http.Header{"X-Openai-Subagent": {"collab_spawn"}})
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"glm-5.3","generate":false,"input":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+	prewarm := readZAITestCompletion(t, c)
+	frame := fmt.Sprintf(`{"type":"response.create","model":"glm-5.3","previous_response_id":%q,"client_metadata":{"x-codex-turn-metadata":%q},"input":[%s]}`,
+		prewarm.Response.ID, worker.Get(codexTurnMetadataKey), task)
+	if err := c.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+		t.Fatal(err)
+	}
+	if result := readZAITestCompletion(t, c); result.Response.ID != "go-answer" {
+		t.Fatalf("WebSocket worker response=%q", result.Response.ID)
+	}
+	if primaryCalls.Load() != 1 || goCalls.Load() != 3 {
+		t.Fatalf("worker routing Z.ai=%d Go=%d", primaryCalls.Load(), goCalls.Load())
+	}
+	encrypted := `{"model":"glm-5.3","input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"opaque"}]}]}`
+	r = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(encrypted))
+	r.Header = worker
+	w = httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, r)
+	if w.Code != http.StatusBadRequest || primaryCalls.Load() != 1 || goCalls.Load() != 3 {
+		t.Fatalf("encrypted task status=%d Z.ai=%d Go=%d", w.Code, primaryCalls.Load(), goCalls.Load())
+	}
+	r = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"glm-5.3","input":[`+task+`]}`))
+	r.Header = worker.Clone()
+	r.Header.Set(codexTurnMetadataKey, `{"session_id":"session","thread_id":"unrelated","turn_id":"unrelated-turn","parent_thread_id":"parent","parent_turn_id":"other-turn","request_kind":"turn"}`)
+	w = httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, r)
+	if w.Code != http.StatusOK || primaryCalls.Load() != 2 || goCalls.Load() != 3 {
+		t.Fatalf("unrelated worker status=%d Z.ai=%d Go=%d", w.Code, primaryCalls.Load(), goCalls.Load())
+	}
+}
+
+func TestOpenCodeGoHTTPRelaysOversizedSSE(t *testing.T) {
+	large := "event: response.output_text.delta\r\ndata: {\"delta\":\"" +
+		strings.Repeat("x", zaiMaxSSEEventBytes) + "\"}\r\n\r\n"
+	const call = "event: response.output_item.done\ndata: {\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"spawn_agent\"}}\n\n"
+	largeCompletion := "event: response.completed\ndata: {\"response\":{\"id\":\"go-answer\",\"padding\":\"" +
+		strings.Repeat("y", zaiMaxSSEEventBytes) + "\"}}\n\n"
+	s := &Server{
+		Config: &Config{}, Catalog: openCodeGoTestCatalog(),
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}},
+				Body: io.NopCloser(strings.NewReader(large + call + largeCompletion)),
+			}, nil
+		}),
+	}
+	w := httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/v1/responses",
+		strings.NewReader(`{"model":"kimi-k3","input":[],"stream":true}`)))
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.HasPrefix(body, large) || !strings.HasSuffix(body, largeCompletion) {
+		t.Fatalf("oversized events changed or truncated: HTTP %d, %d bytes", w.Code, len(body))
+	}
+	if !strings.Contains(body[len(large):len(body)-len(largeCompletion)], `"encrypted_function_args":[]`) {
+		t.Fatal("plaintext rewriting did not resume after the large event")
+	}
+}
+
+func TestOpenCodeGoOmitsOnlyStandardAccessPrograms(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields string
+		want         int
+	}{
+		{"standard", `"access_programs":{"cyber":"standard"}`, http.StatusOK},
+		{"empty", `"access_programs":{}`, http.StatusOK},
+		{"null", `"access_programs":null`, http.StatusOK},
+		{"named", `"access_programs":{"cyber":"nonstandard"}`, http.StatusBadRequest},
+		{"unknown", `"access_programs":{"cyber":"standard","other":"enabled"}`, http.StatusBadRequest},
+		{"duplicate programme", `"access_programs":{"cyber":"nonstandard","cyber":"standard"}`, http.StatusBadRequest},
+		{"duplicate declaration", `"access_programs":{"cyber":"nonstandard"},"access_programs":{"cyber":"standard"}`, http.StatusBadRequest},
+		{"nested programme", `"params":{"access_programs":{"cyber":"nonstandard"}}`, http.StatusBadRequest},
+		{"invalid", `"access_programs":{"cyber":true}`, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			s := &Server{
+				Config: &Config{}, Catalog: openCodeGoTestCatalog(),
+				SharedBudgetRoutes: openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
+					calls++
+					var body map[string]json.RawMessage
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Fatal(err)
+					}
+					if _, exists := body["access_programs"]; exists || string(body["input"]) != `"Say PONG."` {
+						t.Fatalf("Go request lost its input or still carries a Codex access programme")
+					}
+					return httptest.NewRecorder().Result(), nil
+				}),
+			}
+			body := `{"model":"kimi-k3","input":"Say PONG.",` + tc.fields + `}`
+			w := httptest.NewRecorder()
+			s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+			if w.Code != tc.want || (calls == 1) != (tc.want == http.StatusOK) {
+				t.Fatalf("status %d, dispatched %d requests", w.Code, calls)
+			}
+		})
+	}
+}
+
+func TestOpenCodeGoTranslatedModelRequiresFullInput(t *testing.T) {
+	for _, nativeAPI := range []string{"chat-completions", "responses"} {
+		t.Run(nativeAPI, func(t *testing.T) {
+			entry := openCodeGoTestEntry("fixture-model")
+			entry.SharedBudget.NativeAPI = nativeAPI
+			calls := 0
+			s := &Server{
+				Config: &Config{}, Catalog: modelregistry.NewCatalog(modelregistry.Snapshot{Entries: []modelregistry.Entry{entry}}),
+				SharedBudgetRoutes: openCodeGoTestRoutes(func(*http.Request) (*http.Response, error) {
+					calls++
+					w := httptest.NewRecorder()
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"go-first"}`)
+					return w.Result(), nil
+				}),
+			}
+			post := func(body string) *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+				return w
+			}
+			if w := post(`{"model":"fixture-model","input":"hello"}`); w.Code != http.StatusOK || calls != 1 {
+				t.Fatalf("first response status=%d Go calls=%d", w.Code, calls)
+			}
+			w := post(`{"model":"fixture-model","previous_response_id":"go-first","input":"continue"}`)
+			if nativeAPI == "responses" {
+				if w.Code != http.StatusOK || calls != 2 {
+					t.Fatalf("native continuation status=%d Go calls=%d", w.Code, calls)
+				}
+			} else if w.Code != http.StatusConflict || calls != 1 || !strings.Contains(w.Body.String(), "requires full input") {
+				t.Fatalf("translated continuation status=%d Go calls=%d body=%q", w.Code, calls, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestOpenCodeGoWebSocketRejectsAmbiguousAccessBeforeRewriting(t *testing.T) {
+	var calls atomic.Int32
+	s := &Server{
+		Config: &Config{ClaudeUpstream: "https://claude.test"}, Catalog: openCodeGoTestCatalog(),
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return httptest.NewRecorder().Result(), nil
+		}),
+	}
+	c := openZAITestWebSocket(t, s, nil)
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"kimi-k3","generate":false,"input":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+	_ = readZAITestCompletion(t, c)
+	request := `{"type":"response.create","model":"kimi-k3","input":[],"access_programs":{"cyber":"nonstandard"},"access_programs":{"cyber":"standard"}}`
+	if err := c.WriteMessage(websocket.TextMessage, []byte(request)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.ReadMessage(); err == nil || calls.Load() != 0 {
+		t.Fatalf("ambiguous programme reached Go: calls=%d, error=%v", calls.Load(), err)
 	}
 }
 
@@ -325,7 +547,7 @@ func openCodeGoTestRoutes(transport openCodeGoTestTransport) map[modelregistry.P
 			Credential: func(context.Context) (SharedBudgetCredential, error) {
 				return SharedBudgetCredential{Bearer: "go-key"}, nil
 			},
-			Transport: transport, AllowFallback: true, OmitStreamOptions: true, OmitEmptyCallIDOutputs: true,
+			Transport: transport, AllowFallback: true, OmitStreamOptions: true, OmitEmptyCallIDOutputs: true, PlaintextCollaboration: true,
 		},
 	}
 }

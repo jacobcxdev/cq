@@ -45,6 +45,7 @@ type sharedBudgetAdapter struct {
 	CatalogueRequiresFresh bool
 	OmitStreamOptions      bool
 	OmitEmptyCallIDOutputs bool
+	PlaintextCollaboration bool
 	Usage                  func(context.Context, httputil.Doer, string, string) []quota.SharedBudgetWindow
 }
 
@@ -58,6 +59,7 @@ var sharedBudgetAdapters = []sharedBudgetAdapter{
 		CatalogueRequiresFresh: true,
 		OmitStreamOptions:      true,
 		OmitEmptyCallIDOutputs: true,
+		PlaintextCollaboration: true,
 		Catalogue: func(client httputil.Doer, authorize sharedBudgetAuthorization) modelregistry.NativeSource {
 			return &modelregistry.OpenCodeGoSource{
 				Client: client,
@@ -136,6 +138,7 @@ func sharedBudgetProxyRoutes(fsys fsutil.FileSystem, env func(string) string, co
 			RequireCatalogueScope:  adapter.CatalogueRequiresFresh,
 			OmitStreamOptions:      adapter.OmitStreamOptions,
 			OmitEmptyCallIDOutputs: adapter.OmitEmptyCallIDOutputs,
+			PlaintextCollaboration: adapter.PlaintextCollaboration,
 			Credential: func(ctx context.Context) (proxy.SharedBudgetCredential, error) {
 				login, err := resolve(ctx, true)
 				if login.Account == "" {

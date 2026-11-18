@@ -25,10 +25,11 @@ type OpenCodeGoSource struct {
 }
 
 type openCodeGoModel struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Type        string `json:"type"`
-	Description string `json:"description"`
+	ID          string                     `json:"id"`
+	Name        string                     `json:"name"`
+	Type        string                     `json:"type"`
+	Description string                     `json:"description"`
+	API         map[string]json.RawMessage `json:"api"`
 	Limit       struct {
 		Context int `json:"context"`
 		Output  int `json:"output"`
@@ -114,12 +115,21 @@ func (s *OpenCodeGoSource) Fetch(ctx context.Context) (SourceResult, error) {
 		if name == "" {
 			name = model.ID
 		}
+		var nativeAPI string
+		if len(model.API) == 1 {
+			for protocol := range model.API {
+				switch protocol {
+				case "responses", "chat-completions", "messages", "generate-content":
+					nativeAPI = protocol
+				}
+			}
+		}
 		result.Entries = append(result.Entries, Entry{
 			Provider: ProviderOpenCodeGo, ID: model.ID, DisplayName: name + " (" + openCodeGoName + ")",
 			Description: model.Description, ContextWindow: model.Limit.Context, MaxContextWindow: model.Limit.Context,
 			MaxOutputTokens: model.Limit.Output, Visibility: "list", Source: SourceNative, Raw: raw,
 			SharedBudget: &SharedBudgetModel{
-				ProviderName: openCodeGoName, ReasoningEfforts: model.Capabilities.Reasoning.Effort, CredentialScope: scope,
+				ProviderName: openCodeGoName, ReasoningEfforts: model.Capabilities.Reasoning.Effort, NativeAPI: nativeAPI, CredentialScope: scope,
 			},
 		})
 	}

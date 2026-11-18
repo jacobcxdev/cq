@@ -130,6 +130,13 @@ func (s *Server) relaySharedBudgetHTTP(w http.ResponseWriter, response *http.Res
 			writeError(w, http.StatusBadGateway, "api_error", "subscription response unavailable")
 			return
 		}
+		if selected.route.PlaintextCollaboration {
+			data, err = plaintextCollaborationResponse(data)
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "api_error", "invalid subscription response")
+				return
+			}
+		}
 		record(data)
 		w.WriteHeader(response.StatusCode)
 		_, _ = w.Write(data)
@@ -139,6 +146,10 @@ func (s *Server) relaySharedBudgetHTTP(w http.ResponseWriter, response *http.Res
 	body := io.Reader(response.Body)
 	if mediaType == "text/event-stream" {
 		body = io.TeeReader(body, &sharedBudgetSSEObserver{parser: NewCodexSSEParser(1 << 20), record: record})
+		if selected.route.PlaintextCollaboration {
+			_ = copyNormalisedResponsesSSE(zaiFlushWriter{w}, body, plaintextCollaborationResponse, true)
+			return
+		}
 	}
 	_, _ = io.Copy(zaiFlushWriter{w}, body)
 }

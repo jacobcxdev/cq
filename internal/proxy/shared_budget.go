@@ -32,6 +32,8 @@ type SharedBudgetRoute struct {
 	OmitStreamOptions bool
 	// OmitEmptyCallIDOutputs drops unpaired tool results rejected by strict translators.
 	OmitEmptyCallIDOutputs bool
+	// PlaintextCollaboration maps Codex task arguments and messages at the provider boundary.
+	PlaintextCollaboration bool
 }
 
 // SharedBudgetCredential carries material for one subscription request. An
@@ -100,12 +102,16 @@ func (s *Server) selectSharedBudgetRoute(ctx context.Context, model string, fall
 	return sharedBudgetSelection{}, false
 }
 
-func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudgetSelection, session string, body []byte, compactEndpoint bool) (*http.Response, *zaiCompactResponse, error) {
+func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudgetSelection, session string, header http.Header, body []byte, compactEndpoint bool) (*http.Response, *zaiCompactResponse, error) {
 	route := selected.route
+	originalBody := body
 	scope := selected.credential.binding()
-	if route.RequireCatalogueScope && !slices.ContainsFunc(s.Catalog.SharedBudgetModels(selected.model), func(entry modelregistry.Entry) bool {
-		return entry.Provider == selected.id && entry.SharedBudget != nil && entry.SharedBudget.CredentialScope == scope
-	}) {
+	models := s.Catalog.SharedBudgetModels(selected.model)
+	entry := slices.IndexFunc(models, func(entry modelregistry.Entry) bool {
+		return entry.Provider == selected.id && entry.SharedBudget != nil &&
+			(!route.RequireCatalogueScope || entry.SharedBudget.CredentialScope == scope)
+	})
+	if route.RequireCatalogueScope && entry < 0 {
 		return nil, nil, sharedBudgetRouteError{409, route.Name + " model is no longer available for this subscription"}
 	}
 	if len(body) > maxRequestBody {
@@ -115,6 +121,12 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 	if err != nil {
 		return nil, nil, sharedBudgetRouteError{400, "invalid CQ compaction input"}
 	}
+	if route.PlaintextCollaboration {
+		body, err = normaliseSubscriptionAgentMessages(body, route.Name)
+		if err != nil {
+			return nil, nil, sharedBudgetRouteError{400, err.Error()}
+		}
+	}
 	trigger, err := zaiCompactionRequested(body)
 	if err != nil {
 		return nil, nil, sharedBudgetRouteError{400, "invalid " + route.Name + " compaction trigger"}
@@ -122,6 +134,21 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 	var input map[string]json.RawMessage
 	if json.Unmarshal(body, &input) != nil || input == nil {
 		return nil, nil, sharedBudgetRouteError{400, "invalid " + route.Name + " request"}
+	}
+	if entry >= 0 {
+		nativeAPI := models[entry].SharedBudget.NativeAPI
+		if previous := bytes.TrimSpace(input["previous_response_id"]); len(previous) != 0 &&
+			!bytes.Equal(previous, []byte("null")) && !bytes.Equal(previous, []byte(`""`)) &&
+			nativeAPI != "" && nativeAPI != "responses" {
+			return nil, nil, sharedBudgetRouteError{409, route.Name + " requires full input for translated Responses models"}
+		}
+	}
+	_, hasAccessPrograms := input["access_programs"]
+	if hasAccessPrograms || input["params"] != nil {
+		// Scan the original bytes so rewriting history cannot hide duplicate declarations.
+		if !standardResponsesAccessPrograms(originalBody) {
+			return nil, nil, sharedBudgetRouteError{400, route.Name + " cannot enforce the requested access programme"}
+		}
 	}
 	clientModel := input["model"]
 	model := extractModel(body)
@@ -145,6 +172,13 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 	}
 	_, hasStreamOptions := input["stream_options"]
 	omitStreamOptions := route.OmitStreamOptions && hasStreamOptions
+	toolSchemasChanged := false
+	if route.PlaintextCollaboration {
+		if tools, changed := plaintextCollaborationSchemas(input["tools"], ""); changed {
+			input["tools"] = tools
+			toolSchemasChanged = true
+		}
+	}
 	omitEmptyCallIDOutputs := false
 	if route.OmitEmptyCallIDOutputs {
 		filtered, omitted := withoutEmptyCallIDOutputs(input["input"])
@@ -153,8 +187,9 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 			omitEmptyCallIDOutputs = true
 		}
 	}
-	if _, hasClientMetadata := input["client_metadata"]; compacting || hasClientMetadata || model != upstreamModel || omitStreamOptions || omitEmptyCallIDOutputs {
+	if _, hasClientMetadata := input["client_metadata"]; compacting || hasClientMetadata || model != upstreamModel || omitStreamOptions || omitEmptyCallIDOutputs || toolSchemasChanged || hasAccessPrograms {
 		delete(input, "client_metadata")
+		delete(input, "access_programs")
 		if omitStreamOptions {
 			delete(input, "stream_options")
 		}
@@ -190,6 +225,9 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 	if err != nil {
 		return nil, nil, sharedBudgetRouteError{502, route.Name + " request failed"}
 	}
+	if response.StatusCode >= 200 && response.StatusCode < 300 && !compacting {
+		s.recordSharedBudgetTurn(header, originalBody, selected.binding())
+	}
 	if !compacting || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return response, nil, nil
 	}
@@ -206,6 +244,29 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 		sealed.Object = "response.compaction"
 	}
 	return nil, &sealed, nil
+}
+
+// Standard mode carries no model access entitlement. Named or unknown
+// programmes must never be removed to get a third-party request accepted.
+func standardResponsesAccessPrograms(body []byte) bool {
+	scanner := codexFrozenJSONScanner{source: body}
+	fields, err := scanner.scanRequest()
+	if err != nil || fields.paramsAccessPrograms.present {
+		return false
+	}
+	if !fields.rootAccessPrograms.present {
+		return true
+	}
+	var compact bytes.Buffer
+	if json.Compact(&compact, fields.rootAccessPrograms.bytes(body)) != nil {
+		return false
+	}
+	switch compact.String() {
+	case "null", "{}", `{"cyber":"standard"}`:
+		return true
+	default:
+		return false
+	}
 }
 
 func withoutEmptyCallIDOutputs(raw json.RawMessage) (json.RawMessage, bool) {
@@ -257,7 +318,7 @@ func (s *Server) serveSelectedSharedBudgetHTTP(w http.ResponseWriter, r *http.Re
 	if s.CacheProfiler != nil {
 		ctx = withCacheProfileRequestSession(ctx, r.Header, body)
 	}
-	response, compact, err := s.sharedBudgetResponse(ctx, selected, sharedBudgetSession(r.Header, selected.route.SessionHeader), body, compactEndpoint)
+	response, compact, err := s.sharedBudgetResponse(ctx, selected, sharedBudgetSession(r.Header, selected.route.SessionHeader), r.Header, body, compactEndpoint)
 	if err != nil {
 		var route sharedBudgetRouteError
 		if errors.As(err, &route) {
@@ -329,7 +390,7 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 	if s.CacheProfiler != nil {
 		ctx = withCacheProfileRequestSession(ctx, header, body)
 	}
-	response, compact, err := s.sharedBudgetResponse(ctx, selected, session, body, false)
+	response, compact, err := s.sharedBudgetResponse(ctx, selected, session, header, body, false)
 	if err != nil {
 		return "", nil, err
 	}
@@ -348,7 +409,11 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 		_ = downstream.WriteMessage(websocket.TextMessage, data)
 		return "", nil, errors.New(selected.route.Name + " stream rejected")
 	}
-	return relayResponsesSSE(response.Body, selected.route.Name, func(data []byte) ([]byte, error) { return data, nil }, func(kind string, data []byte) error {
+	normalise := func(data []byte) ([]byte, error) { return data, nil }
+	if selected.route.PlaintextCollaboration {
+		normalise = plaintextCollaborationResponse
+	}
+	return relayResponsesSSE(response.Body, selected.route.Name, normalise, func(kind string, data []byte) error {
 		if kind == "response.completed" {
 			var event struct{ Response json.RawMessage }
 			if json.Unmarshal(data, &event) == nil {
@@ -438,6 +503,19 @@ func (s *Server) withSharedBudgetWebSocketFallback(primary func(context.Context,
 		}
 		if s.knownSharedBudgetState(body) {
 			return "", nil, errSharedBudgetContinuation
+		}
+		// Codex can prewarm before sending the parent turn metadata. The
+		// synthetic prewarm does not commit this socket to the primary route.
+		if !primarySelected {
+			model := extractModel(body)
+			if selected, inherited := s.sharedBudgetWorkerRoute(ctx, header, body, model); inherited {
+				if selected.id == "" {
+					return "", nil, errSharedBudgetContinuation
+				}
+				fallbackModel = model
+				fallback = s.sharedBudgetBridge(selected, header)
+				return fallback.Stream(ctx, downstream, header, body)
+			}
 		}
 		id, output, err := primary(ctx, downstream, header, body)
 		if errors.Is(err, errSharedBudgetFallback) {

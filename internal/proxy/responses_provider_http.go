@@ -69,10 +69,25 @@ func (s *Server) tryHandleProviderResponsesEncoded(w http.ResponseWriter, r *htt
 		decoded = envelope.Decoded()
 	}
 	model := extractModel(decoded)
+	provider := s.routeCodexModel(model)
+	switch provider {
+	case ProviderSharedBudget, ProviderZAI, ProviderGrok:
+		if !standardResponsesAccessPrograms(decoded) {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", "subscription route cannot enforce the requested access programme")
+			return true, model
+		}
+	}
 	if s.serveSharedBudgetContinuation(w, r, decoded, model) {
 		return true, model
 	}
-	provider := s.routeCodexModel(model)
+	if selected, inherited := s.sharedBudgetWorkerRoute(r.Context(), r.Header, decoded, model); inherited {
+		if selected.id == "" {
+			writeError(w, http.StatusConflict, "invalid_request_error", "parent subscription unavailable or worker input cannot be replayed")
+		} else {
+			s.serveSelectedSharedBudgetHTTP(w, r, decoded, selected)
+		}
+		return true, model
+	}
 	if provider == ProviderSharedBudget {
 		s.serveSharedBudgetHTTP(w, r, decoded)
 		return true, model
