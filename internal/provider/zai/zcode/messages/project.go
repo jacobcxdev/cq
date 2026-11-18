@@ -377,9 +377,9 @@ func (c *Codec) projectInput(raw json.RawMessage, history *[]message, system *[]
 			}
 			appendMessage(history, "assistant", []any{map[string]any{"type": "tool_use", "id": call, "name": encoded, "input": value}})
 		case "function_call_output", "custom_tool_call_output":
-			call, _ := stringField(item, "call_id")
+			call, stringID := stringField(item, "call_id")
 			_, hasIdentity := item["call_id"]
-			unattributed := kind == "function_call_output" && !hasIdentity
+			unattributed := call == "" && (stringID || kind == "function_call_output" && !hasIdentity)
 			if call == "" && !unattributed {
 				return errors.New("missing Responses tool result identity")
 			}
@@ -389,15 +389,19 @@ func (c *Codec) projectInput(raw json.RawMessage, history *[]message, system *[]
 			}
 			label := ""
 			if unattributed {
+				toolKind := "function"
+				if kind == "custom_tool_call_output" {
+					toolKind = "custom tool"
+				}
 				name, _ := stringField(item, "name")
 				namespace, _ := stringField(item, "namespace")
 				display := name
 				if namespace != "" && name != "" {
 					display = namespace + "." + name
 				}
-				label = "Unattributed historical function result. Literal recorded output:"
+				label = fmt.Sprintf("Unattributed historical %s result. Literal recorded output:", toolKind)
 				if display != "" {
-					label = fmt.Sprintf("Unattributed historical function result from %q. Literal recorded output:", display)
+					label = fmt.Sprintf("Unattributed historical %s result from %q. Literal recorded output:", toolKind, display)
 				}
 			} else if display, ok := literalCalls[call]; ok {
 				label = fmt.Sprintf("Historical result for function call %q (call ID %q). Literal recorded output:", display, call)
