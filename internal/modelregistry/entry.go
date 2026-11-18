@@ -1,6 +1,7 @@
 package modelregistry
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -21,6 +22,25 @@ const (
 type SharedBudgetModel struct {
 	ProviderName     string   `json:"provider_name"`
 	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
+	// CredentialScope ties live catalogue authority to the credential that fetched it.
+	CredentialScope SharedBudgetCredentialScope `json:"-"`
+}
+
+// SharedBudgetCredentialScope identifies the account and workspace that own a
+// catalogue or response. OAuth access-token refresh preserves that identity.
+type SharedBudgetCredentialScope [sha256.Size]byte
+
+func FingerprintSharedBudgetCredential(bearer, account, workspace string) SharedBudgetCredentialScope {
+	if account == "" && workspace == "" {
+		return sha256.Sum256([]byte(bearer))
+	}
+	// Domain-separate scoped keys and OAuth from each other and raw API keys.
+	identity := [3]string{"oauth", account, workspace}
+	if account == "" {
+		identity = [3]string{"key", bearer, workspace}
+	}
+	data, _ := json.Marshal(identity)
+	return sha256.Sum256(append([]byte{0}, data...))
 }
 
 func (p Provider) isFirstParty() bool {

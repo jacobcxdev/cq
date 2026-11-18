@@ -118,6 +118,13 @@ func refreshAccounts() (returnErr error) {
 	if claudeChanged {
 		invalidateProviderCacheFn(provider.Claude)
 	}
+
+	// Renew OpenCode independently of other credential authorities and
+	// before any interactive reauthentication.
+	if err := refreshOpenCodeOAuth(ctx, httpClient); err != nil {
+		defer func() { returnErr = errors.Join(returnErr, err) }()
+	}
+
 	codexChanged, err := refreshCodexAccountsFn(ctx, httpClient, now)
 	if err != nil {
 		return err
@@ -133,11 +140,6 @@ func refreshAccounts() (returnErr error) {
 	if grokChanged {
 		invalidateProviderCacheFn(provider.Grok)
 	}
-	defer func() {
-		if err := refreshOpenCodeOAuth(ctx, httpClient); err != nil {
-			returnErr = errors.Join(returnErr, err)
-		}
-	}()
 	if len(accounts) == 0 {
 		return nil
 	}

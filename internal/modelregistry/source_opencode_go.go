@@ -21,7 +21,7 @@ const (
 type OpenCodeGoSource struct {
 	Client     httputil.Doer
 	URL        string
-	Credential func(context.Context) (bearer, workspaceID string, err error)
+	Credential func(context.Context) (bearer, account, workspaceID string, err error)
 }
 
 type openCodeGoModel struct {
@@ -52,13 +52,14 @@ func (s *OpenCodeGoSource) Fetch(ctx context.Context) (SourceResult, error) {
 	if s.Credential == nil {
 		return SourceResult{NotConfigured: true}, nil
 	}
-	bearer, workspaceID, err := s.Credential(ctx)
+	bearer, account, workspaceID, err := s.Credential(ctx)
 	if err != nil {
 		return SourceResult{}, errors.New("OpenCode Go catalogue credential unavailable")
 	}
 	if bearer == "" {
 		return SourceResult{NotConfigured: true}, nil
 	}
+	scope := FingerprintSharedBudgetCredential(bearer, account, workspaceID)
 	target := s.URL
 	if target == "" {
 		target = OpenCodeGoBaseURL + "/v1/models"
@@ -117,7 +118,9 @@ func (s *OpenCodeGoSource) Fetch(ctx context.Context) (SourceResult, error) {
 			Provider: ProviderOpenCodeGo, ID: model.ID, DisplayName: name + " (" + openCodeGoName + ")",
 			Description: model.Description, ContextWindow: model.Limit.Context, MaxContextWindow: model.Limit.Context,
 			MaxOutputTokens: model.Limit.Output, Visibility: "list", Source: SourceNative, Raw: raw,
-			SharedBudget: &SharedBudgetModel{ProviderName: openCodeGoName, ReasoningEfforts: model.Capabilities.Reasoning.Effort},
+			SharedBudget: &SharedBudgetModel{
+				ProviderName: openCodeGoName, ReasoningEfforts: model.Capabilities.Reasoning.Effort, CredentialScope: scope,
+			},
 		})
 	}
 	return result, nil

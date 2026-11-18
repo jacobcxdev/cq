@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -438,11 +439,28 @@ func TestSharedBudgetHTTPContinuationBindsFallbackCredential(t *testing.T) {
 func TestSharedBudgetHTTPOAuthContinuationFollowsMemberAndWorkspace(t *testing.T) {
 	const workspace = "go-workspace"
 	credential := SharedBudgetCredential{Bearer: "go-access-1", Account: "go-member", WorkspaceID: workspace}
+	catalogue := &modelregistry.OpenCodeGoSource{
+		Client: &http.Client{Transport: openCodeGoTestTransport(func(r *http.Request) (*http.Response, error) {
+			if r.Header.Get("Authorization") != "Bearer go-access-1" || r.Header.Get("X-OpenCode-Org-Id") != workspace {
+				t.Error("catalogue did not use the original OAuth login")
+			}
+			w := httptest.NewRecorder()
+			_, _ = io.WriteString(w, `{"data":[{"id":"kimi-k3","type":"chat","limit":{"context":200000},"capabilities":{"tools":{"supported":true}},"go":{"monthly_usage":{"go":10}}}]}`)
+			return w.Result(), nil
+		})},
+		Credential: func(context.Context) (string, string, string, error) {
+			return credential.Bearer, credential.Account, credential.WorkspaceID, nil
+		},
+	}
+	fetched, err := catalogue.Fetch(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
 	var calls int
 	routes := openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
 		assertOpenCodeGoRequest(t, r)
 		calls++
-		if r.Header.Get("Authorization") != fmt.Sprintf("Bearer go-access-%d", calls) || r.Header.Get("X-OpenCode-Org-Id") != workspace {
+		if r.Header.Get("Authorization") != "Bearer "+credential.Bearer || r.Header.Get("X-OpenCode-Org-Id") != workspace {
 			t.Error("wrong OAuth bearer or workspace")
 		}
 		var input struct {
@@ -458,6 +476,7 @@ func TestSharedBudgetHTTPOAuthContinuationFollowsMemberAndWorkspace(t *testing.T
 	})
 	type requestContextKey struct{}
 	goRoute := routes[modelregistry.ProviderOpenCodeGo]
+	goRoute.RequireCatalogueScope = true
 	goRoute.Credential = func(ctx context.Context) (SharedBudgetCredential, error) {
 		if ctx.Value(requestContextKey{}) != "upstream" {
 			t.Error("credential resolver did not receive request context")
@@ -465,12 +484,22 @@ func TestSharedBudgetHTTPOAuthContinuationFollowsMemberAndWorkspace(t *testing.T
 		return credential, nil
 	}
 	routes[modelregistry.ProviderOpenCodeGo] = goRoute
-	s := &Server{Config: &Config{}, Catalog: openCodeGoTestCatalog(), SharedBudgetRoutes: routes}
+	profilePath := filepath.Join(t.TempDir(), "cache.jsonl")
+	profiler, err := OpenCacheProfiler(profilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = profiler.Close() })
+	s := &Server{
+		Config: &Config{}, Catalog: modelregistry.NewCatalog(modelregistry.Snapshot{Entries: fetched.Entries}),
+		SharedBudgetRoutes: routes, CacheProfiler: profiler,
+	}
 	send := func(tail string) int {
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"model":"kimi-k3",`+tail+`}`))
 		r.Header.Set("Authorization", "Bearer downstream-token")
 		r.Header.Set("X-OpenCode-Org-Id", "downstream-workspace")
+		r.Header.Set("X-OpenCode-Session", "go-test-session")
 		r = r.WithContext(context.WithValue(r.Context(), requestContextKey{}, "upstream"))
 		s.handleLegacyCodexResponsesRoute(w, r)
 		return w.Code
@@ -479,9 +508,13 @@ func TestSharedBudgetHTTPOAuthContinuationFollowsMemberAndWorkspace(t *testing.T
 		t.Fatalf("first turn status %d, want 200", got)
 	}
 	const continuation = `"previous_response_id":"go-anchor","input":[]`
+	original := credential
 	credential.Bearer = "go-access-2"
 	if got := send(continuation); got != http.StatusOK {
 		t.Fatalf("refreshed OAuth continuation status %d, want 200", got)
+	}
+	if got := send(`"input":"new request"`); got != http.StatusOK {
+		t.Fatalf("refreshed OAuth new request status %d, want 200", got)
 	}
 	for _, otherCredential := range []SharedBudgetCredential{
 		{Bearer: "go-access-2", Account: "different-member", WorkspaceID: workspace},
@@ -492,10 +525,100 @@ func TestSharedBudgetHTTPOAuthContinuationFollowsMemberAndWorkspace(t *testing.T
 		if got := send(continuation); got != http.StatusConflict {
 			t.Fatalf("changed credential continuation status %d, want 409", got)
 		}
+		if got := send(`"input":"new request"`); got != http.StatusServiceUnavailable {
+			t.Fatalf("changed credential new request status %d, want 503", got)
+		}
 	}
-	if calls != 2 {
-		t.Fatalf("Go received %d requests, want 2", calls)
+	credential = original
+	s.Catalog.Replace(modelregistry.Snapshot{})
+	if got := send(continuation); got != http.StatusConflict {
+		t.Fatalf("disabled model continuation status %d, want 409", got)
 	}
+	if calls != 3 {
+		t.Fatalf("Go received %d requests, want 3", calls)
+	}
+	events := readCacheProfileTestEvents(t, profilePath)
+	if len(events) != calls {
+		t.Fatalf("recorded %d cache events, want %d", len(events), calls)
+	}
+	for _, event := range events {
+		if event.Route != string(modelregistry.ProviderOpenCodeGo) || event.Usage.Known ||
+			event.AccountHash == "" || event.AccountHash != events[0].AccountHash ||
+			event.SessionHash == "" || event.SessionHash != events[0].SessionHash {
+			t.Fatalf("incorrect shared-budget cache event: %+v", event)
+		}
+	}
+}
+
+func TestOpenCodeGoCatalogueRejectsKeyChangesBeforeRefresh(t *testing.T) {
+	credential := SharedBudgetCredential{Bearer: "original-key"}
+	catalogue := &modelregistry.OpenCodeGoSource{
+		Client: &http.Client{Transport: openCodeGoTestTransport(func(r *http.Request) (*http.Response, error) {
+			if r.Header.Get("Authorization") != "Bearer "+credential.Bearer {
+				t.Error("catalogue request used a different key")
+			}
+			w := httptest.NewRecorder()
+			_, _ = io.WriteString(w, `{"data":[
+				{"id":"kimi-k3","type":"chat","limit":{"context":200000},"capabilities":{"tools":{"supported":true}},"go":{"monthly_usage":{"go":10}}},
+				{"id":"glm-5.3","type":"chat","limit":{"context":200000},"capabilities":{"tools":{"supported":true}},"go":{"monthly_usage":{"go":10}}}
+			]}`)
+			return w.Result(), nil
+		})},
+		Credential: func(context.Context) (string, string, string, error) { return credential.Bearer, "", "", nil },
+	}
+	firstParty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer firstParty.Close()
+	var calls int
+	routes := openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
+		calls++
+		if r.Header.Get("Authorization") != "Bearer "+credential.Bearer {
+			t.Error("inference request used a different key")
+		}
+		w := httptest.NewRecorder()
+		_, _ = io.WriteString(w, `{"id":"go-answer"}`)
+		return w.Result(), nil
+	})
+	goRoute := routes[modelregistry.ProviderOpenCodeGo]
+	goRoute.RequireCatalogueScope = true
+	goRoute.Credential = func(context.Context) (SharedBudgetCredential, error) { return credential, nil }
+	routes[modelregistry.ProviderOpenCodeGo] = goRoute
+	s := &Server{
+		Config: &Config{}, Catalog: modelregistry.NewCatalog(modelregistry.Snapshot{}), SharedBudgetRoutes: routes,
+		ZAIUpstream: firstParty.URL, ZAIAPIKey: func() (string, error) { return "first-party-key", nil },
+	}
+	refresher := &modelregistry.Refresher{
+		Catalog:       s.Catalog,
+		SharedBudgets: []modelregistry.SharedBudgetSource{{Provider: modelregistry.ProviderOpenCodeGo, Source: catalogue, RequireFresh: true}},
+		ZAI: modelregistry.SourceFunc(func(context.Context) (modelregistry.SourceResult, error) {
+			return modelregistry.SourceResult{Entries: []modelregistry.Entry{{Provider: modelregistry.ProviderZAI, ID: "glm-5.3", Source: modelregistry.SourceNative}}}, nil
+		}),
+	}
+	refresh := func() {
+		t.Helper()
+		if _, err := refresher.Refresh(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	check := func(model string, wantStatus, wantCalls int) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(fmt.Sprintf(`{"model":%q,"input":"hello"}`, model)))
+		s.handleLegacyCodexResponsesRoute(w, r)
+		if w.Code != wantStatus || calls != wantCalls {
+			t.Errorf("%s returned HTTP %d with %d Go requests, want HTTP %d with %d requests", model, w.Code, calls, wantStatus, wantCalls)
+		}
+	}
+	refresh()
+	check("kimi-k3", http.StatusOK, 1)
+	check("glm-5.3", http.StatusOK, 2)
+	credential.Bearer = "replacement-key"
+	check("kimi-k3", http.StatusServiceUnavailable, 2)
+	check("glm-5.3", http.StatusTooManyRequests, 2)
+	refresh()
+	check("kimi-k3", http.StatusOK, 3)
+	check("glm-5.3", http.StatusOK, 4)
 }
 
 func TestSharedBudgetWebSocketReconnectRejectsProviderOwnedState(t *testing.T) {

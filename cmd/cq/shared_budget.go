@@ -57,12 +57,12 @@ var sharedBudgetAdapters = []sharedBudgetAdapter{
 		Catalogue: func(client httputil.Doer, authorize sharedBudgetAuthorization) modelregistry.NativeSource {
 			return &modelregistry.OpenCodeGoSource{
 				Client: client,
-				Credential: func(ctx context.Context) (string, string, error) {
+				Credential: func(ctx context.Context) (string, string, string, error) {
 					login, err := authorize(ctx, true)
 					if login.Account == "" {
 						login.SharedBudgetCredential.WorkspaceID = ""
 					}
-					return login.Bearer, login.WorkspaceID, err
+					return login.Bearer, login.Account, login.WorkspaceID, err
 				},
 			}
 		},
@@ -129,6 +129,7 @@ func sharedBudgetProxyRoutes(fsys fsutil.FileSystem, env func(string) string, co
 			Name: adapter.Name + " " + adapter.Plan, URL: adapter.ResponsesURL, SessionHeader: adapter.SessionHeader,
 			WorkspaceHeader: adapter.WorkspaceHeader,
 			Transport:       transport, AllowFallback: settings.AllowFallback,
+			RequireCatalogueScope: adapter.CatalogueRequiresFresh,
 			Credential: func(ctx context.Context) (proxy.SharedBudgetCredential, error) {
 				login, err := resolve(ctx, true)
 				if login.Account == "" {

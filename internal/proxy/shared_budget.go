@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/gorilla/websocket"
@@ -25,6 +26,8 @@ type SharedBudgetRoute struct {
 	SessionHeader   string
 	WorkspaceHeader string
 	AllowFallback   bool
+	// RequireCatalogueScope rejects entries without live workspace authority.
+	RequireCatalogueScope bool
 }
 
 // SharedBudgetCredential carries material for one subscription request. An
@@ -77,11 +80,16 @@ func (s *Server) selectSharedBudgetRoute(ctx context.Context, model string, fall
 	}
 	for _, entry := range s.Catalog.SharedBudgetModels(ParseModel(model)) {
 		route, ok := s.SharedBudgetRoutes[entry.Provider]
-		if !ok || route.Credential == nil || fallback && !route.AllowFallback {
+		if !ok || route.Credential == nil || entry.SharedBudget == nil || fallback && !route.AllowFallback {
+			continue
+		}
+		scope := entry.SharedBudget.CredentialScope
+		unscoped := scope == (modelregistry.SharedBudgetCredentialScope{})
+		if unscoped && route.RequireCatalogueScope {
 			continue
 		}
 		credential, err := route.Credential(ctx)
-		if err == nil && credential.Bearer != "" {
+		if err == nil && credential.Bearer != "" && (unscoped || scope == credential.binding()) {
 			return sharedBudgetSelection{id: entry.Provider, route: route, credential: credential, model: entry.ID, fallback: fallback}, true
 		}
 	}
@@ -90,6 +98,12 @@ func (s *Server) selectSharedBudgetRoute(ctx context.Context, model string, fall
 
 func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudgetSelection, session string, body []byte, compactEndpoint bool) (*http.Response, *zaiCompactResponse, error) {
 	route := selected.route
+	scope := selected.credential.binding()
+	if route.RequireCatalogueScope && !slices.ContainsFunc(s.Catalog.SharedBudgetModels(selected.model), func(entry modelregistry.Entry) bool {
+		return entry.Provider == selected.id && entry.SharedBudget != nil && entry.SharedBudget.CredentialScope == scope
+	}) {
+		return nil, nil, sharedBudgetRouteError{409, route.Name + " model is no longer available for this subscription"}
+	}
 	if len(body) > maxRequestBody {
 		return nil, nil, sharedBudgetRouteError{413, route.Name + " request body exceeds 10 MiB"}
 	}
@@ -133,6 +147,12 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 			return nil, nil, sharedBudgetRouteError{413, route.Name + " request body exceeds 10 MiB"}
 		}
 	}
+	if s.CacheProfiler != nil {
+		if identity, _ := ctx.Value(cacheProfileSessionContextKey{}).(cacheProfileRequestIdentity); identity.session == "" {
+			ctx = context.WithValue(ctx, cacheProfileSessionContextKey{}, cacheProfileRequestIdentity{session: session})
+		}
+		ctx = context.WithValue(ctx, cacheProfileRouteContextKey{}, cacheProfileRouteIdentity{route: string(selected.id), account: string(scope[:])})
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, route.URL, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, sharedBudgetRouteError{500, "cannot create " + route.Name + " request"}
@@ -148,7 +168,7 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 	if route.SessionHeader != "" {
 		req.Header.Set(route.SessionHeader, session)
 	}
-	client := &http.Client{Transport: route.Transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	client := &http.Client{Transport: s.CacheProfiler.WrapTransport(route.Transport), CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(req)
 	if err != nil {
 		return nil, nil, sharedBudgetRouteError{502, route.Name + " request failed"}
@@ -193,7 +213,11 @@ func (s *Server) serveSelectedSharedBudgetHTTP(w http.ResponseWriter, r *http.Re
 	model := extractModel(body)
 	s.observeHarness(r.Header, model, body)
 	compactEndpoint := strings.HasSuffix(r.URL.Path, "/responses/compact")
-	response, compact, err := s.sharedBudgetResponse(r.Context(), selected, sharedBudgetSession(r.Header, selected.route.SessionHeader), body, compactEndpoint)
+	ctx := r.Context()
+	if s.CacheProfiler != nil {
+		ctx = withCacheProfileRequestSession(ctx, r.Header, body)
+	}
+	response, compact, err := s.sharedBudgetResponse(ctx, selected, sharedBudgetSession(r.Header, selected.route.SessionHeader), body, compactEndpoint)
 	if err != nil {
 		var route sharedBudgetRouteError
 		if errors.As(err, &route) {
@@ -262,6 +286,9 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 	}
 	selected.credential = credential
 	s.observeHarness(header, extractModel(body), body)
+	if s.CacheProfiler != nil {
+		ctx = withCacheProfileRequestSession(ctx, header, body)
+	}
 	response, compact, err := s.sharedBudgetResponse(ctx, selected, session, body, false)
 	if err != nil {
 		return "", nil, err

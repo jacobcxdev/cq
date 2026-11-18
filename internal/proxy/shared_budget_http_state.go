@@ -16,21 +16,12 @@ import (
 type sharedBudgetBoundState struct {
 	Provider   modelregistry.Provider
 	Model      string
-	Credential [sha256.Size]byte
+	Credential modelregistry.SharedBudgetCredentialScope
 	Fallback   bool
 }
 
-func (c SharedBudgetCredential) binding() [sha256.Size]byte {
-	if c.Account == "" && c.WorkspaceID == "" {
-		return sha256.Sum256([]byte(c.Bearer))
-	}
-	// Domain-separate scoped keys and OAuth from each other and from raw API keys.
-	identity := [3]string{"oauth", c.Account, c.WorkspaceID}
-	if c.Account == "" {
-		identity = [3]string{"key", c.Bearer, c.WorkspaceID}
-	}
-	data, _ := json.Marshal(identity)
-	return sha256.Sum256(append([]byte{0}, data...))
+func (c SharedBudgetCredential) binding() modelregistry.SharedBudgetCredentialScope {
+	return modelregistry.FingerprintSharedBudgetCredential(c.Bearer, c.Account, c.WorkspaceID)
 }
 
 func (s sharedBudgetSelection) binding() sharedBudgetBoundState {

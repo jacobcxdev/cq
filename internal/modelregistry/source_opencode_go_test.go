@@ -22,7 +22,7 @@ func TestOpenCodeGoRegistryPrefersFirstParty(t *testing.T) {
 	}))
 	defer server.Close()
 	key := "configured"
-	source := &OpenCodeGoSource{Client: server.Client(), URL: server.URL, Credential: func(context.Context) (string, string, error) { return key, "wrk_test", nil }}
+	source := &OpenCodeGoSource{Client: server.Client(), URL: server.URL, Credential: func(context.Context) (string, string, string, error) { return key, "member_test", "wrk_test", nil }}
 	firstParty := Entry{Provider: ProviderZAI, ID: "glm-5.3", ContextWindow: 200000, Source: SourceNative}
 	refresher := &Refresher{
 		Catalog:       NewCatalog(Snapshot{}),
@@ -40,6 +40,20 @@ func TestOpenCodeGoRegistryPrefersFirstParty(t *testing.T) {
 	}
 	if routes := snap.SharedBudgetModels["glm-5.3"]; len(routes) != 1 || routes[0].ID != "glm-5.3" {
 		t.Fatal("missing GLM fallback")
+	}
+	if snap.SharedBudgetModels["glm-5.3"][0].SharedBudget.CredentialScope == (SharedBudgetCredentialScope{}) {
+		t.Fatal("live catalogue has no workspace scope")
+	}
+	encoded, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved Snapshot
+	if err := json.Unmarshal(encoded, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.SharedBudgetModels["glm-5.3"][0].SharedBudget.CredentialScope != (SharedBudgetCredentialScope{}) {
+		t.Fatal("serialised catalogue retained the live workspace scope")
 	}
 	body, err := AugmentCodexModels([]byte(`{"models":[]}`), snap)
 	if err != nil {
@@ -78,7 +92,7 @@ func TestOpenCodeGoCatalogueDoesNotRedirectWorkspaceCredentials(t *testing.T) {
 	defer endpoint.Close()
 	source := &OpenCodeGoSource{
 		Client: endpoint.Client(), URL: endpoint.URL,
-		Credential: func(context.Context) (string, string, error) { return "secret", "wrk_test", nil },
+		Credential: func(context.Context) (string, string, string, error) { return "secret", "member_test", "wrk_test", nil },
 	}
 	if _, err := source.Fetch(t.Context()); err == nil {
 		t.Fatal("redirect accepted as a workspace catalogue")
