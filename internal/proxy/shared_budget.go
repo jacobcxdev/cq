@@ -441,6 +441,10 @@ func (s *Server) withSharedBudgetWebSocketFallback(primary func(context.Context,
 		}
 		id, output, err := primary(ctx, downstream, header, body)
 		if errors.Is(err, errSharedBudgetFallback) {
+			body, _, err = normaliseCQCompactionInput(body, s.cqCompactionToken())
+			if err != nil {
+				return "", nil, err
+			}
 			fallbackModel = extractModel(body)
 			selected, ok := s.selectSharedBudgetFallback(ctx, body)
 			if !ok {

@@ -128,6 +128,9 @@ func (s *Server) compactZAI(ctx context.Context, header http.Header, body []byte
 		return empty, errors.New("Z.ai compaction request failed")
 	}
 	defer response.Body.Close()
+	if s.zaiRejectedBeforeGeneration(ctx, body, response) && s.canFallbackToSharedBudget(ctx, body) {
+		return empty, errSharedBudgetFallback
+	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		return empty, fmt.Errorf("Z.ai compaction rejected (HTTP %d)", response.StatusCode)
 	}
@@ -202,6 +205,12 @@ func zaiCompactionEvents(response zaiCompactResponse) []map[string]any {
 
 func (s *Server) handleZAICompaction(w http.ResponseWriter, r *http.Request, body []byte) {
 	response, err := s.compactZAI(r.Context(), r.Header, body)
+	if errors.Is(err, errSharedBudgetFallback) {
+		if selected, ok := s.selectSharedBudgetFallback(r.Context(), body); ok {
+			s.serveSelectedSharedBudgetHTTP(w, r, body, selected)
+			return
+		}
+	}
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "api_error", err.Error())
 		return
