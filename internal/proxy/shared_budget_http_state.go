@@ -147,7 +147,7 @@ func (s *Server) relaySharedBudgetHTTP(w http.ResponseWriter, response *http.Res
 	if mediaType == "text/event-stream" {
 		body = io.TeeReader(body, &sharedBudgetSSEObserver{parser: NewCodexSSEParser(1 << 20), record: record})
 		if selected.route.PlaintextCollaboration {
-			_ = copyNormalisedResponsesSSE(zaiFlushWriter{w}, body, plaintextCollaborationResponse)
+			_ = copyNormalisedResponsesSSE(zaiFlushWriter{w}, body, plaintextCollaborationResponse, true)
 			return
 		}
 	}

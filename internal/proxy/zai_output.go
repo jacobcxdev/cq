@@ -155,41 +155,59 @@ func plaintextCollaborationTool(name string) bool {
 // Buffer individual SSE events so data can be normalised without changing
 // comments, event metadata, line endings, or an unfinished final event.
 func copyZAIResponseSSE(dst io.Writer, src io.Reader) error {
-	return copyNormalisedResponsesSSE(dst, src, normaliseZAIResponse)
+	return copyNormalisedResponsesSSE(dst, src, normaliseZAIResponse, false)
 }
 
-func copyNormalisedResponsesSSE(dst io.Writer, src io.Reader, normalise func([]byte) ([]byte, error)) error {
+func copyNormalisedResponsesSSE(dst io.Writer, src io.Reader, normalise func([]byte) ([]byte, error), passOversized bool) error {
 	reader := bufio.NewReaderSize(src, 32<<10)
 	var event []byte
-	lineStart := 0
+	var lineContinues, oversized bool
+	write := func(data []byte) error {
+		if len(data) == 0 {
+			return nil
+		}
+		if n, err := dst.Write(data); err != nil {
+			return err
+		} else if n != len(data) {
+			return io.ErrShortWrite
+		}
+		return nil
+	}
 	for {
 		fragment, readErr := reader.ReadSlice('\n')
-		if len(fragment) > zaiMaxSSEEventBytes-len(event) {
-			return errors.New("Z.ai SSE event exceeds 1 MiB")
-		}
-		event = append(event, fragment...)
-		if readErr == bufio.ErrBufferFull {
-			continue
-		}
-		line := event[lineStart:]
-		complete := bytes.Equal(line, []byte("\n")) || bytes.Equal(line, []byte("\r\n"))
-		if complete || readErr != nil {
-			if len(event) != 0 {
+		complete := !lineContinues && (bytes.Equal(fragment, []byte("\n")) || bytes.Equal(fragment, []byte("\r\n")))
+		lineContinues = readErr == bufio.ErrBufferFull
+		if oversized || len(fragment) > zaiMaxSSEEventBytes-len(event) {
+			if !passOversized {
+				return errors.New("Z.ai SSE event exceeds 1 MiB")
+			}
+			// Go already accepts arbitrarily large HTTP events. Stream
+			// overflow in place, then resume rewriting at the next event.
+			if err := write(event); err != nil {
+				return err
+			}
+			event = event[:0]
+			if err := write(fragment); err != nil {
+				return err
+			}
+			oversized = !complete
+		} else {
+			event = append(event, fragment...)
+			if len(event) != 0 && (complete || readErr != nil && !lineContinues) {
 				updated, err := normaliseResponsesSSEEvent(event, normalise)
 				if err != nil {
 					return err
 				}
-				if n, err := dst.Write(updated); err != nil {
-					return err
-				} else if n != len(updated) {
-					return io.ErrShortWrite
+				if len(updated) > zaiMaxSSEEventBytes && !passOversized {
+					return errors.New("Z.ai SSE event exceeds 1 MiB")
 				}
+				if err := write(updated); err != nil {
+					return err
+				}
+				event = event[:0]
 			}
-			event, lineStart = event[:0], 0
-		} else {
-			lineStart = len(event)
 		}
-		if readErr != nil {
+		if readErr != nil && !lineContinues {
 			if readErr == io.EOF {
 				return nil
 			}
@@ -243,8 +261,5 @@ func normaliseResponsesSSEEvent(event []byte, normalise func([]byte) ([]byte, er
 		offset = span.end
 	}
 	output.Write(event[offset:])
-	if output.Len() > zaiMaxSSEEventBytes {
-		return nil, errors.New("Z.ai SSE event exceeds 1 MiB")
-	}
 	return output.Bytes(), nil
 }

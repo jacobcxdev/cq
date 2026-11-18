@@ -252,6 +252,33 @@ func TestOpenCodeGoWorkersInheritParentsRoute(t *testing.T) {
 	}
 }
 
+func TestOpenCodeGoHTTPRelaysOversizedSSE(t *testing.T) {
+	large := "event: response.output_text.delta\r\ndata: {\"delta\":\"" +
+		strings.Repeat("x", zaiMaxSSEEventBytes) + "\"}\r\n\r\n"
+	const call = "event: response.output_item.done\ndata: {\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"spawn_agent\"}}\n\n"
+	largeCompletion := "event: response.completed\ndata: {\"response\":{\"id\":\"go-answer\",\"padding\":\"" +
+		strings.Repeat("y", zaiMaxSSEEventBytes) + "\"}}\n\n"
+	s := &Server{
+		Config: &Config{}, Catalog: openCodeGoTestCatalog(),
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}},
+				Body: io.NopCloser(strings.NewReader(large + call + largeCompletion)),
+			}, nil
+		}),
+	}
+	w := httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/v1/responses",
+		strings.NewReader(`{"model":"kimi-k3","input":[],"stream":true}`)))
+	body := w.Body.String()
+	if w.Code != http.StatusOK || !strings.HasPrefix(body, large) || !strings.HasSuffix(body, largeCompletion) {
+		t.Fatalf("oversized events changed or truncated: HTTP %d, %d bytes", w.Code, len(body))
+	}
+	if !strings.Contains(body[len(large):len(body)-len(largeCompletion)], `"encrypted_function_args":[]`) {
+		t.Fatal("plaintext rewriting did not resume after the large event")
+	}
+}
+
 func TestOpenCodeGoOmitsToolOutputsWithoutCallIDs(t *testing.T) {
 	var got []map[string]json.RawMessage
 	s := &Server{
