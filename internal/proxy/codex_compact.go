@@ -20,7 +20,7 @@ func (s *Server) handleCodexCompactResponsesRoute(w http.ResponseWriter, r *http
 	if s.serveSubscriptionThroughNativeAdmission(w, r, true) {
 		return
 	}
-	if handled, _ := s.tryHandleGrok(w, r); handled {
+	if handled, _ := s.tryHandleProviderResponses(w, r); handled {
 		return
 	}
 	if handled, _ := s.tryHandleZAI(w, r); handled {
@@ -44,7 +44,7 @@ func (s *Server) handleLegacyCodexCompactResponsesRoute(w http.ResponseWriter, r
 	if s.serveSubscriptionThroughNativeAdmission(w, r, true) {
 		return
 	}
-	if handled, _ := s.tryHandleGrok(w, r); handled {
+	if handled, _ := s.tryHandleProviderResponses(w, r); handled {
 		return
 	}
 	if handled, _ := s.tryHandleZAI(w, r); handled {

@@ -139,6 +139,13 @@ func cacheProfileSession(headers http.Header) string {
 
 type cacheProfileSessionContextKey struct{}
 
+type cacheProfileRouteContextKey struct{}
+
+type cacheProfileRouteIdentity struct {
+	route   string
+	account string
+}
+
 type cacheProfileRequestIdentity struct {
 	session  string
 	chatHash string
@@ -247,7 +254,13 @@ func (t *cacheProfileTransport) RoundTrip(r *http.Request) (*http.Response, erro
 		event.SessionHash = p.hash("session", identity.session)
 		event.ChatHash = identity.chatHash
 	}
-	event.AccountHash, event.AccountSource = p.account(r.Context(), r.Header)
+	if identity, ok := r.Context().Value(cacheProfileRouteContextKey{}).(cacheProfileRouteIdentity); ok {
+		event.Route = identity.route
+		event.AccountHash = p.hash("account", identity.account)
+		event.AccountSource = "route_account"
+	} else {
+		event.AccountHash, event.AccountSource = p.account(r.Context(), r.Header)
+	}
 	if r.GetBody != nil {
 		copy, err := r.GetBody()
 		if err == nil && copy != nil {

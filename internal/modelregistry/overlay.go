@@ -53,7 +53,11 @@ func LoadOverlays(fsys fsutil.FileSystem, path string) (OverlayFile, error) {
 // The .tmp file is removed on rename failure so no partial file is left behind.
 func SaveOverlays(fsys fsutil.FileSystem, path string, overlays OverlayFile) error {
 	overlays.Models = copyEntries(overlays.Models)
-	data, err := json.MarshalIndent(overlays, "", "  ")
+	return saveModelFile(fsys, path, overlays)
+}
+
+func saveModelFile(fsys fsutil.FileSystem, path string, models any) error {
+	data, err := json.MarshalIndent(models, "", "  ")
 	if err != nil {
 		return fmt.Errorf("save overlays: marshal: %w", err)
 	}

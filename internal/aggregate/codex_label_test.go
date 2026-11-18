@@ -16,13 +16,14 @@ func TestComputeCodexRequiresKnownUsageMultipliers(t *testing.T) {
 		{name: "unknown business variant suppresses aggregate", members: []quota.Result{{Plan: "self_serve_business_promax"}}},
 		{name: "explicit nonnumeric business tier stays unknown", members: []quota.Result{{Plan: "self_serve_business_prolite", RateLimitTier: "business_custom"}}},
 		{name: "invalid numeric business tier stays unknown", members: []quota.Result{{Plan: "self_serve_business_prolite", RateLimitTier: "business_0x"}}},
-		{name: "explicit business multiplier", members: []quota.Result{{Plan: "self_serve_business_prolite", RateLimitTier: "business_8x"}}, wantLabel: "1 × business premium 8x + 1 × pro 50x = 58x", wantTotal: 58},
-		{name: "explicit business baseline", members: []quota.Result{{Plan: "self_serve_business_prolite", RateLimitTier: "business_1x"}}, wantLabel: "1 × business premium + 1 × pro 50x = 51x", wantTotal: 51},
-		{name: "Business Premium documented allowance", members: []quota.Result{{Plan: "self_serve_business_prolite"}}, wantLabel: "1 × business premium 5x + 1 × pro 50x = 55x", wantTotal: 55},
-		{name: "Business Standard known baseline", members: []quota.Result{{Plan: "team"}}, wantLabel: "1 × business + 1 × pro 50x = 51x", wantTotal: 51},
-		{name: "Plus known baseline", members: []quota.Result{{Plan: "plus"}}, wantLabel: "1 × plus + 1 × pro 50x = 51x", wantTotal: 51},
-		{name: "explicit nonnumeric Plus tier stays unknown", members: []quota.Result{{Plan: "plus", RateLimitTier: "custom"}}},
-		{name: "fully known personal usage", members: []quota.Result{{Plan: "prolite", RateLimitTier: "codex_prolite_10x"}, {Plan: "pro", RateLimitTier: "codex_pro_20x"}}, wantLabel: "1 × pro 10x + 1 × pro 20x + 1 × pro 50x = 80x", wantTotal: 80},
+		{name: "explicit business multiplier", members: []quota.Result{{Plan: "self_serve_business_prolite", RateLimitTier: "business_8x"}}, wantLabel: "1 × Business Premium 8x + 1 × Pro 50x = 58x", wantTotal: 58},
+		{name: "explicit business baseline", members: []quota.Result{{Plan: "self_serve_business_prolite", RateLimitTier: "business_1x"}}, wantLabel: "1 × Business Premium + 1 × Pro 50x = 51x", wantTotal: 51},
+		{name: "Business Premium documented allowance", members: []quota.Result{{Plan: "self_serve_business_prolite"}}, wantLabel: "1 × Business Premium 5x + 1 × Pro 50x = 55x", wantTotal: 55},
+		{name: "Business Standard known baseline", members: []quota.Result{{Plan: "team"}}, wantLabel: "1 × Business + 1 × Pro 50x = 51x", wantTotal: 51},
+		{name: "Plus known baseline", members: []quota.Result{{Plan: "plus"}}, wantLabel: "1 × Plus + 1 × Pro 50x = 51x", wantTotal: 51},
+		{name: "Plus baseline with unrecognised tier", members: []quota.Result{{Plan: "plus", RateLimitTier: "custom"}}, wantLabel: "1 × Plus + 1 × Pro 50x = 51x", wantTotal: 51},
+		{name: "Plus baseline with conflicting multiplier", members: []quota.Result{{Plan: "plus", RateLimitTier: "provider_10x"}}, wantLabel: "1 × Plus + 1 × Pro 50x = 51x", wantTotal: 51},
+		{name: "fully known personal usage", members: []quota.Result{{Plan: "prolite", RateLimitTier: "codex_prolite_10x"}, {Plan: "pro", RateLimitTier: "codex_pro_20x"}}, wantLabel: "1 × Pro 10x + 1 × Pro 20x + 1 × Pro 50x = 80x", wantTotal: 80},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			results := append(tt.members, quota.Result{Plan: "promax", RateLimitTier: "codex_promax_50x"})

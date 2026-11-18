@@ -14,11 +14,17 @@ import (
 )
 
 type Runner struct {
-	Clock    Clock
-	Cache    Cache   // nil = no caching
-	History  History // nil = cold-start, no burn-rate smoothing
-	Services map[provider.ID]provider.Services
-	Renderer Renderer
+	Clock         Clock
+	Cache         Cache   // nil = no caching
+	History       History // nil = cold-start, no burn-rate smoothing
+	Services      map[provider.ID]provider.Services
+	Renderer      Renderer
+	SharedBudgets []SharedBudgetCheck
+}
+
+type SharedBudgetCheck struct {
+	Report quota.SharedBudgetReport
+	Fetch  func(context.Context) []quota.SharedBudgetWindow
 }
 
 func (r *Runner) Run(ctx context.Context, req RunRequest) error {
@@ -67,6 +73,21 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 			mu.Unlock()
 		}()
 	}
+	var sharedBudgets []quota.SharedBudgetReport
+	if len(r.SharedBudgets) != 0 {
+		sharedBudgets = make([]quota.SharedBudgetReport, len(r.SharedBudgets))
+	}
+	for i, check := range r.SharedBudgets {
+		sharedBudgets[i] = check.Report
+		wg.Go(func() {
+			defer func() {
+				if recover() != nil {
+					fmt.Fprintf(os.Stderr, "cq: panic in %s allowance check\n", check.Report.ProviderID)
+				}
+			}()
+			sharedBudgets[i].Windows = check.Fetch(ctx)
+		})
+	}
 	wg.Wait()
 
 	var burnRates history.BurnRates
@@ -80,7 +101,9 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 	}
 
 	attachRecentBurnRates(fetched, estimates)
-	return buildReport(now, req.Providers, fetched, burnRates), nil
+	report := buildReport(now, req.Providers, fetched, burnRates)
+	report.SharedBudgetSubscriptions = sharedBudgets
+	return report, nil
 }
 
 func (r *Runner) fetchOne(ctx context.Context, now time.Time, refresh bool, id provider.ID) []quota.Result {

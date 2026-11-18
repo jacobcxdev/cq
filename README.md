@@ -142,7 +142,7 @@ These commands inspect service/runtime health. Verify a real request from the cl
 | Use banked resets before expiry or schedule them with my approval | [Codex resets](docs/usage.md#codex) and [Z.ai reset cards](docs/usage.md#zai-coding-plan) |
 | Start eligible usage windows earlier instead of waiting for my first task | [Codex priming](docs/usage.md#pins-defaults-and-priming) and [Z.ai priming](docs/usage.md#zai-coding-plan) |
 | Give each chat, project or model a suitable plugin/MCP/skill set | [Harness profiles](docs/usage.md#harness-capability-profiles) |
-| Use available models, including supported Z.ai and Grok models in compatible Codex clients, without maintaining picker entries by hand | [Model registry](docs/usage.md#model-registry), [Z.ai setup](docs/usage.md#zai-coding-plan) and [Grok setup/limits](docs/usage.md#grok-subscriptions) |
+| Use available models, including supported Z.ai, Grok and OpenCode Go models in compatible Codex clients, without maintaining picker entries by hand | [Model registry](docs/usage.md#model-registry), [Z.ai setup](docs/usage.md#zai-coding-plan) and [Grok setup/limits](docs/usage.md#grok-subscriptions) and [OpenCode Go setup](docs/usage.md#opencode-go) |
 | Access my primary Dot before Dots is available in my region | Use a **US WireGuard profile** with [native ChatGPT routing](docs/configuration.md#native-chatgpt-network-routing). Normal ChatGPT launches work; the multi-account adapter is not required. |
 | Use Dots from several accounts in one ChatGPT sidebar | Install [multi-account Dots](docs/dots.md) and launch through CQ. Secondary Dots must already be onboarded; add US WireGuard routing too if regional access requires it. |
 | Let Dots coordinate, send them one announcement or share one local message board | [Dot setup and relay](docs/dots.md#setup-and-manual-reminders), [broadcast](docs/dots.md#broadcast), [message board](docs/dots.md#shared-message-board) |
@@ -277,6 +277,8 @@ cq models overlay add
 cq models overlay prune
 cq models overlay remove
 cq models refresh
+cq opencode
+cq opencode login
 cq operation
 cq operation recover
 cq operation status

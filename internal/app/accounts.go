@@ -309,7 +309,7 @@ func PrintClaudeAccounts(accounts []provider.Account, activeEmail string) {
 			}
 		}
 
-		labelStr := acctLabelStyle.Render(plan + multiplier)
+		labelStr := acctLabelStyle.Render(provider.PlanDisplayLabel(provider.Claude, plan) + multiplier)
 		if activeEmail != "" && a.Email == activeEmail {
 			fmt.Printf("  %s %s  %s\n",
 				acctBoldStyle.Render(fmt.Sprintf("%-30s", email)),

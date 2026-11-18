@@ -456,6 +456,7 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 	serveCtx, cancelServe := context.WithCancel(ctx)
 	downstreamReader := startCodexWSDownstreamReader(serveCtx, cancelServe, downstream)
 	defer downstreamReader.close()
+	wsFallback, _ := ctx.Value(codexWSSubscriptionFallbackKey{}).(*codexWSSubscriptionFallback)
 	var active codexWSActiveUpstream
 	defer func() {
 		broker.cancelActivePrewarm(&active)
@@ -511,7 +512,25 @@ func (broker *codexTerminatingWSBroker) Serve(ctx context.Context, downstream we
 			Provider: "codex", RouteKind: "codex_websocket_frame", Direction: "downstream_request",
 			FrameType: codexTraceWebSocketFrameType(messageType), Complete: true,
 		}, encoded)
-		err = broker.serveFrame(frameCtx, downstream, pending, &active)
+		if wsFallback != nil && wsFallback.selected {
+			err = wsFallback.serve(frameCtx, messageType, pending.encoded)
+		} else if wsFallback != nil && wsFallback.hasState(pending.encoded) {
+			err = errSharedBudgetContinuation
+		} else {
+			err = broker.serveFrame(frameCtx, downstream, pending, &active)
+			if wsFallback != nil {
+				var limit *CachedUsageLimitError
+				if (errors.Is(err, errSharedBudgetFallback) || errors.As(err, &limit)) &&
+					wsFallback.eligible(frameCtx, pending) {
+					wsFallback.selected = true
+					broker.cancelActivePrewarm(&active)
+					closeCodexWSActiveUpstream(&active)
+					err = wsFallback.serve(frameCtx, messageType, pending.encoded)
+				} else if err == nil && !pending.prewarm {
+					wsFallback.nativeTurn = true
+				}
+			}
+		}
 		finishCacheProfileWebSocket(frameCtx, "interrupted")
 		pending.Release()
 		var limit *CachedUsageLimitError
@@ -1716,6 +1735,12 @@ func (broker *codexTerminatingWSBroker) readUpstreamRequest(ctx context.Context,
 			if result.AuthFailure && lifecycle.turnAdmitted && !resetAvailable {
 				if err := lifecycle.CompleteAccountUnavailableCycle(ctx, lifecycle.upstreamGeneration); err != nil {
 					return false, err
+				}
+			}
+			if result.HardUsageLimit && result.DefinitePreAdmissionRejection {
+				fallback, _ := ctx.Value(codexWSSubscriptionFallbackKey{}).(*codexWSSubscriptionFallback)
+				if fallback != nil && fallback.eligible(ctx, pending) {
+					return false, errSharedBudgetFallback
 				}
 			}
 			markCodexWSProviderTerminal(ctx, string(result.Kind), reason, reason, terminalAccountHint, 0)

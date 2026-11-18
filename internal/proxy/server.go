@@ -95,15 +95,17 @@ type Server struct {
 	Discover        ClaudeDiscoverer
 	Transport       http.RoundTripper
 	// Subscription providers retain their own credential authority.
-	GrokAuthority    grok.Authority
-	grokBindings     grokStateBindings
-	ZAIAPIKey        func() (string, error)
-	ZAIAccounts      func() ([]zaiprov.Account, error)
-	ZAIQuota         func() []quota.Result
-	ZAIUpstream      string
-	ZAITransport     http.RoundTripper
-	ZAIGateway       *zcode.Gateway
-	ZAIProjectTokens *zcode.ProjectTokenClient
+	SharedBudgetRoutes   map[modelregistry.Provider]SharedBudgetRoute
+	GrokAuthority        grok.Authority
+	grokBindings         grokStateBindings
+	sharedBudgetBindings responsesStateBindings[sharedBudgetBoundState]
+	ZAIAPIKey            func() (string, error)
+	ZAIAccounts          func() ([]zaiprov.Account, error)
+	ZAIQuota             func() []quota.Result
+	ZAIUpstream          string
+	ZAITransport         http.RoundTripper
+	ZAIGateway           *zcode.Gateway
+	ZAIProjectTokens     *zcode.ProjectTokenClient
 	// RuntimeNormalHandler is set only by the socket supervisor. It forwards
 	// public work to the selected private worker instead of running normal
 	// proxy semantics in the supervisor process.
@@ -421,12 +423,12 @@ func (s *Server) handler() (http.Handler, error) {
 	mux.HandleFunc("POST "+RuntimeCodexResetScheduleStatusPath, s.handleCodexResetScheduleStatus)
 	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptPath, s.handleCodexTurnReceipt)
 	mux.HandleFunc("POST "+RuntimeCodexTurnReceiptV2Path, s.handleCodexTurnReceipt)
-	mux.HandleFunc(codexResponsesPath, s.handleCodexResponsesRoute)
-	mux.HandleFunc(legacyCodexResponsesPath, s.handleLegacyCodexResponsesRoute)
+	mux.HandleFunc(codexResponsesPath, guardResponsesOrigin(s.handleCodexResponsesRoute))
+	mux.HandleFunc(legacyCodexResponsesPath, guardResponsesOrigin(s.handleLegacyCodexResponsesRoute))
 	mux.HandleFunc("GET "+codexCompactResponsesPath, s.handleCodexCompactResponsesGetRoute)
 	mux.HandleFunc("GET "+legacyCodexCompactResponsesPath, s.handleLegacyCodexCompactResponsesGetRoute)
-	mux.HandleFunc("POST "+codexCompactResponsesPath, s.handleCodexCompactResponsesRoute)
-	mux.HandleFunc("POST "+legacyCodexCompactResponsesPath, s.handleLegacyCodexCompactResponsesRoute)
+	mux.HandleFunc("POST "+codexCompactResponsesPath, guardResponsesOrigin(s.handleCodexCompactResponsesRoute))
+	mux.HandleFunc("POST "+legacyCodexCompactResponsesPath, guardResponsesOrigin(s.handleLegacyCodexCompactResponsesRoute))
 	mux.HandleFunc(codexAppServerPath, s.handleCodexAppServerRoute)
 	mux.HandleFunc(codexImagesPathPrefix, s.handleCodexImagesRoute)
 	mux.HandleFunc(legacyCodexImagesPathPrefix, s.handleCodexImagesRoute)
@@ -723,7 +725,7 @@ func (s *Server) handleCodexResponsesRoute(w http.ResponseWriter, r *http.Reques
 	if s.serveSubscriptionThroughNativeAdmission(w, r, false) {
 		return
 	}
-	if handled, _ := s.tryHandleGrok(w, r); handled {
+	if handled, _ := s.tryHandleProviderResponses(w, r); handled {
 		return
 	}
 	if handled, _ := s.tryHandleZAI(w, r); handled {
@@ -746,7 +748,7 @@ func (s *Server) handleLegacyCodexResponsesRoute(w http.ResponseWriter, r *http.
 	if s.serveSubscriptionThroughNativeAdmission(w, r, false) {
 		return
 	}
-	if handled, _ := s.tryHandleGrok(w, r); handled {
+	if handled, _ := s.tryHandleProviderResponses(w, r); handled {
 		return
 	}
 	if handled, _ := s.tryHandleZAI(w, r); handled {
@@ -1299,18 +1301,19 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	grokEnabled := s.GrokAuthority != nil || s.hasGrokCatalog()
+	sharedBudgetEnabled := s.hasSharedBudgetCatalog() || s.sharedBudgetBindings.hasReferences()
 	zaiEnabled := s.hasZAICatalog()
 	if !zaiEnabled && (s.ZAIAPIKey != nil || s.ZAIAccounts != nil) {
 		key, keyErr := s.zaiKey()
 		zaiEnabled = keyErr == nil && key != ""
 	}
-	if webSocketEnforcing && s.CodexWebSocketBroker == nil && !zaiEnabled && !grokEnabled {
+	if webSocketEnforcing && s.CodexWebSocketBroker == nil && !zaiEnabled && !grokEnabled && !sharedBudgetEnabled {
 		statusCode = http.StatusServiceUnavailable
 		diagError = diagnosticsErrorCode("api_error", "Codex WebSocket routing unavailable")
 		writeError(w, http.StatusServiceUnavailable, "api_error", "Codex WebSocket routing unavailable")
 		return
 	}
-	if !webSocketEnforcing && !zaiEnabled && !grokEnabled {
+	if !webSocketEnforcing && !zaiEnabled && !grokEnabled && !sharedBudgetEnabled {
 		if router, executor := s.codexWebSocketRouting(); router == nil || executor == nil {
 			statusCode = http.StatusServiceUnavailable
 			diagError = diagnosticsErrorCode("api_error", "no codex accounts configured")
@@ -1319,7 +1322,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	upstreamURL := ""
-	if !webSocketEnforcing && !zaiEnabled && !grokEnabled {
+	if !webSocketEnforcing && !zaiEnabled && !grokEnabled && !sharedBudgetEnabled {
 		var err error
 		upstreamURL, err = codexAppServerWebSocketURL(s.Config.CodexUpstream)
 		if err != nil {
@@ -1349,7 +1352,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	var firstKind int
 	var firstFrame []byte
-	if zaiEnabled || grokEnabled || s.HarnessObserver != nil {
+	if zaiEnabled || grokEnabled || sharedBudgetEnabled || s.HarnessObserver != nil {
 		var upgrade <-chan struct{}
 		if s.runtimeUpgrade != nil {
 			upgrade = s.runtimeUpgrade.PauseSignal()
@@ -1386,14 +1389,33 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if firstKind == websocket.TextMessage && RouteModelWithCatalog(extractCodexWebSocketFrameModel(firstFrame), s.Catalog) == ProviderGrok {
+		if firstKind == websocket.TextMessage && sharedBudgetEnabled {
+			_, found, complete := s.sharedBudgetRequestBinding(firstFrame)
+			if found || (!complete && s.routeCodexModel(extractCodexWebSocketFrameModel(firstFrame)) == ProviderSharedBudget) {
+				_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, errSharedBudgetContinuation.Error()), time.Now().Add(time.Second))
+				return
+			}
+		}
+		if firstKind == websocket.TextMessage && s.routeCodexModel(extractCodexWebSocketFrameModel(firstFrame)) == ProviderSharedBudget {
+			routeKind = "shared_budget_websocket"
+			selected, ok := s.selectSharedBudgetRoute(r.Context(), extractCodexWebSocketFrameModel(firstFrame), false)
+			if ok {
+				diagnosticsProvider = string(selected.id)
+				err = s.serveSharedBudgetWebSocket(r.Context(), clientConn, r.Header, firstKind, firstFrame, selected)
+			}
+			if !ok || err != nil {
+				_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "subscription upstream unavailable"), time.Now().Add(time.Second))
+			}
+			return
+		}
+		if firstKind == websocket.TextMessage && s.routeCodexModel(extractCodexWebSocketFrameModel(firstFrame)) == ProviderGrok {
 			diagnosticsProvider, routeKind = "grok", "grok_subscription_websocket"
 			if err := s.serveGrokWebSocket(r.Context(), clientConn, r.Header, firstKind, firstFrame); err != nil {
 				_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "Grok subscription unavailable"), time.Now().Add(time.Second))
 			}
 			return
 		}
-		if firstKind == websocket.TextMessage && RouteModelWithCatalog(extractCodexWebSocketFrameModel(firstFrame), s.Catalog) == ProviderZAI {
+		if firstKind == websocket.TextMessage && s.routeCodexModel(extractCodexWebSocketFrameModel(firstFrame)) == ProviderZAI {
 			diagnosticsProvider = "zai"
 			routeKind = "zai_native_websocket"
 			fmt.Fprintf(os.Stderr, "cq: route %s /responses model=%q provider=zai (native websocket)\n", r.Method, extractCodexWebSocketFrameModel(firstFrame))
@@ -1413,11 +1435,15 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		})
 		brokerContext = context.WithValue(brokerContext, cqCompactionTokenContextKey{}, s.cqCompactionToken())
 		brokerContext = context.WithValue(brokerContext, cacheProfileBrokerContextKey{}, true)
+		if sharedBudgetEnabled {
+			brokerContext = context.WithValue(brokerContext, codexWSSubscriptionFallbackKey{}, s.codexSharedBudgetWebSocketFallback(clientConn, r.Header))
+		}
 		var brokerErr error
 		if firstFrame != nil {
 			if broker, ok := s.CodexWebSocketBroker.(initialCodexWebSocketRoutingHandler); ok {
 				brokerErr = broker.ServeInitial(brokerContext, clientConn, r.Header, firstKind, firstFrame, func(model string) bool {
-					return RouteModelWithCatalog(model, s.Catalog) != ProviderZAI && RouteModelWithCatalog(model, s.Catalog) != ProviderGrok
+					provider := s.routeCodexModel(model)
+					return provider != ProviderZAI && provider != ProviderGrok && provider != ProviderSharedBudget
 				})
 			} else {
 				brokerErr = errors.New("Codex WebSocket initial-frame routing unavailable")
@@ -1518,12 +1544,16 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	var upstreamFrameIndex atomic.Int64
 	downstreamRelay := websocketRelayConn(clientConn)
 	boundRelay := &providerBoundWebSocketConn{websocketRelayConn: clientConn, normalise: func(body []byte) ([]byte, error) {
+		if s.knownSharedBudgetState(body) {
+			return nil, errSharedBudgetContinuation
+		}
 		restored, _, err := normaliseCQCompactionInput(body, s.cqCompactionToken())
 		return restored, err
 	}}
-	if zaiEnabled || grokEnabled {
+	if zaiEnabled || grokEnabled || sharedBudgetEnabled {
 		boundRelay.acceptsModel = func(model string) bool {
-			return RouteModelWithCatalog(model, s.Catalog) != ProviderZAI && RouteModelWithCatalog(model, s.Catalog) != ProviderGrok
+			provider := s.routeCodexModel(model)
+			return provider != ProviderZAI && provider != ProviderGrok && provider != ProviderSharedBudget
 		}
 	}
 	downstreamRelay = boundRelay
@@ -1885,10 +1915,12 @@ func (s *Server) proxyHandler(upstream *url.URL) http.HandlerFunc {
 			fmt.Fprintf(os.Stderr, "cq: route %s %s model=%q provider=%s\n",
 				r.Method, r.URL.Path, routeModel, providerName(routeProvider))
 		}
-		if routeProvider == ProviderZAI || routeProvider == ProviderGrok {
+		if routeProvider == ProviderZAI || routeProvider == ProviderGrok || routeProvider == ProviderSharedBudget {
 			name := "Z.ai"
 			if routeProvider == ProviderGrok {
 				name = "Grok"
+			} else if routeProvider == ProviderSharedBudget {
+				name = "Shared-budget subscription"
 			}
 			writeError(w, http.StatusBadRequest, "invalid_request_error", name+" models require the Responses endpoint")
 			return
@@ -2085,6 +2117,8 @@ func providerName(provider Provider) string {
 	switch provider {
 	case ProviderZAI:
 		return "zai"
+	case ProviderSharedBudget:
+		return "shared-budget"
 	case ProviderGrok:
 		return "grok"
 	case ProviderCodex:

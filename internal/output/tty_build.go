@@ -2,6 +2,7 @@ package output
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 	"unicode"
@@ -28,7 +29,7 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 	nowEpoch := now.Unix()
 
 	model := TTYModel{
-		Sections: make([]TTYSection, 0, len(report.Providers)),
+		Sections: make([]TTYSection, 0, len(report.Providers)+len(report.SharedBudgetSubscriptions)),
 	}
 
 	// Track which sections are provider-first (get separator) vs continuation (no separator).
@@ -79,6 +80,13 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 		}
 		model.Sections = append(model.Sections, section)
 	}
+	for i, subscription := range report.SharedBudgetSubscriptions {
+		if i == 0 || report.SharedBudgetSubscriptions[i-1].ProviderID != subscription.ProviderID {
+			providerFirstIdx = append(providerFirstIdx, len(model.Sections))
+		}
+		header, rows := buildSharedBudgetBlock(subscription, nowEpoch)
+		model.Sections = append(model.Sections, TTYSection{Header: header, WindowRows: rows})
+	}
 
 	// Measure actual max width across all rendered content.
 	sepWidth := measuredSepWidth(model)
@@ -110,11 +118,26 @@ func ttyHeader(icon, status, label string) string {
 	return prefix + strings.Repeat(" ", max(0, labelOffset-lipgloss.Width(prefix))) + boldStyle.Render(label)
 }
 
+func ttyAccountHeader(icon, status, name, plan, email string) string {
+	header := ttyHeader(icon, status, name)
+	if plan != "" {
+		header += " " + boldDimItalicStyle.Render(plan)
+	}
+	if email != "" {
+		header += " " + brightBlackStyle.Render("\u00b7 "+email)
+	}
+	return header
+}
+
 // buildResultBlock builds the header and window rows for a single quota.Result.
 func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, []TTYWindowRow) {
 	displayName := providerDisplayName(id)
 	icon := providerIcon(id)
-	status := extraCreditsStatus(r, id)
+	status := ""
+	if id == provider.Codex {
+		status = extraCreditsStatus(r.ExtraCredits)
+	}
+	plan := resultPlanLabel(r, id)
 
 	if !r.IsUsable() {
 		errMsg := "error"
@@ -130,27 +153,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 			}
 		}
 
-		header := ttyHeader(boldRedStyle.Render(icon), status, displayName)
-		label := r.Plan
-		if label == "" {
-			label = r.Tier
-		}
-		if label != "" && label != "null" {
-			if id == provider.Codex {
-				label = provider.CodexPlanLabel(label)
-			}
-			m := quota.ExtractMultiplier(r.RateLimitTier)
-			if id == provider.Codex {
-				m, _ = provider.CodexUsageMultiplier(r.Plan, r.RateLimitTier)
-			}
-			if m > 1 {
-				label += fmt.Sprintf(" %dx", m)
-			}
-			header += " " + boldDimItalicStyle.Render(label)
-		}
-		if r.Email != "" {
-			header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
-		}
+		header := ttyAccountHeader(boldRedStyle.Render(icon), status, displayName, plan, r.Email)
 		header += " " + brightBlackStyle.Render("\u00b7") + " " + boldRedStyle.Render(errMsg)
 		return header, nil
 	}
@@ -161,29 +164,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 		iconStyle = redStyle
 	}
 
-	header := ttyHeader(iconStyle.Render(icon), status, displayName)
-
-	label := r.Plan
-	if label == "" {
-		label = r.Tier
-	}
-	if label != "" && label != "null" {
-		if id == provider.Codex {
-			label = provider.CodexPlanLabel(label)
-		}
-		m := quota.ExtractMultiplier(r.RateLimitTier)
-		if id == provider.Codex {
-			m, _ = provider.CodexUsageMultiplier(r.Plan, r.RateLimitTier)
-		}
-		if m > 1 {
-			label += fmt.Sprintf(" %dx", m)
-		}
-		header += " " + boldDimItalicStyle.Render(label)
-	}
-
-	if r.Email != "" {
-		header += " " + brightBlackStyle.Render(fmt.Sprintf("\u00b7 %s", r.Email))
-	}
+	header := ttyAccountHeader(iconStyle.Render(icon), status, displayName, plan, r.Email)
 
 	if r.CacheAge > 0 && r.Error != nil {
 		errMsg := "error"
@@ -227,7 +208,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 			w.ResetAtUnix = quota.DefaultResetEpoch(periodS, nowEpoch)
 		}
 
-		row := TTYWindowRow{Label: fmt.Sprintf("       %5s  ", quota.BaseWindow(winName))}
+		row := TTYWindowRow{Label: windowLabel(string(quota.BaseWindow(winName)))}
 
 		var pace int
 		hasPace := false
@@ -245,18 +226,16 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 		if isExhausted {
 			pc = dimStyle
 		}
-		row.Pct = pc.Render(fmt.Sprintf("\U000F0A9F %3d%%", w.RemainingPct))
+		row.Pct = windowPercentage(pc, fmt.Sprintf("%d%%", w.RemainingPct))
 
+		rc := dimStyle
 		if w.ResetAtUnix > 0 {
-			rel := fmtDuration(w.ResetAtUnix - nowEpoch)
-			rc := resetStyle(w.RemainingPct, w.ResetAtUnix, nowEpoch, periodS)
+			rc = resetStyle(w.RemainingPct, w.ResetAtUnix, nowEpoch, periodS)
 			if isExhausted && w.RemainingPct > 0 {
 				rc = dimStyle
 			}
-			row.Reset = rc.Render(fmt.Sprintf("\U000F0996 %7s", rel))
-		} else {
-			row.Reset = dimStyle.Render(fmt.Sprintf("\U000F0996 %7s", "\u2014"))
 		}
+		row.Reset = windowReset(rc, w.ResetAtUnix, nowEpoch)
 
 		if hasPace {
 			diff := w.RemainingPct - pace
@@ -288,14 +267,60 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 	return header, rows
 }
 
-func extraCreditsStatus(result quota.Result, id provider.ID) string {
-	if id != provider.Codex || result.ExtraCredits == nil {
+func buildSharedBudgetBlock(subscription quota.SharedBudgetReport, nowEpoch int64) (string, []TTYWindowRow) {
+	minPct := 100
+	rows := make([]TTYWindowRow, 0, len(subscription.Windows))
+	for _, window := range subscription.Windows {
+		pct := int(math.Round(window.RemainingPct))
+		minPct = min(minPct, pct)
+		percentage := fmt.Sprintf("%d%%", pct)
+		if window.RemainingPct > 0 && window.RemainingPct < 1 {
+			percentage = "<1%"
+		}
+		rows = append(rows, TTYWindowRow{
+			Label: windowLabel(window.Name),
+			Bar:   renderBar(pct, lipgloss.Style{}, -1),
+			Pct:   windowPercentage(pctStyle(pct), percentage),
+			Reset: windowReset(resetStyle(pct, window.ResetAtUnix, nowEpoch, 0), window.ResetAtUnix, nowEpoch),
+		})
+	}
+	iconStyle := pctStyle(minPct)
+	if len(rows) == 0 {
+		iconStyle = dimStyle
+	}
+	header := ttyAccountHeader(iconStyle.Render(subscription.Icon), extraCreditsStatus(subscription.ExtraUsage), subscription.ProviderName, subscription.Plan, subscription.Email)
+	if len(rows) == 0 {
+		header += " " + brightBlackStyle.Render("\u00b7") + " " + dimStyle.Render("Allowance unavailable")
+	}
+	return header, rows
+}
+
+func windowLabel(name string) string {
+	return "       " + strings.Repeat(" ", max(0, 5-visibleWidth(name))) + name + "  "
+}
+
+func windowPercentage(style lipgloss.Style, percentage string) string {
+	return style.Render(fmt.Sprintf("\U000F0A9F %4s", percentage))
+}
+
+func windowReset(style lipgloss.Style, resetAt, now int64) string {
+	remaining := "\u2014"
+	if resetAt > 0 {
+		remaining = fmtDuration(resetAt - now)
+	} else {
+		style = dimStyle
+	}
+	return style.Render(fmt.Sprintf("\U000F0996 %7s", remaining))
+}
+
+func extraCreditsStatus(credits *quota.ExtraCredits) string {
+	if credits == nil {
 		return ""
 	}
 	icon := boldRedStyle.Render("\U000F05E4")
-	if result.ExtraCredits.Enabled {
+	if credits.Enabled {
 		icon = redStyle.Render("\U000F0FAF")
-		if result.ExtraCredits.Available != nil && *result.ExtraCredits.Available {
+		if credits.Available != nil && *credits.Available {
 			icon = greenStyle.Render("\U000F13D1")
 		}
 	}
@@ -482,11 +507,13 @@ func rowVisibleWidth(row TTYWindowRow) int {
 	if row.Bar == "" && row.Pct == "" && row.Reset == "" && row.PaceDiff == "" && row.Burndown == "" {
 		return visibleWidth(row.Label)
 	}
-	return visibleWidth(row.Label) + visibleWidth(row.Bar) +
+	width := visibleWidth(row.Label) + visibleWidth(row.Bar) +
 		2 + visibleWidth(row.Pct) +
-		2 + visibleWidth(row.Reset) +
-		2 + visibleWidth(row.PaceDiff) +
-		2 + visibleWidth(row.Burndown)
+		2 + visibleWidth(row.Reset)
+	if row.PaceDiff != "" || row.Burndown != "" {
+		width += 2 + visibleWidth(row.PaceDiff) + 2 + visibleWidth(row.Burndown)
+	}
+	return width
 }
 
 // visibleWidth returns terminal-cell width after ANSI styling is removed.
@@ -498,27 +525,32 @@ func visibleWidth(s string) int {
 func headerVisibleWidth(r quota.Result, id provider.ID) int {
 	// "  <icon>  <7-char name>" = 2 + icon(1) + 2 + len(displayName padded to 7) = 12 base
 	w := 12
-	label := r.Plan
-	if label == "" {
-		label = r.Tier
-	}
-	if label != "" && label != "null" {
-		if id == provider.Codex {
-			label = provider.CodexPlanLabel(label)
-		}
+	if label := resultPlanLabel(r, id); label != "" {
 		w += 1 + lipgloss.Width(label)
-		m := quota.ExtractMultiplier(r.RateLimitTier)
-		if id == provider.Codex {
-			m, _ = provider.CodexUsageMultiplier(r.Plan, r.RateLimitTier)
-		}
-		if m > 1 {
-			w += lipgloss.Width(fmt.Sprintf(" %dx", m))
-		}
 	}
 	if r.Email != "" {
 		w += 3 + lipgloss.Width(r.Email) // " · <email>"
 	}
 	return w
+}
+
+func resultPlanLabel(r quota.Result, id provider.ID) string {
+	label := r.Plan
+	if label == "" {
+		label = r.Tier
+	}
+	if label == "" || label == "null" {
+		return ""
+	}
+	label = provider.PlanDisplayLabel(id, label)
+	m := quota.ExtractMultiplier(r.RateLimitTier)
+	if id == provider.Codex {
+		m, _ = provider.CodexUsageMultiplier(r.Plan, r.RateLimitTier)
+	}
+	if m > 1 {
+		label += fmt.Sprintf(" %dx", m)
+	}
+	return label
 }
 
 // providerDisplayName returns the capitalised display name for a provider ID.

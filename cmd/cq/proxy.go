@@ -1186,20 +1186,19 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 
 	var proxyRefresher proxy.RegistryRefresher
 	if registryRefresher != nil {
-		proxyRefresher = proxy.RegistryRefresherFunc(func(ctx context.Context) (modelregistry.RefreshDiagnostics, error) {
+		refreshRegistry := func(ctx context.Context) (modelregistry.RefreshDiagnostics, error) {
 			diag, err := registryRefresher.Refresh(ctx)
 			writeRegistrySourceDiagnostics(os.Stderr, diag)
-			if err == nil {
+			if err == nil || diag.Replaced {
 				publishRegistry()
 			}
 			return diag, err
-		})
+		}
+		proxyRefresher = proxy.RegistryRefresherFunc(refreshRegistry)
 		initialRefreshCtx, initialRefreshCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		if initDiag, err := registryRefresher.Refresh(initialRefreshCtx); err != nil {
-			fmt.Fprintf(os.Stderr, "cq: registry: initial refresh failed: %v (continuing with empty registry)\n", err)
-		} else {
-			writeRegistrySourceDiagnostics(os.Stderr, initDiag)
-			publishRegistry()
+		_, err := refreshRegistry(initialRefreshCtx)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: registry: initial refresh failed: %v\n", err)
 		}
 		initialRefreshCancel()
 		if pipeline.StartReconciler != nil {
@@ -1446,13 +1445,14 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		defer func() { proxyCancel(); <-grokPrimerDone }()
 	}
 	srv := &proxy.Server{
-		HarnessObserver: harnessObserver,
-		GrokAuthority:   grokAuthority,
-		GrokPrimer:      grokPrimer,
-		Config:          cfg,
-		Selector:        selector,
-		Discover:        discover,
-		Transport:       transport,
+		HarnessObserver:    harnessObserver,
+		GrokAuthority:      grokAuthority,
+		SharedBudgetRoutes: sharedBudgetProxyRoutes(fsys, os.Getenv, roots.Config),
+		GrokPrimer:         grokPrimer,
+		Config:             cfg,
+		Selector:           selector,
+		Discover:           discover,
+		Transport:          transport,
 		ZAIAccounts: func() ([]zaiprov.Account, error) {
 			return zaiprov.ReadAccounts(fsys, os.Getenv, roots.Config)
 		},

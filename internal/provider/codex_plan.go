@@ -6,16 +6,20 @@ import (
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
-// CodexUsageMultiplier resolves an explicit tier before the current documented
-// included allowance. Usage-based and unfamiliar plans have no fixed weight.
+// CodexUsageMultiplier uses Plus as the baseline and resolves explicit tiers
+// for other plans before falling back to their documented included allowance.
 // https://help.openai.com/en/articles/9793128-about-chatgpt-pro-tiers
 // https://help.openai.com/en/articles/8542115-chatgpt-business-general-faq
 func CodexUsageMultiplier(plan, tier string) (int, bool) {
+	plan = strings.ToLower(plan)
+	if plan == "plus" {
+		return 1, true
+	}
 	if tier != "" {
 		return quota.ParseMultiplier(tier)
 	}
-	switch strings.ToLower(plan) {
-	case "plus", "team":
+	switch plan {
+	case "team":
 		return 1, true
 	case "prolite":
 		return 10, true
@@ -30,36 +34,39 @@ func CodexUsageMultiplier(plan, tier string) (int, bool) {
 	}
 }
 
-// CodexPlanLabel follows Codex's status labels, using CQ's lowercase style.
-// Keep this exact catalogue: business seat types are not aliases for every
-// personal Pro tier. Unknown values retain the upstream name.
-// https://github.com/openai/codex/blob/ddd1812a51f4aded35c3ec5446672474d5cb546b/codex-rs/tui/src/subscription.rs
+// CodexPlanLabel follows Codex status labels and groups Pro variants for the
+// appended usage multiplier. Unknown values retain the upstream name.
+// https://github.com/openai/codex/blob/main/codex-rs/tui/src/subscription.rs
 func CodexPlanLabel(plan string) string {
 	switch strings.ToLower(plan) {
-	case "":
-		return "unknown"
-	case "free", "go", "plus", "unknown":
-		return strings.ToLower(plan)
+	case "", "unknown":
+		return "Unknown"
+	case "free":
+		return "Free"
+	case "go":
+		return "Go"
+	case "plus":
+		return "Plus"
 	case "pro", "prolite", "promax":
-		return "pro"
+		return "Pro"
 	case "team", "self_serve_business_usage_based":
-		return "business"
+		return "Business"
 	case "self_serve_business_prolite":
-		return "business premium"
+		return "Business Premium"
 	case "business", "ent26", "enterprise", "hc", "enterprise_cbp_usage_based":
-		return "enterprise"
+		return "Enterprise"
 	case "enterprise_cbp_automation":
-		return "enterprise (automation)"
+		return "Enterprise (Automation)"
 	case "education", "edu":
-		return "edu"
+		return "Edu"
 	case "edu_plus":
-		return "edu plus"
+		return "Edu Plus"
 	case "edu_pro":
-		return "edu pro"
+		return "Edu Pro"
 	case "sci":
-		return "academic researchers"
+		return "Academic Researchers"
 	case "sci_plus":
-		return "academic researchers plus"
+		return "Academic Researchers Plus"
 	default:
 		return plan
 	}

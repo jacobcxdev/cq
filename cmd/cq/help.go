@@ -29,6 +29,7 @@ Commands:
   gemini      Show Gemini account
   zai         Manage Z.ai Coding Plan accounts
   grok        Manage Grok subscription accounts
+  opencode    Sign in to OpenCode Go
   refresh     Refresh stored OAuth tokens
   agent       Manage the background refresh agent
   service     Manage complete background service lifecycle
@@ -54,6 +55,13 @@ Verified OAuth identity takes priority over duplicate borrowed credentials.
 CodexBar accounts remain owned by CodexBar. Unverified cookies are reported as
 unavailable and are not used for inference. Model routing currently requires a
 native Responses backend in the account's catalogue.
+`,
+	"opencode": `Usage: cq opencode <command>
+
+Commands:
+  opencode login    Sign in to OpenCode Go through the browser
+
+Run cq check opencode-go to inspect the selected workspace’s allowance.
 `,
 	"codex": `Usage: cq codex <command>
 
@@ -653,7 +661,9 @@ List active registry models.
 
 Options:
   --json              Output JSON
-  --provider PROVIDER Filter by provider: anthropic, codex, zai or grok
+  --provider PROVIDER Filter by provider ID (anthropic, codex, zai, grok or an added subscription)
+
+Run cq models list --json to see provider IDs for active models.
 `,
 	"models refresh": `Usage: cq models refresh
 

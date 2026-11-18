@@ -170,7 +170,29 @@ func snapshotHasProvider(snap modelregistry.Snapshot, provider modelregistry.Pro
 	return false
 }
 
-func cachedRegistryEntries(opts registryPipelineOptions) []modelregistry.Entry {
+func loadCachedRegistrySnapshot(deps modelsDeps) (modelregistry.Snapshot, error) {
+	snap, present, err := modelregistry.LoadCodexRegistrySnapshot(deps.FS, deps.Roots)
+	if err != nil {
+		return modelregistry.Snapshot{}, err
+	}
+	if path := codexModelCachePath(deps); !present && path != "" {
+		codex, err := modelregistry.LoadCodexEntriesFromCache(deps.FS, path)
+		if err != nil {
+			return modelregistry.Snapshot{}, err
+		}
+		snap.Entries = append(snap.Entries, codex...)
+	}
+	if path := claudeModelCachePath(deps); path != "" {
+		claude, err := modelregistry.LoadClaudeEntriesFromCapabilities(deps.FS, path)
+		if err != nil {
+			return modelregistry.Snapshot{}, err
+		}
+		snap.Entries = append(snap.Entries, claude...)
+	}
+	return snap, nil
+}
+
+func cachedRegistrySnapshot(opts registryPipelineOptions) modelregistry.Snapshot {
 	deps := modelsDeps{
 		FS:      opts.FS,
 		HomeDir: opts.HomeDir,
@@ -178,17 +200,18 @@ func cachedRegistryEntries(opts registryPipelineOptions) []modelregistry.Entry {
 		Env:     opts.Env,
 		Stderr:  opts.Stderr,
 	}
-	entries, err := loadCachedNativeEntries(deps)
+	snap, err := loadCachedRegistrySnapshot(deps)
 	if err != nil {
 		fmt.Fprintf(opts.Stderr, "cq: registry: load cached models: %v\n", err)
-		return nil
+		return modelregistry.Snapshot{}
 	}
 	overlays, err := loadModelsOverlayFile(deps)
 	if err != nil {
 		fmt.Fprintf(opts.Stderr, "cq: registry: load model overlays: %v\n", err)
-		return entries
+		return snap
 	}
-	return modelregistry.Merge(entries, overlays.Models).Active
+	snap.Entries = modelregistry.Merge(snap.Entries, overlays.Models).Active
+	return snap
 }
 
 func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error) {
@@ -217,20 +240,52 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 	if opts.RefreshInterval <= 0 {
 		opts.RefreshInterval = 5 * time.Minute
 	}
-	seedEntries := cachedRegistryEntries(opts)
+	var sharedSources []modelregistry.SharedBudgetSource
+	configuredShared := make(map[modelregistry.Provider]bool, len(sharedBudgetAdapters))
+	for _, adapter := range sharedBudgetAdapters {
+		settings := loadSharedBudgetSettings(opts.FS, opts.Roots.Config, adapter.ID)
+		resolve := adapter.resolve(opts.FS, opts.Env, opts.Roots.Config, opts.HTTPClient, settings)
+		sharedSources = append(sharedSources, modelregistry.SharedBudgetSource{
+			Provider: adapter.ID, Source: adapter.Catalogue(opts.HTTPClient, resolve),
+			RequireFresh: adapter.CatalogueRequiresFresh,
+		})
+		// A workspace catalogue must recheck permission before publication.
+		if !adapter.CatalogueRequiresFresh {
+			login, err := resolve(context.Background(), false)
+			if err != nil {
+				fmt.Fprintf(opts.Stderr, "cq: registry: %s: %v\n", adapter.Name, err)
+			}
+			configuredShared[adapter.ID] = login.Bearer != "" && err == nil
+		}
+	}
+	seedSnap := cachedRegistrySnapshot(opts)
+	for id, entries := range seedSnap.SharedBudgetModels {
+		filtered := entries[:0]
+		for _, entry := range entries {
+			if configuredShared[entry.Provider] {
+				filtered = append(filtered, entry)
+			}
+		}
+		if len(filtered) == 0 {
+			delete(seedSnap.SharedBudgetModels, id)
+		} else {
+			seedSnap.SharedBudgetModels[id] = filtered
+		}
+	}
+	seedEntries := seedSnap.Entries
 	if opts.GrokAuthority == nil {
 		opts.GrokAuthority = grokReadAuthority(opts.FS, opts.Roots.Config, opts.HTTPClient, opts.Env, opts.HomeDir)
 	}
 	// Grok's display union is repopulated by the cancellable source fetch.
 	// Construction must not invoke an external source's identity HTTP reads,
 	// and a previous account's cache cannot seed another account's catalogue.
-	filteredGrok := seedEntries[:0]
+	filtered := seedEntries[:0]
 	for _, entry := range seedEntries {
-		if entry.Provider != modelregistry.ProviderGrok {
-			filteredGrok = append(filteredGrok, entry)
+		if entry.Provider != modelregistry.ProviderGrok && (entry.SharedBudget == nil || configuredShared[entry.Provider]) {
+			filtered = append(filtered, entry)
 		}
 	}
-	seedEntries = filteredGrok
+	seedEntries = filtered
 	zcodeTokens := &zcode.ProjectTokenClient{HTTP: opts.HTTPClient, Version: zcode.ClientVersion}
 	zaiTokens := func(ctx context.Context) ([]string, error) {
 		accounts, err := zaiprov.ReadAccounts(opts.FS, opts.Env, opts.Roots.Config)
@@ -265,12 +320,13 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		}
 		seedEntries = filtered
 	}
-	seedVersion := modelregistry.DiscoverCodexClientVersion(opts.FS, codexModelCachePath(modelsDeps{HomeDir: opts.HomeDir, Env: opts.Env}))
-	seedSnap := modelregistry.Snapshot{Entries: seedEntries, CodexClientVersion: seedVersion}
+	seedSnap.CodexClientVersion = modelregistry.DiscoverCodexClientVersion(opts.FS, codexModelCachePath(modelsDeps{HomeDir: opts.HomeDir, Env: opts.Env}))
+	seedSnap.Entries = seedEntries
 	catalog := modelregistry.NewCatalog(seedSnap)
 	refresher := &modelregistry.Refresher{
-		Catalog: catalog,
-		Grok:    &modelregistry.GrokSource{Authority: opts.GrokAuthority},
+		Catalog:       catalog,
+		Grok:          &modelregistry.GrokSource{Authority: opts.GrokAuthority},
+		SharedBudgets: sharedSources,
 		Anthropic: &modelregistry.AnthropicSource{
 			Client:  opts.HTTPClient,
 			BaseURL: opts.ClaudeUpstream,
@@ -390,7 +446,8 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 						writeRegistrySourceDiagnostics(opts.Stderr, diag)
 						if err != nil {
 							fmt.Fprintf(opts.Stderr, "cq: registry: background refresh: %v\n", err)
-						} else {
+						}
+						if err == nil || diag.Replaced {
 							p.Publish()
 						}
 					case <-ticker.C:

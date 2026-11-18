@@ -219,6 +219,7 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 	// Freeze the retry budget from the first plan so a changing inventory cannot
 	// keep one downstream request retrying indefinitely.
 	remainingQuotaRetries := -1
+	fallback, _ := request.Context().Value(codexHTTPSubscriptionFallbackKey{}).(responsesProviderRoute)
 	for {
 		trace := codexInstalledHTTPTraceFromContext(request.Context())
 		emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "planning", Outcome: "started"})
@@ -234,6 +235,12 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 			return handler.planner.Build(ctx, input)
 		}()
 		if err != nil {
+			var limit *CachedUsageLimitError
+			if claim == nil && fallback != nil && errors.As(err, &limit) {
+				if handled, model := fallback(writer, request, encoded); handled {
+					return true, model
+				}
+			}
 			if writeCodexCapacityError(writer, err) {
 				return true, ""
 			}
@@ -348,6 +355,11 @@ func (handler *CodexNativeHTTPHandler) serveEncoded(writer http.ResponseWriter, 
 
 		if result.Response.StatusCode < http.StatusOK || result.Response.StatusCode >= http.StatusMultipleChoices {
 			defer closeCodexHTTPResponseBody(result.Response.Body)
+			if claim == nil && result.quotaExhausted && fallback != nil {
+				if handled, routedModel := fallback(writer, request, encoded); handled {
+					return true, routedModel
+				}
+			}
 			relayErr := relayCodexHTTPResponse(writer, result.Response, false)
 			emitCodexTrace(request.Context(), CodexTraceEvent{Phase: "relay", Outcome: codexTraceRelayOutcome(relayErr), UpstreamStatus: result.Response.StatusCode, Reason: codexTraceErrorReason(relayErr)})
 			trace.relayedResponse(false, true, relayErr)

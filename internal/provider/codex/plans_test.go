@@ -122,7 +122,7 @@ func TestParseUsageCanonicalProUsageAggregate(t *testing.T) {
 		results = append(results, parseUsage(body, plan+"@example.com", plan))
 	}
 	_, summary := aggregate.Compute(results, 1000, "codex", nil)
-	if summary == nil || summary.TotalMulti != 85 || summary.Label != "1 × pro 10x + 1 × pro 20x + 1 × pro 50x + 1 × business premium 5x = 85x" {
+	if summary == nil || summary.TotalMulti != 85 || summary.Label != "1 × Pro 10x + 1 × Pro 20x + 1 × Pro 50x + 1 × Business Premium 5x = 85x" {
 		t.Fatalf("summary = %+v, want 10x + 20x + 50x + 5x usage = 85x", summary)
 	}
 }
@@ -187,37 +187,37 @@ func TestParseUsagePlanCatalogue(t *testing.T) {
 	for _, tt := range []struct {
 		plan, label, tier string
 	}{
-		{"free", "free", ""},
-		{"go", "go", ""},
-		{"plus", "plus", ""},
-		{"prolite", "pro", "codex_prolite_10x"},
-		{"pro", "pro", "codex_pro_20x"},
-		{"promax", "pro", "codex_promax_50x"},
-		{"team", "business", ""},
-		{"self_serve_business_prolite", "business premium", "codex_self_serve_business_prolite_5x"},
-		{"self_serve_business_usage_based", "business", ""},
-		{"business", "enterprise", ""},
-		{"ent26", "enterprise", ""},
-		{"enterprise_cbp_automation", "enterprise (automation)", ""},
-		{"enterprise_cbp_usage_based", "enterprise", ""},
-		{"enterprise", "enterprise", ""},
-		{"hc", "enterprise", ""},
-		{"education", "edu", ""},
-		{"edu", "edu", ""},
-		{"edu_plus", "edu plus", ""},
-		{"edu_pro", "edu pro", ""},
-		{"sci", "academic researchers", ""},
-		{"sci_plus", "academic researchers plus", ""},
+		{"free", "Free", ""},
+		{"go", "Go", ""},
+		{"plus", "Plus", ""},
+		{"prolite", "Pro", "codex_prolite_10x"},
+		{"pro", "Pro", "codex_pro_20x"},
+		{"promax", "Pro", "codex_promax_50x"},
+		{"team", "Business", ""},
+		{"self_serve_business_prolite", "Business Premium", "codex_self_serve_business_prolite_5x"},
+		{"self_serve_business_usage_based", "Business", ""},
+		{"business", "Enterprise", ""},
+		{"ent26", "Enterprise", ""},
+		{"enterprise_cbp_automation", "Enterprise (Automation)", ""},
+		{"enterprise_cbp_usage_based", "Enterprise", ""},
+		{"enterprise", "Enterprise", ""},
+		{"hc", "Enterprise", ""},
+		{"education", "Edu", ""},
+		{"edu", "Edu", ""},
+		{"edu_plus", "Edu Plus", ""},
+		{"edu_pro", "Edu Pro", ""},
+		{"sci", "Academic Researchers", ""},
+		{"sci_plus", "Academic Researchers Plus", ""},
 		{"guest", "guest", ""},
 		{"free_workspace", "free_workspace", ""},
 		{"quorum", "quorum", ""},
 		{"k12", "k12", ""},
-		{"unknown", "unknown", ""},
-		{"", "unknown", ""},
+		{"unknown", "Unknown", ""},
+		{"", "Unknown", ""},
 		{"future_plan", "future_plan", ""},
 		{"self_serve_business_pro", "self_serve_business_pro", ""},
 		{"self_serve_business_promax", "self_serve_business_promax", ""},
-		{"ProLite", "pro", "codex_prolite_10x"},
+		{"ProLite", "Pro", "codex_prolite_10x"},
 	} {
 		t.Run(tt.plan, func(t *testing.T) {
 			body, err := json.Marshal(map[string]any{

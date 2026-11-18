@@ -18,6 +18,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/keyring"
 	"github.com/jacobcxdev/cq/internal/provider"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/provider/opencodego"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
@@ -84,6 +85,65 @@ func TestRunRefreshReconcilesPendingRuntimeAfterCredentialFailure(t *testing.T) 
 	}
 	if err := runRefresh(); !errors.Is(err, codexprov.ErrCredentialAuthorityUnavailable) || !reconciled || passes != 2 {
 		t.Fatalf("credential failure stopped pending reconciliation: passes=%d reconciled=%t err=%v", passes, reconciled, err)
+	}
+}
+
+func TestRefreshAccountsRenewsOpenCodeWhenAnotherProviderFails(t *testing.T) {
+	originalDiscover, originalClient := discoverClaudeAccountsFn, newHTTPClientFn
+	originalCodex, originalGrok, originalRoots := refreshCodexAccountsFn, refreshGrokAccountsFn, resolveRefreshRootsFn
+	t.Cleanup(func() {
+		discoverClaudeAccountsFn, newHTTPClientFn = originalDiscover, originalClient
+		refreshCodexAccountsFn, refreshGrokAccountsFn, resolveRefreshRootsFn = originalCodex, originalGrok, originalRoots
+	})
+	discoverClaudeAccountsFn = func() []keyring.ClaudeOAuth { return nil }
+	newHTTPClientFn = func(time.Duration, string) httputil.Doer {
+		return testDoer(func(req *http.Request) (*http.Response, error) {
+			if req.Method != http.MethodPost || req.URL.String() != "https://opencode.ai/console/auth/device/token" {
+				t.Fatalf("unexpected refresh request %s %s", req.Method, req.URL)
+			}
+			body := `{"access_token":"renewed-access","refresh_token":"renewed-refresh","expires_in":3600,"org_id":"test-workspace"}`
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+		})
+	}
+
+	for _, tc := range []struct {
+		name     string
+		codexErr error
+		grokErr  error
+	}{
+		{name: "Codex", codexErr: codexprov.ErrCredentialInventoryDegraded},
+		{name: "Grok", grokErr: errors.New("Grok authority unavailable")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configDir := filepath.Join(t.TempDir(), "cq")
+			resolveRefreshRootsFn = func() (userdirs.Roots, error) {
+				return userdirs.Roots{Config: configDir}, nil
+			}
+			refreshCodexAccountsFn = func(context.Context, httputil.Doer, int64) (bool, error) { return false, tc.codexErr }
+			refreshGrokAccountsFn = func(context.Context) (bool, error) { return false, tc.grokErr }
+			authority := opencodego.SessionAuthority{FS: fsutil.OSFileSystem{}, ConfigDir: configDir}
+			session := opencodego.OAuthSession{
+				AccessToken: "initial-access", RefreshToken: "initial-refresh", MemberID: "test-member",
+				WorkspaceID: "test-workspace", Email: "member@example.test", ExpiresAt: time.Now().Add(45 * time.Second),
+			}
+			if err := authority.Save(t.Context(), session); err != nil {
+				t.Fatal(err)
+			}
+			wantErr := tc.codexErr
+			if wantErr == nil {
+				wantErr = tc.grokErr
+			}
+			if err := refreshAccounts(); !errors.Is(err, wantErr) {
+				t.Fatalf("refreshAccounts() error = %v, want %v", err, wantErr)
+			}
+			renewed, err := authority.Read()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !renewed.ExpiresAt.After(session.ExpiresAt) {
+				t.Fatal("OpenCode session was not renewed")
+			}
+		})
 	}
 }
 

@@ -57,7 +57,7 @@ func runRefresh() error {
 	return errors.Join(refreshErr, reconcileRefreshRuntimeFn(context.Background(), refreshAccounts))
 }
 
-func refreshAccounts() error {
+func refreshAccounts() (returnErr error) {
 	accounts := discoverClaudeAccountsFn()
 	httpClient := newHTTPClientFn(10*time.Second, version)
 	ctx := context.Background()
@@ -118,6 +118,13 @@ func refreshAccounts() error {
 	if claudeChanged {
 		invalidateProviderCacheFn(provider.Claude)
 	}
+
+	// Renew OpenCode independently of other credential authorities and
+	// before any interactive reauthentication.
+	if err := refreshOpenCodeOAuth(ctx, httpClient); err != nil {
+		defer func() { returnErr = errors.Join(returnErr, err) }()
+	}
+
 	codexChanged, err := refreshCodexAccountsFn(ctx, httpClient, now)
 	if err != nil {
 		return err
