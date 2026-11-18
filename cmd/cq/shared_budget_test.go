@@ -76,6 +76,23 @@ func TestSharedBudgetKeyPrefersEnvironmentAndRequiresPrivateFile(t *testing.T) {
 	}
 }
 
+func TestSharedBudgetSettingsAbsentInInheritedConfigDirectory(t *testing.T) {
+	fsys, dir := privateSharedBudgetConfig(t)
+	if err := fsys.Chmod(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	id := modelregistry.ProviderOpenCodeGo
+	if got := loadSharedBudgetSettings(fsys, dir, id); got.invalid {
+		t.Fatal("missing optional settings blocked credential refresh")
+	}
+	if err := fsys.WriteFile(filepath.Join(dir, string(id)+".json"), []byte(`{"allow_fallback":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := loadSharedBudgetSettings(fsys, dir, id); !got.invalid || got.AllowFallback {
+		t.Fatal("settings under non-private directory were trusted")
+	}
+}
+
 func privateSharedBudgetConfig(t *testing.T) (*fsutil.MemFS, string) {
 	t.Helper()
 	fsys := fsutil.NewMemFS()

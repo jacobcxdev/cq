@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -187,6 +188,13 @@ func (a SessionAuthority) open() (sessionStore, error) {
 }
 
 func (a SessionAuthority) read() (sessionRecord, error) {
+	// An unconfigured provider needs no private storage yet. Existing
+	// sessions still go through the secure directory and file checks.
+	if inspector, ok := a.FS.(fsutil.SecurePathInspector); ok && a.ConfigDir != "" {
+		if _, err := inspector.Lstat(filepath.Join(a.ConfigDir, oauthSessionFile)); errors.Is(err, os.ErrNotExist) {
+			return sessionRecord{}, os.ErrNotExist
+		}
+	}
 	s, err := a.open()
 	if err != nil {
 		return sessionRecord{}, err
