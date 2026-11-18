@@ -247,7 +247,7 @@ func TestProjectMalformedHistoryFallbackRemainedNarrow(t *testing.T) {
 		"encrypted call":             strings.TrimSuffix(call, "}") + `,"encrypted_arguments":"opaque"},` + result,
 		"custom missing identity":    `{"type":"custom_tool_call_output","output":"literal"}`,
 		"explicit null identity":     `{"type":"function_call_output","call_id":null,"output":"literal"}`,
-		"explicit empty identity":    `{"type":"function_call_output","call_id":"","output":"literal"}`,
+		"non-string identity":        `{"type":"function_call_output","call_id":42,"output":"literal"}`,
 		"unsupported result content": `{"type":"function_call_output","output":[{"type":"unknown","text":"literal"}]}`,
 	} {
 		t.Run(name, func(t *testing.T) {

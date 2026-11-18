@@ -16,6 +16,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
+	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 )
 
 func TestOpenCodeGoHTTPPrefersZAIAndOnlyRetriesRejectedRequests(t *testing.T) {
@@ -101,6 +103,57 @@ func TestOpenCodeGoHTTPPrefersZAIAndOnlyRetriesRejectedRequests(t *testing.T) {
 				t.Fatalf("credential read %d times, want %d dispatched requests", credentialReads, tc.wantGo)
 			}
 		})
+	}
+}
+
+func TestOpenCodeGoFallbackAfterZCodeWithEmptyToolResultIDs(t *testing.T) {
+	var primaryCalls, goCalls int
+	s := &Server{
+		Config: &Config{}, Catalog: openCodeGoTestCatalog(),
+		ZAIAccounts: func() ([]zaiprov.Account, error) {
+			return []zaiprov.Account{{
+				ID: "zcode", Transport: "zcode-start",
+				OAuth: &zcode.LoginSession{ID: "fixture", ZCodeJWT: "fixture-token"},
+			}}, nil
+		},
+		ZAIGateway: &zcode.Gateway{
+			Version: "3.17.2",
+			HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				primaryCalls++
+				var request struct{ Messages json.RawMessage }
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+					t.Fatal(err)
+				}
+				history := string(request.Messages)
+				if strings.Contains(history, "tool_result") || !strings.Contains(history, "function output") || !strings.Contains(history, "custom output") {
+					t.Errorf("ZCode did not preserve unattributed results as text: %s", history)
+				}
+				w := httptest.NewRecorder()
+				w.WriteHeader(http.StatusTooManyRequests)
+				return w.Result(), nil
+			})},
+		},
+		CodexNativeHTTP: zaiForbiddenCodexHTTP{t},
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
+			goCalls++
+			assertOpenCodeGoUpstream(t, r)
+			var request struct{ Input []map[string]json.RawMessage }
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if len(request.Input) != 1 || string(request.Input[0]["type"]) != `"message"` {
+				t.Errorf("Go did not receive cleaned history: %v", request.Input)
+			}
+			w := httptest.NewRecorder()
+			_, _ = io.WriteString(w, `{"id":"go-answer"}`)
+			return w.Result(), nil
+		}),
+	}
+	body := `{"model":"glm-5.3","input":[{"type":"message","role":"user","content":"Continue."},{"type":"function_call_output","call_id":"","output":"function output"},{"type":"custom_tool_call_output","call_id":"","output":"custom output"}]}`
+	w := httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+	if w.Code != http.StatusOK || primaryCalls != 1 || goCalls != 1 || !strings.Contains(w.Body.String(), "go-answer") {
+		t.Fatalf("status %d, ZCode calls %d, Go calls %d, body %q", w.Code, primaryCalls, goCalls, w.Body.String())
 	}
 }
 
