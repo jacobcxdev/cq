@@ -90,7 +90,7 @@ expired profiles or credentials explicitly; CI never creates certificates or
 changes Apple portal access automatically.
 
 Only the native signing step receives the `.p12`, password and profiles. The
-notarisation finishing step receives only the API key inputs. PR checks use
+notarisation submission and finishing steps receive only the API key inputs. PR checks use
 synthetic credentials and fake external commands. Private keys, imported
 keychains and task-installed profiles are removed on exit, and the prior
 keychain search list is restored. Retained request artefacts contain signed
@@ -136,9 +136,10 @@ public binaries and receipt metadata, never signing credentials.
 ## Resume a notarisation attempt
 
 Rerun the failed native job or dispatch the same tag and build again. CI finds
-the latest signing attempt for the exact release tag and source commit and
-recovers its request. If the attempt exists but the artefact is missing or
-expired, CI stops before submitting again. Preserve release run history while
+the latest notarisation submission step for the exact release tag and source
+commit and recovers its request. Archive or signing failures before that step
+can retry. If the submission step started but its artefact is missing or expired,
+CI stops before submitting again. Preserve release run history while
 a draft is active.
 The finishing helper independently verifies its version, build, source, payload
 hash and safe archive paths, then waits on the recorded submission ID without

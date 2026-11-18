@@ -4,8 +4,8 @@ set +x
 set -euo pipefail
 umask 077
 
-if [[ $# -lt 2 || $# -gt 3 || ( "$1" != prepare && "$1" != finish ) || ( "$1" == prepare && $# != 2 ) ]]; then
-  echo 'usage: build-sign-ci.sh prepare OUTPUT | finish OUTPUT [RESUME_DIRECTORY]' >&2
+if [[ $# -lt 2 || $# -gt 3 || ( "$1" != prepare && "$1" != submit && "$1" != finish ) || ( "$1" != finish && $# != 2 ) ]]; then
+  echo 'usage: build-sign-ci.sh prepare OUTPUT | submit OUTPUT | finish OUTPUT [RESUME_DIRECTORY]' >&2
   exit 64
 fi
 mode=$1
@@ -19,9 +19,11 @@ version, build, previous = (os.environ[k] for k in ["CQ_VERSION", "CQ_BUILD_NUMB
 if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version) or not re.fullmatch(r"[1-9][0-9]*", build) or not re.fullmatch(r"0|[1-9][0-9]*", previous) or int(build) <= int(previous) or not re.fullmatch(r"[0-9a-f]{40}", sys.argv[1]):
     sys.exit("Invalid release source, version or increasing integer build number")
 PY
-for name in CQ_NOTARY_KEY_P8 CQ_NOTARY_KEY_ID CQ_NOTARY_ISSUER_ID; do
-  if [[ -z ${!name:-} ]]; then echo "Missing required input: $name" >&2; exit 64; fi
-done
+if [[ $mode != prepare ]]; then
+  for name in CQ_NOTARY_KEY_P8 CQ_NOTARY_KEY_ID CQ_NOTARY_ISSUER_ID; do
+    if [[ -z ${!name:-} ]]; then echo "Missing required input: $name" >&2; exit 64; fi
+  done
+fi
 mkdir -p "$2"
 output=$(cd "$2" && pwd -P)
 temporary=$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/cq-native-sign.XXXXXX")
@@ -43,8 +45,10 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-printf '%s' "$CQ_NOTARY_KEY_P8" >"$temporary/notary.p8"
-notary_auth=(--key "$temporary/notary.p8" --key-id "$CQ_NOTARY_KEY_ID" --issuer "$CQ_NOTARY_ISSUER_ID")
+if [[ $mode != prepare ]]; then
+  printf '%s' "$CQ_NOTARY_KEY_P8" >"$temporary/notary.p8"
+  notary_auth=(--key "$temporary/notary.p8" --key-id "$CQ_NOTARY_KEY_ID" --issuer "$CQ_NOTARY_ISSUER_ID")
+fi
 
 # Bound archive, export and upload operations, including their child processes.
 run_bounded() {
@@ -91,7 +95,7 @@ PY
 
 if [[ $mode == prepare ]]; then
   request="$output/native-request"
-  if [[ -e $request ]]; then echo 'A native request already exists; resume or reconcile it before preparing another.' >&2; exit 1; fi
+  if [[ -e $request ]]; then echo 'A native request already exists; submit, resume or reconcile it before preparing another.' >&2; exit 1; fi
   for name in CQ_SIGNING_P12_BASE64 CQ_SIGNING_P12_PASSWORD CQ_HOST_PROFILE_BASE64 CQ_PROVIDER_PROFILE_BASE64; do
     if [[ -z ${!name:-} ]]; then echo "Missing required input: $name" >&2; exit 64; fi
   done
@@ -134,6 +138,8 @@ root, tmp, identity = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.
 mapping = {}
 for kind, identifier in [("host", "dev.jacobcx.cq.network"), ("provider", "dev.jacobcx.cq.network.proxy")]:
     p = plistlib.loads((tmp/(kind+".plist")).read_bytes()); e = p.get("Entitlements", {})
+    if p.get("IsXcodeManaged"):
+        sys.exit(f"The {kind} Developer ID provisioning profile must be manually managed")
     expiry = p.get("ExpirationDate")
     app_id = e.get("com.apple.application-identifier", e.get("application-identifier"))
     valid = p.get("TeamIdentifier") == ["K2648T24P4"] and e.get("com.apple.developer.team-identifier") == "K2648T24P4" and app_id == "K2648T24P4."+identifier and p.get("ProvisionsAllDevices") is True
@@ -176,12 +182,31 @@ PY
   verify_app "$temporary/export/CQNetwork.app"
   mkdir "$request"
   ditto -c -k --sequesterRsrc --keepParent "$temporary/export/CQNetwork.app" "$request/payload.zip"
-  # Persist uncertainty before the upload; interruption must never trigger resubmission.
   python3 - "$request" "$source_commit" <<'PY'
 import hashlib, json, os, pathlib, sys
 path = pathlib.Path(sys.argv[1])
-receipt = {"state":"submission-uncertain", "source_commit":sys.argv[2], "version":os.environ["CQ_VERSION"], "build_number":os.environ["CQ_BUILD_NUMBER"], "sha256":hashlib.sha256((path/"payload.zip").read_bytes()).hexdigest()}
+receipt = {"state":"prepared", "source_commit":sys.argv[2], "version":os.environ["CQ_VERSION"], "build_number":os.environ["CQ_BUILD_NUMBER"], "sha256":hashlib.sha256((path/"payload.zip").read_bytes()).hexdigest()}
 (path/"submission.json").write_text(json.dumps(receipt)+"\n")
+PY
+  echo 'Signed native payload prepared.'
+elif [[ $mode == submit ]]; then
+  request="$output/native-request"
+  # Persist uncertainty before the upload; interruption must never trigger resubmission.
+  python3 - "$request" "$source_commit" <<'PY'
+import fcntl, hashlib, json, os, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+with (path/"submission.json").open("r+") as receipt_file:
+    fcntl.flock(receipt_file, fcntl.LOCK_EX)
+    receipt = json.load(receipt_file)
+    expected = {"state":"prepared", "source_commit":sys.argv[2], "version":os.environ["CQ_VERSION"], "build_number":os.environ["CQ_BUILD_NUMBER"], "sha256":hashlib.sha256((path/"payload.zip").read_bytes()).hexdigest()}
+    if receipt != expected:
+        sys.exit("Native request is already submitted, uncertain or differs from the prepared payload")
+    receipt.update(state="submission-uncertain")
+    receipt_file.seek(0)
+    receipt_file.write(json.dumps(receipt)+"\n")
+    receipt_file.truncate()
+    receipt_file.flush()
+    os.fsync(receipt_file.fileno())
 PY
   if ! run_bounded xcrun notarytool submit "$request/payload.zip" "${notary_auth[@]}" --output-format json >"$temporary/submitted.json" 2>"$temporary/submit-error"; then
     echo 'Notary upload did not return a confirmed submission; preserve the request and reconcile it before retrying.' >&2; exit 1
