@@ -279,6 +279,81 @@ func TestOpenCodeGoHTTPRelaysOversizedSSE(t *testing.T) {
 	}
 }
 
+func TestOpenCodeGoOmitsOnlyStandardAccessPrograms(t *testing.T) {
+	for _, tc := range []struct {
+		name, programmes string
+		want             int
+	}{
+		{"standard", `{"cyber":"standard"}`, http.StatusOK},
+		{"empty", `{}`, http.StatusOK},
+		{"null", `null`, http.StatusOK},
+		{"named", `{"cyber":"nonstandard"}`, http.StatusBadRequest},
+		{"unknown", `{"cyber":"standard","other":"enabled"}`, http.StatusBadRequest},
+		{"duplicate", `{"cyber":"nonstandard","cyber":"standard"}`, http.StatusBadRequest},
+		{"invalid", `{"cyber":true}`, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			s := &Server{
+				Config: &Config{}, Catalog: openCodeGoTestCatalog(),
+				SharedBudgetRoutes: openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
+					calls++
+					var body map[string]json.RawMessage
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Fatal(err)
+					}
+					if _, exists := body["access_programs"]; exists || string(body["input"]) != `"Say PONG."` {
+						t.Fatalf("Go request lost its input or still carries a Codex access programme")
+					}
+					return httptest.NewRecorder().Result(), nil
+				}),
+			}
+			body := `{"model":"kimi-k3","input":"Say PONG.","access_programs":` + tc.programmes + `}`
+			w := httptest.NewRecorder()
+			s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+			if w.Code != tc.want || (calls == 1) != (tc.want == http.StatusOK) {
+				t.Fatalf("status %d, dispatched %d requests", w.Code, calls)
+			}
+		})
+	}
+}
+
+func TestOpenCodeGoTranslatedModelRequiresFullInput(t *testing.T) {
+	for _, nativeAPI := range []string{"chat-completions", "responses"} {
+		t.Run(nativeAPI, func(t *testing.T) {
+			entry := openCodeGoTestEntry("fixture-model")
+			entry.SharedBudget.NativeAPI = nativeAPI
+			calls := 0
+			s := &Server{
+				Config: &Config{}, Catalog: modelregistry.NewCatalog(modelregistry.Snapshot{Entries: []modelregistry.Entry{entry}}),
+				SharedBudgetRoutes: openCodeGoTestRoutes(func(*http.Request) (*http.Response, error) {
+					calls++
+					w := httptest.NewRecorder()
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"id":"go-first"}`)
+					return w.Result(), nil
+				}),
+			}
+			post := func(body string) *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+				return w
+			}
+			if w := post(`{"model":"fixture-model","input":"hello"}`); w.Code != http.StatusOK || calls != 1 {
+				t.Fatalf("first response status=%d Go calls=%d", w.Code, calls)
+			}
+			w := post(`{"model":"fixture-model","previous_response_id":"go-first","input":"continue"}`)
+			if nativeAPI == "responses" {
+				if w.Code != http.StatusOK || calls != 2 {
+					t.Fatalf("native continuation status=%d Go calls=%d", w.Code, calls)
+				}
+			} else if w.Code != http.StatusConflict || calls != 1 || !strings.Contains(w.Body.String(), "requires full input") {
+				t.Fatalf("translated continuation status=%d Go calls=%d body=%q", w.Code, calls, w.Body.String())
+			}
+		})
+	}
+}
+
 func TestOpenCodeGoOmitsToolOutputsWithoutCallIDs(t *testing.T) {
 	var got []map[string]json.RawMessage
 	s := &Server{

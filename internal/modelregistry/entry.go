@@ -22,6 +22,8 @@ const (
 type SharedBudgetModel struct {
 	ProviderName     string   `json:"provider_name"`
 	ReasoningEfforts []string `json:"reasoning_efforts,omitempty"`
+	// NativeAPI records the model's protocol when the catalogue declares it.
+	NativeAPI string `json:"native_api,omitempty"`
 	// CredentialScope ties live catalogue authority to the credential that fetched it.
 	CredentialScope SharedBudgetCredentialScope `json:"-"`
 }

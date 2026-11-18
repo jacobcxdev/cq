@@ -106,9 +106,12 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 	route := selected.route
 	originalBody := body
 	scope := selected.credential.binding()
-	if route.RequireCatalogueScope && !slices.ContainsFunc(s.Catalog.SharedBudgetModels(selected.model), func(entry modelregistry.Entry) bool {
-		return entry.Provider == selected.id && entry.SharedBudget != nil && entry.SharedBudget.CredentialScope == scope
-	}) {
+	models := s.Catalog.SharedBudgetModels(selected.model)
+	entry := slices.IndexFunc(models, func(entry modelregistry.Entry) bool {
+		return entry.Provider == selected.id && entry.SharedBudget != nil &&
+			(!route.RequireCatalogueScope || entry.SharedBudget.CredentialScope == scope)
+	})
+	if route.RequireCatalogueScope && entry < 0 {
 		return nil, nil, sharedBudgetRouteError{409, route.Name + " model is no longer available for this subscription"}
 	}
 	if len(body) > maxRequestBody {
@@ -131,6 +134,18 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 	var input map[string]json.RawMessage
 	if json.Unmarshal(body, &input) != nil || input == nil {
 		return nil, nil, sharedBudgetRouteError{400, "invalid " + route.Name + " request"}
+	}
+	if entry >= 0 {
+		nativeAPI := models[entry].SharedBudget.NativeAPI
+		if previous := bytes.TrimSpace(input["previous_response_id"]); len(previous) != 0 &&
+			!bytes.Equal(previous, []byte("null")) && !bytes.Equal(previous, []byte(`""`)) &&
+			nativeAPI != "" && nativeAPI != "responses" {
+			return nil, nil, sharedBudgetRouteError{409, route.Name + " requires full input for translated Responses models"}
+		}
+	}
+	accessPrograms, hasAccessPrograms := input["access_programs"]
+	if hasAccessPrograms && !standardResponsesAccessPrograms(accessPrograms) {
+		return nil, nil, sharedBudgetRouteError{400, route.Name + " cannot enforce the requested access programme"}
 	}
 	clientModel := input["model"]
 	model := extractModel(body)
@@ -169,8 +184,9 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 			omitEmptyCallIDOutputs = true
 		}
 	}
-	if _, hasClientMetadata := input["client_metadata"]; compacting || hasClientMetadata || model != upstreamModel || omitStreamOptions || omitEmptyCallIDOutputs || toolSchemasChanged {
+	if _, hasClientMetadata := input["client_metadata"]; compacting || hasClientMetadata || model != upstreamModel || omitStreamOptions || omitEmptyCallIDOutputs || toolSchemasChanged || hasAccessPrograms {
 		delete(input, "client_metadata")
+		delete(input, "access_programs")
 		if omitStreamOptions {
 			delete(input, "stream_options")
 		}
@@ -225,6 +241,21 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 		sealed.Object = "response.compaction"
 	}
 	return nil, &sealed, nil
+}
+
+// Standard mode carries no model access entitlement. Named or unknown
+// programmes must never be removed to get a third-party request accepted.
+func standardResponsesAccessPrograms(raw json.RawMessage) bool {
+	var compact bytes.Buffer
+	if json.Compact(&compact, raw) != nil {
+		return false
+	}
+	switch compact.String() {
+	case "null", "{}", `{"cyber":"standard"}`:
+		return true
+	default:
+		return false
+	}
 }
 
 func withoutEmptyCallIDOutputs(raw json.RawMessage) (json.RawMessage, bool) {

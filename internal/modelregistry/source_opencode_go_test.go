@@ -15,7 +15,7 @@ func TestOpenCodeGoRegistryPrefersFirstParty(t *testing.T) {
 			t.Error("workspace discovery did not receive the selected login")
 		}
 		_, _ = w.Write([]byte(`{"data":[
-			{"id":"glm-5.3","name":"GLM-5.3","type":"chat","limit":{"context":1000000,"output":65536},"capabilities":{"tools":{"supported":true}},"go":{"monthly_usage":{"go":500}}},
+			{"id":"glm-5.3","name":"GLM-5.3","type":"chat","api":{"chat-completions":{}},"limit":{"context":1000000,"output":65536},"capabilities":{"tools":{"supported":true}},"go":{"monthly_usage":{"go":500}}},
 			{"id":"kimi-k3","name":"Kimi K3","type":"chat","limit":{"context":1048576,"output":32768},"capabilities":{"tools":{"supported":true}},"go":{"monthly_usage":{"go":15}}},
 			{"id":"free-model","type":"chat","limit":{"context":1000000},"capabilities":{"tools":{"supported":true}},"go":null}
 		]}`))
@@ -38,8 +38,8 @@ func TestOpenCodeGoRegistryPrefersFirstParty(t *testing.T) {
 	if len(snap.Entries) != 2 || snap.Entries[0].Provider != ProviderZAI || snap.Entries[0].ContextWindow != 200000 {
 		t.Fatalf("public entries = %+v", snap.Entries)
 	}
-	if routes := snap.SharedBudgetModels["glm-5.3"]; len(routes) != 1 || routes[0].ID != "glm-5.3" {
-		t.Fatal("missing GLM fallback")
+	if routes := snap.SharedBudgetModels["glm-5.3"]; len(routes) != 1 || routes[0].ID != "glm-5.3" || routes[0].SharedBudget.NativeAPI != "chat-completions" {
+		t.Fatal("missing GLM fallback or its native protocol")
 	}
 	if snap.SharedBudgetModels["glm-5.3"][0].SharedBudget.CredentialScope == (SharedBudgetCredentialScope{}) {
 		t.Fatal("live catalogue has no workspace scope")
