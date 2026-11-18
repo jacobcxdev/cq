@@ -21,9 +21,10 @@ case "$(git remote get-url origin)" in
   *) fail 'origin is not the release repository' ;;
 esac
 
-# Refresh all identities without rewriting existing tags. GitHub must verify
-# both annotated signatures before any signing credentials are requested.
-git fetch --no-tags origin main "refs/tags/$tag:refs/tags/$tag" "refs/tags/$stage_tag:refs/tags/$stage_tag"
+# Checkout can create a lightweight local tag for the dispatch commit. Fetch
+# the annotations separately so preflight verifies the remote tag objects.
+fetch_refs=refs/cq-release/tags
+git fetch --no-tags origin main "refs/tags/$tag:$fetch_refs/$tag" "refs/tags/$stage_tag:$fetch_refs/$stage_tag"
 source_commit=$(git rev-parse --verify 'HEAD^{commit}')
 [[ "$source_commit" == "$(git rev-parse --verify 'FETCH_HEAD^{commit}')" ]] || fail 'checkout is not current origin/main'
 verified_tag() {
@@ -33,8 +34,9 @@ verified_tag() {
   [[ "$object" =~ ^[0-9a-f]{40}$ ]] || fail 'release tag is not annotated'
   gh api "repos/$repository/git/tags/$object" > "$temporary/tag.json"
   jq -e --arg name "$name" '.tag == $name and .verification.verified == true and .object.type == "commit"' "$temporary/tag.json" >/dev/null || fail 'release tag signature is not verified'
+  [[ "$object" == "$(git rev-parse --verify "$fetch_refs/$name^{tag}")" ]] || fail 'fetched release tag differs from GitHub identity'
   commit=$(jq -er .object.sha "$temporary/tag.json")
-  [[ "$commit" == "$source_commit" && "$commit" == "$(git rev-parse --verify "refs/tags/$name^{commit}")" ]] || fail 'release tag does not identify current main'
+  [[ "$commit" == "$source_commit" && "$commit" == "$(git rev-parse --verify "$fetch_refs/$name^{commit}")" ]] || fail 'release tag does not identify current main'
   [[ "$(git rev-parse --verify "$commit:native/macos-network")" == "$(git rev-parse --verify HEAD:native/macos-network)" ]] || fail 'native source identity differs'
 }
 verified_tag "$tag"

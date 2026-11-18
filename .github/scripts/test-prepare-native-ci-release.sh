@@ -12,9 +12,16 @@ export PATH="$root/bin:$PATH" GITHUB_REPOSITORY=jacobcxdev/cq
 cat > "$root/bin/git" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ "$*" == 'remote get-url origin' ]]; then
+  echo "$ORIGIN"
+  exit
+fi
+if [[ -n "${NATIVE_CI_REAL_GIT:-}" ]]; then
+  exec "$NATIVE_CI_REAL_GIT" "$@"
+fi
 case "$*" in
-  'remote get-url origin') echo "$ORIGIN" ;;
   fetch*) ;;
+  *'^{tag}') echo cccccccccccccccccccccccccccccccccccccccc ;;
   'rev-parse --verify FETCH_HEAD^{commit}'|'rev-parse --verify refs/remotes/origin/main^{commit}') echo "$MAIN_COMMIT" ;;
   'rev-parse --verify HEAD^{commit}'|'rev-parse HEAD'|*'^{commit}') echo "$HEAD_COMMIT" ;;
   *':native/macos-network') echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
@@ -28,7 +35,12 @@ cat > "$root/bin/gh" <<'FAKE'
 set -euo pipefail
 printf '%s\n' "$*" >> "$FIXTURE/gh.log"
 case "$*" in
-  'api repos/jacobcxdev/cq/git/ref/tags/'*) printf '{"object":{"type":"%s","sha":"cccccccccccccccccccccccccccccccccccccccc"}}\n' "${TAG_TYPE:-tag}" ;;
+  'api repos/jacobcxdev/cq/git/ref/tags/'*)
+    object=cccccccccccccccccccccccccccccccccccccccc
+    if [[ -n "${NATIVE_CI_REAL_GIT:-}" ]]; then
+      object=$("$NATIVE_CI_REAL_GIT" --git-dir="$FIXTURE/origin.git" rev-parse "refs/tags/${2##*/}")
+    fi
+    printf '{"object":{"type":"%s","sha":"%s"}}\n' "${TAG_TYPE:-tag}" "$object" ;;
   'api repos/jacobcxdev/cq/git/tags/'*)
     tag=$(tail -2 "$FIXTURE/gh.log" | head -1); tag=${tag##*/}
     printf '{"tag":"%s","verification":{"verified":%s},"object":{"type":"commit","sha":"%s"}}\n' "$tag" "${STAGE_VERIFIED:-$VERIFIED}" "${TAG_COMMIT:-$HEAD_COMMIT}" ;;
@@ -139,23 +151,29 @@ for change in '.name="wrong"' '.target_commitish="wrong"' '.prerelease=true' '.a
   jq ".[0][1] |= ($change)" "$root/temp.json" > "$root/releases.json"
   reject
 done
-# Exercise the actual multi-ref Git fetch with stale tracking state and tags
-# pointing at an older commit. Existing local objects keep this probe small.
+# Reproduce checkout's lightweight parent tag alongside the remote's annotations.
+# Keep a stale origin/main to prove validation uses the explicit main fetch.
+fixture
 "$real_git" -c gc.auto=0 -c maintenance.auto=false clone --quiet --bare --shared "$repository_root" "$root/origin.git"
 current=$("$real_git" -C "$repository_root" rev-parse HEAD)
 older=$("$real_git" -C "$repository_root" rev-parse 'HEAD^')
 "$real_git" --git-dir="$root/origin.git" update-ref refs/heads/main "$current"
-"$real_git" --git-dir="$root/origin.git" update-ref refs/tags/native-ci-fixture "$older"
-"$real_git" --git-dir="$root/origin.git" update-ref refs/tags/native-ci-stage-fixture "$older"
+for tag in v1.2.3 cq-native-stage-v1.2.3; do
+  "$real_git" --git-dir="$root/origin.git" -c user.name=Fixture -c user.email=fixture@example.invalid \
+    tag --annotate --no-sign -m "$tag" "$tag" "$current"
+done
 "$real_git" init --quiet "$root/fetch-probe"
 "$real_git" -C "$root/fetch-probe" config gc.auto 0
 "$real_git" -C "$root/fetch-probe" config maintenance.auto false
 "$real_git" -C "$root/fetch-probe" remote add origin "$root/origin.git"
 "$real_git" -C "$root/fetch-probe" config --unset-all remote.origin.fetch
-"$real_git" -C "$root/fetch-probe" fetch --quiet --no-auto-maintenance --no-tags origin "$older"
+"$real_git" -C "$root/fetch-probe" fetch --quiet --no-tags origin main
 "$real_git" -C "$root/fetch-probe" update-ref refs/remotes/origin/main "$older"
-"$real_git" -C "$root/fetch-probe" fetch --quiet --no-auto-maintenance --no-tags origin main refs/tags/native-ci-fixture:refs/tags/native-ci-fixture refs/tags/native-ci-stage-fixture:refs/tags/native-ci-stage-fixture
-[[ "$("$real_git" -C "$root/fetch-probe" rev-parse --verify 'FETCH_HEAD^{commit}')" == "$current" ]]
-[[ "$("$real_git" -C "$root/fetch-probe" rev-parse --verify 'refs/remotes/origin/main^{commit}')" == "$older" ]]
-[[ "$("$real_git" -C "$root/fetch-probe" rev-parse --verify 'refs/tags/native-ci-fixture^{commit}')" == "$older" ]]
+"$real_git" -C "$root/fetch-probe" update-ref refs/tags/v1.2.2 "$older"
+"$real_git" -C "$root/fetch-probe" update-ref refs/tags/v1.2.3 "$current"
+"$real_git" -C "$root/fetch-probe" checkout --quiet --detach refs/tags/v1.2.3
+(cd "$root/fetch-probe"; NATIVE_CI_REAL_GIT="$real_git" HEAD_COMMIT="$current" run)
+[[ "$("$real_git" -C "$root/fetch-probe" rev-parse --verify refs/remotes/origin/main)" == "$older" ]]
+[[ "$("$real_git" -C "$root/fetch-probe" rev-parse --verify refs/tags/v1.2.3)" == "$current" ]]
+grep -Fxq "source_commit=$current" "$GITHUB_OUTPUT"
 echo 'Native CI preparation checks passed.'
