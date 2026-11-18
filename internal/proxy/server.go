@@ -1384,7 +1384,15 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if firstKind == websocket.TextMessage {
-			s.observeHarness(r.Header, extractCodexWebSocketFrameModel(firstFrame), firstFrame)
+			model := extractCodexWebSocketFrameModel(firstFrame)
+			switch s.routeCodexModel(model) {
+			case ProviderSharedBudget, ProviderZAI, ProviderGrok:
+				if !standardResponsesAccessPrograms(firstFrame) {
+					_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "subscription route cannot enforce the requested access programme"), time.Now().Add(time.Second))
+					return
+				}
+			}
+			s.observeHarness(r.Header, model, firstFrame)
 			firstFrame, _, err = normaliseCQCompactionInput(firstFrame, s.cqCompactionToken())
 			if err != nil {
 				return

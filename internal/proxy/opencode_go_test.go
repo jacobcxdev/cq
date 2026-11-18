@@ -281,16 +281,18 @@ func TestOpenCodeGoHTTPRelaysOversizedSSE(t *testing.T) {
 
 func TestOpenCodeGoOmitsOnlyStandardAccessPrograms(t *testing.T) {
 	for _, tc := range []struct {
-		name, programmes string
-		want             int
+		name, fields string
+		want         int
 	}{
-		{"standard", `{"cyber":"standard"}`, http.StatusOK},
-		{"empty", `{}`, http.StatusOK},
-		{"null", `null`, http.StatusOK},
-		{"named", `{"cyber":"nonstandard"}`, http.StatusBadRequest},
-		{"unknown", `{"cyber":"standard","other":"enabled"}`, http.StatusBadRequest},
-		{"duplicate", `{"cyber":"nonstandard","cyber":"standard"}`, http.StatusBadRequest},
-		{"invalid", `{"cyber":true}`, http.StatusBadRequest},
+		{"standard", `"access_programs":{"cyber":"standard"}`, http.StatusOK},
+		{"empty", `"access_programs":{}`, http.StatusOK},
+		{"null", `"access_programs":null`, http.StatusOK},
+		{"named", `"access_programs":{"cyber":"nonstandard"}`, http.StatusBadRequest},
+		{"unknown", `"access_programs":{"cyber":"standard","other":"enabled"}`, http.StatusBadRequest},
+		{"duplicate programme", `"access_programs":{"cyber":"nonstandard","cyber":"standard"}`, http.StatusBadRequest},
+		{"duplicate declaration", `"access_programs":{"cyber":"nonstandard"},"access_programs":{"cyber":"standard"}`, http.StatusBadRequest},
+		{"nested programme", `"params":{"access_programs":{"cyber":"nonstandard"}}`, http.StatusBadRequest},
+		{"invalid", `"access_programs":{"cyber":true}`, http.StatusBadRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
@@ -308,7 +310,7 @@ func TestOpenCodeGoOmitsOnlyStandardAccessPrograms(t *testing.T) {
 					return httptest.NewRecorder().Result(), nil
 				}),
 			}
-			body := `{"model":"kimi-k3","input":"Say PONG.","access_programs":` + tc.programmes + `}`
+			body := `{"model":"kimi-k3","input":"Say PONG.",` + tc.fields + `}`
 			w := httptest.NewRecorder()
 			s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
 			if w.Code != tc.want || (calls == 1) != (tc.want == http.StatusOK) {
@@ -351,6 +353,29 @@ func TestOpenCodeGoTranslatedModelRequiresFullInput(t *testing.T) {
 				t.Fatalf("translated continuation status=%d Go calls=%d body=%q", w.Code, calls, w.Body.String())
 			}
 		})
+	}
+}
+
+func TestOpenCodeGoWebSocketRejectsAmbiguousAccessBeforeRewriting(t *testing.T) {
+	var calls atomic.Int32
+	s := &Server{
+		Config: &Config{ClaudeUpstream: "https://claude.test"}, Catalog: openCodeGoTestCatalog(),
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(*http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return httptest.NewRecorder().Result(), nil
+		}),
+	}
+	c := openZAITestWebSocket(t, s, nil)
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"kimi-k3","generate":false,"input":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+	_ = readZAITestCompletion(t, c)
+	request := `{"type":"response.create","model":"kimi-k3","input":[],"access_programs":{"cyber":"nonstandard"},"access_programs":{"cyber":"standard"}}`
+	if err := c.WriteMessage(websocket.TextMessage, []byte(request)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.ReadMessage(); err == nil || calls.Load() != 0 {
+		t.Fatalf("ambiguous programme reached Go: calls=%d, error=%v", calls.Load(), err)
 	}
 }
 

@@ -88,6 +88,9 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 	if err := json.Unmarshal(first, &request); err != nil || request == nil {
 		return errors.New("invalid " + bridge.Name + " WebSocket request")
 	}
+	if (request["access_programs"] != nil || request["params"] != nil) && !standardResponsesAccessPrograms(first) {
+		return errors.New(bridge.Name + " cannot enforce the requested access programme")
+	}
 	var frameType string
 	_ = json.Unmarshal(request["type"], &frameType)
 	if frameType != "response.create" {

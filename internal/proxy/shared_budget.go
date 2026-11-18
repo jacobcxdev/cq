@@ -143,9 +143,12 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 			return nil, nil, sharedBudgetRouteError{409, route.Name + " requires full input for translated Responses models"}
 		}
 	}
-	accessPrograms, hasAccessPrograms := input["access_programs"]
-	if hasAccessPrograms && !standardResponsesAccessPrograms(accessPrograms) {
-		return nil, nil, sharedBudgetRouteError{400, route.Name + " cannot enforce the requested access programme"}
+	_, hasAccessPrograms := input["access_programs"]
+	if hasAccessPrograms || input["params"] != nil {
+		// Scan the original bytes so rewriting history cannot hide duplicate declarations.
+		if !standardResponsesAccessPrograms(originalBody) {
+			return nil, nil, sharedBudgetRouteError{400, route.Name + " cannot enforce the requested access programme"}
+		}
 	}
 	clientModel := input["model"]
 	model := extractModel(body)
@@ -245,9 +248,17 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 
 // Standard mode carries no model access entitlement. Named or unknown
 // programmes must never be removed to get a third-party request accepted.
-func standardResponsesAccessPrograms(raw json.RawMessage) bool {
+func standardResponsesAccessPrograms(body []byte) bool {
+	scanner := codexFrozenJSONScanner{source: body}
+	fields, err := scanner.scanRequest()
+	if err != nil || fields.paramsAccessPrograms.present {
+		return false
+	}
+	if !fields.rootAccessPrograms.present {
+		return true
+	}
 	var compact bytes.Buffer
-	if json.Compact(&compact, raw) != nil {
+	if json.Compact(&compact, fields.rootAccessPrograms.bytes(body)) != nil {
 		return false
 	}
 	switch compact.String() {
