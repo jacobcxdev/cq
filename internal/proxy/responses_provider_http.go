@@ -72,6 +72,14 @@ func (s *Server) tryHandleProviderResponsesEncoded(w http.ResponseWriter, r *htt
 	if s.serveSharedBudgetContinuation(w, r, decoded, model) {
 		return true, model
 	}
+	if selected, inherited := s.sharedBudgetWorkerRoute(r.Context(), r.Header, decoded, model); inherited {
+		if selected.id == "" {
+			writeError(w, http.StatusConflict, "invalid_request_error", "parent subscription unavailable or worker input cannot be replayed")
+		} else {
+			s.serveSelectedSharedBudgetHTTP(w, r, decoded, selected)
+		}
+		return true, model
+	}
 	provider := s.routeCodexModel(model)
 	if provider == ProviderSharedBudget {
 		s.serveSharedBudgetHTTP(w, r, decoded)

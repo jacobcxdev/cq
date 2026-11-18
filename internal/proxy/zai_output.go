@@ -13,20 +13,24 @@ const zaiMaxSSEEventBytes = 1 << 20
 // Z.ai emits plaintext reasoning and collaboration arguments in shapes Codex
 // cannot safely replay to other providers without normalisation.
 func normaliseZAIResponse(data []byte) ([]byte, error) {
+	return normaliseResponsesOutput(data, normaliseZAIResponseItem)
+}
+
+func normaliseResponsesOutput(data []byte, itemNormaliser func(json.RawMessage) (json.RawMessage, bool, error)) ([]byte, error) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
 		if !json.Valid(data) {
-			return nil, errors.New("invalid Z.ai response JSON")
+			return nil, errors.New("invalid Responses JSON")
 		}
 		return data, nil
 	}
 	var envelope map[string]json.RawMessage
 	if err := json.Unmarshal(data, &envelope); err != nil {
-		return nil, errors.New("invalid Z.ai response JSON")
+		return nil, errors.New("invalid Responses JSON")
 	}
 	changed := false
 	if item, ok := envelope["item"]; ok {
-		updated, itemChanged, err := normaliseZAIResponseItem(item)
+		updated, itemChanged, err := itemNormaliser(item)
 		if err != nil {
 			return nil, err
 		}
@@ -48,7 +52,7 @@ func normaliseZAIResponse(data []byte) ([]byte, error) {
 		}
 		outputChanged := false
 		for i, item := range output {
-			updated, itemChanged, err := normaliseZAIResponseItem(item)
+			updated, itemChanged, err := itemNormaliser(item)
 			if err != nil {
 				return nil, err
 			}
@@ -83,7 +87,7 @@ func normaliseZAIResponseItem(raw json.RawMessage) (json.RawMessage, bool, error
 	if err := json.Unmarshal(raw, &call); err != nil || call == nil {
 		return raw, false, nil
 	}
-	var kind, namespace, name string
+	var kind string
 	if json.Unmarshal(call["type"], &kind) != nil {
 		return raw, false, nil
 	}
@@ -123,14 +127,17 @@ func normaliseZAIResponseItem(raw json.RawMessage) (json.RawMessage, bool, error
 		updated, err := json.Marshal(call)
 		return updated, err == nil, err
 	}
-	if kind != "function_call" ||
+	return markPlaintextCollaborationCall(raw, call)
+}
+
+func markPlaintextCollaborationCall(raw json.RawMessage, call map[string]json.RawMessage) (json.RawMessage, bool, error) {
+	var kind, namespace, name string
+	if json.Unmarshal(call["type"], &kind) != nil || kind != "function_call" ||
 		json.Unmarshal(call["namespace"], &namespace) != nil || namespace != "collaboration" ||
 		json.Unmarshal(call["name"], &name) != nil {
 		return raw, false, nil
 	}
-	switch name {
-	case "spawn_agent", "send_message", "followup_task":
-	default:
+	if !plaintextCollaborationTool(name) {
 		return raw, false, nil
 	}
 	if marker, ok := call["encrypted_function_args"]; ok && !bytes.Equal(bytes.TrimSpace(marker), []byte("null")) {
@@ -141,9 +148,17 @@ func normaliseZAIResponseItem(raw json.RawMessage) (json.RawMessage, bool, error
 	return updated, err == nil, err
 }
 
+func plaintextCollaborationTool(name string) bool {
+	return name == "spawn_agent" || name == "send_message" || name == "followup_task"
+}
+
 // Buffer individual SSE events so data can be normalised without changing
 // comments, event metadata, line endings, or an unfinished final event.
 func copyZAIResponseSSE(dst io.Writer, src io.Reader) error {
+	return copyNormalisedResponsesSSE(dst, src, normaliseZAIResponse)
+}
+
+func copyNormalisedResponsesSSE(dst io.Writer, src io.Reader, normalise func([]byte) ([]byte, error)) error {
 	reader := bufio.NewReaderSize(src, 32<<10)
 	var event []byte
 	lineStart := 0
@@ -160,7 +175,7 @@ func copyZAIResponseSSE(dst io.Writer, src io.Reader) error {
 		complete := bytes.Equal(line, []byte("\n")) || bytes.Equal(line, []byte("\r\n"))
 		if complete || readErr != nil {
 			if len(event) != 0 {
-				updated, err := normaliseZAISSEEvent(event)
+				updated, err := normaliseResponsesSSEEvent(event, normalise)
 				if err != nil {
 					return err
 				}
@@ -183,7 +198,7 @@ func copyZAIResponseSSE(dst io.Writer, src io.Reader) error {
 	}
 }
 
-func normaliseZAISSEEvent(event []byte) ([]byte, error) {
+func normaliseResponsesSSEEvent(event []byte, normalise func([]byte) ([]byte, error)) ([]byte, error) {
 	type dataSpan struct{ start, end int }
 	var spans []dataSpan
 	var data []byte
@@ -214,7 +229,7 @@ func normaliseZAISSEEvent(event []byte) ([]byte, error) {
 	if anchor < 0 || !json.Valid(data) {
 		return event, nil
 	}
-	updated, err := normaliseZAIResponse(data)
+	updated, err := normalise(data)
 	if err != nil || bytes.Equal(updated, data) {
 		return event, err
 	}

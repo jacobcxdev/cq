@@ -217,10 +217,6 @@ func (s *Server) serveZAIWebSocket(ctx context.Context, downstream *websocket.Co
 	})
 }
 
-func zaiResponseInput(raw json.RawMessage) ([]json.RawMessage, error) {
-	return responsesBridgeInput(raw, "Z.ai")
-}
-
 func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *websocket.Conn, header http.Header, body []byte) (string, []json.RawMessage, error) {
 	s.observeHarness(header, extractModel(body), body)
 	body, _, err := normaliseCQCompactionInput(body, s.cqCompactionToken())

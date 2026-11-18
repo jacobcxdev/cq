@@ -864,6 +864,10 @@ IDs and encrypted reasoning on their original account between HTTP requests
 while the proxy is running. OAuth refresh keeps that account binding. After a
 restart, workspace change or API-key rotation, resume with full readable input.
 
+Fresh Codex workers using the same model inherit the Go account that served
+their parent turn while CQ is running. CQ passes their task messages as
+ordinary text through Go's Responses endpoint.
+
 Use `cq check opencode-go` to inspect the 5h, 7d and monthly allowance windows.
 CQ shows the remaining percentages and reset times supplied by OpenCode.
 These windows have no pace or burn projections. If CQ cannot read the limits,

@@ -99,6 +99,7 @@ type Server struct {
 	GrokAuthority        grok.Authority
 	grokBindings         grokStateBindings
 	sharedBudgetBindings responsesStateBindings[sharedBudgetBoundState]
+	sharedBudgetTurns    sharedBudgetTurnRoutes
 	ZAIAPIKey            func() (string, error)
 	ZAIAccounts          func() ([]zaiprov.Account, error)
 	ZAIQuota             func() []quota.Result
@@ -1393,6 +1394,17 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			_, found, complete := s.sharedBudgetRequestBinding(firstFrame)
 			if found || (!complete && s.routeCodexModel(extractCodexWebSocketFrameModel(firstFrame)) == ProviderSharedBudget) {
 				_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, errSharedBudgetContinuation.Error()), time.Now().Add(time.Second))
+				return
+			}
+			if selected, inherited := s.sharedBudgetWorkerRoute(r.Context(), r.Header, firstFrame, extractCodexWebSocketFrameModel(firstFrame)); inherited {
+				routeKind = "shared_budget_websocket"
+				if selected.id != "" {
+					diagnosticsProvider = string(selected.id)
+					if err := s.serveSharedBudgetWebSocket(r.Context(), clientConn, r.Header, firstKind, firstFrame, selected); err == nil {
+						return
+					}
+				}
+				_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "parent subscription or worker input unavailable"), time.Now().Add(time.Second))
 				return
 			}
 		}
