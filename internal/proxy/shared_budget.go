@@ -123,6 +123,9 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 	}
 	if route.PlaintextCollaboration {
 		body, err = normaliseSubscriptionAgentMessages(body, route.Name)
+		if errors.Is(err, errEncryptedSubscriptionAgentMessage) {
+			return nil, nil, err
+		}
 		if err != nil {
 			return nil, nil, sharedBudgetRouteError{400, err.Error()}
 		}
@@ -320,6 +323,10 @@ func (s *Server) serveSelectedSharedBudgetHTTP(w http.ResponseWriter, r *http.Re
 	}
 	response, compact, err := s.sharedBudgetResponse(ctx, selected, sharedBudgetSession(r.Header, selected.route.SessionHeader), r.Header, body, compactEndpoint)
 	if err != nil {
+		if errors.Is(err, errEncryptedSubscriptionAgentMessage) {
+			writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+			return
+		}
 		var route sharedBudgetRouteError
 		if errors.As(err, &route) {
 			writeError(w, route.status, "api_error", route.message)

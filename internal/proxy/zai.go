@@ -244,8 +244,10 @@ func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *web
 	originalBody := body
 	body, err = normaliseZAIRequest(body)
 	if err != nil {
-		data, _ := json.Marshal(map[string]any{"type": "error", "status": http.StatusBadRequest, "error": map[string]string{"type": "invalid_request_error", "code": "zai_invalid_request", "message": err.Error()}})
-		_ = downstream.WriteMessage(websocket.TextMessage, data)
+		if !errors.Is(err, errEncryptedSubscriptionAgentMessage) {
+			data, _ := json.Marshal(map[string]any{"type": "error", "status": http.StatusBadRequest, "error": map[string]string{"type": "invalid_request_error", "code": "zai_invalid_request", "message": err.Error()}})
+			_ = downstream.WriteMessage(websocket.TextMessage, data)
+		}
 		return "", nil, err
 	}
 	if len(body) > maxRequestBody {

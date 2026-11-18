@@ -150,34 +150,64 @@ func TestZAIWebSocketAgentTaskAndContinuationCompatibility(t *testing.T) {
 	}
 }
 
-func TestZAIEncryptedAgentTaskFailsBeforeUpstream(t *testing.T) {
+func TestSubscriptionRejectsEncryptedAgentMessagesLocally(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		writeZAITestSSE(w, "should-not-run", nil)
 	}))
 	defer upstream.Close()
-	s := &Server{Config: &Config{ClaudeUpstream: upstream.URL}, Catalog: zaiTestCatalog(), ZAIAPIKey: func() (string, error) { return "test-key", nil }, ZAIUpstream: upstream.URL, CodexNativeHTTP: zaiForbiddenCodexHTTP{t}}
-	const input = `[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"opaque-task"}]}]`
-	w := httptest.NewRecorder()
-	s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"model":"glm-5.3-flash","input":`+input+`}`)))
-	if w.Code != http.StatusBadRequest || strings.Contains(w.Body.String(), "opaque-task") {
-		t.Errorf("HTTP encrypted task response = %d %s", w.Code, w.Body.String())
+	s := &Server{
+		Config: &Config{ClaudeUpstream: upstream.URL}, Catalog: openCodeGoTestCatalog(),
+		ZAIAPIKey: func() (string, error) { return "test-key", nil }, ZAIUpstream: upstream.URL,
+		CodexNativeHTTP: zaiForbiddenCodexHTTP{t},
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(_ *http.Request) (*http.Response, error) {
+			calls.Add(1)
+			return httptest.NewRecorder().Result(), nil
+		}),
 	}
-	c := openZAITestWebSocket(t, s, nil)
-	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"glm-5.3-flash","input":`+input+`}`)); err != nil {
-		t.Fatal(err)
+	const agent = `{"type":"agent_message","content":[{"type":"input_text","text":"private-header"},{"type":"encrypted_content","encrypted_content":"private-ciphertext"}]}`
+	check := func(t *testing.T, data []byte, webSocket bool) {
+		t.Helper()
+		var event struct {
+			Type   string `json:"type"`
+			Status int    `json:"status"`
+			Error  struct{ Code, Type, Message string }
+		}
+		if err := json.Unmarshal(data, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Type != "error" || event.Error.Type != "invalid_request_error" ||
+			!strings.Contains(event.Error.Message, "CQ rejected encrypted agent messages before sending the request") ||
+			(webSocket && (event.Status != http.StatusBadRequest || event.Error.Code != "encrypted_agent_message_unsupported")) ||
+			bytes.Contains(data, []byte("private-")) {
+			t.Errorf("expected local encrypted agent message error, got %s", data)
+		}
 	}
-	_, response, err := c.ReadMessage()
-	if err != nil {
-		t.Fatal(err)
-	}
-	var event struct {
-		Type   string `json:"type"`
-		Status int    `json:"status"`
-	}
-	if json.Unmarshal(response, &event) != nil || event.Type != "error" || event.Status != http.StatusBadRequest || bytes.Contains(response, []byte("opaque-task")) {
-		t.Errorf("WebSocket encrypted task response = %s", response)
+	for _, tc := range []struct{ name, model, input string }{
+		{"Z.ai", "glm-5.3", agent},
+		{"OpenCode Go", "kimi-k3", agent},
+		{"Z.ai compaction", "glm-5.3", agent + `,{"type":"compaction_trigger"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			body := fmt.Sprintf(`{"model":%q,"input":[%s]}`, tc.model, tc.input)
+			s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(body)))
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("HTTP status = %d", w.Code)
+			}
+			check(t, w.Body.Bytes(), false)
+			c := openZAITestWebSocket(t, s, nil)
+			frame := fmt.Sprintf(`{"type":"response.create","model":%q,"input":[%s]}`, tc.model, tc.input)
+			if err := c.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+				t.Fatal(err)
+			}
+			_, response, err := c.ReadMessage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			check(t, response, true)
+		})
 	}
 	if got := calls.Load(); got != 0 {
 		t.Fatalf("encrypted tasks reached upstream %d times", got)
