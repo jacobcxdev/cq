@@ -65,9 +65,15 @@ func TestOpenCodeGoHTTPPrefersZAIAndOnlyRetriesRejectedRequests(t *testing.T) {
 					if r.Header.Get("X-OpenCode-Session") != "codex-session" {
 						t.Error("wrong Go session")
 					}
-					var request struct{ Model string }
+					var request struct {
+						Model         string
+						StreamOptions json.RawMessage `json:"stream_options"`
+					}
 					if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request.Model != strings.ToLower(ParseModel(tc.model)) {
 						t.Errorf("upstream model = %q, err = %v", request.Model, err)
+					}
+					if len(request.StreamOptions) != 0 {
+						t.Error("Go received Responses-only stream_options")
 					}
 					w := httptest.NewRecorder()
 					_, _ = io.WriteString(w, `{"id":"go-answer"}`)
@@ -81,7 +87,7 @@ func TestOpenCodeGoHTTPPrefersZAIAndOnlyRetriesRejectedRequests(t *testing.T) {
 				return resolveCredential(ctx)
 			}
 			s.SharedBudgetRoutes[modelregistry.ProviderOpenCodeGo] = route
-			req := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(fmt.Sprintf(`{"model":%q,"input":%s}`, tc.model, tc.input)))
+			req := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(fmt.Sprintf(`{"model":%q,"input":%s,"stream_options":{"include_obfuscation":false}}`, tc.model, tc.input)))
 			req.Header.Set("Authorization", "Bearer chatgpt-token")
 			req.Header.Set("Cookie", "chatgpt-cookie")
 			req.Header.Set("Chatgpt-Account-Id", "chatgpt-account")
@@ -95,6 +101,51 @@ func TestOpenCodeGoHTTPPrefersZAIAndOnlyRetriesRejectedRequests(t *testing.T) {
 				t.Fatalf("credential read %d times, want %d dispatched requests", credentialReads, tc.wantGo)
 			}
 		})
+	}
+}
+
+func TestOpenCodeGoOmitsToolOutputsWithoutCallIDs(t *testing.T) {
+	var got []map[string]json.RawMessage
+	s := &Server{
+		Config: &Config{}, Catalog: openCodeGoTestCatalog(),
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
+			var request struct{ Input []map[string]json.RawMessage }
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			got = request.Input
+			return httptest.NewRecorder().Result(), nil
+		}),
+	}
+	body := `{"model":"kimi-k3","input":[{"type":"message","role":"user","content":"hello"},{"type":"function_call_output","output":"orphan"},{"type":"custom_tool_call_output","call_id":"","output":"orphan"},{"type":"function_call","call_id":"call-1","name":"echo","arguments":"{}"},{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`
+	w := httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body)))
+	if w.Code != http.StatusOK || len(got) != 3 {
+		t.Fatalf("status %d, forwarded items %d", w.Code, len(got))
+	}
+	if string(got[0]["type"]) != `"message"` || string(got[1]["type"]) != `"function_call"` || string(got[2]["call_id"]) != `"call-1"` {
+		t.Fatalf("forwarded history changed: %v", got)
+	}
+}
+
+func TestOpenCodeGoStreamOptionsRewritePreservesAbsentInput(t *testing.T) {
+	var upstream map[string]json.RawMessage
+	s := &Server{
+		Config: &Config{}, Catalog: openCodeGoTestCatalog(),
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
+			if err := json.NewDecoder(r.Body).Decode(&upstream); err != nil {
+				t.Fatal(err)
+			}
+			return httptest.NewRecorder().Result(), nil
+		}),
+	}
+	w := httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"kimi-k3","stream_options":{"include_obfuscation":false}}`)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d", w.Code)
+	}
+	if _, ok := upstream["input"]; ok {
+		t.Fatal("rewrite added absent input")
 	}
 }
 
@@ -114,12 +165,16 @@ func TestOpenCodeGoWebSocketFallbackKeepsContinuationOnGo(t *testing.T) {
 		SharedBudgetRoutes: openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
 			assertOpenCodeGoRequest(t, r)
 			var request struct {
-				Input    []json.RawMessage
-				Stream   bool
-				Previous string `json:"previous_response_id"`
+				Input         []json.RawMessage
+				Stream        bool
+				Previous      string          `json:"previous_response_id"`
+				StreamOptions json.RawMessage `json:"stream_options"`
 			}
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || !request.Stream || request.Previous != "" {
 				t.Errorf("invalid streamed request: %+v, %v", request, err)
+			}
+			if len(request.StreamOptions) != 0 {
+				t.Error("Go received Responses-only stream_options")
 			}
 			call := goCalls.Add(1)
 			if r.Header.Get("Authorization") != fmt.Sprintf("Bearer go-access-%d", call) || r.Header.Get("X-OpenCode-Org-Id") != workspace {
@@ -145,8 +200,8 @@ func TestOpenCodeGoWebSocketFallbackKeepsContinuationOnGo(t *testing.T) {
 	s.SharedBudgetRoutes[modelregistry.ProviderOpenCodeGo] = goRoute
 	conn := openZAITestWebSocket(t, s, http.Header{"X-Opencode-Org-Id": []string{"downstream-workspace"}})
 	frames := []string{
-		`{"type":"response.create","model":"glm-5.3","input":"hello"}`,
-		`{"type":"response.create","model":"glm-5.3","previous_response_id":"go-1","input":[{"type":"function_call_output","call_id":"call-1","output":"ok"}]}`,
+		`{"type":"response.create","model":"glm-5.3","input":"hello","stream_options":{"include_obfuscation":false}}`,
+		`{"type":"response.create","model":"glm-5.3","previous_response_id":"go-1","input":[{"type":"function_call_output","call_id":"call-1","output":"ok"}],"stream_options":{"include_obfuscation":false}}`,
 	}
 	for i, frame := range frames {
 		credential.Store(&SharedBudgetCredential{Bearer: fmt.Sprintf("go-access-%d", i+1), Account: "go-member", WorkspaceID: workspace})
@@ -217,7 +272,7 @@ func openCodeGoTestRoutes(transport openCodeGoTestTransport) map[modelregistry.P
 			Credential: func(context.Context) (SharedBudgetCredential, error) {
 				return SharedBudgetCredential{Bearer: "go-key"}, nil
 			},
-			Transport: transport, AllowFallback: true,
+			Transport: transport, AllowFallback: true, OmitStreamOptions: true, OmitEmptyCallIDOutputs: true,
 		},
 	}
 }

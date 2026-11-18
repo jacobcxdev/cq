@@ -43,6 +43,8 @@ type sharedBudgetAdapter struct {
 	OAuth                  func(fsutil.FileSystem, string, httputil.Doer) sharedBudgetAuthorization
 	Catalogue              func(httputil.Doer, sharedBudgetAuthorization) modelregistry.NativeSource
 	CatalogueRequiresFresh bool
+	OmitStreamOptions      bool
+	OmitEmptyCallIDOutputs bool
 	Usage                  func(context.Context, httputil.Doer, string, string) []quota.SharedBudgetWindow
 }
 
@@ -54,6 +56,8 @@ var sharedBudgetAdapters = []sharedBudgetAdapter{
 		SessionHeader: "X-OpenCode-Session", WorkspaceHeader: "X-OpenCode-Org-Id",
 		OAuth: openCodeAuthorization, Usage: opencodego.Usage,
 		CatalogueRequiresFresh: true,
+		OmitStreamOptions:      true,
+		OmitEmptyCallIDOutputs: true,
 		Catalogue: func(client httputil.Doer, authorize sharedBudgetAuthorization) modelregistry.NativeSource {
 			return &modelregistry.OpenCodeGoSource{
 				Client: client,
@@ -129,7 +133,9 @@ func sharedBudgetProxyRoutes(fsys fsutil.FileSystem, env func(string) string, co
 			Name: adapter.Name + " " + adapter.Plan, URL: adapter.ResponsesURL, SessionHeader: adapter.SessionHeader,
 			WorkspaceHeader: adapter.WorkspaceHeader,
 			Transport:       transport, AllowFallback: settings.AllowFallback,
-			RequireCatalogueScope: adapter.CatalogueRequiresFresh,
+			RequireCatalogueScope:  adapter.CatalogueRequiresFresh,
+			OmitStreamOptions:      adapter.OmitStreamOptions,
+			OmitEmptyCallIDOutputs: adapter.OmitEmptyCallIDOutputs,
 			Credential: func(ctx context.Context) (proxy.SharedBudgetCredential, error) {
 				login, err := resolve(ctx, true)
 				if login.Account == "" {
