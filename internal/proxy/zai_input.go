@@ -5,6 +5,8 @@ import (
 	"errors"
 )
 
+var errEncryptedSubscriptionAgentMessage = errors.New("CQ rejected encrypted agent messages before sending the request upstream. Subscription routes require readable agent messages.")
+
 // normaliseZAIRequest translates plaintext Codex agent messages into the
 // ordinary user messages understood by Z.ai's Responses endpoint.
 func normaliseZAIRequest(body []byte) ([]byte, error) {
@@ -31,7 +33,7 @@ func normaliseSubscriptionAgentMessages(body []byte, name string) ([]byte, error
 			continue
 		}
 		if len(agent.EncryptedContent) != 0 {
-			return nil, errors.New(name + " does not support encrypted agent messages")
+			return nil, errEncryptedSubscriptionAgentMessage
 		}
 		var content []json.RawMessage
 		if err := json.Unmarshal(agent.Content, &content); err != nil || len(content) == 0 {
@@ -47,7 +49,7 @@ func normaliseSubscriptionAgentMessages(body []byte, name string) ([]byte, error
 				return nil, errors.New("invalid " + name + " agent message content")
 			}
 			if part.Type == "encrypted_content" || len(part.EncryptedContent) != 0 {
-				return nil, errors.New(name + " does not support encrypted agent messages")
+				return nil, errEncryptedSubscriptionAgentMessage
 			}
 			if part.Type != "input_text" {
 				return nil, errors.New("unsupported " + name + " agent message content")

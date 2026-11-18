@@ -141,6 +141,17 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 		}
 		id, output, err := bridge.Stream(ctx, downstream, header, body)
 		if err != nil {
+			if errors.Is(err, errEncryptedSubscriptionAgentMessage) {
+				_ = downstream.WriteJSON(map[string]any{
+					"type":   "error",
+					"status": http.StatusBadRequest,
+					"error": map[string]string{
+						"type":    "invalid_request_error",
+						"code":    "encrypted_agent_message_unsupported",
+						"message": err.Error(),
+					},
+				})
+			}
 			return err
 		}
 		state.previousID = id

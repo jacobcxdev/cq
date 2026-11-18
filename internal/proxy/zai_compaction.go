@@ -205,6 +205,10 @@ func zaiCompactionEvents(response zaiCompactResponse) []map[string]any {
 
 func (s *Server) handleZAICompaction(w http.ResponseWriter, r *http.Request, body []byte) {
 	response, err := s.compactZAI(r.Context(), r.Header, body)
+	if errors.Is(err, errEncryptedSubscriptionAgentMessage) {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
 	if errors.Is(err, errSharedBudgetFallback) {
 		if selected, ok := s.selectSharedBudgetFallback(r.Context(), body); ok {
 			s.serveSelectedSharedBudgetHTTP(w, r, body, selected)
