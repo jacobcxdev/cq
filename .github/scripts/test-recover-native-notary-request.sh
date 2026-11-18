@@ -32,9 +32,9 @@ jq -n --arg sha "$GITHUB_SHA" '[{workflow_runs:[
     {id:22,run_number:3,head_branch:"v1.2.3",head_sha:$sha}
   ]}]' > "$root/runs"
 job() {
-  jq -n --argjson attempt "$1" --arg conclusion "$2" '[{jobs:[{
+  jq -n --argjson attempt "$1" --arg conclusion "$2" --arg step "${3:-Submit the native companion for notarisation}" '[{jobs:[{
     name:"native-network",run_attempt:$attempt,steps:[{
-      name:"Build, sign and submit the native companion",started_at:"2026-11-17T18:00:00Z",conclusion:$conclusion
+      name:$step,started_at:"2026-11-17T18:00:00Z",conclusion:$conclusion
     }]}]}]'
 }
 artifact() {
@@ -47,6 +47,11 @@ run() {
 
 job 1 success > "$root/jobs-22" # The current job must not count as an earlier attempt.
 job 1 skipped > "$root/jobs-21"
+run
+[[ "$(cat "$GITHUB_OUTPUT")" == 'restored=false' && ! -e "$root/download" ]]
+
+# An archive failure has never contacted Apple and can retry without a request.
+job 2 failure 'Build and sign the native companion' > "$root/jobs-21"
 run
 [[ "$(cat "$GITHUB_OUTPUT")" == 'restored=false' && ! -e "$root/download" ]]
 

@@ -28,7 +28,8 @@ while IFS= read -r run; do
   attempt=$(gh api --paginate --slurp "repos/$repository/actions/runs/$run/jobs?filter=all&per_page=100" |
     jq -er --argjson exclude "$exclude_attempt" '
       map(.jobs) | add | map(select(.name == "native-network" and .run_attempt != $exclude
-        and any(.steps[]?; .name == "Build, sign and submit the native companion"
+        and any(.steps[]?; (.name == "Submit the native companion for notarisation"
+          or .name == "Build, sign and submit the native companion")
           and .started_at != null and .conclusion != "skipped")))
       | map(.run_attempt) | max // ""')
   [[ -n "$attempt" ]] || continue

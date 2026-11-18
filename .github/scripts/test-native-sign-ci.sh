@@ -139,10 +139,21 @@ else: raise SystemExit("unexpected tool: "+tool)
         for profile_id in profile_ids:
             for folder in ["Library/MobileDevice/Provisioning Profiles", "Library/Developer/Xcode/UserData/Provisioning Profiles"]:
                 assert not (Path.home() / folder / (profile_id + ".provisionprofile")).exists(), "installed profile survived"
-    # Removing the prepare/archive branch must stop producing a durable request.
-    result = invoke("prepare", "good")
+    # Archives have no notarisation credentials and never contact Apple.
+    result = invoke("prepare", "good", {"CQ_NOTARY_KEY_P8":"", "CQ_NOTARY_KEY_ID":"", "CQ_NOTARY_ISSUER_ID":""})
     assert result.returncode == 0, "prepare failed: " + result.stdout
     request = root / "good/native-request"
+    prepared = json.loads((request / "submission.json").read_text())
+    assert prepared["state"] == "prepared" and "submission_id" not in prepared
+    before = (root / "calls").read_text()
+    assert "notarytool" not in before
+    assert invoke("submit", "good", {"CQ_NOTARY_KEY_P8":""}).returncode != 0
+    assert "notarytool" not in (root / "calls").read_text()[len(before):]
+    assert json.loads((request / "submission.json").read_text()) == prepared
+    result = invoke("submit", "good", {"CQ_SIGNING_P12_BASE64":"", "CQ_SIGNING_P12_PASSWORD":"", "CQ_HOST_PROFILE_BASE64":"", "CQ_PROVIDER_PROFILE_BASE64":""})
+    assert result.returncode == 0, "submit failed: " + result.stdout
+    calls = (root / "calls").read_text()[len(before):]
+    assert calls.count("notarytool submit") == 1 and "xcodebuild" not in calls
     receipt = json.loads((request / "submission.json").read_text())
     assert receipt["submission_id"] == "12345678-1234-1234-1234-123456789abc"
     assert receipt["source_commit"] == "a" * 40 and receipt["version"] == "1.2.3" and receipt["build_number"] == "45"
@@ -162,7 +173,8 @@ else: raise SystemExit("unexpected tool: "+tool)
     invalid_profile = dict(profiles[0], TeamIdentifier=["OTHERTEAM"])
     for name, changes in [
         ("old-build", {"CQ_BUILD_NUMBER":"44"}), ("bad-build", {"CQ_BUILD_NUMBER":"45.1"}),
-        ("bad-version", {"CQ_VERSION":"vv1.2.3"}), ("missing-key", {"CQ_NOTARY_KEY_P8":""}),
+        ("bad-version", {"CQ_VERSION":"vv1.2.3"}),
+        ("managed-profile", {"CQ_HOST_PROFILE_BASE64":encode(dict(profiles[0], IsXcodeManaged=True))}),
         ("wrong-team", {"CQ_HOST_PROFILE_BASE64":encode(invalid_profile)}),
         ("expired", {"CQ_HOST_PROFILE_BASE64":encode(dict(profiles[0], ExpirationDate=datetime.datetime(2000,1,1)))}),
         ("wrong-cert", {"CQ_HOST_PROFILE_BASE64":encode(dict(profiles[0], DeveloperCertificates=[b"other certificate"]))}),
@@ -174,7 +186,19 @@ else: raise SystemExit("unexpected tool: "+tool)
         result = invoke("prepare", name, changes)
         assert result.returncode != 0, name + " succeeded"
         assert "notarytool submit" not in (root / "calls").read_text()[len(before):], name + " submitted invalid input"
+        assert not (root / name / "native-request").exists(), name + " left a request"
         clean()
+    before = (root / "calls").read_text()
+    assert invoke("submit", "good").returncode != 0
+    assert "notarytool submit" not in (root / "calls").read_text()[len(before):]
+    tampered = root / "tampered/native-request"
+    shutil.copytree(request, tampered)
+    (tampered/"submission.json").write_text(json.dumps(prepared))
+    with (tampered/"payload.zip").open("ab") as payload:
+        payload.write(b"changed")
+    assert invoke("submit", "tampered").returncode != 0
+    assert "notarytool submit" not in (root / "calls").read_text()[len(before):]
+    clean()
     for name, mutation in [("hash", lambda p: p.update(sha256="0"*64)), ("source", lambda p: p.update(source_commit="b"*40)), ("build", lambda p: p.update(build_number="46")), ("id", lambda p: p.update(submission_id="bad"))]:
         resume = root / ("bad-"+name); shutil.copytree(request, resume)
         invalid = dict(receipt); mutation(invalid); (resume/"submission.json").write_text(json.dumps(invalid))
@@ -188,11 +212,13 @@ else: raise SystemExit("unexpected tool: "+tool)
         assert json.loads((request/"submission.json").read_text()) == receipt
         clean()
     for failure in ["upload", "missing-id"]:
-        assert invoke("prepare", failure, {"NATIVE_TEST_FAIL":failure}).returncode != 0
+        assert invoke("prepare", failure).returncode == 0
+        assert invoke("submit", failure, {"NATIVE_TEST_FAIL":failure}).returncode != 0
         uncertain = root/failure/"native-request"
         assert json.loads((uncertain/"submission.json").read_text())["state"] == "submission-uncertain"
         before = (root/"calls").read_text()
         assert invoke("prepare", failure).returncode != 0
+        assert invoke("submit", failure).returncode != 0
         assert invoke("finish", "resume-"+failure, resume=uncertain).returncode != 0
         assert "notarytool submit" not in (root/"calls").read_text()[len(before):] and "notarytool wait" not in (root/"calls").read_text()[len(before):]
         clean()
