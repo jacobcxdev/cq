@@ -23,6 +23,12 @@ func TestSharedBudgetSettingsAndCheckSelection(t *testing.T) {
 	if !routes[id].AllowFallback {
 		t.Fatal("explicit fallback permission missing")
 	}
+	if !routes[id].OmitStreamOptions {
+		t.Fatal("Go route must omit native Responses stream options")
+	}
+	if !routes[id].OmitEmptyCallIDOutputs {
+		t.Fatal("Go route must omit tool outputs without call IDs")
+	}
 	_, checks := sharedBudgetChecks(fsys, env, dir, nil)
 	if len(checks) != 0 {
 		t.Fatal("default check included an unconfigured subscription")

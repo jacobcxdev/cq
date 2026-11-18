@@ -28,6 +28,10 @@ type SharedBudgetRoute struct {
 	AllowFallback   bool
 	// RequireCatalogueScope rejects entries without live workspace authority.
 	RequireCatalogueScope bool
+	// OmitStreamOptions applies to Responses translators that reject this field.
+	OmitStreamOptions bool
+	// OmitEmptyCallIDOutputs drops unpaired tool results rejected by strict translators.
+	OmitEmptyCallIDOutputs bool
 }
 
 // SharedBudgetCredential carries material for one subscription request. An
@@ -139,8 +143,21 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 		// The selected model supplies its own reasoning default.
 		delete(input, "reasoning")
 	}
-	if _, hasClientMetadata := input["client_metadata"]; compacting || hasClientMetadata || model != upstreamModel {
+	_, hasStreamOptions := input["stream_options"]
+	omitStreamOptions := route.OmitStreamOptions && hasStreamOptions
+	omitEmptyCallIDOutputs := false
+	if route.OmitEmptyCallIDOutputs {
+		filtered, omitted := withoutEmptyCallIDOutputs(input["input"])
+		if omitted {
+			input["input"] = filtered
+			omitEmptyCallIDOutputs = true
+		}
+	}
+	if _, hasClientMetadata := input["client_metadata"]; compacting || hasClientMetadata || model != upstreamModel || omitStreamOptions || omitEmptyCallIDOutputs {
 		delete(input, "client_metadata")
+		if omitStreamOptions {
+			delete(input, "stream_options")
+		}
 		input["model"], _ = json.Marshal(upstreamModel)
 		body, err = json.Marshal(input)
 		if err != nil || len(body) > maxRequestBody {
@@ -189,6 +206,29 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 		sealed.Object = "response.compaction"
 	}
 	return nil, &sealed, nil
+}
+
+func withoutEmptyCallIDOutputs(raw json.RawMessage) (json.RawMessage, bool) {
+	var items []json.RawMessage
+	if json.Unmarshal(raw, &items) != nil || items == nil {
+		return raw, false
+	}
+	kept := make([]json.RawMessage, 0, len(items))
+	for _, item := range items {
+		var call struct {
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+		}
+		if json.Unmarshal(item, &call) == nil && (call.Type == "function_call_output" || call.Type == "custom_tool_call_output") && call.CallID == "" {
+			continue
+		}
+		kept = append(kept, item)
+	}
+	if len(kept) == len(items) {
+		return raw, false
+	}
+	filtered, _ := json.Marshal(kept)
+	return filtered, true
 }
 
 func sharedBudgetSession(header http.Header, preferred string) string {
