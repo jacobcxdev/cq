@@ -153,7 +153,15 @@ type sharedBudgetSettings struct {
 
 func loadSharedBudgetSettings(fsys fsutil.FileSystem, configDir string, id modelregistry.Provider) sharedBudgetSettings {
 	var settings sharedBudgetSettings
-	data, err := fsutil.ReadSecureFile(fsys, filepath.Join(configDir, string(id)+".json"), 4096)
+	path := filepath.Join(configDir, string(id)+".json")
+	// The config root may still have inherited permissions on a fresh install.
+	// Check for absence before requiring a private directory to read settings.
+	if inspector, ok := fsys.(fsutil.SecurePathInspector); ok {
+		if _, err := inspector.Lstat(path); errors.Is(err, os.ErrNotExist) {
+			return settings
+		}
+	}
+	data, err := fsutil.ReadSecureFile(fsys, path, 4096)
 	if errors.Is(err, os.ErrNotExist) {
 		return settings
 	}

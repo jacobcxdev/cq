@@ -51,6 +51,22 @@ func TestSessionAuthoritySavesPrivateEncryptedSession(t *testing.T) {
 	}
 }
 
+func TestSessionAuthorityAbsentInInheritedConfigDirectory(t *testing.T) {
+	authority, fsys, _, _ := sessionAuthorityFixture(t)
+	if err := fsys.Chmod(authority.ConfigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authority.Fresh(t.Context()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("absent session: %v", err)
+	}
+	if err := fsys.WriteFile(filepath.Join(authority.ConfigDir, oauthSessionFile), []byte("untrusted"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := authority.Fresh(t.Context()); err == nil || errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("session under non-private directory must fail closed: %v", err)
+	}
+}
+
 func TestSessionAuthoritySerialisesConcurrentRefresh(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
