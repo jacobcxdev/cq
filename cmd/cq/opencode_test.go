@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -92,6 +93,9 @@ func TestOpenCodeLoginRequiresGoAllowanceBeforeSaving(t *testing.T) {
 
 func TestOpenCodeAccountsAppearSeparately(t *testing.T) {
 	fsys, dir := privateSharedBudgetConfig(t)
+	if err := fsys.WriteFile(filepath.Join(dir, "opencode-go.json"), []byte(`{"extra_usage":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	authority := openCodeSessionAuthority(fsys, dir, nil)
 	first := opencodego.OAuthSession{AccessToken: "first-token", RefreshToken: "first-refresh", MemberID: "first", WorkspaceID: "wrk_first", Email: "first@example.test", ExpiresAt: time.Now().Add(time.Hour)}
 	second := opencodego.OAuthSession{AccessToken: "second-token", RefreshToken: "second-refresh", MemberID: "second", WorkspaceID: "wrk_second", Email: "second@example.test", ExpiresAt: time.Now().Add(time.Hour)}
@@ -103,6 +107,9 @@ func TestOpenCodeAccountsAppearSeparately(t *testing.T) {
 	_, checks := sharedBudgetChecks(fsys, func(string) string { return "" }, dir, []string{"opencode-go"})
 	if len(checks) != 2 || checks[0].Report.Email != first.Email || checks[1].Report.Email != second.Email {
 		t.Fatalf("account reports: count=%d", len(checks))
+	}
+	if checks[0].Report.ExtraUsage != nil || checks[1].Report.ExtraUsage != nil {
+		t.Fatal("provider-wide Extra Usage shown as per-account state")
 	}
 	route := sharedBudgetProxyRoutes(fsys, func(string) string { return "" }, dir)[modelregistry.ProviderOpenCodeGo]
 	credentials, err := route.Credentials(t.Context())

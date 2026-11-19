@@ -901,7 +901,8 @@ Use `extra_usage` to display the workspace's Extra Usage setting:
 All fields are optional. Under API-key auth, `email` supplies the account label
 and `workspace_id` identifies the workspace when checking usage. Browser
 login supplies both. Set `extra_usage` to match the OpenCode Console setting
-and update it if the setting changes.
+and update it if the setting changes. CQ omits this provider-wide setting from
+multi-account rows because each workspace may have a different value.
 
 Set `allow_fallback` to `true` and restart the CQ proxy to authorise automatic
 requests to Go when the preferred route is unavailable. Go's own

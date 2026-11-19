@@ -299,7 +299,7 @@ func sharedBudgetChecks(fsys fsutil.FileSystem, env func(string) string, configD
 			report := quota.SharedBudgetReport{
 				ProviderID: id, ProviderName: adapter.Name, Plan: adapter.Plan, Icon: adapter.Icon, Email: email,
 			}
-			if settings.ExtraUsage != nil {
+			if settings.ExtraUsage != nil && len(logins) == 1 {
 				report.ExtraUsage = &quota.ExtraCredits{Enabled: *settings.ExtraUsage}
 			}
 			checks = append(checks, app.SharedBudgetCheck{
