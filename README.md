@@ -279,6 +279,7 @@ cq models overlay remove
 cq models refresh
 cq opencode
 cq opencode login
+cq opencode switch
 cq operation
 cq operation recover
 cq operation status

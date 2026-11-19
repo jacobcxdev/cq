@@ -517,6 +517,23 @@ func TestOpenCodeGoWebSocketFallbackKeepsContinuationOnGo(t *testing.T) {
 }
 
 func TestOpenCodeGoWebSocketFailoverKeepsAccount(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		firstSucceeds bool
+		switchAccount bool
+	}{
+		{name: "initial rejection"},
+		{name: "rejection after a successful turn", firstSucceeds: true},
+		{name: "switch after a successful turn", firstSucceeds: true, switchAccount: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			testOpenCodeGoWebSocketAccountFailover(t, tc.firstSucceeds, tc.switchAccount)
+		})
+	}
+}
+
+func testOpenCodeGoWebSocketAccountFailover(t *testing.T, firstSucceeds, switchAccount bool) {
+	t.Helper()
 	first := SharedBudgetCredential{Bearer: "first-token", Account: "first", WorkspaceID: "wrk_first"}
 	second := SharedBudgetCredential{Bearer: "second-token", Account: "second", WorkspaceID: "wrk_second"}
 	entry := func(credential SharedBudgetCredential) modelregistry.Entry {
@@ -528,6 +545,7 @@ func TestOpenCodeGoWebSocketFailoverKeepsAccount(t *testing.T) {
 		SharedBudgetModels: map[string][]modelregistry.Entry{"kimi-k3": {entry(first), entry(second)}},
 	})
 	var firstCalls, secondCalls atomic.Int32
+	var prefersSecond atomic.Bool
 	route := SharedBudgetRoute{Name: "OpenCode Go", URL: "https://opencode.example/responses", RequireCatalogueScope: true,
 		WorkspaceHeader: "X-OpenCode-Org-Id",
 		Credential:      func(context.Context) (SharedBudgetCredential, error) { return first, nil },
@@ -543,15 +561,27 @@ func TestOpenCodeGoWebSocketFailoverKeepsAccount(t *testing.T) {
 			}
 			return SharedBudgetCredential{}, errors.New("account unavailable")
 		},
+		Preferred: func(context.Context) (modelregistry.SharedBudgetCredentialScope, bool) {
+			return second.binding(), prefersSecond.Load()
+		},
 		Transport: openCodeGoTestTransport(func(r *http.Request) (*http.Response, error) {
 			w := httptest.NewRecorder()
 			if r.Header.Get("Authorization") == "Bearer first-token" {
-				firstCalls.Add(1)
+				if firstCalls.Add(1) == 1 && firstSucceeds {
+					writeZAITestSSE(w, "first-1", nil)
+					return w.Result(), nil
+				}
 				w.WriteHeader(http.StatusTooManyRequests)
 				return w.Result(), nil
 			}
 			if r.Header.Get("Authorization") != "Bearer second-token" || r.Header.Get("X-OpenCode-Org-Id") != "wrk_second" {
 				t.Error("WebSocket request used wrong account")
+			}
+			if firstSucceeds {
+				var request struct{ Input []json.RawMessage }
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request.Input) < 2 {
+					t.Error("rebound request did not replay the full history")
+				}
 			}
 			call := secondCalls.Add(1)
 			writeZAITestSSE(w, fmt.Sprintf("second-%d", call), nil)
@@ -560,18 +590,32 @@ func TestOpenCodeGoWebSocketFailoverKeepsAccount(t *testing.T) {
 	}
 	s := &Server{Config: &Config{}, Catalog: catalog, SharedBudgetRoutes: map[modelregistry.Provider]SharedBudgetRoute{modelregistry.ProviderOpenCodeGo: route}}
 	conn := openZAITestWebSocket(t, s, nil)
-	for i, frame := range []string{
-		`{"type":"response.create","model":"kimi-k3","input":"hello"}`,
-		`{"type":"response.create","model":"kimi-k3","previous_response_id":"second-1","input":"again"}`,
-	} {
-		if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+	previous := ""
+	wantFirst := int32(1)
+	wantIDs := []string{"second-1", "second-2"}
+	if firstSucceeds {
+		if !switchAccount {
+			wantFirst++
+		}
+		wantIDs = append([]string{"first-1"}, wantIDs...)
+	}
+	for _, want := range wantIDs {
+		request := map[string]string{"type": "response.create", "model": "kimi-k3", "input": "hello"}
+		if previous != "" {
+			request["previous_response_id"] = previous
+		}
+		if err := conn.WriteJSON(request); err != nil {
 			t.Fatal(err)
 		}
-		if got := readZAITestCompletion(t, conn).Response.ID; got != fmt.Sprintf("second-%d", i+1) {
-			t.Fatalf("response ID = %q", got)
+		if got := readZAITestCompletion(t, conn).Response.ID; got != want {
+			t.Fatalf("response ID = %q, want %q", got, want)
 		}
+		if want == "first-1" && switchAccount {
+			prefersSecond.Store(true)
+		}
+		previous = want
 	}
-	if firstCalls.Load() != 1 || secondCalls.Load() != 2 {
+	if firstCalls.Load() != wantFirst || secondCalls.Load() != 2 {
 		t.Fatalf("account calls: first=%d second=%d", firstCalls.Load(), secondCalls.Load())
 	}
 }
@@ -638,6 +682,7 @@ func TestOpenCodeGoAccountsFailOverAndBindContinuation(t *testing.T) {
 		SharedBudgetModels: map[string][]modelregistry.Entry{"glm-5.3": {entry(first), entry(second)}},
 	})
 	var firstCalls, secondCalls int
+	preferFirst := false
 	accounts := []SharedBudgetCredential{first, second}
 	route := SharedBudgetRoute{Name: "OpenCode Go", URL: "https://opencode.example/responses", RequireCatalogueScope: true,
 		Credential:  func(context.Context) (SharedBudgetCredential, error) { return accounts[0], nil },
@@ -649,6 +694,9 @@ func TestOpenCodeGoAccountsFailOverAndBindContinuation(t *testing.T) {
 				}
 			}
 			return SharedBudgetCredential{}, errors.New("account unavailable")
+		},
+		Preferred: func(context.Context) (modelregistry.SharedBudgetCredentialScope, bool) {
+			return first.binding(), preferFirst
 		},
 		Transport: openCodeGoTestTransport(func(r *http.Request) (*http.Response, error) {
 			w := httptest.NewRecorder()
@@ -679,9 +727,11 @@ func TestOpenCodeGoAccountsFailOverAndBindContinuation(t *testing.T) {
 	if got := request(`{"model":"glm-5.3","input":"hello"}`); got.Code != http.StatusOK || firstCalls != 1 || secondCalls != 1 {
 		t.Fatalf("initial failover: status=%d first=%d second=%d", got.Code, firstCalls, secondCalls)
 	}
-	if got := request(`{"model":"glm-5.3","previous_response_id":"second-response","input":[]}`); got.Code != http.StatusOK || secondCalls != 2 {
+	preferFirst = true
+	if got := request(`{"model":"glm-5.3","previous_response_id":"second-response","input":[]}`); got.Code != http.StatusOK || secondCalls != 2 || firstCalls != 1 {
 		t.Fatalf("bound continuation: status=%d first=%d second=%d", got.Code, firstCalls, secondCalls)
 	}
+	preferFirst = false
 	if got := request(`{"model":"glm-5.3","input":"next turn"}`); got.Code != http.StatusOK || secondCalls != 3 || firstCalls != 1 {
 		t.Fatalf("session affinity: status=%d first=%d second=%d", got.Code, firstCalls, secondCalls)
 	}

@@ -11,12 +11,29 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alecthomas/kong"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	"github.com/jacobcxdev/cq/internal/provider/opencodego"
 	"github.com/jacobcxdev/cq/internal/proxy"
 )
+
+func TestOpenCodeSwitchCommand(t *testing.T) {
+	const email = "account@example.test"
+	var cli CLI
+	parser, err := kong.New(&cli, cliKongOptions()...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := parser.Parse([]string{"opencode", "switch", email})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Command() != "opencode switch <email>" || cli.OpenCode.Switch.Email != email {
+		t.Fatalf("unexpected switch command: %q", parsed.Command())
+	}
+}
 
 func TestSharedBudgetPrefersOAuthWithExplicitKeyOption(t *testing.T) {
 	fsys, configDir := privateSharedBudgetConfig(t)
@@ -112,6 +129,16 @@ func TestOpenCodeAccountsAppearSeparately(t *testing.T) {
 		t.Fatal("provider-wide Extra Usage shown as per-account state")
 	}
 	route := sharedBudgetProxyRoutes(fsys, func(string) string { return "" }, dir)[modelregistry.ProviderOpenCodeGo]
+	if _, ok := route.Preferred(t.Context()); ok {
+		t.Fatal("account preference applied before switch")
+	}
+	if _, err := authority.SetPreferred(t.Context(), second.Email); err != nil {
+		t.Fatal(err)
+	}
+	wantPreferred := modelregistry.FingerprintSharedBudgetCredential(second.AccessToken, second.MemberID, second.WorkspaceID)
+	if preferred, ok := route.Preferred(t.Context()); !ok || preferred != wantPreferred {
+		t.Fatal("existing route did not read the new account preference")
+	}
 	credentials, err := route.Credentials(t.Context())
 	if err != nil || len(credentials) != 2 || credentials[0].Account != first.MemberID || credentials[1].Account != second.MemberID {
 		t.Fatalf("account routes: count=%d, err=%v", len(credentials), err)

@@ -30,8 +30,9 @@ type sharedBudgetLogin struct {
 }
 
 type sharedBudgetAuthorization struct {
-	List func(context.Context, bool) ([]sharedBudgetLogin, error)
-	For  func(context.Context, modelregistry.SharedBudgetCredentialScope) (sharedBudgetLogin, error)
+	List      func(context.Context, bool) ([]sharedBudgetLogin, error)
+	For       func(context.Context, modelregistry.SharedBudgetCredentialScope) (sharedBudgetLogin, error)
+	Preferred func(context.Context) (sharedBudgetLogin, error)
 }
 
 func (a sharedBudgetAuthorization) first(ctx context.Context, refresh bool) (sharedBudgetLogin, error) {
@@ -146,7 +147,7 @@ func (a sharedBudgetAdapter) resolve(fsys fsutil.FileSystem, env func(string) st
 		}
 		return sharedBudgetLogin{SharedBudgetCredential: proxy.SharedBudgetCredential{Bearer: key, WorkspaceID: settings.WorkspaceID}, Email: settings.Email}, nil
 	}
-	return sharedBudgetAuthorization{List: func(ctx context.Context, refresh bool) ([]sharedBudgetLogin, error) {
+	return sharedBudgetAuthorization{Preferred: oauth.Preferred, List: func(ctx context.Context, refresh bool) ([]sharedBudgetLogin, error) {
 		if oauth.List != nil {
 			logins, err := oauth.List(ctx, refresh)
 			if !errors.Is(err, os.ErrNotExist) {
@@ -209,6 +210,16 @@ func sharedBudgetProxyRoutes(fsys fsutil.FileSystem, env func(string) string, co
 			CredentialFor: func(ctx context.Context, scope modelregistry.SharedBudgetCredentialScope) (proxy.SharedBudgetCredential, error) {
 				login, err := resolve.For(ctx, scope)
 				return login.routeCredential(), err
+			},
+			Preferred: func(ctx context.Context) (modelregistry.SharedBudgetCredentialScope, bool) {
+				if resolve.Preferred == nil {
+					return modelregistry.SharedBudgetCredentialScope{}, false
+				}
+				login, err := resolve.Preferred(ctx)
+				if err != nil {
+					return modelregistry.SharedBudgetCredentialScope{}, false
+				}
+				return login.scope(), true
 			},
 		}
 	}

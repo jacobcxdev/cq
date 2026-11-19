@@ -24,6 +24,7 @@ type SharedBudgetRoute struct {
 	Credential      func(context.Context) (SharedBudgetCredential, error)
 	Credentials     func(context.Context) ([]SharedBudgetCredential, error)
 	CredentialFor   func(context.Context, modelregistry.SharedBudgetCredentialScope) (SharedBudgetCredential, error)
+	Preferred       func(context.Context) (modelregistry.SharedBudgetCredentialScope, bool)
 	Transport       http.RoundTripper
 	SessionHeader   string
 	WorkspaceHeader string
@@ -410,18 +411,22 @@ func (s *Server) serveSelectedSharedBudgetHTTP(w http.ResponseWriter, r *http.Re
 	if s.CacheProfiler != nil {
 		ctx = withCacheProfileRequestSession(ctx, r.Header, body)
 	}
-	response, compact, err := s.sharedBudgetResponse(ctx, &selected, sharedBudgetSession(r.Header, selected.route.SessionHeader), r.Header, body, compactEndpoint)
+	canRebind := !selected.bound && !compactEndpoint && portableSharedBudgetInput(body)
+	if canRebind {
+		selected = s.preferSharedBudgetAccount(ctx, selected)
+	}
+	session := sharedBudgetSession(r.Header, selected.route.SessionHeader)
+	response, compact, err := s.sharedBudgetResponse(ctx, &selected, session, r.Header, body, compactEndpoint)
 	tried := map[modelregistry.SharedBudgetCredentialScope]bool{selected.credential.binding(): true}
-	for err == nil && response != nil && firstPartyRejectedBeforeGeneration(response.StatusCode) &&
-		!selected.bound && !compactEndpoint && portableSharedBudgetInput(body) {
-		alternate, ok := s.alternateSharedBudgetAccount(ctx, selected, tried)
+	for canRebind && err == nil && response != nil && firstPartyRejectedBeforeGeneration(response.StatusCode) {
+		alternate, ok := s.matchSharedBudgetAccount(ctx, selected, func(scope modelregistry.SharedBudgetCredentialScope) bool { return !tried[scope] })
 		if !ok {
 			break
 		}
 		response.Body.Close()
 		selected = alternate
 		tried[selected.credential.binding()] = true
-		response, compact, err = s.sharedBudgetResponse(ctx, &selected, sharedBudgetSession(r.Header, selected.route.SessionHeader), r.Header, body, false)
+		response, compact, err = s.sharedBudgetResponse(ctx, &selected, session, r.Header, body, false)
 	}
 	if err != nil {
 		if errors.Is(err, errEncryptedSubscriptionAgentMessage) {
@@ -464,9 +469,24 @@ func (s *Server) serveSelectedSharedBudgetHTTP(w http.ResponseWriter, r *http.Re
 	s.relaySharedBudgetHTTP(w, response, selected, body)
 }
 
-func (s *Server) alternateSharedBudgetAccount(ctx context.Context, selected sharedBudgetSelection, tried map[modelregistry.SharedBudgetCredentialScope]bool) (sharedBudgetSelection, bool) {
+func (s *Server) preferSharedBudgetAccount(ctx context.Context, selected sharedBudgetSelection) sharedBudgetSelection {
+	if selected.route.Preferred == nil {
+		return selected
+	}
+	preferred, ok := selected.route.Preferred(ctx)
+	if !ok || preferred == selected.credential.binding() {
+		return selected
+	}
+	candidate, ok := s.matchSharedBudgetAccount(ctx, selected, func(scope modelregistry.SharedBudgetCredentialScope) bool { return scope == preferred })
+	if !ok {
+		return selected
+	}
+	return candidate
+}
+
+func (s *Server) matchSharedBudgetAccount(ctx context.Context, selected sharedBudgetSelection, eligible func(modelregistry.SharedBudgetCredentialScope) bool) (sharedBudgetSelection, bool) {
 	for _, entry := range s.Catalog.SharedBudgetModels(selected.model) {
-		if entry.Provider != selected.id || entry.SharedBudget == nil || tried[entry.SharedBudget.CredentialScope] {
+		if entry.Provider != selected.id || entry.SharedBudget == nil || !eligible(entry.SharedBudget.CredentialScope) {
 			continue
 		}
 		credential, err := selected.route.credentialFor(ctx, entry.SharedBudget.CredentialScope)
@@ -505,10 +525,16 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 	if err != nil || credential.Bearer == "" || credential.binding() != binding.Credential {
 		return "", nil, errSharedBudgetContinuation
 	}
-	if bound, found, complete := s.sharedBudgetRequestBinding(body); !complete || (found && bound != *binding) {
+	bound, found, complete := s.sharedBudgetRequestBinding(body)
+	if !complete || (found && bound != *binding) {
 		return "", nil, errSharedBudgetContinuation
 	}
 	selected.credential = credential
+	canRebind := !selected.bound && !found && portableSharedBudgetInput(body)
+	if canRebind {
+		*selected = s.preferSharedBudgetAccount(ctx, *selected)
+		*binding = selected.binding()
+	}
 	s.observeHarness(header, extractModel(body), body)
 	if s.CacheProfiler != nil {
 		ctx = withCacheProfileRequestSession(ctx, header, body)
@@ -518,8 +544,8 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 		return "", nil, err
 	}
 	tried := map[modelregistry.SharedBudgetCredentialScope]bool{selected.credential.binding(): true}
-	for response != nil && firstPartyRejectedBeforeGeneration(response.StatusCode) && !selected.bound && portableSharedBudgetInput(body) {
-		alternate, ok := s.alternateSharedBudgetAccount(ctx, *selected, tried)
+	for canRebind && response != nil && firstPartyRejectedBeforeGeneration(response.StatusCode) {
+		alternate, ok := s.matchSharedBudgetAccount(ctx, *selected, func(scope modelregistry.SharedBudgetCredentialScope) bool { return !tried[scope] })
 		if !ok {
 			break
 		}
@@ -547,7 +573,6 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 		_ = downstream.WriteMessage(websocket.TextMessage, data)
 		return "", nil, errors.New(selected.route.Name + " stream rejected")
 	}
-	selected.bound = true
 	emit := func(kind string, data []byte) error {
 		if kind == "response.completed" {
 			var event struct{ Response json.RawMessage }
@@ -580,10 +605,14 @@ func portableSharedBudgetInput(body []byte) bool {
 	}
 	for _, raw := range input {
 		var item struct {
-			Type             string `json:"type"`
-			EncryptedContent string `json:"encrypted_content"`
+			Type                  string            `json:"type"`
+			EncryptedContent      string            `json:"encrypted_content"`
+			EncryptedFunctionArgs []json.RawMessage `json:"encrypted_function_args"`
+			EncryptedArguments    []json.RawMessage `json:"encrypted_arguments"`
 		}
-		if json.Unmarshal(raw, &item) != nil || item.EncryptedContent != "" || item.Type == "item_reference" || item.Type == "compaction" {
+		if json.Unmarshal(raw, &item) != nil || item.EncryptedContent != "" ||
+			len(item.EncryptedFunctionArgs) != 0 || len(item.EncryptedArguments) != 0 ||
+			item.Type == "item_reference" || item.Type == "compaction" {
 			return false
 		}
 	}

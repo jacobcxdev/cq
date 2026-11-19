@@ -99,7 +99,7 @@ func (s *Server) sharedBudgetTurnRoute(ctx context.Context, header http.Header, 
 	if err != nil || credential.Bearer == "" || credential.binding() != bound.Credential {
 		return sharedBudgetSelection{}, true
 	}
-	return sharedBudgetSelection{id: bound.Provider, route: route, credential: credential, model: bound.Model, fallback: bound.Fallback, bound: true}, true
+	return sharedBudgetSelection{id: bound.Provider, route: route, credential: credential, model: bound.Model, fallback: bound.Fallback}, true
 }
 
 func (routes *sharedBudgetTurnRoutes) lookup(key sharedBudgetTurnKey) (sharedBudgetBoundState, bool) {

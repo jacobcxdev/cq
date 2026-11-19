@@ -82,6 +82,80 @@ func TestSessionAuthorityKeepsSeparateLogins(t *testing.T) {
 	}
 }
 
+func TestSessionAuthoritySelectsUniquePreferredEmail(t *testing.T) {
+	a, _, first, _ := sessionAuthorityFixture(t)
+	second := first
+	second.MemberID, second.WorkspaceID, second.Email = "other", "other-workspace", "other@example.test"
+	second.AccessToken, second.RefreshToken = "other-access", "other-refresh"
+	for _, session := range []OAuthSession{first, second} {
+		if err := a.Save(t.Context(), session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := a.Preferred(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected automatic account selection: %v", err)
+	}
+	if _, err := a.SetPreferred(t.Context(), "unknown@example.test"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected unknown account to fail: %v", err)
+	}
+	if got, err := a.SetPreferred(t.Context(), strings.ToUpper(second.Email)); err != nil || !sameSession(got, second) {
+		t.Fatalf("select account by email: %v", err)
+	}
+	if got, err := a.Preferred(); err != nil || !sameSession(got, second) {
+		t.Fatalf("read preferred account: %v", err)
+	}
+	if _, err := a.SetPreferred(t.Context(), first.Email); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := second
+	duplicate.WorkspaceID = "duplicate-workspace"
+	duplicate.Email = strings.ToUpper(second.Email)
+	if err := a.Save(t.Context(), duplicate); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.SetPreferred(t.Context(), second.Email); err == nil {
+		t.Fatal("accepted an email shared by multiple workspaces")
+	}
+	if got, err := a.Preferred(); err != nil || !sameSession(got, first) {
+		t.Fatalf("ambiguous selection changed preference: %v", err)
+	}
+	accounts, err := a.ReadAll()
+	if err != nil || len(accounts) != 3 || !sameSession(accounts[0], first) ||
+		!sameSession(accounts[1], second) || !sameSession(accounts[2], duplicate) {
+		t.Fatalf("preference changed saved logins: count=%d, err=%v", len(accounts), err)
+	}
+}
+
+func TestSessionAuthorityPreservesPreferenceAcrossRefreshAndRelogin(t *testing.T) {
+	a, _, first, now := sessionAuthorityFixture(t)
+	if err := a.Save(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.SetPreferred(t.Context(), first.Email); err != nil {
+		t.Fatal(err)
+	}
+	*now = first.ExpiresAt
+	refreshed := first
+	refreshed.AccessToken, refreshed.RefreshToken = "refreshed-access", "refreshed-refresh"
+	refreshed.ExpiresAt = now.Add(time.Hour)
+	a.Exchange = func(context.Context, OAuthSession) (OAuthSession, error) { return refreshed, nil }
+	if _, err := a.FreshFor(t.Context(), first.MemberID, first.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := a.Preferred(); err != nil || !sameSession(got, refreshed) {
+		t.Fatalf("refresh lost preference: %v", err)
+	}
+	relogin := refreshed
+	relogin.AccessToken, relogin.RefreshToken = "relogin-access", "relogin-refresh"
+	relogin.Email = "updated@example.test"
+	if err := a.Save(t.Context(), relogin); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := a.Preferred(); err != nil || !sameSession(got, relogin) {
+		t.Fatalf("re-login lost preference: %v", err)
+	}
+}
+
 func TestSessionAuthorityMigratesLegacyRecord(t *testing.T) {
 	a, fsys, first, _ := sessionAuthorityFixture(t)
 	if err := a.Save(t.Context(), first); err != nil {
