@@ -121,6 +121,31 @@ func TestNormaliseZAIRequestRecoversLegacyPlaintextAgentContent(t *testing.T) {
 	}
 }
 
+func TestNormaliseZAIRequestDropsLegacyEncryptedAgentMessages(t *testing.T) {
+	const body = `{"model":"glm-test","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"Keep user context."}]},{"type":"agent_message","id":"amsg-test","author":"/root","recipient":"/root/worker","internal_chat_message_metadata_passthrough":{"opaque":true},"content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"gAAAAABpHEk0UHJpWmRxY0xIS2hJZl9tS0dKR3B4U2g="}]},{"type":"agent_message","author":"/root/worker","recipient":"/root","content":[{"type":"input_text","text":"Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\n"},{"type":"input_text","text":"Keep readable worker reply."}]}]}`
+	got, err := normaliseZAIRequest([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		Input []struct {
+			Type, Role string
+			Content    []struct {
+				Type, Text string
+			}
+		}
+	}
+	if err := json.Unmarshal(got, &request); err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Input) != 2 || request.Input[0].Type != "message" || request.Input[0].Role != "user" ||
+		len(request.Input[0].Content) != 1 || request.Input[0].Content[0].Text != "Keep user context." ||
+		request.Input[1].Type != "message" || request.Input[1].Role != "user" || len(request.Input[1].Content) != 2 ||
+		request.Input[1].Content[1].Text != "Keep readable worker reply." {
+		t.Fatalf("legacy encrypted agent message was not dropped safely: %+v", request.Input)
+	}
+}
+
 func TestNormaliseZAIRequestMakesCollaborationSchemasPlaintext(t *testing.T) {
 	const body = `{"model":"glm-test","input":[],"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}]}]}`
 	got, err := normaliseZAIRequest([]byte(body))
@@ -137,7 +162,8 @@ func TestNormaliseZAIRequestRejectsUnreadableAgentContent(t *testing.T) {
 		name, agent, errorKind string
 	}{
 		{"encrypted part", `{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"gAAAAABpHEk0UHJpWmRxY0xIS2hJZl9tS0dKR3B4U2g="}]}`, "encrypted"},
-		{"mixed plaintext and encryption", `{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"gAAAAABpHEk0UHJpWmRxY0xIS2hJZl9tS0dKR3B4U2g="}]}`, "encrypted"},
+		{"current legacy-shaped encrypted part", `{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"gAAAAABpHEk0UHJpWmRxY0xIS2hJZl9tS0dKR3B4U2g="}]}`, "encrypted"},
+		{"mixed plaintext and encryption", `{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n"},{"type":"input_text","text":"Readable content must not be discarded."},{"type":"encrypted_content","encrypted_content":"gAAAAABpHEk0UHJpWmRxY0xIS2hJZl9tS0dKR3B4U2g="}]}`, "encrypted"},
 		{"mismatched legacy header", `{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/other\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"TASK_CONTENT_MUST_NOT_APPEAR"}]}`, "encrypted"},
 		{"encrypted envelope", `{"type":"agent_message","encrypted_content":"TASK_CONTENT_MUST_NOT_APPEAR","content":[{"type":"input_text","text":"header"}]}`, "encrypted"},
 		{"encryption on text part", `{"type":"agent_message","content":[{"type":"input_text","text":"header","encrypted_content":"TASK_CONTENT_MUST_NOT_APPEAR"}]}`, "encrypted"},
