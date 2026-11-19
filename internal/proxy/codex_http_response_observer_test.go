@@ -94,6 +94,27 @@ func TestRelayCodexAcceptedHTTPResponseRelaysSSETerminalOutcomes(t *testing.T) {
 	}
 }
 
+func TestRelayCodexAcceptedHTTPResponseMarksCollaborationCallsPlaintext(t *testing.T) {
+	t.Parallel()
+	bodyBytes := "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"spawn_agent\",\"arguments\":\"{}\"}}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-a\",\"output\":[{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"send_message\",\"arguments\":\"{}\"}]}}\n\n"
+	calls := &codexHTTPObserverLifecycleCalls{}
+	body := newCodexHTTPObserverBody([]string{bodyBytes[:7], bodyBytes[7:]}, nil, calls)
+	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}
+	writer := newCodexHTTPObserverWriter()
+
+	if err := relayCodexAcceptedHTTPResponse(context.Background(), writer, response, codexHTTPResponseModeSSE, &codexHTTPObserverLifecycle{calls: calls, generation: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(writer.body.String(), `"encrypted_function_args":[]`); got != 2 {
+		t.Fatalf("plaintext collaboration markers = %d, want 2 in %q", got, writer.body.String())
+	}
+	got := calls.snapshot()
+	if got.terminalKind != "completed" || got.responseEvidence.ResponseAnchor != "response-a" || got.terminalCalls != 1 || got.drainCalls != 1 {
+		t.Fatalf("lifecycle calls = %#v", got)
+	}
+}
+
 func TestRelayCodexAcceptedHTTPResponsePersistsStreamedTurnStateBeforeRelay(t *testing.T) {
 	t.Parallel()
 	const turnState = "private-streamed-turn-state"
