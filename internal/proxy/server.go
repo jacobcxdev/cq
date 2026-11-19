@@ -1404,7 +1404,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 				_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.ClosePolicyViolation, errSharedBudgetContinuation.Error()), time.Now().Add(time.Second))
 				return
 			}
-			if selected, inherited := s.sharedBudgetWorkerRoute(r.Context(), r.Header, firstFrame, extractCodexWebSocketFrameModel(firstFrame)); inherited {
+			if selected, bound := s.sharedBudgetTurnRoute(r.Context(), r.Header, firstFrame, extractCodexWebSocketFrameModel(firstFrame)); bound {
 				routeKind = "shared_budget_websocket"
 				if selected.id != "" {
 					diagnosticsProvider = string(selected.id)
@@ -1412,7 +1412,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 				}
-				_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "parent subscription or worker input unavailable"), time.Now().Add(time.Second))
+				_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, errSharedBudgetContinuation.Error()), time.Now().Add(time.Second))
 				return
 			}
 		}

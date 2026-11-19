@@ -15,11 +15,11 @@ type sharedBudgetTurnRoutes struct {
 	byTurn map[sharedBudgetTurnKey]sharedBudgetBoundState
 }
 
-// A fresh worker has its own Responses connection. Remember the selected
-// subscription before streaming so a tool call can spawn a worker immediately.
+// Remember the subscription before streaming, so a reconnect or fresh worker
+// can retain the same route even before the original response completes.
 func (s *Server) recordSharedBudgetTurn(header http.Header, body []byte, state sharedBudgetBoundState) {
 	info, err := ParseCodexTurnMetadata(body, header.Get(codexTurnMetadataKey), nil)
-	if err != nil || !info.Strong || info.Metadata.TurnID == "" {
+	if err != nil || !info.Strong || info.Metadata.ThreadID == "" || info.Metadata.TurnID == "" {
 		return
 	}
 	key := sharedBudgetTurnKey{info.Metadata.ThreadID, info.Metadata.TurnID, strings.ToLower(state.Model)}
@@ -38,23 +38,23 @@ func (s *Server) recordSharedBudgetTurn(header http.Header, body []byte, state s
 	routes.byTurn[key] = state
 }
 
-func (s *Server) sharedBudgetWorkerRoute(ctx context.Context, header http.Header, body []byte, model string) (sharedBudgetSelection, bool) {
-	if header.Get("X-OpenAI-Subagent") != "collab_spawn" || !s.hasSharedBudgetCatalog() {
+func (s *Server) sharedBudgetTurnRoute(ctx context.Context, header http.Header, body []byte, model string) (sharedBudgetSelection, bool) {
+	if len(s.SharedBudgetRoutes) == 0 || !s.hasSharedBudgetCatalog() {
 		return sharedBudgetSelection{}, false
 	}
 	info, err := ParseCodexTurnMetadata(body, header.Get(codexTurnMetadataKey), nil)
 	if err != nil || !info.Strong {
 		return sharedBudgetSelection{}, false
 	}
-	parentThread, parentTurn := sharedBudgetWorkerParent(header, body, info.Source)
-	if parentThread == "" || parentTurn == "" || parentThread == info.Metadata.ThreadID {
-		return sharedBudgetSelection{}, false
-	}
-	key := sharedBudgetTurnKey{parentThread, parentTurn, strings.ToLower(ParseModel(model))}
+	model = strings.ToLower(ParseModel(model))
 	routes := &s.sharedBudgetTurns
-	routes.mu.Lock()
-	bound, found := routes.byTurn[key]
-	routes.mu.Unlock()
+	bound, found := routes.lookup(sharedBudgetTurnKey{info.Metadata.ThreadID, info.Metadata.TurnID, model})
+	if !found && header.Get("X-OpenAI-Subagent") == "collab_spawn" {
+		parentThread, parentTurn := sharedBudgetWorkerParent(header, body, info.Source)
+		if parentThread != "" && parentTurn != "" && parentThread != info.Metadata.ThreadID {
+			bound, found = routes.lookup(sharedBudgetTurnKey{parentThread, parentTurn, model})
+		}
+	}
 	if !found {
 		return sharedBudgetSelection{}, false
 	}
@@ -67,6 +67,13 @@ func (s *Server) sharedBudgetWorkerRoute(ctx context.Context, header http.Header
 		return sharedBudgetSelection{}, true
 	}
 	return sharedBudgetSelection{id: bound.Provider, route: route, credential: credential, model: bound.Model, fallback: bound.Fallback}, true
+}
+
+func (routes *sharedBudgetTurnRoutes) lookup(key sharedBudgetTurnKey) (sharedBudgetBoundState, bool) {
+	routes.mu.Lock()
+	defer routes.mu.Unlock()
+	bound, found := routes.byTurn[key]
+	return bound, found
 }
 
 // Keep delegation provenance separate from native Codex lease identity.

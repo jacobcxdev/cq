@@ -951,6 +951,86 @@ func TestOpenCodeGoCatalogueRejectsKeyChangesBeforeRefresh(t *testing.T) {
 	check("glm-5.3", http.StatusOK, 4)
 }
 
+func TestSharedBudgetReconnectReusesSameTurn(t *testing.T) {
+	var primaryCalls, goCalls atomic.Int32
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if primaryCalls.Add(1) == 1 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		writeZAITestSSE(w, "primary-answer", nil)
+	}))
+	defer primary.Close()
+	s := &Server{
+		Config: &Config{ClaudeUpstream: primary.URL}, Catalog: openCodeGoTestCatalog(),
+		ZAIUpstream: primary.URL, ZAIAPIKey: func() (string, error) { return "primary-key", nil },
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(_ *http.Request) (*http.Response, error) {
+			goCalls.Add(1)
+			w := httptest.NewRecorder()
+			writeZAITestSSE(w, "go-answer", nil)
+			return w.Result(), nil
+		}),
+	}
+	const body = `"model":"glm-5.3","input":"Reply with the fixture marker."`
+	const turn = `{"thread_id":"thread","turn_id":"turn-1","session_id":"session","request_kind":"turn"}`
+	header := make(http.Header)
+	header.Set(codexTurnMetadataKey, turn)
+	request := func(header http.Header, input string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(input))
+		req.Header = header
+		w := httptest.NewRecorder()
+		s.handleCodexResponsesRoute(w, req)
+		return w
+	}
+	first := openZAITestWebSocket(t, s, header)
+	if err := first.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create",`+body+`}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readZAITestCompletion(t, first); got.Response.ID != "go-answer" {
+		t.Fatalf("initial turn ran on wrong provider: %q", got.Response.ID)
+	}
+	_ = first.Close()
+
+	direct := openZAITestWebSocket(t, s, header)
+	if err := direct.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create",`+body+`}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readZAITestCompletion(t, direct); got.Response.ID != "go-answer" {
+		t.Fatalf("direct reconnect ran on wrong provider: %q", got.Response.ID)
+	}
+	_ = direct.Close()
+
+	reconnected := openZAITestWebSocket(t, s, nil)
+	if err := reconnected.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"glm-5.3","generate":false,"input":[]}`)); err != nil {
+		t.Fatal(err)
+	}
+	prewarm := readZAITestCompletion(t, reconnected)
+	replay := fmt.Sprintf(`{"type":"response.create","previous_response_id":%q,"client_metadata":{"x-codex-turn-metadata":%q},%s}`,
+		prewarm.Response.ID, turn, body)
+	if err := reconnected.WriteMessage(websocket.TextMessage, []byte(replay)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readZAITestCompletion(t, reconnected); got.Response.ID != "go-answer" {
+		t.Fatalf("reconnected turn ran on wrong provider: %q", got.Response.ID)
+	}
+
+	if w := request(header, "{"+body+"}"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "go-answer") {
+		t.Fatalf("HTTP replay status %d, body %q", w.Code, w.Body.String())
+	}
+	encrypted := `{"model":"glm-5.3","input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"opaque"}]}]}`
+	if w := request(header, encrypted); w.Code != http.StatusBadRequest {
+		t.Fatalf("encrypted replay status %d, body %q", w.Code, w.Body.String())
+	}
+	newTurn := header.Clone()
+	newTurn.Set(codexTurnMetadataKey, strings.Replace(turn, "turn-1", "turn-2", 1))
+	if w := request(newTurn, "{"+body+"}"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "primary-answer") {
+		t.Fatalf("new turn status %d, body %q", w.Code, w.Body.String())
+	}
+	if primaryCalls.Load() != 2 || goCalls.Load() != 4 {
+		t.Fatalf("Z.ai calls %d, Go calls %d", primaryCalls.Load(), goCalls.Load())
+	}
+}
+
 func TestSharedBudgetWebSocketReconnectRejectsProviderOwnedState(t *testing.T) {
 	s := &Server{
 		Config: &Config{}, Catalog: openCodeGoTestCatalog(),

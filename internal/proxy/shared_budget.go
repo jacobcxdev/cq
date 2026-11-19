@@ -511,11 +511,11 @@ func (s *Server) withSharedBudgetWebSocketFallback(primary func(context.Context,
 		if s.knownSharedBudgetState(body) {
 			return "", nil, errSharedBudgetContinuation
 		}
-		// Codex can prewarm before sending the parent turn metadata. The
+		// Codex can prewarm before sending the turn metadata. The
 		// synthetic prewarm does not commit this socket to the primary route.
 		if !primarySelected {
 			model := extractModel(body)
-			if selected, inherited := s.sharedBudgetWorkerRoute(ctx, header, body, model); inherited {
+			if selected, bound := s.sharedBudgetTurnRoute(ctx, header, body, model); bound {
 				if selected.id == "" {
 					return "", nil, errSharedBudgetContinuation
 				}
