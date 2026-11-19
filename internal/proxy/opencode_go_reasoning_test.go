@@ -155,16 +155,25 @@ func TestOpenCodeGoSequentialReasoningLeavesOtherStreamsAlone(t *testing.T) {
 		"data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"summary_index\":0,\"item_id\":\"rs\",\"delta\":\"First complete sentence. \"}\n\n"
 	for _, tc := range []struct {
 		name, nativeAPI, options string
+		otherAccount             bool
 	}{
-		{"ordinary delivery", "chat-completions", ""},
-		{"native Responses", "responses", `,"stream_options":{"reasoning_summary_delivery":"sequential_cutoff"}`},
-		{"explicit suppression", "chat-completions", `,"stream_options":{"reasoning_summary_delivery":"sequential_cutoff"},"reasoning":{"summary":"none"}`},
+		{"ordinary delivery", "chat-completions", "", false},
+		{"native Responses", "responses", `,"stream_options":{"reasoning_summary_delivery":"sequential_cutoff"}`, false},
+		{"another account translates", "responses", `,"stream_options":{"reasoning_summary_delivery":"sequential_cutoff"}`, true},
+		{"explicit suppression", "chat-completions", `,"stream_options":{"reasoning_summary_delivery":"sequential_cutoff"},"reasoning":{"summary":"none"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			snapshot := openCodeGoTestCatalog().Snapshot()
 			entry := openCodeGoTestEntry("glm-5.3")
 			entry.SharedBudget.NativeAPI = tc.nativeAPI
 			snapshot.SharedBudgetModels["glm-5.3"] = []modelregistry.Entry{entry}
+			if tc.otherAccount {
+				entry.SharedBudget.CredentialScope = (SharedBudgetCredential{Bearer: "go-key"}).binding()
+				other := openCodeGoTestEntry("glm-5.3")
+				other.SharedBudget.NativeAPI = "chat-completions"
+				other.SharedBudget.CredentialScope = (SharedBudgetCredential{Bearer: "other-key"}).binding()
+				snapshot.SharedBudgetModels["glm-5.3"] = []modelregistry.Entry{other, entry}
+			}
 			s := &Server{
 				Config: &Config{}, Catalog: modelregistry.NewCatalog(snapshot),
 				SharedBudgetRoutes: openCodeGoTestRoutes(func(*http.Request) (*http.Response, error) {
@@ -173,6 +182,11 @@ func TestOpenCodeGoSequentialReasoningLeavesOtherStreamsAlone(t *testing.T) {
 						Body: io.NopCloser(strings.NewReader(stream)),
 					}, nil
 				}),
+			}
+			if tc.otherAccount {
+				route := s.SharedBudgetRoutes[modelregistry.ProviderOpenCodeGo]
+				route.RequireCatalogueScope = true
+				s.SharedBudgetRoutes[modelregistry.ProviderOpenCodeGo] = route
 			}
 			w := httptest.NewRecorder()
 			body := `{"model":"glm-5.3","input":[{"type":"message","role":"user","content":[]}],"stream":true` + tc.options + "}"

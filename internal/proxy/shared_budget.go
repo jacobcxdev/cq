@@ -51,6 +51,7 @@ type sharedBudgetSelection struct {
 	credential SharedBudgetCredential
 	model      string
 	fallback   bool
+	nativeAPI  string
 }
 
 type sharedBudgetRouteError struct {
@@ -102,7 +103,7 @@ func (s *Server) selectSharedBudgetRoute(ctx context.Context, model string, fall
 	return sharedBudgetSelection{}, false
 }
 
-func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudgetSelection, session string, header http.Header, body []byte, compactEndpoint bool) (*http.Response, *zaiCompactResponse, error) {
+func (s *Server) sharedBudgetResponse(ctx context.Context, selected *sharedBudgetSelection, session string, header http.Header, body []byte, compactEndpoint bool) (*http.Response, *zaiCompactResponse, error) {
 	route := selected.route
 	originalBody := body
 	scope := selected.credential.binding()
@@ -113,6 +114,10 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 	})
 	if route.RequireCatalogueScope && entry < 0 {
 		return nil, nil, sharedBudgetRouteError{409, route.Name + " model is no longer available for this subscription"}
+	}
+	selected.nativeAPI = ""
+	if entry >= 0 {
+		selected.nativeAPI = models[entry].SharedBudget.NativeAPI
 	}
 	if len(body) > maxRequestBody {
 		return nil, nil, sharedBudgetRouteError{413, route.Name + " request body exceeds 10 MiB"}
@@ -139,7 +144,7 @@ func (s *Server) sharedBudgetResponse(ctx context.Context, selected sharedBudget
 		return nil, nil, sharedBudgetRouteError{400, "invalid " + route.Name + " request"}
 	}
 	if entry >= 0 {
-		nativeAPI := models[entry].SharedBudget.NativeAPI
+		nativeAPI := selected.nativeAPI
 		if previous := bytes.TrimSpace(input["previous_response_id"]); len(previous) != 0 &&
 			!bytes.Equal(previous, []byte("null")) && !bytes.Equal(previous, []byte(`""`)) &&
 			nativeAPI != "" && nativeAPI != "responses" {
@@ -321,7 +326,7 @@ func (s *Server) serveSelectedSharedBudgetHTTP(w http.ResponseWriter, r *http.Re
 	if s.CacheProfiler != nil {
 		ctx = withCacheProfileRequestSession(ctx, r.Header, body)
 	}
-	response, compact, err := s.sharedBudgetResponse(ctx, selected, sharedBudgetSession(r.Header, selected.route.SessionHeader), r.Header, body, compactEndpoint)
+	response, compact, err := s.sharedBudgetResponse(ctx, &selected, sharedBudgetSession(r.Header, selected.route.SessionHeader), r.Header, body, compactEndpoint)
 	if err != nil {
 		if errors.Is(err, errEncryptedSubscriptionAgentMessage) {
 			writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -397,7 +402,7 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 	if s.CacheProfiler != nil {
 		ctx = withCacheProfileRequestSession(ctx, header, body)
 	}
-	response, compact, err := s.sharedBudgetResponse(ctx, selected, session, header, body, false)
+	response, compact, err := s.sharedBudgetResponse(ctx, &selected, session, header, body, false)
 	if err != nil {
 		return "", nil, err
 	}
@@ -425,7 +430,7 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 		}
 		return downstream.WriteMessage(websocket.TextMessage, data)
 	}
-	normalise := s.sharedBudgetStreamNormaliser(selected, body, emit)
+	normalise := sharedBudgetStreamNormaliser(selected, body, emit)
 	if normalise == nil {
 		normalise = func(data []byte) ([]byte, error) { return data, nil }
 	}

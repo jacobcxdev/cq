@@ -9,12 +9,12 @@ import (
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
 
-func (s *Server) sharedBudgetStreamNormaliser(selected sharedBudgetSelection, body []byte, emit func(string, []byte) error) func([]byte) ([]byte, error) {
+func sharedBudgetStreamNormaliser(selected sharedBudgetSelection, body []byte, emit func(string, []byte) error) func([]byte) ([]byte, error) {
 	var normalise func([]byte) ([]byte, error)
 	if selected.route.PlaintextCollaboration {
 		normalise = plaintextCollaborationResponse
 	}
-	if selected.id != modelregistry.ProviderOpenCodeGo || !selected.route.OmitStreamOptions {
+	if selected.id != modelregistry.ProviderOpenCodeGo || !selected.route.OmitStreamOptions || selected.nativeAPI != "chat-completions" {
 		return normalise
 	}
 	var request struct {
@@ -26,13 +26,8 @@ func (s *Server) sharedBudgetStreamNormaliser(selected sharedBudgetSelection, bo
 	if json.Unmarshal(body, &request) != nil || request.StreamOptions.Delivery != "sequential_cutoff" || request.Reasoning.Summary == "none" {
 		return normalise
 	}
-	for _, entry := range s.Catalog.SharedBudgetModels(selected.model) {
-		if entry.Provider == selected.id && entry.SharedBudget != nil && entry.SharedBudget.NativeAPI == "chat-completions" {
-			stream := openCodeGoReasoningStream{emit: emit, normalise: normalise}
-			return stream.event
-		}
-	}
-	return normalise
+	stream := openCodeGoReasoningStream{emit: emit, normalise: normalise}
+	return stream.event
 }
 
 // OpenCode Go sends the entire reasoning block as one summary part and can

@@ -148,7 +148,7 @@ func (s *Server) relaySharedBudgetHTTP(w http.ResponseWriter, response *http.Res
 	if mediaType == "text/event-stream" {
 		body = io.TeeReader(body, &sharedBudgetSSEObserver{parser: NewCodexSSEParser(1 << 20), record: record})
 		writer := zaiFlushWriter{w}
-		normalise := s.sharedBudgetStreamNormaliser(selected, request, func(kind string, data []byte) error {
+		normalise := sharedBudgetStreamNormaliser(selected, request, func(kind string, data []byte) error {
 			_, err := fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", kind, data)
 			return err
 		})
