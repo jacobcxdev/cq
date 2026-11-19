@@ -22,6 +22,10 @@ type sessionPolicyPermitRecorder struct {
 	requests []CallerDispatchPermitRequestV2
 }
 
+func sessionPolicyTestRequest(session []byte) CodexProtocolRequest {
+	return CodexProtocolRequest{Metadata: CodexTurnMetadataResult{Strong: true, Metadata: CodexTurnMetadata{SessionID: string(session)}}}
+}
+
 func (recorder *sessionPolicyPermitRecorder) IssueAndConsume(_ context.Context, request CallerDispatchPermitRequestV2) (CallerDispatchPermitV2, error) {
 	recorder.requests = append(recorder.requests, request)
 	return CallerDispatchPermitV2{Digest: strings.Repeat("d", 64)}, nil
@@ -41,17 +45,17 @@ func TestSessionCyberPolicyOverridesBindingOnlyForCyberRequest(t *testing.T) {
 	resolver := NewSessionPolicyResolver(key, policy)
 	caller := RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"}
 	accounts := []codex.AccountKey{"ordinary", "cyber"}
-	cyber, err := enforceSessionCyberPolicy(resolver, caller, session, accounts, "", time.Now())
+	cyber, err := enforceSessionCyberPolicy(resolver, caller, session, "daybreak_blue", accounts, "", time.Now())
 	if err != nil || cyber.PoolID != testPoolIDA || !slices.Equal(cyber.Allowed, []codex.AccountKey{"cyber"}) {
 		t.Fatalf("Cyber request policy = %+v, error %v", cyber, err)
 	}
-	ordinary, err := enforceSessionPolicy(resolver, caller, session, accounts, "", time.Now())
+	ordinary, err := enforceSessionPolicy(resolver, caller, sessionPolicyTestRequest(session), accounts, "", time.Now())
 	if err != nil || ordinary.PoolID != testPoolIDB || !slices.Equal(ordinary.Allowed, []codex.AccountKey{"ordinary"}) {
 		t.Fatalf("ordinary request policy = %+v, error %v", ordinary, err)
 	}
 	policy.Pools = policy.Pools[1:]
 	resolver.Replace(policy)
-	unknown, err := enforceSessionCyberPolicy(resolver, caller, session, accounts, "", time.Now())
+	unknown, err := enforceSessionCyberPolicy(resolver, caller, session, "daybreak_blue", accounts, "", time.Now())
 	if err != nil || unknown.Status != PolicyDecisionUnbound || !slices.Equal(unknown.Allowed, []codex.AccountKey{"cyber", "ordinary"}) {
 		t.Fatalf("pre-discovery Cyber policy = %+v, error %v", unknown, err)
 	}
@@ -72,14 +76,15 @@ func TestSessionPolicyEnforcementNarrowsPoolCapabilityAndDelegationAfterContinui
 	})
 	resolver := NewSessionPolicyResolver(key, policy)
 	caller := RuntimeCallerAuthorityV1{Domain: NormalCallerCodex, SubjectID: "caller-safe-id"}
-	decision, err := enforceSessionPolicy(resolver, caller, session, []codex.AccountKey{"account-a", "account-b", "account-c"}, "account-a", time.Unix(100, 0))
+	request := sessionPolicyTestRequest(session)
+	decision, err := enforceSessionPolicy(resolver, caller, request, []codex.AccountKey{"account-a", "account-b", "account-c"}, "account-a", time.Unix(100, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if decision.Status != PolicyDecisionSelected || decision.Pool != "team" || len(decision.Allowed) != 1 || decision.Allowed[0] != "account-a" {
 		t.Fatalf("decision = %#v", decision)
 	}
-	if _, err := enforceSessionPolicy(resolver, caller, session, []codex.AccountKey{"account-a", "account-b"}, "account-b", time.Unix(100, 0)); !errors.Is(err, ErrSessionPolicyContinuity) {
+	if _, err := enforceSessionPolicy(resolver, caller, request, []codex.AccountKey{"account-a", "account-b"}, "account-b", time.Unix(100, 0)); !errors.Is(err, ErrSessionPolicyContinuity) {
 		t.Fatalf("continuity error = %v", err)
 	}
 }
@@ -87,7 +92,7 @@ func TestSessionPolicyEnforcementNarrowsPoolCapabilityAndDelegationAfterContinui
 func TestSessionPolicyEnforcementPreservesUnboundParity(t *testing.T) {
 	resolver := NewSessionPolicyResolver([]byte("01234567890123456789012345678901"), routingPolicyV2ForTest(RoutingPolicyV1{SchemaVersion: 1}))
 	global := []codex.AccountKey{"account-b", "account-a"}
-	decision, err := enforceSessionPolicy(resolver, RuntimeCallerAuthorityV1{}, []byte("unbound"), global, "", time.Unix(100, 0))
+	decision, err := enforceSessionPolicy(resolver, RuntimeCallerAuthorityV1{}, sessionPolicyTestRequest([]byte("unbound")), global, "", time.Unix(100, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +125,7 @@ func TestSessionPolicyEnforcementAllowsCodexCallerWithoutDelegation(t *testing.T
 	}))
 	caller := RuntimeCallerAuthorityV1{Domain: NormalCallerCodex, SubjectID: "worker-keyed-caller"}
 
-	decision, err := enforceSessionPolicy(resolver, caller, session, []codex.AccountKey{"account-a", "account-b", "account-c"}, "", time.Unix(100, 0))
+	decision, err := enforceSessionPolicy(resolver, caller, sessionPolicyTestRequest(session), []codex.AccountKey{"account-a", "account-b", "account-c"}, "", time.Unix(100, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,10 +158,10 @@ func TestSessionPolicyResolverScopesCapabilityRulesToNamedPool(t *testing.T) {
 		CapabilityRoutingEvidence: []CapabilityRoutingEvidenceV1{{AccountKey: "cyber"}},
 	})
 	resolver := NewSessionPolicyResolver(nil, policy)
-	if _, _, active := resolver.capabilityPolicy(policy.Pools[0].ID, 7); active {
+	if _, _, active, err := resolver.capabilityPolicy(policy.Pools[0].ID, 7); err != nil || active {
 		t.Fatal("paid pool inherited cyber capability rules")
 	}
-	if _, _, active := resolver.capabilityPolicy(policy.Pools[1].ID, 7); !active {
+	if _, _, active, err := resolver.capabilityPolicy(policy.Pools[1].ID, 7); err != nil || !active {
 		t.Fatal("cyber pool missing capability rules")
 	}
 }
@@ -174,8 +179,8 @@ func TestSessionPolicyResolverKeepsPoolIdentityAcrossRename(t *testing.T) {
 	}
 	resolver := NewSessionPolicyResolver(key, policy)
 	before := resolver.Resolve(session, []codex.AccountKey{"account-a", "account-b"})
-	snapshot, _, active := resolver.capabilityPolicy(testPoolIDA, 7)
-	if before.PoolID != testPoolIDA || before.Pool != "Cyber" || !active || snapshot.PoolID != testPoolIDA {
+	snapshot, _, active, err := resolver.capabilityPolicy(testPoolIDA, 7)
+	if err != nil || before.PoolID != testPoolIDA || before.Pool != "Cyber" || !active || snapshot.PoolID != testPoolIDA {
 		t.Fatalf("before = %#v snapshot = %#v active = %t", before, snapshot, active)
 	}
 	policy.Pools[0].Name = "Security Research"

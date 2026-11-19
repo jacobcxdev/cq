@@ -21,13 +21,7 @@ func (factory *CodexHTTPRequestPlanFactory) redistributionInventory(ctx context.
 	caller, _ := runtimeCallerAuthority(ctx)
 	allowed := accounts
 	if factory.SessionPolicy != nil {
-		var decision SessionPolicyDecision
-		var err error
-		if factory.CyberEligibility != nil && protocol.CyberEnabled() {
-			decision, err = enforceSessionCyberPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, "", now)
-		} else {
-			decision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, "", now)
-		}
+		decision, err := factory.enforceRequestSessionPolicy(ctx, caller, protocol, accounts, "", now)
 		if err != nil {
 			return codex.Inventory{}
 		}

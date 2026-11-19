@@ -1453,6 +1453,47 @@ func TestCodexFrozenRequestReleaseClearsOwnedStateAndFreezeIsSingleUse(t *testin
 	}
 }
 
+func TestCodexFrozenRequestRestoresDaybreakWithOriginalEncoding(t *testing.T) {
+	for _, encoding := range []string{"", "zstd"} {
+		t.Run(encoding, func(t *testing.T) {
+			body := frozenRequestBody("gpt-6-sol", CodexRequestTurn, "history")
+			encoded, err := EncodeCodexRequest(body, encoding, codexHTTPZstdLimits())
+			if err != nil {
+				t.Fatal(err)
+			}
+			headers := make(http.Header)
+			if encoding != "" {
+				headers.Set("Content-Encoding", encoding)
+			}
+			inspection, err := InspectCodexNativeRequest(context.Background(), encoded, headers)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := inspection.restoreDaybreak("daybreak_blue"); err != nil {
+				t.Fatal(err)
+			}
+			frozen, err := inspection.Freeze(context.Background(), frozenRequestChoice("gpt-6-sol", "gpt-6-sol"), nil, HeadroomModeCache)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer frozen.Release()
+			replay, err := frozen.Replay()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer replay.Release()
+			decoded, err := replay.DecodedBody()
+			if err != nil {
+				t.Fatal(err)
+			}
+			request, err := ParseCodexProtocolRequest(decoded, "", nil)
+			if err != nil || request.CyberAccessProgram != "daybreak_blue" {
+				t.Fatalf("forwarded programme = %q, error %v", request.CyberAccessProgram, err)
+			}
+		})
+	}
+}
+
 func frozenRequestBody(model string, kind CodexRequestKind, private string) []byte {
 	phase := ""
 	if kind == CodexRequestCompaction {

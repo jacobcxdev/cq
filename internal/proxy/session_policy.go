@@ -26,13 +26,15 @@ const (
 )
 
 type SessionPolicyDecision struct {
-	SessionDigest  string
-	Pool           string
-	PoolID         PoolID
-	Allowed        []providerCodex.AccountKey
-	AccountValues  map[providerCodex.AccountKey]PoolValue
-	PolicyRevision uint64
-	Status         PolicyDecisionStatus
+	SessionDigest     string
+	Pool              string
+	PoolID            PoolID
+	Allowed           []providerCodex.AccountKey
+	AccountValues     map[providerCodex.AccountKey]PoolValue
+	PolicyRevision    uint64
+	Status            PolicyDecisionStatus
+	daybreakBound     bool
+	daybreakProgramme string
 }
 
 type SessionPolicyResolver struct {
@@ -41,17 +43,20 @@ type SessionPolicyResolver struct {
 	policy RoutingPolicyV2
 }
 
-func (r *SessionPolicyResolver) capabilityPolicy(poolID PoolID, revision uint64) (RoutingPolicySnapshotV1, []CapabilityRoutingEvidenceV1, bool) {
+func (r *SessionPolicyResolver) capabilityPolicy(poolID PoolID, revision uint64) (RoutingPolicySnapshotV1, []CapabilityRoutingEvidenceV1, bool, error) {
 	if r == nil {
-		return RoutingPolicySnapshotV1{}, nil, false
+		return RoutingPolicySnapshotV1{}, nil, false, nil
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.policy.RoutingGeneration != revision || len(r.policy.CapabilityPredicates) == 0 || len(r.policy.CapabilityRoutingEvidence) == 0 {
-		return RoutingPolicySnapshotV1{}, nil, false
+	if r.policy.RoutingGeneration != revision {
+		return RoutingPolicySnapshotV1{}, nil, false, ErrSessionPolicyUnavailable
+	}
+	if len(r.policy.CapabilityPredicates) == 0 || len(r.policy.CapabilityRoutingEvidence) == 0 {
+		return RoutingPolicySnapshotV1{}, nil, false, nil
 	}
 	if poolID != r.policy.CapabilityPool {
-		return RoutingPolicySnapshotV1{}, nil, false
+		return RoutingPolicySnapshotV1{}, nil, false, nil
 	}
 	for _, candidate := range r.policy.Pools {
 		if candidate.ID != poolID {
@@ -61,9 +66,9 @@ func (r *SessionPolicyResolver) capabilityPolicy(poolID PoolID, revision uint64)
 			SchemaVersion: 1, Active: true, RoutingGeneration: r.policy.RoutingGeneration,
 			PoolID: candidate.ID,
 			Pool:   AccountPoolV1{Name: candidate.Name, Members: append([]providerCodex.AccountKey(nil), candidate.Members...)}, Predicates: append([]CapabilityPredicateCoreV1(nil), r.policy.CapabilityPredicates...),
-		}, append([]CapabilityRoutingEvidenceV1(nil), r.policy.CapabilityRoutingEvidence...), true
+		}, append([]CapabilityRoutingEvidenceV1(nil), r.policy.CapabilityRoutingEvidence...), true, nil
 	}
-	return RoutingPolicySnapshotV1{}, nil, false
+	return RoutingPolicySnapshotV1{}, nil, false, nil
 }
 
 func NewSessionPolicyResolver(key []byte, policy RoutingPolicyV2) *SessionPolicyResolver {
@@ -79,32 +84,51 @@ func (r *SessionPolicyResolver) Replace(policy RoutingPolicyV2) {
 		return
 	}
 	r.mu.Lock()
-	r.policy = cloneRoutingPolicyV2(policy)
-	r.mu.Unlock()
+	defer r.mu.Unlock()
+	if policy.RoutingGeneration >= r.policy.RoutingGeneration {
+		r.policy = cloneRoutingPolicyV2(policy)
+	}
 }
 
 func (r *SessionPolicyResolver) Resolve(exactSession []byte, global []providerCodex.AccountKey) SessionPolicyDecision {
-	decision, _ := r.resolveWithPolicy(exactSession, global)
+	decision, _ := r.resolveWithPolicy(keyedSessionDigest(r.key[:], exactSession), "", global)
 	return decision
 }
 
-func (r *SessionPolicyResolver) resolveWithPolicy(exactSession []byte, global []providerCodex.AccountKey) (SessionPolicyDecision, RoutingPolicyV2) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.resolveLocked(exactSession, global), cloneRoutingPolicyV2(r.policy)
+func (r *SessionPolicyResolver) resolveCodexSession(request CodexProtocolRequest, global []providerCodex.AccountKey) (SessionPolicyDecision, RoutingPolicyV2) {
+	exact := []byte(request.Metadata.Metadata.SessionID)
+	var daybreakDigest string
+	if request.Metadata.Strong && request.CyberAccessProgram == "" && validCanonicalSessionID(exact) {
+		daybreakDigest = keyedDaybreakSessionDigest(r.key[:], exact)
+	}
+	return r.resolveWithPolicy(keyedSessionDigest(r.key[:], exact), daybreakDigest, global)
 }
 
-func (r *SessionPolicyResolver) resolveLocked(exactSession []byte, global []providerCodex.AccountKey) SessionPolicyDecision {
-	digest := keyedSessionDigest(r.key[:], exactSession)
+func (r *SessionPolicyResolver) resolveWithPolicy(digest, daybreakDigest string, global []providerCodex.AccountKey) (SessionPolicyDecision, RoutingPolicyV2) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.resolveLocked(digest, daybreakDigest, global), cloneRoutingPolicyV2(r.policy)
+}
+
+func (r *SessionPolicyResolver) resolveLocked(digest, daybreakDigest string, global []providerCodex.AccountKey) SessionPolicyDecision {
 	decision := SessionPolicyDecision{
 		SessionDigest: digest, PolicyRevision: r.policy.RoutingGeneration, Status: PolicyDecisionUnbound,
 		AccountValues: r.accountValuesLocked(global),
 	}
 	var poolID PoolID
 	for _, binding := range r.policy.SessionBindings {
+		if daybreakDigest != "" && hmac.Equal([]byte(binding.SessionDigest), []byte(daybreakDigest)) {
+			poolID = binding.PoolID
+			decision.SessionDigest = daybreakDigest
+			decision.daybreakBound = true
+			decision.daybreakProgramme = binding.DaybreakProgramme
+			break
+		}
 		if hmac.Equal([]byte(binding.SessionDigest), []byte(digest)) {
 			poolID = binding.PoolID
-			break
+			if daybreakDigest == "" {
+				break
+			}
 		}
 	}
 	if poolID == "" {
@@ -157,21 +181,27 @@ func (r *SessionPolicyResolver) accountValuesLocked(global []providerCodex.Accou
 
 // enforceSessionPolicy loads continuity first, then narrows global authority.
 // Unbound sessions preserve existing routing parity.
-func enforceSessionPolicy(resolver *SessionPolicyResolver, caller RuntimeCallerAuthorityV1, exactSession []byte, global []providerCodex.AccountKey, continuity providerCodex.AccountKey, now time.Time) (SessionPolicyDecision, error) {
+func enforceSessionPolicy(resolver *SessionPolicyResolver, caller RuntimeCallerAuthorityV1, request CodexProtocolRequest, global []providerCodex.AccountKey, continuity providerCodex.AccountKey, now time.Time) (SessionPolicyDecision, error) {
 	if resolver == nil {
 		return SessionPolicyDecision{Allowed: sortedAccountKeys(global), AccountValues: map[providerCodex.AccountKey]PoolValue{}, Status: PolicyDecisionUnbound}, nil
 	}
-	decision, policy := resolver.resolveWithPolicy(exactSession, global)
+	decision, policy := resolver.resolveCodexSession(request, global)
 	return enforceSessionPolicyDecision(decision, policy, caller, global, continuity, now)
 }
 
-// A Cyber request selects the generated pool for this request only. Persistent
-// session bindings remain intact when the caller turns Cyber access off.
-func enforceSessionCyberPolicy(resolver *SessionPolicyResolver, caller RuntimeCallerAuthorityV1, exactSession []byte, global []providerCodex.AccountKey, continuity providerCodex.AccountKey, now time.Time) (SessionPolicyDecision, error) {
+func enforceSessionCyberPolicy(resolver *SessionPolicyResolver, caller RuntimeCallerAuthorityV1, exactSession []byte, programme string, global []providerCodex.AccountKey, continuity providerCodex.AccountKey, now time.Time) (SessionPolicyDecision, error) {
 	if resolver == nil {
 		return SessionPolicyDecision{}, ErrSessionPolicyUnavailable
 	}
-	decision, policy := resolver.resolveWithPolicy(exactSession, global)
+	digest := keyedSessionDigest(resolver.key[:], exactSession)
+	explicitDaybreak := isExplicitDaybreakProgramme(programme)
+	if explicitDaybreak {
+		digest = keyedDaybreakSessionDigest(resolver.key[:], exactSession)
+	}
+	decision, policy := resolver.resolveWithPolicy(digest, "", global)
+	if explicitDaybreak && decision.PoolID != "" {
+		return enforceSessionPolicyDecision(decision, policy, caller, global, continuity, now)
+	}
 	index := poolIndexByName(&policy, "Cyber")
 	if index < 0 {
 		decision.Pool = ""
@@ -251,8 +281,16 @@ func enforceSessionPolicyDecision(decision SessionPolicyDecision, policy Routing
 }
 
 func keyedSessionDigest(key, exact []byte) string {
+	return keyedSessionDigestForScope(key, exact, "cq/session-policy/digest/v1\x00")
+}
+
+func keyedDaybreakSessionDigest(key, exact []byte) string {
+	return keyedSessionDigestForScope(key, exact, "cq/session-policy/daybreak-digest/v1\x00")
+}
+
+func keyedSessionDigestForScope(key, exact []byte, scope string) string {
 	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte("cq/session-policy/digest/v1\x00"))
+	_, _ = mac.Write([]byte(scope))
 	var length [8]byte
 	binary.BigEndian.PutUint64(length[:], uint64(len(exact)))
 	_, _ = mac.Write(length[:])

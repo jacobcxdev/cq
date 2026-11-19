@@ -34,6 +34,10 @@ func (request CodexProtocolRequest) CyberEnabled() bool {
 	return request.CyberAccessProgram != "" && request.CyberAccessProgram != "standard"
 }
 
+func isExplicitDaybreakProgramme(programme string) bool {
+	return programme == "daybreak_blue" || programme == "daybreak_red"
+}
+
 func ParseCodexProtocolRequest(body []byte, directMetadata string, handshake *CodexTurnMetadata) (CodexProtocolRequest, error) {
 	return parseCodexProtocolRequest(body, directMetadata, handshake, codexHTTPRequestMaxBytes)
 }

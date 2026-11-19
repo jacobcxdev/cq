@@ -228,13 +228,18 @@ func proxyPolicyControl(ctx context.Context, deps proxyPolicyDependencies, metho
 	return policy, nil
 }
 
-func proxyPolicySessionDigest(ctx context.Context, deps proxyPolicyDependencies, port int, session []byte) (string, error) {
+type proxyPolicySessionDigests struct {
+	SessionDigest         string `json:"session_digest"`
+	DaybreakSessionDigest string `json:"daybreak_session_digest"`
+}
+
+func proxyPolicySessionDigest(ctx context.Context, deps proxyPolicyDependencies, port int, session []byte) (proxyPolicySessionDigests, error) {
 	if ctx == nil || deps.LoadConfig == nil || deps.Doer == nil {
-		return "", errors.New("proxy policy control unavailable")
+		return proxyPolicySessionDigests{}, errors.New("proxy policy control unavailable")
 	}
 	cfg, err := deps.LoadConfig()
 	if err != nil {
-		return "", err
+		return proxyPolicySessionDigests{}, err
 	}
 	if port == 0 {
 		port = cfg.Port
@@ -244,32 +249,31 @@ func proxyPolicySessionDigest(ctx context.Context, deps proxyPolicyDependencies,
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", port, proxy.RuntimePolicySessionDigestPath), bytes.NewReader(session))
 	if err != nil {
-		return "", err
+		return proxyPolicySessionDigests{}, err
 	}
 	request.Header.Set("Authorization", "Bearer "+cfg.LocalToken)
 	request.Header.Set("Content-Type", "application/octet-stream")
 	response, err := deps.Doer.Do(request)
 	if err != nil {
-		return "", err
+		return proxyPolicySessionDigests{}, err
 	}
 	if response == nil || response.Body == nil {
-		return "", errors.New("proxy policy response unavailable")
+		return proxyPolicySessionDigests{}, errors.New("proxy policy response unavailable")
 	}
 	defer response.Body.Close()
 	body, err := httputil.ReadBody(response.Body)
 	if err != nil {
-		return "", err
+		return proxyPolicySessionDigests{}, err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("proxy policy control failed: HTTP %d", response.StatusCode)
+		return proxyPolicySessionDigests{}, fmt.Errorf("proxy policy control failed: HTTP %d", response.StatusCode)
 	}
-	var result struct {
-		SessionDigest string `json:"session_digest"`
+	var result proxyPolicySessionDigests
+	if json.Unmarshal(body, &result) != nil || !validProxyPolicyDigest(result.SessionDigest) ||
+		(result.DaybreakSessionDigest != "" && !validProxyPolicyDigest(result.DaybreakSessionDigest)) {
+		return proxyPolicySessionDigests{}, errors.New("proxy policy digest response invalid")
 	}
-	if json.Unmarshal(body, &result) != nil || !validProxyPolicyDigest(result.SessionDigest) {
-		return "", errors.New("proxy policy digest response invalid")
-	}
-	return result.SessionDigest, nil
+	return result, nil
 }
 
 func nextProxyRoutingPolicy(current proxy.RoutingPolicyDocument) proxy.RoutingPolicyDocument {
@@ -438,13 +442,18 @@ func runProxyPolicySession(ctx context.Context, args []string, output io.Writer,
 		}
 		return json.NewEncoder(output).Encode(current.SessionBindings)
 	}
+	var daybreakDigest string
 	if options.Digest == "" {
 		if len(options.SessionID) == 0 {
 			return errors.New("proxy policy session: session selector required")
 		}
-		options.Digest, err = proxyPolicySessionDigest(ctx, deps, options.Port, options.SessionID)
+		digests, err := proxyPolicySessionDigest(ctx, deps, options.Port, options.SessionID)
 		if err != nil {
 			return err
+		}
+		options.Digest = digests.SessionDigest
+		if command == "show" || command == "unbind" {
+			daybreakDigest = digests.DaybreakSessionDigest
 		}
 	}
 	if command == "digest" {
@@ -459,9 +468,12 @@ func runProxyPolicySession(ctx context.Context, args []string, output io.Writer,
 	}
 	match := -1
 	for index, binding := range current.SessionBindings {
-		if binding.SessionDigest == options.Digest {
+		if daybreakDigest != "" && binding.SessionDigest == daybreakDigest {
 			match = index
 			break
+		}
+		if binding.SessionDigest == options.Digest {
+			match = index
 		}
 	}
 	switch command {

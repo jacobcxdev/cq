@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -397,6 +398,7 @@ type CodexHTTPRequestPlanFactory struct {
 	Now               func() time.Time
 	SessionPolicy     *SessionPolicyResolver
 	CyberEligibility  *CyberEligibilityStore
+	DaybreakState     CodexDaybreakState
 	DispatchPermits   CallerDispatchPermitAuthority
 	TransportKind     string
 	TurnReceipts      *CodexTurnReceiptStore
@@ -431,8 +433,8 @@ func (factory *CodexHTTPRequestPlanFactory) ShouldResetCyberOff(ctx context.Cont
 		now = factory.Now()
 	}
 	caller, _ := runtimeCallerAuthority(ctx)
-	decision, err := enforceSessionPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, "", now)
-	if err != nil {
+	decision, err := factory.enforceRequestSessionPolicy(ctx, caller, protocol, accounts, "", now)
+	if err != nil || decision.daybreakBound {
 		return false
 	}
 	candidates, err := ProjectCodexRoutePolicyCandidates(inventory, factory.Capacity, codexHTTPRequestPlanRequirements(protocol), nil, now)
@@ -481,6 +483,9 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	defer func() { inspection.Release() }()
 
 	protocol, err := inspection.Protocol()
+	if err == nil {
+		protocol, err = factory.restoreDaybreakForGoal(ctx, inspection, protocol)
+	}
 	if factory.TransportKind == "http" {
 		replaceCodexRequestObservation(ctx, protocol, err)
 		emitCodexRequestIngressObservation(ctx)
@@ -538,6 +543,10 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 				if err != nil {
 					return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
 				}
+				protocol, err = factory.restoreDaybreakForGoal(ctx, inspection, protocol)
+				if err != nil {
+					return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+				}
 				ingressContinuity = nil
 			}
 		}
@@ -573,6 +582,10 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 						return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
 					}
 					protocol, err = inspection.Protocol()
+					if err != nil {
+						return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
+					}
+					protocol, err = factory.restoreDaybreakForGoal(ctx, inspection, protocol)
 					if err != nil {
 						return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
 					}
@@ -615,11 +628,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	caller, callerOK := runtimeCallerAuthority(ctx)
 	policyDecision := SessionPolicyDecision{Allowed: sortedAccountKeys(accounts), AccountValues: map[codex.AccountKey]PoolValue{}, Status: PolicyDecisionUnbound}
 	if factory.SessionPolicy != nil {
-		if factory.CyberEligibility != nil && protocol.CyberEnabled() {
-			policyDecision, err = enforceSessionCyberPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, snapshot.BoundAccountKey, now)
-		} else {
-			policyDecision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, snapshot.BoundAccountKey, now)
-		}
+		policyDecision, err = factory.enforceRequestSessionPolicy(ctx, caller, protocol, accounts, snapshot.BoundAccountKey, now)
 		if err != nil {
 			emitCodexTrace(ctx, CodexTraceEvent{Phase: "pool_policy", Outcome: "error", Reason: string(codexRequestFailureReason(err))})
 			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
@@ -640,7 +649,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 	if snapshot.Classification == CodexRestoredLaneUnseen && input.ExpectedBound == nil &&
 		codexHTTPRequestAccountUnavailablePortable(protocol) && snapshot.AffinityAccountKey != "" {
 		switchAccount := cyberActive && !containsCodexHTTPRequestAccountKey(codexHTTPRequestPlanAccountKeys(inventory), snapshot.AffinityAccountKey)
-		if !cyberActive && factory.CyberEligibility != nil && containsCodexHTTPRequestAccountKey(factory.CyberEligibility.Members(), snapshot.AffinityAccountKey) {
+		if !cyberActive && !policyDecision.daybreakBound && factory.CyberEligibility != nil && containsCodexHTTPRequestAccountKey(factory.CyberEligibility.Members(), snapshot.AffinityAccountKey) {
 			for _, account := range inventory.Accounts {
 				if account.Routable && !account.Unstable && policyDecision.AccountValues[account.Key] < policyDecision.AccountValues[snapshot.AffinityAccountKey] {
 					switchAccount = true
@@ -727,7 +736,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		boundAccountKey = factory.PinnedAccountKey
 	}
 	defaultAccountKey := factory.DefaultAccountKey
-	if cyberActive && !containsCodexHTTPRequestAccountKey(codexHTTPRequestPlanAccountKeys(inventory), defaultAccountKey) {
+	if (cyberActive || policyDecision.daybreakBound) && !containsCodexHTTPRequestAccountKey(codexHTTPRequestPlanAccountKeys(inventory), defaultAccountKey) {
 		defaultAccountKey = inventory.Accounts[0].Key
 	}
 	accountUnavailablePortable := boundAccountKey != "" && codexHTTPRequestAccountUnavailablePortable(protocol) &&
@@ -774,7 +783,10 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		Candidates: codexTraceDispatchCandidates(dispatch), Pool: policyDecision.Pool, PoolID: string(policyDecision.PoolID),
 	})
 	if policyDecision.Status == PolicyDecisionSelected {
-		capabilityPolicy, capabilityEvidence, active := factory.SessionPolicy.capabilityPolicy(policyDecision.PoolID, policyDecision.PolicyRevision)
+		capabilityPolicy, capabilityEvidence, active, policyErr := factory.SessionPolicy.capabilityPolicy(policyDecision.PoolID, policyDecision.PolicyRevision)
+		if policyErr != nil {
+			return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, policyErr)
+		}
 		if active {
 			if !callerOK {
 				return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, ErrCapabilityRouteUnavailable)
@@ -926,6 +938,8 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanBegin, nil)
 	}
 	emitCodexTrace(ctx, CodexTraceEvent{Phase: "lease_begin", Outcome: "success", AccountHint: codexTraceAccountHint(choice.AccountKey)})
+
+	factory.updateDaybreakSessionBinding(protocol, policyDecision)
 
 	// A full create can be retried after a definitive quota rejection by
 	// discarding the rejected account's turn-state header. Response-ID deltas
@@ -1195,13 +1209,7 @@ func (factory *CodexHTTPRequestPlanFactory) planWebSocketPrewarm(ctx context.Con
 	accounts := codexHTTPRequestPlanAccountKeys(inventory)
 	caller, _ := runtimeCallerAuthority(ctx)
 	cyberActive := factory.CyberEligibility != nil && protocol.CyberEnabled()
-	var decision SessionPolicyDecision
-	var policyErr error
-	if cyberActive {
-		decision, policyErr = enforceSessionCyberPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, factory.PinnedAccountKey, now)
-	} else {
-		decision, policyErr = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), accounts, factory.PinnedAccountKey, now)
-	}
+	decision, policyErr := factory.enforceRequestSessionPolicy(ctx, caller, protocol, accounts, factory.PinnedAccountKey, now)
 	if policyErr != nil {
 		return CodexFrozenDispatchPlan{}, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, policyErr)
 	}
@@ -1215,7 +1223,7 @@ func (factory *CodexHTTPRequestPlanFactory) planWebSocketPrewarm(ctx context.Con
 		}
 	}
 	defaultAccountKey := factory.DefaultAccountKey
-	if cyberActive && !containsCodexHTTPRequestAccountKey(codexHTTPRequestPlanAccountKeys(inventory), defaultAccountKey) {
+	if (cyberActive || decision.daybreakBound) && !containsCodexHTTPRequestAccountKey(codexHTTPRequestPlanAccountKeys(inventory), defaultAccountKey) {
 		defaultAccountKey = inventory.Accounts[0].Key
 	}
 	dispatch, err := factory.buildDispatch(ctx, CodexFrozenDispatchInput{
@@ -1308,6 +1316,9 @@ func (factory *CodexHTTPRequestPlanFactory) adoptWebSocketPrewarm(ctx context.Co
 	}
 	defer inspection.Release()
 	protocol, err := inspection.Protocol()
+	if err == nil {
+		protocol, err = factory.restoreDaybreakForGoal(ctx, inspection, protocol)
+	}
 	if err != nil {
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanInspect, err)
 	}
@@ -1333,12 +1344,7 @@ func (factory *CodexHTTPRequestPlanFactory) adoptWebSocketPrewarm(ctx context.Co
 	}
 	caller, _ := runtimeCallerAuthority(ctx)
 	cyberActive := factory.CyberEligibility != nil && protocol.CyberEnabled()
-	var decision SessionPolicyDecision
-	if cyberActive {
-		decision, err = enforceSessionCyberPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, reservation.AccountKey, now)
-	} else {
-		decision, err = enforceSessionPolicy(factory.SessionPolicy, caller, []byte(metadata.SessionID), accounts, reservation.AccountKey, now)
-	}
+	decision, err := factory.enforceRequestSessionPolicy(ctx, caller, protocol, accounts, reservation.AccountKey, now)
 	if err != nil {
 		emitCodexTrace(ctx, CodexTraceEvent{Phase: "pool_policy", Stage: "prewarm_adoption", Outcome: "error", Reason: string(codexRequestFailureReason(err)), AccountHint: codexTraceAccountHint(reservation.AccountKey)})
 		return result, newCodexHTTPRequestPlanError(CodexHTTPRequestPlanDispatch, err)
@@ -1402,9 +1408,66 @@ func (factory *CodexHTTPRequestPlanFactory) adoptWebSocketPrewarm(ctx context.Co
 	result.Frozen = frozen
 	result.leaseHandle = handle
 	result.Lifecycle = NewCodexHTTPRequestLifecycle(handle)
+	factory.updateDaybreakSessionBinding(protocol, decision)
 	result.receipt = factory.registerCodexTurnReceipt(protocol, decision, reservation.AccountKey, dispatchAccounts[0], codexNoAffinityShadowResult{Comparison: CodexTurnReceiptShadowNotApplicable})
 	result.Lifecycle = wrapCodexTurnReceiptLifecycle(result.Lifecycle, result.receipt)
 	return result, nil
+}
+
+func (factory *CodexHTTPRequestPlanFactory) enforceRequestSessionPolicy(ctx context.Context, caller RuntimeCallerAuthorityV1, protocol CodexProtocolRequest, accounts []codex.AccountKey, continuity codex.AccountKey, now time.Time) (SessionPolicyDecision, error) {
+	if factory.CyberEligibility != nil && protocol.CyberEnabled() {
+		return enforceSessionCyberPolicy(factory.SessionPolicy, caller, []byte(protocol.Metadata.Metadata.SessionID), protocol.CyberAccessProgram, accounts, continuity, now)
+	}
+	if protocol.CyberAccessProgram == "" && factory.DaybreakState != nil && factory.SessionPolicy != nil {
+		decision, _ := factory.SessionPolicy.resolveCodexSession(protocol, nil)
+		if decision.daybreakBound {
+			enabled, _, err := factory.DaybreakState.Current(ctx, protocol.Metadata.Metadata.SessionID)
+			if err == nil && !enabled {
+				protocol.CyberAccessProgram = "standard"
+			}
+		}
+	}
+	return enforceSessionPolicy(factory.SessionPolicy, caller, protocol, accounts, continuity, now)
+}
+
+func (factory *CodexHTTPRequestPlanFactory) restoreDaybreakForGoal(ctx context.Context, inspection *CodexFrozenRequestInspection, protocol CodexProtocolRequest) (CodexProtocolRequest, error) {
+	if factory.DaybreakState == nil || factory.SessionPolicy == nil || !protocol.Metadata.Strong ||
+		protocol.Metadata.Metadata.RequestKind != CodexRequestTurn || protocol.CyberAccessProgram != "" {
+		return protocol, nil
+	}
+	decision, _ := factory.SessionPolicy.resolveCodexSession(protocol, nil)
+	if !decision.daybreakBound || !isExplicitDaybreakProgramme(decision.daybreakProgramme) {
+		return protocol, nil
+	}
+	enabled, goalActive, err := factory.DaybreakState.Current(ctx, protocol.Metadata.Metadata.SessionID)
+	if err != nil || !enabled || !goalActive {
+		return protocol, nil
+	}
+	if err := inspection.restoreDaybreak(decision.daybreakProgramme); err != nil {
+		return protocol, err
+	}
+	return inspection.Protocol()
+}
+
+func (factory *CodexHTTPRequestPlanFactory) updateDaybreakSessionBinding(protocol CodexProtocolRequest, decision SessionPolicyDecision) {
+	if factory.CyberEligibility == nil || !protocol.Metadata.Strong || protocol.Metadata.Metadata.RequestKind != CodexRequestTurn {
+		return
+	}
+	var poolID PoolID
+	switch {
+	case protocol.CyberAccessProgram == "standard":
+	case isExplicitDaybreakProgramme(protocol.CyberAccessProgram) && decision.Status == PolicyDecisionSelected:
+		poolID = decision.PoolID
+	default:
+		return
+	}
+	routing := factory.CyberEligibility.routing
+	changed, err := routing.updateDaybreakSessionBinding([]byte(protocol.Metadata.Metadata.SessionID), poolID, protocol.CyberAccessProgram)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "cq: failed to update Daybreak session binding")
+	} else if changed {
+		factory.SessionPolicy.Replace(routing.Current())
+	}
 }
 
 const codexGPT56PromptCacheFairnessFloor = 30 * time.Minute
