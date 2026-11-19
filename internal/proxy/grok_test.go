@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -446,6 +447,36 @@ func TestGrokRejectsEncryptedToolArguments(t *testing.T) {
 	_, _, err := normaliseGrokRequest([]byte(`{"model":"grok-test","input":[{"type":"function_call","name":"f","call_id":"c","arguments":"{}","encrypted_function_args":["opaque"]}]}`))
 	if err == nil {
 		t.Fatal("silently discarded encrypted tool arguments")
+	}
+}
+
+func TestGrokRestoredCollaborationToolOnlyMarksReadableArguments(t *testing.T) {
+	codec := grokRequestCodec{tools: map[string]grokToolIdentity{
+		"grok-tool": {Name: "send_message", Namespace: "collaboration"},
+	}}
+	for _, tc := range []struct{ name, arguments, wantMarker string }{
+		{"readable", `{"message":"hello"}`, "[]"},
+		{"sealed", `{"message":"gAAAAABpHEk0UHJwTkZpZWxkVHlwZVNhbXBsZQ=="}`, ""},
+		{"unfinished", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, err := codec.normaliseItem(json.RawMessage(`{"type":"function_call","name":"grok-tool","arguments":` + strconv.Quote(tc.arguments) + `}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var item struct {
+				Name      string          `json:"name"`
+				Namespace string          `json:"namespace"`
+				Arguments string          `json:"arguments"`
+				Marker    json.RawMessage `json:"encrypted_function_args"`
+			}
+			if err := json.Unmarshal(raw, &item); err != nil {
+				t.Fatal(err)
+			}
+			if item.Name != "send_message" || item.Namespace != "collaboration" || item.Arguments != tc.arguments || string(item.Marker) != tc.wantMarker {
+				t.Fatalf("wrong restored call: %s", raw)
+			}
+		})
 	}
 }
 

@@ -1,9 +1,6 @@
 package proxy
 
-import (
-	"bytes"
-	"encoding/json"
-)
+import "encoding/json"
 
 // Go's Responses translator should receive ordinary message parameters. The
 // reserved collaboration namespace tells Codex where the plaintext marker applies.
@@ -61,9 +58,6 @@ func plaintextCollaborationResponse(data []byte) ([]byte, error) {
 	return normaliseResponsesOutput(data, func(raw json.RawMessage) (json.RawMessage, bool, error) {
 		var call map[string]json.RawMessage
 		if json.Unmarshal(raw, &call) != nil {
-			return raw, false, nil
-		}
-		if encrypted := bytes.TrimSpace(call["encrypted_arguments"]); len(encrypted) != 0 && !bytes.Equal(encrypted, []byte("null")) {
 			return raw, false, nil
 		}
 		return markPlaintextCollaborationCall(raw, call)

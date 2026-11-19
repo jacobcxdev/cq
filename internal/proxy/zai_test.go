@@ -123,7 +123,7 @@ func TestZAIWebSocketAgentTaskAndContinuationCompatibility(t *testing.T) {
 		}
 		assertZAIPlainAgentTask(t, request.Input[0])
 		if calls.Add(1) == 1 {
-			writeZAITestSSE(w, "agent-response", []json.RawMessage{json.RawMessage(`{"type":"function_call","namespace":"collaboration","name":"followup_task","call_id":"task-call","arguments":"{}"}`)})
+			writeZAITestSSE(w, "agent-response", []json.RawMessage{json.RawMessage(`{"type":"function_call","namespace":"collaboration","name":"followup_task","call_id":"task-call","arguments":"{\"message\":\"follow up\"}"}`)})
 		} else {
 			if len(request.Input) != 3 || !bytes.Contains(request.Input[2], []byte(`"function_call_output"`)) {
 				t.Errorf("task/tool continuation lost: %s", request.Input)

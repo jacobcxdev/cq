@@ -96,8 +96,8 @@ func TestRelayCodexAcceptedHTTPResponseRelaysSSETerminalOutcomes(t *testing.T) {
 
 func TestRelayCodexAcceptedHTTPResponseMarksCollaborationCallsPlaintext(t *testing.T) {
 	t.Parallel()
-	bodyBytes := "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"spawn_agent\",\"arguments\":\"{}\"}}\n\n" +
-		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-a\",\"output\":[{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"send_message\",\"arguments\":\"{}\"}]}}\n\n"
+	bodyBytes := "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"spawn_agent\",\"arguments\":\"{\\\"message\\\":\\\"reply\\\"}\"}}\n\n" +
+		"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"response-a\",\"output\":[{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"send_message\",\"arguments\":\"{\\\"message\\\":\\\"reply\\\"}\"}]}}\n\n"
 	calls := &codexHTTPObserverLifecycleCalls{}
 	body := newCodexHTTPObserverBody([]string{bodyBytes[:7], bodyBytes[7:]}, nil, calls)
 	response := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: body}

@@ -265,9 +265,6 @@ func (c *grokRequestCodec) normaliseItem(raw json.RawMessage) (json.RawMessage, 
 		c.items[id] = identity
 	}
 	item["name"], _ = json.Marshal(identity.Name)
-	if identity.Namespace == "collaboration" {
-		item["encrypted_function_args"] = json.RawMessage("[]")
-	}
 	if identity.Namespace != "" {
 		item["namespace"], _ = json.Marshal(identity.Namespace)
 	}
@@ -284,6 +281,8 @@ func (c *grokRequestCodec) normaliseItem(raw json.RawMessage) (json.RawMessage, 
 		}
 		item["input"], _ = json.Marshal(value)
 		delete(item, "arguments")
+	} else if identity.Namespace == "collaboration" {
+		normaliseCollaborationPlaintextMarker(item)
 	}
 	return json.Marshal(item)
 }
