@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"net/http"
@@ -120,7 +121,7 @@ func (s *Server) knownSharedBudgetState(body []byte) bool {
 	return found
 }
 
-func (s *Server) relaySharedBudgetHTTP(w http.ResponseWriter, response *http.Response, selected sharedBudgetSelection) {
+func (s *Server) relaySharedBudgetHTTP(w http.ResponseWriter, response *http.Response, selected sharedBudgetSelection, request []byte) {
 	state := selected.binding()
 	record := func(raw []byte) { s.recordSharedBudgetResponse(state, raw) }
 	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
@@ -146,8 +147,13 @@ func (s *Server) relaySharedBudgetHTTP(w http.ResponseWriter, response *http.Res
 	body := io.Reader(response.Body)
 	if mediaType == "text/event-stream" {
 		body = io.TeeReader(body, &sharedBudgetSSEObserver{parser: NewCodexSSEParser(1 << 20), record: record})
-		if selected.route.PlaintextCollaboration {
-			_ = copyNormalisedResponsesSSE(zaiFlushWriter{w}, body, plaintextCollaborationResponse, true)
+		writer := zaiFlushWriter{w}
+		normalise := s.sharedBudgetStreamNormaliser(selected, request, func(kind string, data []byte) error {
+			_, err := fmt.Fprintf(writer, "event: %s\ndata: %s\n\n", kind, data)
+			return err
+		})
+		if normalise != nil {
+			_ = copyNormalisedResponsesSSE(writer, body, normalise, true)
 			return
 		}
 	}

@@ -360,7 +360,7 @@ func (s *Server) serveSelectedSharedBudgetHTTP(w http.ResponseWriter, r *http.Re
 		writeError(w, response.StatusCode, "api_error", selected.route.Name+" request rejected")
 		return
 	}
-	s.relaySharedBudgetHTTP(w, response, selected)
+	s.relaySharedBudgetHTTP(w, response, selected, body)
 }
 
 func (s *Server) serveSharedBudgetWebSocket(ctx context.Context, downstream *websocket.Conn, header http.Header, kind int, first []byte, selected sharedBudgetSelection) error {
@@ -416,11 +416,7 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 		_ = downstream.WriteMessage(websocket.TextMessage, data)
 		return "", nil, errors.New(selected.route.Name + " stream rejected")
 	}
-	normalise := func(data []byte) ([]byte, error) { return data, nil }
-	if selected.route.PlaintextCollaboration {
-		normalise = plaintextCollaborationResponse
-	}
-	return relayResponsesSSE(response.Body, selected.route.Name, normalise, func(kind string, data []byte) error {
+	emit := func(kind string, data []byte) error {
 		if kind == "response.completed" {
 			var event struct{ Response json.RawMessage }
 			if json.Unmarshal(data, &event) == nil {
@@ -428,7 +424,12 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 			}
 		}
 		return downstream.WriteMessage(websocket.TextMessage, data)
-	})
+	}
+	normalise := s.sharedBudgetStreamNormaliser(selected, body, emit)
+	if normalise == nil {
+		normalise = func(data []byte) ([]byte, error) { return data, nil }
+	}
+	return relayResponsesSSE(response.Body, selected.route.Name, normalise, emit)
 }
 
 func portableSharedBudgetInput(body []byte) bool {

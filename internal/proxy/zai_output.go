@@ -251,6 +251,9 @@ func normaliseResponsesSSEEvent(event []byte, normalise func([]byte) ([]byte, er
 	if err != nil || bytes.Equal(updated, data) {
 		return event, err
 	}
+	if len(updated) == 0 {
+		return nil, nil
+	}
 	var output bytes.Buffer
 	offset = 0
 	for i, span := range spans {
