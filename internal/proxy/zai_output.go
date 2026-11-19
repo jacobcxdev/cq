@@ -131,21 +131,46 @@ func normaliseZAIResponseItem(raw json.RawMessage) (json.RawMessage, bool, error
 }
 
 func markPlaintextCollaborationCall(raw json.RawMessage, call map[string]json.RawMessage) (json.RawMessage, bool, error) {
+	if !normaliseCollaborationPlaintextMarker(call) {
+		return raw, false, nil
+	}
+	updated, err := json.Marshal(call)
+	return updated, err == nil, err
+}
+
+func normaliseCollaborationPlaintextMarker(call map[string]json.RawMessage) bool {
 	var kind, namespace, name string
 	if json.Unmarshal(call["type"], &kind) != nil || kind != "function_call" ||
 		json.Unmarshal(call["namespace"], &namespace) != nil || namespace != "collaboration" ||
-		json.Unmarshal(call["name"], &name) != nil {
-		return raw, false, nil
+		json.Unmarshal(call["name"], &name) != nil || !plaintextCollaborationTool(name) {
+		return false
 	}
-	if !plaintextCollaborationTool(name) {
-		return raw, false, nil
+	// A streaming tool call can start with empty arguments. Inspect the
+	// message before asserting that Codex can deliver it as readable text.
+	var args string
+	var params struct {
+		Message string `json:"message"`
 	}
-	if marker, ok := call["encrypted_function_args"]; ok && !bytes.Equal(bytes.TrimSpace(marker), []byte("null")) {
-		return raw, false, nil
+	if json.Unmarshal(call["arguments"], &args) != nil || json.Unmarshal([]byte(args), &params) != nil || params.Message == "" {
+		return false
+	}
+	marker := bytes.TrimSpace(call["encrypted_function_args"])
+	if openAIAgentCiphertext.MatchString(params.Message) {
+		var fields []json.RawMessage
+		if json.Unmarshal(marker, &fields) == nil && fields != nil && len(fields) == 0 {
+			delete(call, "encrypted_function_args")
+			return true
+		}
+		return false
+	}
+	if encrypted := bytes.TrimSpace(call["encrypted_arguments"]); len(encrypted) != 0 && !bytes.Equal(encrypted, []byte("null")) {
+		return false
+	}
+	if len(marker) != 0 && !bytes.Equal(marker, []byte("null")) {
+		return false
 	}
 	call["encrypted_function_args"] = json.RawMessage("[]")
-	updated, err := json.Marshal(call)
-	return updated, err == nil, err
+	return true
 }
 
 func plaintextCollaborationTool(name string) bool {

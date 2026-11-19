@@ -269,7 +269,7 @@ func TestOpenCodeGoWorkersInheritParentsRoute(t *testing.T) {
 func TestOpenCodeGoHTTPRelaysOversizedSSE(t *testing.T) {
 	large := "event: response.output_text.delta\r\ndata: {\"delta\":\"" +
 		strings.Repeat("x", zaiMaxSSEEventBytes) + "\"}\r\n\r\n"
-	const call = "event: response.output_item.done\ndata: {\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"spawn_agent\"}}\n\n"
+	const call = "event: response.output_item.done\ndata: {\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"spawn_agent\",\"arguments\":\"{\\\"message\\\":\\\"task\\\"}\"}}\n\n"
 	largeCompletion := "event: response.completed\ndata: {\"response\":{\"id\":\"go-answer\",\"padding\":\"" +
 		strings.Repeat("y", zaiMaxSSEEventBytes) + "\"}}\n\n"
 	s := &Server{

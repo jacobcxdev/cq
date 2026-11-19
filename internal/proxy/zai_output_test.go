@@ -199,9 +199,49 @@ func TestNormaliseZAIResponsePreservesUnrelatedAndEncryptedCalls(t *testing.T) {
 	}
 }
 
+func TestCollaborationNormalisersWithholdFalsePlaintextMarker(t *testing.T) {
+	const sealed = `{"type":"function_call","namespace":"collaboration","name":"send_message","arguments":"{\"message\":\"gAAAAABpHEk0UHJwTkZpZWxkVHlwZVNhbXBsZQ==\"}"`
+	const readable = `{"type":"function_call","namespace":"collaboration","name":"send_message","arguments":"{\"message\":\"readable reply\"}"`
+	const done = `{"type":"response.output_item.done","item":`
+	for _, normaliser := range []struct {
+		name string
+		run  func([]byte) ([]byte, error)
+	}{
+		{"native_and_shared_budget", plaintextCollaborationResponse},
+		{"zai", normaliseZAIResponse},
+	} {
+		t.Run(normaliser.name, func(t *testing.T) {
+			for _, tc := range []struct{ name, body, want string }{
+				{"sealed without metadata", done + sealed + `}}`, ""},
+				{"sealed with encrypted marker", done + sealed + `,"encrypted_function_args":["message"]}}`, ""},
+				{"sealed with false empty marker", done + sealed + `,"encrypted_function_args":[ ]}}`, done + sealed + `}}`},
+				{"explicit encrypted arguments", done + readable + `,"encrypted_arguments":["opaque"]}}`, ""},
+				{"unfinished call", `{"type":"response.output_item.added","item":{"type":"function_call","namespace":"collaboration","name":"send_message","arguments":""}}`, ""},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					got, err := normaliser.run([]byte(tc.body))
+					if err != nil {
+						t.Fatal(err)
+					}
+					if tc.want == "" {
+						if string(got) != tc.body {
+							t.Fatalf("response changed: %s", got)
+						}
+						return
+					}
+					var actual, want any
+					if json.Unmarshal(got, &actual) != nil || json.Unmarshal([]byte(tc.want), &want) != nil || !reflect.DeepEqual(actual, want) {
+						t.Fatalf("expected only false marker removed, got %s", got)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestNormaliseZAIResponsePreservesCompleteEnvelope(t *testing.T) {
-	const body = `{"type":"response.completed","sequence_number":9007199254740997,"response":{"id":"response-1","model":"glm-test","output":[{"type":"function_call","namespace":"collaboration","name":"spawn_agent","arguments":"task text","call_id":"call-1"},{"type":"function_call","namespace":"collaboration","name":"send_message","encrypted_function_args":["ciphertext"],"arguments":"encrypted"},{"type":"function_call","namespace":"functions","name":"spawn_agent","arguments":"unrelated"}],"usage":{"input_tokens":9007199254740995}},"unknown":{"value":9007199254740993}}`
-	const expected = `{"type":"response.completed","sequence_number":9007199254740997,"response":{"id":"response-1","model":"glm-test","output":[{"type":"function_call","namespace":"collaboration","name":"spawn_agent","encrypted_function_args":[],"arguments":"task text","call_id":"call-1"},{"type":"function_call","namespace":"collaboration","name":"send_message","encrypted_function_args":["ciphertext"],"arguments":"encrypted"},{"type":"function_call","namespace":"functions","name":"spawn_agent","arguments":"unrelated"}],"usage":{"input_tokens":9007199254740995}},"unknown":{"value":9007199254740993}}`
+	const body = `{"type":"response.completed","sequence_number":9007199254740997,"response":{"id":"response-1","model":"glm-test","output":[{"type":"function_call","namespace":"collaboration","name":"spawn_agent","arguments":"{\"message\":\"task text\"}","call_id":"call-1"},{"type":"function_call","namespace":"collaboration","name":"send_message","encrypted_function_args":["ciphertext"],"arguments":"encrypted"},{"type":"function_call","namespace":"functions","name":"spawn_agent","arguments":"unrelated"}],"usage":{"input_tokens":9007199254740995}},"unknown":{"value":9007199254740993}}`
+	const expected = `{"type":"response.completed","sequence_number":9007199254740997,"response":{"id":"response-1","model":"glm-test","output":[{"type":"function_call","namespace":"collaboration","name":"spawn_agent","encrypted_function_args":[],"arguments":"{\"message\":\"task text\"}","call_id":"call-1"},{"type":"function_call","namespace":"collaboration","name":"send_message","encrypted_function_args":["ciphertext"],"arguments":"encrypted"},{"type":"function_call","namespace":"functions","name":"spawn_agent","arguments":"unrelated"}],"usage":{"input_tokens":9007199254740995}},"unknown":{"value":9007199254740993}}`
 	got, err := normaliseZAIResponse([]byte(body))
 	if err != nil {
 		t.Fatal(err)
@@ -221,7 +261,7 @@ func TestNormaliseZAIResponsePreservesCompleteEnvelope(t *testing.T) {
 
 func TestCopyZAIResponseSSEPreservesFramingAndNormalisesMultilineData(t *testing.T) {
 	const prefix = ": keepalive\r\nid: event-1\r\nevent: response.output_item.done\r\nretry: 1500\r\n"
-	const body = prefix + "data: {\"type\":\"response.output_item.done\",\"item\":\r\n: between data lines\r\ndata: {\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"spawn_agent\",\"arguments\":\"task text\"}}\r\n\r\n"
+	const body = prefix + "data: {\"type\":\"response.output_item.done\",\"item\":\r\n: between data lines\r\ndata: {\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"spawn_agent\",\"arguments\":\"{\\\"message\\\":\\\"task text\\\"}\"}}\r\n\r\n"
 	const suffix = ": tail\r\ndata: [DONE]\r\n\r\n"
 	for _, chunk := range []int{1, 2, 7, 31, 32768} {
 		t.Run(strconv.Itoa(chunk), func(t *testing.T) {
@@ -246,7 +286,7 @@ func TestCopyZAIResponseSSEPreservesFramingAndNormalisesMultilineData(t *testing
 					Marker    []json.RawMessage `json:"encrypted_function_args"`
 				} `json:"item"`
 			}
-			if err := json.Unmarshal(observations[0].Data, &event); err != nil || event.Item.Marker == nil || len(event.Item.Marker) != 0 || event.Item.Arguments != "task text" {
+			if err := json.Unmarshal(observations[0].Data, &event); err != nil || event.Item.Marker == nil || len(event.Item.Marker) != 0 || event.Item.Arguments != `{"message":"task text"}` {
 				t.Fatalf("normalised event = %s, error %v", observations[0].Data, err)
 			}
 		})
@@ -277,7 +317,7 @@ func TestCopyZAIResponseSSEPreservesUnchangedAndFailedStreams(t *testing.T) {
 }
 
 func TestCopyZAIResponseSSEDoesNotCompleteFailedOrTruncatedStreams(t *testing.T) {
-	const call = `data: {"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","arguments":"task"}}`
+	const call = `data: {"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","arguments":"{\"message\":\"task\"}"}}`
 	for _, terminal := range []string{"response.failed", "response.incomplete", "error", ""} {
 		t.Run(terminal, func(t *testing.T) {
 			body, suffix := call, ""
@@ -330,7 +370,7 @@ func TestCopyZAIResponseSSEEventLimitIncludesNormalisedOutput(t *testing.T) {
 	if err := copyZAIResponseSSE(&output, strings.NewReader(body)); err != nil || output.String() != body {
 		t.Fatalf("exact event limit rejected: %v", err)
 	}
-	const base = "data: {\"item\":{\"type\":\"function_call\",\"namespace\":\"collaboration\",\"name\":\"spawn_agent\"},\"padding\":\"\"}\n\n"
+	const base = `data: {"item":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","arguments":"{\"message\":\"task\"}"},"padding":""}` + "\n\n"
 	body = strings.Replace(base, `"padding":""`, `"padding":"`+strings.Repeat("x", zaiMaxSSEEventBytes-len(base))+`"`, 1)
 	if len(body) != zaiMaxSSEEventBytes {
 		t.Fatalf("test event length = %d", len(body))
