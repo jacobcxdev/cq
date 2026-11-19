@@ -57,6 +57,23 @@ func TestCodexRegistryCacheSeedsSharedBudgetRoutes(t *testing.T) {
 	}
 }
 
+func TestCodexRegistryCachePublishesOneRoutePerProvider(t *testing.T) {
+	fsys := fsutil.NewMemFS()
+	roots := userdirs.Roots{Cache: "/cq/cache"}
+	first := Entry{Provider: ProviderOpenCodeGo, ID: "glm-5.3", Source: SourceNative, ContextWindow: 100,
+		SharedBudget: &SharedBudgetModel{ProviderName: "OpenCode Go", CredentialScope: FingerprintSharedBudgetCredential("first", "member-1", "workspace-1")}}
+	second := copyEntry(first)
+	second.SharedBudget.CredentialScope = FingerprintSharedBudgetCredential("second", "member-2", "workspace-2")
+	if err := PublishCodexRegistryCache(fsys, roots, Snapshot{Entries: []Entry{first}, SharedBudgetModels: map[string][]Entry{"glm-5.3": {first, second}}}); err != nil {
+		t.Fatal(err)
+	}
+	cached, present, err := LoadCodexRegistrySnapshot(fsys, roots)
+	if err != nil || !present || len(cached.SharedBudgetModels["glm-5.3"]) != 1 ||
+		cached.SharedBudgetModels["glm-5.3"][0].SharedBudget.CredentialScope != (SharedBudgetCredentialScope{}) {
+		t.Fatalf("public cache routes: present=%t err=%v", present, err)
+	}
+}
+
 func TestCodexRegistryCacheExcludesOverlaysAndPreservesMissingState(t *testing.T) {
 	fsys := fsutil.NewMemFS()
 	roots := userdirs.Roots{Cache: "/cq/cache"}

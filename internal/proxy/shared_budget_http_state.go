@@ -43,11 +43,11 @@ func (s *Server) serveSharedBudgetContinuation(w http.ResponseWriter, r *http.Re
 		return false
 	}
 	route, available := s.SharedBudgetRoutes[bound.Provider]
-	if complete && available && route.Credential != nil && (!bound.Fallback || route.AllowFallback) &&
+	if complete && available && (route.Credential != nil || route.CredentialFor != nil) && (!bound.Fallback || route.AllowFallback) &&
 		strings.EqualFold(bound.Model, ParseModel(model)) {
-		credential, err := route.Credential(r.Context())
+		credential, err := route.credentialFor(r.Context(), bound.Credential)
 		if err == nil && credential.Bearer != "" && credential.binding() == bound.Credential {
-			selected := sharedBudgetSelection{id: bound.Provider, route: route, credential: credential, model: bound.Model, fallback: bound.Fallback}
+			selected := sharedBudgetSelection{id: bound.Provider, route: route, credential: credential, model: bound.Model, fallback: bound.Fallback, bound: true}
 			s.serveSelectedSharedBudgetHTTP(w, r, body, selected)
 			return true
 		}

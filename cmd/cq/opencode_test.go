@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -35,11 +36,15 @@ func TestSharedBudgetPrefersOAuthWithExplicitKeyOption(t *testing.T) {
 			adapter := sharedBudgetAdapter{
 				ID: modelregistry.ProviderOpenCodeGo, KeyEnv: "OPENCODE_API_KEY",
 				OAuth: func(_ fsutil.FileSystem, _ string, _ httputil.Doer) sharedBudgetAuthorization {
-					return func(context.Context, bool) (sharedBudgetLogin, error) { return tc.session, tc.oauthErr }
+					return sharedBudgetAuthorization{List: func(context.Context, bool) ([]sharedBudgetLogin, error) {
+						return []sharedBudgetLogin{tc.session}, tc.oauthErr
+					}, For: func(context.Context, modelregistry.SharedBudgetCredentialScope) (sharedBudgetLogin, error) {
+						return tc.session, tc.oauthErr
+					}}
 				},
 			}
 			resolve := adapter.resolve(fsys, legacyKey, configDir, nil, sharedBudgetSettings{Auth: tc.mode})
-			login, err := resolve(context.Background(), true)
+			login, err := resolve.first(context.Background(), true)
 			if login.Bearer != tc.want || (err != nil) != (tc.want == "") {
 				t.Fatalf("unexpected credential selection (available=%t, error=%t)", login.Bearer != "", err != nil)
 			}
@@ -83,5 +88,39 @@ func TestOpenCodeLoginRequiresGoAllowanceBeforeSaving(t *testing.T) {
 	_, checks := sharedBudgetChecks(fsys, func(string) string { return "" }, dir, []string{"opencode-go"})
 	if len(checks) != 1 || checks[0].Report.Email != session.Email {
 		t.Fatal("quota report did not use the saved login identity")
+	}
+}
+
+func TestOpenCodeAccountsAppearSeparately(t *testing.T) {
+	fsys, dir := privateSharedBudgetConfig(t)
+	if err := fsys.WriteFile(filepath.Join(dir, "opencode-go.json"), []byte(`{"extra_usage":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authority := openCodeSessionAuthority(fsys, dir, nil)
+	first := opencodego.OAuthSession{AccessToken: "first-token", RefreshToken: "first-refresh", MemberID: "first", WorkspaceID: "wrk_first", Email: "first@example.test", ExpiresAt: time.Now().Add(time.Hour)}
+	second := opencodego.OAuthSession{AccessToken: "second-token", RefreshToken: "second-refresh", MemberID: "second", WorkspaceID: "wrk_second", Email: "second@example.test", ExpiresAt: time.Now().Add(time.Hour)}
+	for _, session := range []opencodego.OAuthSession{first, second} {
+		if err := authority.Save(t.Context(), session); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, checks := sharedBudgetChecks(fsys, func(string) string { return "" }, dir, []string{"opencode-go"})
+	if len(checks) != 2 || checks[0].Report.Email != first.Email || checks[1].Report.Email != second.Email {
+		t.Fatalf("account reports: count=%d", len(checks))
+	}
+	if checks[0].Report.ExtraUsage != nil || checks[1].Report.ExtraUsage != nil {
+		t.Fatal("provider-wide Extra Usage shown as per-account state")
+	}
+	route := sharedBudgetProxyRoutes(fsys, func(string) string { return "" }, dir)[modelregistry.ProviderOpenCodeGo]
+	credentials, err := route.Credentials(t.Context())
+	if err != nil || len(credentials) != 2 || credentials[0].Account != first.MemberID || credentials[1].Account != second.MemberID {
+		t.Fatalf("account routes: count=%d, err=%v", len(credentials), err)
+	}
+	for _, credential := range credentials {
+		scope := modelregistry.FingerprintSharedBudgetCredential(credential.Bearer, credential.Account, credential.WorkspaceID)
+		resolved, err := route.CredentialFor(t.Context(), scope)
+		if err != nil || resolved.Account != credential.Account {
+			t.Fatalf("account-specific credential: %v", err)
+		}
 	}
 }

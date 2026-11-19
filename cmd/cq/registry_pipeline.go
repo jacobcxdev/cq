@@ -251,7 +251,7 @@ func newRegistryPipeline(opts registryPipelineOptions) (*registryPipeline, error
 		})
 		// A workspace catalogue must recheck permission before publication.
 		if !adapter.CatalogueRequiresFresh {
-			login, err := resolve(context.Background(), false)
+			login, err := resolve.first(context.Background(), false)
 			if err != nil {
 				fmt.Fprintf(opts.Stderr, "cq: registry: %s: %v\n", adapter.Name, err)
 			}

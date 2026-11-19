@@ -353,7 +353,9 @@ func mergeSharedBudgetModels(active, shared []Entry) ([]Entry, map[string][]Entr
 	routes := make(map[string][]Entry)
 	for _, e := range shared {
 		id := strings.ToLower(e.ID)
-		if slices.ContainsFunc(routes[id], func(other Entry) bool { return other.Provider == e.Provider }) {
+		if slices.ContainsFunc(routes[id], func(other Entry) bool {
+			return other.Provider == e.Provider && other.SharedBudget.CredentialScope == e.SharedBudget.CredentialScope
+		}) {
 			continue
 		}
 		routes[id] = append(routes[id], e)

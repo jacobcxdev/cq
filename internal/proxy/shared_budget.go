@@ -22,6 +22,8 @@ type SharedBudgetRoute struct {
 	Name            string
 	URL             string
 	Credential      func(context.Context) (SharedBudgetCredential, error)
+	Credentials     func(context.Context) ([]SharedBudgetCredential, error)
+	CredentialFor   func(context.Context, modelregistry.SharedBudgetCredentialScope) (SharedBudgetCredential, error)
 	Transport       http.RoundTripper
 	SessionHeader   string
 	WorkspaceHeader string
@@ -52,6 +54,7 @@ type sharedBudgetSelection struct {
 	model      string
 	fallback   bool
 	nativeAPI  string
+	bound      bool
 }
 
 type sharedBudgetRouteError struct {
@@ -81,26 +84,107 @@ func (s *Server) hasSharedBudgetCatalog() bool {
 	return s.Catalog != nil && s.Catalog.HasSharedBudgetModels()
 }
 
-func (s *Server) selectSharedBudgetRoute(ctx context.Context, model string, fallback bool) (sharedBudgetSelection, bool) {
+func (s *Server) selectSharedBudgetRoute(ctx context.Context, model string, fallback, advance bool) (sharedBudgetSelection, bool) {
 	if s.Catalog == nil || len(s.SharedBudgetRoutes) == 0 {
 		return sharedBudgetSelection{}, false
 	}
+	var candidates []sharedBudgetSelection
+	var preferred modelregistry.Provider
+	credentialsByProvider := make(map[modelregistry.Provider][]SharedBudgetCredential)
 	for _, entry := range s.Catalog.SharedBudgetModels(ParseModel(model)) {
 		route, ok := s.SharedBudgetRoutes[entry.Provider]
-		if !ok || route.Credential == nil || entry.SharedBudget == nil || fallback && !route.AllowFallback {
+		if !ok || route.Credential == nil && route.Credentials == nil || entry.SharedBudget == nil || fallback && !route.AllowFallback {
 			continue
+		}
+		if preferred != "" && preferred != entry.Provider {
+			break
 		}
 		scope := entry.SharedBudget.CredentialScope
 		unscoped := scope == (modelregistry.SharedBudgetCredentialScope{})
 		if unscoped && route.RequireCatalogueScope {
 			continue
 		}
-		credential, err := route.Credential(ctx)
-		if err == nil && credential.Bearer != "" && (unscoped || scope == credential.binding()) {
-			return sharedBudgetSelection{id: entry.Provider, route: route, credential: credential, model: entry.ID, fallback: fallback}, true
+		credentials, loaded := credentialsByProvider[entry.Provider]
+		if !loaded {
+			var err error
+			credentials, err = route.credentials(ctx)
+			if err != nil {
+				credentials = nil
+			}
+			credentialsByProvider[entry.Provider] = credentials
+		}
+		for _, credential := range credentials {
+			if credential.Bearer != "" && (unscoped || scope == credential.binding()) {
+				preferred = entry.Provider
+				candidates = append(candidates, sharedBudgetSelection{id: entry.Provider, route: route, credential: credential, model: entry.ID, fallback: fallback})
+				break
+			}
 		}
 	}
-	return sharedBudgetSelection{}, false
+	if len(candidates) == 0 {
+		return sharedBudgetSelection{}, false
+	}
+	if key, _ := ctx.Value(sharedBudgetAffinityContextKey{}).(string); key != "" {
+		if bound, found := s.sharedBudgetTurns.session(key, model); found {
+			for _, candidate := range candidates {
+				if candidate.id == bound.Provider && candidate.credential.binding() == bound.Credential {
+					return candidate, true
+				}
+			}
+			if ctx.Value(sharedBudgetRebindContextKey{}) == nil {
+				return sharedBudgetSelection{}, false
+			}
+		}
+	}
+	next := s.sharedBudgetNext.Load()
+	if advance {
+		next = s.sharedBudgetNext.Add(1) - 1
+	}
+	return candidates[int(next%uint64(len(candidates)))], true
+}
+
+type sharedBudgetAffinityContextKey struct{}
+type sharedBudgetRebindContextKey struct{}
+
+func withSharedBudgetRebind(ctx context.Context, body []byte) context.Context {
+	if portableSharedBudgetInput(body) {
+		return context.WithValue(ctx, sharedBudgetRebindContextKey{}, true)
+	}
+	return ctx
+}
+
+func withSharedBudgetAffinity(ctx context.Context, header http.Header) context.Context {
+	if key := sharedBudgetAffinity(header); key != "" {
+		return context.WithValue(ctx, sharedBudgetAffinityContextKey{}, key)
+	}
+	return ctx
+}
+
+func (r SharedBudgetRoute) credentials(ctx context.Context) ([]SharedBudgetCredential, error) {
+	if r.Credentials != nil {
+		return r.Credentials(ctx)
+	}
+	credential, err := r.Credential(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return []SharedBudgetCredential{credential}, nil
+}
+
+func (r SharedBudgetRoute) credentialFor(ctx context.Context, scope modelregistry.SharedBudgetCredentialScope) (SharedBudgetCredential, error) {
+	if r.CredentialFor != nil {
+		return r.CredentialFor(ctx, scope)
+	}
+	credentials, err := r.credentials(ctx)
+	if err != nil {
+		return SharedBudgetCredential{}, err
+	}
+	for _, credential := range credentials {
+		if credential.Bearer != "" && credential.binding() == scope {
+			return credential, nil
+		}
+	}
+	return SharedBudgetCredential{}, errSharedBudgetContinuation
 }
 
 func (s *Server) sharedBudgetResponse(ctx context.Context, selected *sharedBudgetSelection, session string, header http.Header, body []byte, compactEndpoint bool) (*http.Response, *zaiCompactResponse, error) {
@@ -310,7 +394,7 @@ func sharedBudgetSession(header http.Header, preferred string) string {
 }
 
 func (s *Server) serveSharedBudgetHTTP(w http.ResponseWriter, r *http.Request, body []byte) {
-	selected, ok := s.selectSharedBudgetRoute(r.Context(), extractModel(body), false)
+	selected, ok := s.selectSharedBudgetRoute(withSharedBudgetRebind(withSharedBudgetAffinity(r.Context(), r.Header), body), extractModel(body), false, true)
 	if !ok {
 		writeError(w, http.StatusServiceUnavailable, "api_error", "subscription credential unavailable")
 		return
@@ -327,6 +411,18 @@ func (s *Server) serveSelectedSharedBudgetHTTP(w http.ResponseWriter, r *http.Re
 		ctx = withCacheProfileRequestSession(ctx, r.Header, body)
 	}
 	response, compact, err := s.sharedBudgetResponse(ctx, &selected, sharedBudgetSession(r.Header, selected.route.SessionHeader), r.Header, body, compactEndpoint)
+	tried := map[modelregistry.SharedBudgetCredentialScope]bool{selected.credential.binding(): true}
+	for err == nil && response != nil && firstPartyRejectedBeforeGeneration(response.StatusCode) &&
+		!selected.bound && !compactEndpoint && portableSharedBudgetInput(body) {
+		alternate, ok := s.alternateSharedBudgetAccount(ctx, selected, tried)
+		if !ok {
+			break
+		}
+		response.Body.Close()
+		selected = alternate
+		tried[selected.credential.binding()] = true
+		response, compact, err = s.sharedBudgetResponse(ctx, &selected, sharedBudgetSession(r.Header, selected.route.SessionHeader), r.Header, body, false)
+	}
 	if err != nil {
 		if errors.Is(err, errEncryptedSubscriptionAgentMessage) {
 			writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -368,6 +464,21 @@ func (s *Server) serveSelectedSharedBudgetHTTP(w http.ResponseWriter, r *http.Re
 	s.relaySharedBudgetHTTP(w, response, selected, body)
 }
 
+func (s *Server) alternateSharedBudgetAccount(ctx context.Context, selected sharedBudgetSelection, tried map[modelregistry.SharedBudgetCredentialScope]bool) (sharedBudgetSelection, bool) {
+	for _, entry := range s.Catalog.SharedBudgetModels(selected.model) {
+		if entry.Provider != selected.id || entry.SharedBudget == nil || tried[entry.SharedBudget.CredentialScope] {
+			continue
+		}
+		credential, err := selected.route.credentialFor(ctx, entry.SharedBudget.CredentialScope)
+		if err == nil && credential.Bearer != "" && credential.binding() == entry.SharedBudget.CredentialScope {
+			selected.credential = credential
+			selected.model = entry.ID
+			return selected, true
+		}
+	}
+	return sharedBudgetSelection{}, false
+}
+
 func (s *Server) serveSharedBudgetWebSocket(ctx context.Context, downstream *websocket.Conn, header http.Header, kind int, first []byte, selected sharedBudgetSelection) error {
 	bridge := s.sharedBudgetBridge(selected, header)
 	bridge.AcceptsModel = func(model string) bool {
@@ -383,18 +494,18 @@ func (s *Server) sharedBudgetBridge(selected sharedBudgetSelection, header http.
 	return responsesHTTPBridge{
 		Name: selected.route.Name, PrewarmPrefix: "cq_" + strings.ReplaceAll(string(selected.id), "-", "_") + "_prewarm_",
 		Stream: func(ctx context.Context, downstream *websocket.Conn, header http.Header, body []byte) (string, []json.RawMessage, error) {
-			return s.streamSharedBudget(ctx, downstream, header, selected, binding, session, body)
+			return s.streamSharedBudget(ctx, downstream, header, &selected, &binding, session, body)
 		},
 		Compaction: zaiCompactionRequested,
 	}
 }
 
-func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.Conn, header http.Header, selected sharedBudgetSelection, binding sharedBudgetBoundState, session string, body []byte) (string, []json.RawMessage, error) {
-	credential, err := selected.route.Credential(ctx)
+func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.Conn, header http.Header, selected *sharedBudgetSelection, binding *sharedBudgetBoundState, session string, body []byte) (string, []json.RawMessage, error) {
+	credential, err := selected.route.credentialFor(ctx, binding.Credential)
 	if err != nil || credential.Bearer == "" || credential.binding() != binding.Credential {
 		return "", nil, errSharedBudgetContinuation
 	}
-	if bound, found, complete := s.sharedBudgetRequestBinding(body); !complete || (found && bound != binding) {
+	if bound, found, complete := s.sharedBudgetRequestBinding(body); !complete || (found && bound != *binding) {
 		return "", nil, errSharedBudgetContinuation
 	}
 	selected.credential = credential
@@ -402,9 +513,24 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 	if s.CacheProfiler != nil {
 		ctx = withCacheProfileRequestSession(ctx, header, body)
 	}
-	response, compact, err := s.sharedBudgetResponse(ctx, &selected, session, header, body, false)
+	response, compact, err := s.sharedBudgetResponse(ctx, selected, session, header, body, false)
 	if err != nil {
 		return "", nil, err
+	}
+	tried := map[modelregistry.SharedBudgetCredentialScope]bool{selected.credential.binding(): true}
+	for response != nil && firstPartyRejectedBeforeGeneration(response.StatusCode) && !selected.bound && portableSharedBudgetInput(body) {
+		alternate, ok := s.alternateSharedBudgetAccount(ctx, *selected, tried)
+		if !ok {
+			break
+		}
+		response.Body.Close()
+		*selected = alternate
+		*binding = alternate.binding()
+		tried[selected.credential.binding()] = true
+		response, compact, err = s.sharedBudgetResponse(ctx, selected, session, header, body, false)
+		if err != nil {
+			return "", nil, err
+		}
 	}
 	if compact != nil {
 		for _, event := range zaiCompactionEvents(*compact) {
@@ -421,16 +547,17 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 		_ = downstream.WriteMessage(websocket.TextMessage, data)
 		return "", nil, errors.New(selected.route.Name + " stream rejected")
 	}
+	selected.bound = true
 	emit := func(kind string, data []byte) error {
 		if kind == "response.completed" {
 			var event struct{ Response json.RawMessage }
 			if json.Unmarshal(data, &event) == nil {
-				s.recordSharedBudgetResponse(binding, event.Response)
+				s.recordSharedBudgetResponse(*binding, event.Response)
 			}
 		}
 		return downstream.WriteMessage(websocket.TextMessage, data)
 	}
-	normalise := sharedBudgetStreamNormaliser(selected, body, emit)
+	normalise := sharedBudgetStreamNormaliser(*selected, body, emit)
 	if normalise == nil {
 		normalise = func(data []byte) ([]byte, error) { return data, nil }
 	}
@@ -473,11 +600,15 @@ var errSharedBudgetFallback = errors.New("first-party subscription rejected befo
 var errSharedBudgetContinuation = errors.New("subscription continuation unavailable; retry with full readable input")
 
 func (s *Server) selectSharedBudgetFallback(ctx context.Context, body []byte) (sharedBudgetSelection, bool) {
+	return s.sharedBudgetFallback(ctx, body, true)
+}
+
+func (s *Server) sharedBudgetFallback(ctx context.Context, body []byte, advance bool) (sharedBudgetSelection, bool) {
 	if ctx.Err() != nil || ctx.Value(sharedBudgetFallbackDisabled{}) != nil || len(s.SharedBudgetRoutes) == 0 ||
 		!portableSharedBudgetInput(body) {
 		return sharedBudgetSelection{}, false
 	}
-	return s.selectSharedBudgetRoute(ctx, extractModel(body), true)
+	return s.selectSharedBudgetRoute(withSharedBudgetRebind(ctx, body), extractModel(body), true, advance)
 }
 
 // hasSharedBudgetFallback avoids reading a successful response's SSE prelude
@@ -496,7 +627,7 @@ func (s *Server) hasSharedBudgetFallback(ctx context.Context, body []byte) bool 
 }
 
 func (s *Server) canFallbackToSharedBudget(ctx context.Context, body []byte) bool {
-	_, ok := s.selectSharedBudgetFallback(ctx, body)
+	_, ok := s.sharedBudgetFallback(ctx, body, false)
 	return ok
 }
 

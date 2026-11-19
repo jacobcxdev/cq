@@ -41,8 +41,19 @@ func PublishCodexRegistryCache(fsys fsutil.FileSystem, roots userdirs.Roots, sna
 			entries = append(entries, entry)
 		}
 	}
+	publicRoutes := make(map[string][]Entry, len(snap.SharedBudgetModels))
+	for id, routes := range snap.SharedBudgetModels {
+		seen := make(map[Provider]bool)
+		for _, route := range routes {
+			if seen[route.Provider] {
+				continue
+			}
+			seen[route.Provider] = true
+			publicRoutes[id] = append(publicRoutes[id], route)
+		}
+	}
 	return saveModelFile(fsys, path, codexRegistryCache{
-		Version: 1, Models: entries, SharedBudgetModels: snap.SharedBudgetModels,
+		Version: 1, Models: entries, SharedBudgetModels: publicRoutes,
 	})
 }
 

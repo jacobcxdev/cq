@@ -29,7 +29,31 @@ type sharedBudgetLogin struct {
 	Email string
 }
 
-type sharedBudgetAuthorization func(context.Context, bool) (sharedBudgetLogin, error)
+type sharedBudgetAuthorization struct {
+	List func(context.Context, bool) ([]sharedBudgetLogin, error)
+	For  func(context.Context, modelregistry.SharedBudgetCredentialScope) (sharedBudgetLogin, error)
+}
+
+func (a sharedBudgetAuthorization) first(ctx context.Context, refresh bool) (sharedBudgetLogin, error) {
+	logins, err := a.List(ctx, refresh)
+	if err != nil || len(logins) == 0 {
+		return sharedBudgetLogin{}, err
+	}
+	return logins[0], nil
+}
+
+func (l sharedBudgetLogin) scope() modelregistry.SharedBudgetCredentialScope {
+	credential := l.routeCredential()
+	return modelregistry.FingerprintSharedBudgetCredential(credential.Bearer, credential.Account, credential.WorkspaceID)
+}
+
+func (l sharedBudgetLogin) routeCredential() proxy.SharedBudgetCredential {
+	credential := l.SharedBudgetCredential
+	if credential.Account == "" {
+		credential.WorkspaceID = ""
+	}
+	return credential
+}
 
 type sharedBudgetAdapter struct {
 	ID                     modelregistry.Provider
@@ -63,12 +87,17 @@ var sharedBudgetAdapters = []sharedBudgetAdapter{
 		Catalogue: func(client httputil.Doer, authorize sharedBudgetAuthorization) modelregistry.NativeSource {
 			return &modelregistry.OpenCodeGoSource{
 				Client: client,
-				Credential: func(ctx context.Context) (string, string, string, error) {
-					login, err := authorize(ctx, true)
-					if login.Account == "" {
-						login.SharedBudgetCredential.WorkspaceID = ""
+				Credentials: func(ctx context.Context) ([]modelregistry.OpenCodeGoCredential, error) {
+					logins, err := authorize.List(ctx, true)
+					if err != nil {
+						return nil, err
 					}
-					return login.Bearer, login.Account, login.WorkspaceID, err
+					credentials := make([]modelregistry.OpenCodeGoCredential, 0, len(logins))
+					for _, login := range logins {
+						credential := login.routeCredential()
+						credentials = append(credentials, modelregistry.OpenCodeGoCredential{Bearer: credential.Bearer, Account: credential.Account, WorkspaceID: credential.WorkspaceID})
+					}
+					return credentials, nil
 				},
 			}
 		},
@@ -98,30 +127,53 @@ func sharedBudgetKey(fsys fsutil.FileSystem, env func(string) string, configDir 
 // A failed or expired OAuth login still owns the selected route.
 func (a sharedBudgetAdapter) resolve(fsys fsutil.FileSystem, env func(string) string, configDir string, client httputil.Doer, settings sharedBudgetSettings) sharedBudgetAuthorization {
 	if settings.invalid {
-		return func(context.Context, bool) (sharedBudgetLogin, error) {
-			return sharedBudgetLogin{}, fmt.Errorf("%s subscription settings unavailable", a.Name)
+		invalid := func() error { return fmt.Errorf("%s subscription settings unavailable", a.Name) }
+		return sharedBudgetAuthorization{
+			List: func(context.Context, bool) ([]sharedBudgetLogin, error) { return nil, invalid() },
+			For: func(context.Context, modelregistry.SharedBudgetCredentialScope) (sharedBudgetLogin, error) {
+				return sharedBudgetLogin{}, invalid()
+			},
 		}
 	}
 	var oauth sharedBudgetAuthorization
 	if a.OAuth != nil && settings.Auth != "api_key" {
 		oauth = a.OAuth(fsys, configDir, client)
 	}
-	return func(ctx context.Context, refresh bool) (sharedBudgetLogin, error) {
-		if oauth != nil {
-			login, err := oauth(ctx, refresh)
-			if !errors.Is(err, os.ErrNotExist) {
-				return login, err
-			}
-		}
+	keyLogin := func() (sharedBudgetLogin, error) {
 		key, err := sharedBudgetKey(fsys, env, configDir, a.ID, a.KeyEnv)
 		if err != nil {
 			return sharedBudgetLogin{}, err
 		}
-		return sharedBudgetLogin{
-			SharedBudgetCredential: proxy.SharedBudgetCredential{Bearer: key, WorkspaceID: settings.WorkspaceID},
-			Email:                  settings.Email,
-		}, nil
+		return sharedBudgetLogin{SharedBudgetCredential: proxy.SharedBudgetCredential{Bearer: key, WorkspaceID: settings.WorkspaceID}, Email: settings.Email}, nil
 	}
+	return sharedBudgetAuthorization{List: func(ctx context.Context, refresh bool) ([]sharedBudgetLogin, error) {
+		if oauth.List != nil {
+			logins, err := oauth.List(ctx, refresh)
+			if !errors.Is(err, os.ErrNotExist) {
+				return logins, err
+			}
+		}
+		login, err := keyLogin()
+		if err != nil {
+			return nil, err
+		}
+		return []sharedBudgetLogin{login}, nil
+	}, For: func(ctx context.Context, scope modelregistry.SharedBudgetCredentialScope) (sharedBudgetLogin, error) {
+		if oauth.For != nil {
+			login, err := oauth.For(ctx, scope)
+			if !errors.Is(err, os.ErrNotExist) {
+				return login, err
+			}
+		}
+		login, err := keyLogin()
+		if err != nil {
+			return sharedBudgetLogin{}, err
+		}
+		if login.Bearer == "" || login.scope() != scope {
+			return sharedBudgetLogin{}, os.ErrNotExist
+		}
+		return login, nil
+	}}
 }
 
 func sharedBudgetProxyRoutes(fsys fsutil.FileSystem, env func(string) string, configDir string) map[modelregistry.Provider]proxy.SharedBudgetRoute {
@@ -140,11 +192,23 @@ func sharedBudgetProxyRoutes(fsys fsutil.FileSystem, env func(string) string, co
 			OmitEmptyCallIDOutputs: adapter.OmitEmptyCallIDOutputs,
 			PlaintextCollaboration: adapter.PlaintextCollaboration,
 			Credential: func(ctx context.Context) (proxy.SharedBudgetCredential, error) {
-				login, err := resolve(ctx, true)
-				if login.Account == "" {
-					login.SharedBudgetCredential.WorkspaceID = ""
+				login, err := resolve.first(ctx, true)
+				return login.routeCredential(), err
+			},
+			Credentials: func(ctx context.Context) ([]proxy.SharedBudgetCredential, error) {
+				logins, err := resolve.List(ctx, true)
+				if err != nil {
+					return nil, err
 				}
-				return login.SharedBudgetCredential, err
+				credentials := make([]proxy.SharedBudgetCredential, 0, len(logins))
+				for _, login := range logins {
+					credentials = append(credentials, login.routeCredential())
+				}
+				return credentials, nil
+			},
+			CredentialFor: func(ctx context.Context, scope modelregistry.SharedBudgetCredentialScope) (proxy.SharedBudgetCredential, error) {
+				login, err := resolve.For(ctx, scope)
+				return login.routeCredential(), err
 			},
 		}
 	}
@@ -217,34 +281,42 @@ func sharedBudgetChecks(fsys fsutil.FileSystem, env func(string) string, configD
 		}
 		settings := loadSharedBudgetSettings(fsys, configDir, adapter.ID)
 		resolve := adapter.resolve(fsys, env, configDir, client, settings)
-		login, err := resolve(context.Background(), false)
-		if len(selected) == 0 && (err != nil || login.Bearer == "") {
+		logins, err := resolve.List(context.Background(), false)
+		if len(selected) == 0 && (err != nil || len(logins) == 0) {
 			continue
 		}
-		email := login.Email
-		if login.Account == "" {
-			email = settings.Email
+		if len(logins) == 0 {
+			logins = []sharedBudgetLogin{{}}
 		}
-		report := quota.SharedBudgetReport{
-			ProviderID: id, ProviderName: adapter.Name, Plan: adapter.Plan, Icon: adapter.Icon, Email: email,
+		for _, login := range logins {
+			if len(selected) == 0 && login.Bearer == "" {
+				continue
+			}
+			email := login.Email
+			if login.Account == "" {
+				email = settings.Email
+			}
+			report := quota.SharedBudgetReport{
+				ProviderID: id, ProviderName: adapter.Name, Plan: adapter.Plan, Icon: adapter.Icon, Email: email,
+			}
+			if settings.ExtraUsage != nil && len(logins) == 1 {
+				report.ExtraUsage = &quota.ExtraCredits{Enabled: *settings.ExtraUsage}
+			}
+			checks = append(checks, app.SharedBudgetCheck{
+				Report: report,
+				Fetch: func(ctx context.Context) []quota.SharedBudgetWindow {
+					if adapter.Usage == nil {
+						return nil
+					}
+					current, err := resolve.For(ctx, login.scope())
+					if err != nil || current.Bearer == "" || current.Account != login.Account || current.WorkspaceID != login.WorkspaceID ||
+						current.Account == "" && current.Bearer != login.Bearer {
+						return nil
+					}
+					return adapter.Usage(ctx, client, current.Bearer, current.WorkspaceID)
+				},
+			})
 		}
-		if settings.ExtraUsage != nil {
-			report.ExtraUsage = &quota.ExtraCredits{Enabled: *settings.ExtraUsage}
-		}
-		checks = append(checks, app.SharedBudgetCheck{
-			Report: report,
-			Fetch: func(ctx context.Context) []quota.SharedBudgetWindow {
-				if adapter.Usage == nil {
-					return nil
-				}
-				current, err := resolve(ctx, true)
-				if err != nil || current.Bearer == "" || current.Account != login.Account || current.WorkspaceID != login.WorkspaceID ||
-					current.Account == "" && current.Bearer != login.Bearer {
-					return nil
-				}
-				return adapter.Usage(ctx, client, current.Bearer, current.WorkspaceID)
-			},
-		})
 	}
 	for _, id := range selected {
 		if !sharedIDs[id] {

@@ -87,6 +87,18 @@ func TestSharedBudgetTTYAlignment(t *testing.T) {
 	}
 }
 
+func TestSharedBudgetTTYMultipleAccounts(t *testing.T) {
+	model := BuildTTYModel(app.Report{SharedBudgetSubscriptions: []quota.SharedBudgetReport{
+		{ProviderID: "opencode-go", ProviderName: "OpenCode", Plan: "Go", Icon: "\U000F0C15", Email: "first@example.test"},
+		{ProviderID: "opencode-go", ProviderName: "OpenCode", Plan: "Go", Icon: "\U000F0C15", Email: "second@example.test"},
+	}}, time.Unix(1000, 0))
+	if len(model.Sections) != 2 || model.Sections[0].Separator == "" || model.Sections[1].Separator != "" ||
+		!strings.Contains(stripANSI(model.Sections[0].Header), "first@example.test") ||
+		!strings.Contains(stripANSI(model.Sections[1].Header), "second@example.test") {
+		t.Fatalf("multi-account OpenCode layout = %+v", model.Sections)
+	}
+}
+
 func TestSharedBudgetJSONKeepsExactAllowance(t *testing.T) {
 	var out bytes.Buffer
 	renderer := &JSONRenderer{W: &out}

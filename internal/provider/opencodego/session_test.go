@@ -3,6 +3,7 @@ package opencodego
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -48,6 +49,94 @@ func TestSessionAuthoritySavesPrivateEncryptedSession(t *testing.T) {
 	}
 	if _, err := a.Read(); err == nil || errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("corrupt OAuth file must fail closed: %v", err)
+	}
+}
+
+func TestSessionAuthorityKeepsSeparateLogins(t *testing.T) {
+	a, _, first, _ := sessionAuthorityFixture(t)
+	second := first
+	second.MemberID = "second-member"
+	second.WorkspaceID = "second-workspace"
+	second.Email = "second@example.test"
+	second.AccessToken = "second-access"
+	second.RefreshToken = "second-refresh"
+	if err := a.Save(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Save(t.Context(), second); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := a.ReadAll()
+	if err != nil || len(accounts) != 2 || !sameSession(accounts[0], first) || !sameSession(accounts[1], second) {
+		t.Fatalf("separate logins not retained: count=%d, err=%v", len(accounts), err)
+	}
+	updated := first
+	updated.AccessToken = "updated-first-access"
+	updated.RefreshToken = "updated-first-refresh"
+	if err := a.Save(t.Context(), updated); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err = a.ReadAll()
+	if err != nil || len(accounts) != 2 || !sameSession(accounts[0], updated) || !sameSession(accounts[1], second) {
+		t.Fatalf("re-login changed another account: count=%d, err=%v", len(accounts), err)
+	}
+}
+
+func TestSessionAuthorityMigratesLegacyRecord(t *testing.T) {
+	a, fsys, first, _ := sessionAuthorityFixture(t)
+	if err := a.Save(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	store, err := a.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := store.cipher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := json.Marshal(sessionRecord{Session: first})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed := aead.Seal([]byte{oauthFileVersion}, nil, legacy, []byte(oauthSessionFile))
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsys.WriteFile(filepath.Join(a.ConfigDir, oauthSessionFile), sealed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second := first
+	second.MemberID, second.WorkspaceID, second.Email = "other", "other-workspace", "other@example.test"
+	second.AccessToken, second.RefreshToken = "other-access", "other-refresh"
+	if err := a.Save(t.Context(), second); err != nil {
+		t.Fatal(err)
+	}
+	accounts, err := a.ReadAll()
+	if err != nil || len(accounts) != 2 || !sameSession(accounts[0], first) || !sameSession(accounts[1], second) {
+		t.Fatalf("legacy migration lost an account: count=%d, err=%v", len(accounts), err)
+	}
+}
+
+func TestSessionAuthorityRefreshFailureIsAccountScoped(t *testing.T) {
+	a, _, first, now := sessionAuthorityFixture(t)
+	second := first
+	second.MemberID, second.WorkspaceID, second.Email = "other", "other-workspace", "other@example.test"
+	second.AccessToken, second.RefreshToken = "other-access", "other-refresh"
+	second.ExpiresAt = now.Add(2 * time.Hour)
+	if err := a.Save(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Save(t.Context(), second); err != nil {
+		t.Fatal(err)
+	}
+	*now = first.ExpiresAt
+	a.Exchange = func(context.Context, OAuthSession) (OAuthSession, error) { return OAuthSession{}, ErrOAuthRejected }
+	if _, err := a.FreshFor(t.Context(), first.MemberID, first.WorkspaceID); !errors.Is(err, ErrOAuthRejected) {
+		t.Fatalf("first refresh: %v", err)
+	}
+	if got, err := a.FreshFor(t.Context(), second.MemberID, second.WorkspaceID); err != nil || !sameSession(got, second) {
+		t.Fatalf("other account blocked by failed refresh: %v", err)
 	}
 }
 

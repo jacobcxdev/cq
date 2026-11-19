@@ -19,9 +19,14 @@ const (
 )
 
 type OpenCodeGoSource struct {
-	Client     httputil.Doer
-	URL        string
-	Credential func(context.Context) (bearer, account, workspaceID string, err error)
+	Client      httputil.Doer
+	URL         string
+	Credential  func(context.Context) (bearer, account, workspaceID string, err error)
+	Credentials func(context.Context) ([]OpenCodeGoCredential, error)
+}
+
+type OpenCodeGoCredential struct {
+	Bearer, Account, WorkspaceID string
 }
 
 type openCodeGoModel struct {
@@ -50,13 +55,52 @@ type openCodeGoModel struct {
 }
 
 func (s *OpenCodeGoSource) Fetch(ctx context.Context) (SourceResult, error) {
-	if s.Credential == nil {
+	if s.Credential == nil && s.Credentials == nil {
 		return SourceResult{NotConfigured: true}, nil
 	}
-	bearer, account, workspaceID, err := s.Credential(ctx)
+	var credentials []OpenCodeGoCredential
+	var err error
+	if s.Credentials != nil {
+		credentials, err = s.Credentials(ctx)
+	} else {
+		var credential OpenCodeGoCredential
+		credential.Bearer, credential.Account, credential.WorkspaceID, err = s.Credential(ctx)
+		credentials = []OpenCodeGoCredential{credential}
+	}
 	if err != nil {
 		return SourceResult{}, errors.New("OpenCode Go catalogue credential unavailable")
 	}
+	result := SourceResult{FetchedAt: time.Now()}
+	var failures []error
+	configured, succeeded := false, false
+	for _, credential := range credentials {
+		if err := ctx.Err(); err != nil {
+			return SourceResult{}, err
+		}
+		if credential.Bearer == "" {
+			continue
+		}
+		configured = true
+		accountResult, fetchErr := s.fetchAccount(ctx, credential)
+		if fetchErr != nil {
+			failures = append(failures, fetchErr)
+			continue
+		}
+		succeeded = true
+		result.Entries = append(result.Entries, accountResult.Entries...)
+		result.MalformedEntries += accountResult.MalformedEntries
+	}
+	if !succeeded && len(failures) > 0 {
+		return SourceResult{}, errors.Join(failures...)
+	}
+	if !configured {
+		return SourceResult{NotConfigured: true}, nil
+	}
+	return result, nil
+}
+
+func (s *OpenCodeGoSource) fetchAccount(ctx context.Context, credential OpenCodeGoCredential) (SourceResult, error) {
+	bearer, account, workspaceID := credential.Bearer, credential.Account, credential.WorkspaceID
 	if bearer == "" {
 		return SourceResult{NotConfigured: true}, nil
 	}
