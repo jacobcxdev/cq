@@ -27,6 +27,10 @@ func normaliseSubscriptionAgentMessages(body []byte, name string) ([]byte, error
 		return nil, err
 	}
 	changed := false
+	var normalisedInput []json.RawMessage
+	if input != nil {
+		normalisedInput = make([]json.RawMessage, 0, len(input))
+	}
 	for i, raw := range input {
 		var agent struct {
 			Type             string          `json:"type"`
@@ -36,6 +40,7 @@ func normaliseSubscriptionAgentMessages(body []byte, name string) ([]byte, error
 			EncryptedContent json.RawMessage `json:"encrypted_content"`
 		}
 		if err := json.Unmarshal(raw, &agent); err != nil || agent.Type != "agent_message" {
+			normalisedInput = append(normalisedInput, raw)
 			continue
 		}
 		if len(agent.EncryptedContent) != 0 {
@@ -48,6 +53,14 @@ func normaliseSubscriptionAgentMessages(body []byte, name string) ([]byte, error
 		if recovered, ok := recoverLegacyPlaintextAgentContent(content, agent.Author, agent.Recipient); ok {
 			content = recovered
 			agent.Content, _ = json.Marshal(content)
+		} else if isLegacyEncryptedAgentContent(content, agent.Author, agent.Recipient) {
+			// Old chats can retain unreadable worker tasks before later readable
+			// history. Never discard the newest task: it may still need delivery.
+			if i == len(input)-1 {
+				return nil, errEncryptedSubscriptionAgentMessage
+			}
+			changed = true
+			continue
 		}
 		for _, rawPart := range content {
 			var part struct {
@@ -68,7 +81,7 @@ func normaliseSubscriptionAgentMessages(body []byte, name string) ([]byte, error
 				return nil, errors.New("invalid " + name + " agent message content")
 			}
 		}
-		input[i], err = json.Marshal(map[string]json.RawMessage{
+		normalised, err := json.Marshal(map[string]json.RawMessage{
 			"type":    json.RawMessage(`"message"`),
 			"role":    json.RawMessage(`"user"`),
 			"content": agent.Content,
@@ -76,6 +89,7 @@ func normaliseSubscriptionAgentMessages(body []byte, name string) ([]byte, error
 		if err != nil {
 			return nil, errors.New("invalid " + name + " agent message content")
 		}
+		normalisedInput = append(normalisedInput, normalised)
 		changed = true
 	}
 	if tools, edited := plaintextCollaborationSchemas(request["tools"], ""); edited {
@@ -85,7 +99,7 @@ func normaliseSubscriptionAgentMessages(body []byte, name string) ([]byte, error
 	if !changed {
 		return body, nil
 	}
-	request["input"], err = json.Marshal(input)
+	request["input"], err = json.Marshal(normalisedInput)
 	if err != nil {
 		return nil, errors.New("invalid " + name + " response input")
 	}
@@ -101,14 +115,29 @@ func normaliseSubscriptionAgentMessages(body []byte, name string) ([]byte, error
 // was still plaintext. OpenAI-owned encrypted arguments are Fernet tokens with
 // the gAAAAA prefix and must remain unreadable.
 func recoverLegacyPlaintextAgentContent(content []json.RawMessage, author, recipient string) ([]json.RawMessage, bool) {
-	if len(content) != 2 || author == "" || recipient == "" {
+	payload, ok := legacyAgentContentPayload(content, author, recipient)
+	if !ok || openAIAgentCiphertext.MatchString(payload) {
 		return content, false
+	}
+	recovered := append([]json.RawMessage(nil), content...)
+	recovered[1], _ = json.Marshal(map[string]string{"type": "input_text", "text": payload})
+	return recovered, true
+}
+
+func isLegacyEncryptedAgentContent(content []json.RawMessage, author, recipient string) bool {
+	payload, ok := legacyAgentContentPayload(content, author, recipient)
+	return ok && openAIAgentCiphertext.MatchString(payload)
+}
+
+func legacyAgentContentPayload(content []json.RawMessage, author, recipient string) (string, bool) {
+	if len(content) != 2 || author == "" || recipient == "" {
+		return "", false
 	}
 	var headerObject, payloadObject map[string]json.RawMessage
 	if json.Unmarshal(content[0], &headerObject) != nil || json.Unmarshal(content[1], &payloadObject) != nil ||
 		len(headerObject) != 2 || len(payloadObject) != 2 || headerObject["type"] == nil || headerObject["text"] == nil ||
 		payloadObject["type"] == nil || payloadObject["encrypted_content"] == nil {
-		return content, false
+		return "", false
 	}
 	var header struct {
 		Type string  `json:"type"`
@@ -119,16 +148,13 @@ func recoverLegacyPlaintextAgentContent(content []json.RawMessage, author, recip
 		EncryptedContent *string `json:"encrypted_content"`
 	}
 	if json.Unmarshal(content[0], &header) != nil || json.Unmarshal(content[1], &payload) != nil ||
-		header.Type != "input_text" || header.Text == nil || payload.Type != "encrypted_content" ||
-		payload.EncryptedContent == nil || openAIAgentCiphertext.MatchString(*payload.EncryptedContent) {
-		return content, false
+		header.Type != "input_text" || header.Text == nil || payload.Type != "encrypted_content" || payload.EncryptedContent == nil {
+		return "", false
 	}
 	newTask := fmt.Sprintf("Message Type: NEW_TASK\nTask name: %s\nSender: %s\nPayload:\n", recipient, author)
 	message := fmt.Sprintf("Message Type: MESSAGE\nTask name: %s\nSender: %s\nPayload:\n", recipient, author)
 	if *header.Text != newTask && *header.Text != message {
-		return content, false
+		return "", false
 	}
-	recovered := append([]json.RawMessage(nil), content...)
-	recovered[1], _ = json.Marshal(map[string]string{"type": "input_text", "text": *payload.EncryptedContent})
-	return recovered, true
+	return *payload.EncryptedContent, true
 }
