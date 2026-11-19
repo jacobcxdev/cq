@@ -97,12 +97,48 @@ func TestNormaliseZAIRequestLeavesOrdinaryRequestsByteExact(t *testing.T) {
 	}
 }
 
+func TestNormaliseZAIRequestRecoversLegacyPlaintextAgentContent(t *testing.T) {
+	const body = `{"model":"glm-test","input":[{"type":"agent_message","author":"/root/worker","recipient":"/root","content":[{"type":"input_text","text":"Message Type: MESSAGE\nTask name: /root\nSender: /root/worker\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"Recovered worker reply."}]}]}`
+	got, err := normaliseZAIRequest([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var request struct {
+		Input []struct {
+			Type, Role string
+			Content    []struct {
+				Type, Text string
+			}
+		}
+	}
+	if err := json.Unmarshal(got, &request); err != nil {
+		t.Fatal(err)
+	}
+	if len(request.Input) != 1 || request.Input[0].Type != "message" || request.Input[0].Role != "user" ||
+		len(request.Input[0].Content) != 2 || request.Input[0].Content[0].Type != "input_text" ||
+		request.Input[0].Content[1].Type != "input_text" || request.Input[0].Content[1].Text != "Recovered worker reply." {
+		t.Fatalf("legacy agent content was not recovered: %+v", request.Input)
+	}
+}
+
+func TestNormaliseZAIRequestMakesCollaborationSchemasPlaintext(t *testing.T) {
+	const body = `{"model":"glm-test","input":[],"tools":[{"type":"namespace","name":"collaboration","tools":[{"type":"function","name":"spawn_agent","parameters":{"type":"object","properties":{"message":{"type":"string","encrypted":true}}}}]}]}`
+	got, err := normaliseZAIRequest([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(got, []byte(`"encrypted"`)) || !bytes.Contains(got, []byte(`"spawn_agent"`)) {
+		t.Fatalf("collaboration schema was not made plaintext: %s", got)
+	}
+}
+
 func TestNormaliseZAIRequestRejectsUnreadableAgentContent(t *testing.T) {
 	for _, tc := range []struct {
 		name, agent, errorKind string
 	}{
-		{"encrypted part", `{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"TASK_CONTENT_MUST_NOT_APPEAR"}]}`, "encrypted"},
-		{"mixed plaintext and encryption", `{"type":"agent_message","content":[{"type":"input_text","text":"TASK_CONTENT_MUST_NOT_APPEAR"},{"type":"encrypted_content","encrypted_content":"opaque-task"}]}`, "encrypted"},
+		{"encrypted part", `{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"gAAAAABpHEk0UHJpWmRxY0xIS2hJZl9tS0dKR3B4U2g="}]}`, "encrypted"},
+		{"mixed plaintext and encryption", `{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"gAAAAABpHEk0UHJpWmRxY0xIS2hJZl9tS0dKR3B4U2g="}]}`, "encrypted"},
+		{"mismatched legacy header", `{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/other\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"TASK_CONTENT_MUST_NOT_APPEAR"}]}`, "encrypted"},
 		{"encrypted envelope", `{"type":"agent_message","encrypted_content":"TASK_CONTENT_MUST_NOT_APPEAR","content":[{"type":"input_text","text":"header"}]}`, "encrypted"},
 		{"encryption on text part", `{"type":"agent_message","content":[{"type":"input_text","text":"header","encrypted_content":"TASK_CONTENT_MUST_NOT_APPEAR"}]}`, "encrypted"},
 		{"unsupported part", `{"type":"agent_message","content":[{"type":"input_image","image_url":"TASK_CONTENT_MUST_NOT_APPEAR"}]}`, "unsupported"},
