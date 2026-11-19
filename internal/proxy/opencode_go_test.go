@@ -182,9 +182,22 @@ func TestOpenCodeGoWorkersInheritParentsRoute(t *testing.T) {
 				t.Error(err)
 			}
 			call := goCalls.Add(1)
-			if call > 1 && (len(request.Input) != 1 || request.Input[0].Type != "message" ||
-				request.Input[0].Role != "user" || len(request.Input[0].Content) != 1 || request.Input[0].Content[0].Text != "Report the fixture marker.") {
-				t.Errorf("worker task was not forwarded as a plaintext user message: %+v", request.Input)
+			if call > 1 {
+				if len(request.Input) != 1 {
+					t.Errorf("worker request has unexpected input: %+v", request.Input)
+					return httptest.NewRecorder().Result(), nil
+				}
+				var text strings.Builder
+				for _, part := range request.Input[0].Content {
+					if part.Type != "input_text" {
+						t.Errorf("worker content remained encrypted: %+v", request.Input)
+					}
+					text.WriteString(part.Text)
+				}
+				if request.Input[0].Type != "message" || request.Input[0].Role != "user" ||
+					!strings.Contains(text.String(), "Report the fixture marker.") {
+					t.Errorf("worker task was not forwarded as a plaintext user message: %+v", request.Input)
+				}
 			}
 			w := httptest.NewRecorder()
 			if call == 1 {
@@ -223,8 +236,9 @@ func TestOpenCodeGoWorkersInheritParentsRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	prewarm := readZAITestCompletion(t, c)
+	const legacyTask = `{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"Report the fixture marker."}]}`
 	frame := fmt.Sprintf(`{"type":"response.create","model":"glm-5.3","previous_response_id":%q,"client_metadata":{"x-codex-turn-metadata":%q},"input":[%s]}`,
-		prewarm.Response.ID, worker.Get(codexTurnMetadataKey), task)
+		prewarm.Response.ID, worker.Get(codexTurnMetadataKey), legacyTask)
 	if err := c.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +248,7 @@ func TestOpenCodeGoWorkersInheritParentsRoute(t *testing.T) {
 	if primaryCalls.Load() != 1 || goCalls.Load() != 3 {
 		t.Fatalf("worker routing Z.ai=%d Go=%d", primaryCalls.Load(), goCalls.Load())
 	}
-	encrypted := `{"model":"glm-5.3","input":[{"type":"agent_message","content":[{"type":"encrypted_content","encrypted_content":"opaque"}]}]}`
+	encrypted := `{"model":"glm-5.3","input":[{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"gAAAAABpHEk0UHJpWmRxY0xIS2hJZl9tS0dKR3B4U2g="}]}]}`
 	r = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(encrypted))
 	r.Header = worker
 	w = httptest.NewRecorder()
