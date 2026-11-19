@@ -176,6 +176,45 @@ func TestProxyPolicyLivePoolAndSessionLifecycle(t *testing.T) {
 	if decision.Status != proxy.PolicyDecisionUnbound {
 		t.Fatalf("unbound decision = %#v", decision)
 	}
+
+	digestResponse := httptest.NewRecorder()
+	handler.ServeHTTP(digestResponse, httptest.NewRequest(http.MethodPost, proxy.RuntimePolicySessionDigestPath, bytes.NewBufferString("private-session")))
+	var digests struct {
+		SessionDigest string `json:"session_digest"`
+		Daybreak      string `json:"daybreak_session_digest"`
+	}
+	if err := json.Unmarshal(digestResponse.Body.Bytes(), &digests); err != nil ||
+		!validProxyPolicyDigest(digests.Daybreak) || digests.Daybreak == digests.SessionDigest {
+		t.Fatalf("session digest response = %q, error = %v", digestResponse.Body.String(), err)
+	}
+	current, err := state.Routing.Document()
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped := nextProxyRoutingPolicy(current)
+	scoped.SessionBindings = []proxy.SessionBindingDocument{
+		{SessionDigest: digests.SessionDigest, Pool: "Security Research"},
+		{SessionDigest: digests.Daybreak, Pool: "Security Research"},
+	}
+	if err := state.Routing.PublishDocument(scoped); err != nil {
+		t.Fatal(err)
+	}
+	output.Reset()
+	selector = []string{"--session-id", "private-session", "--port", strconv.Itoa(port)}
+	if err := runProxyPolicyWithDependencies(context.Background(), append([]string{"session", "show"}, selector...), &output, deps); err != nil {
+		t.Fatal(err)
+	}
+	var binding proxy.SessionBindingDocument
+	if err := json.Unmarshal(output.Bytes(), &binding); err != nil || binding != scoped.SessionBindings[1] {
+		t.Fatalf("scoped binding = %+v, error = %v", binding, err)
+	}
+	output.Reset()
+	if err := runProxyPolicyWithDependencies(context.Background(), append([]string{"session", "unbind"}, selector...), &output, deps); err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Routing.Current().SessionBindings; len(got) != 1 || got[0].SessionDigest != digests.SessionDigest {
+		t.Fatalf("expected only manual binding to remain: %+v", got)
+	}
 }
 
 func TestProxyPolicyPoolRejectsInvalidValues(t *testing.T) {

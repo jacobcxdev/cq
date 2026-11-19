@@ -1303,6 +1303,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	var codexLeaseRedistributor proxy.CodexLeaseRedistributor
 	var sessionPolicy *proxy.SessionPolicyResolver
 	var cyberEligibility *proxy.CyberEligibilityStore
+	var daybreakState proxy.CodexDaybreakState
 	var dispatchPermits proxy.CallerDispatchPermitAuthority
 	if codexContinuity != nil {
 		codexRoutes = codexContinuity.Coordinator
@@ -1311,6 +1312,10 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		codexLeaseRedistributor = codexContinuity.Coordinator
 	}
 	if resilienceState != nil {
+		daybreakState, err = proxy.NewCodexDaybreakState()
+		if err != nil {
+			return fmt.Errorf("Codex Daybreak state: %w", err)
+		}
 		sessionPolicy = resilienceState.Routing.Resolver()
 		cyberEligibility = proxy.NewCyberEligibilityStore(resilienceState.Routing)
 		dispatchPermits = resilienceState.DispatchPermits
@@ -1343,6 +1348,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Refresher:         credentialControl,
 		SessionPolicy:     sessionPolicy,
 		CyberEligibility:  cyberEligibility,
+		DaybreakState:     daybreakState,
 		DispatchPermits:   dispatchPermits,
 		TurnReceipts:      codexTurnReceipts,
 		Headroom:          proxy.NewCodexRequestHeadroomAdapter(headroom),
@@ -1366,6 +1372,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		Refresher:         credentialControl,
 		SessionPolicy:     sessionPolicy,
 		CyberEligibility:  cyberEligibility,
+		DaybreakState:     daybreakState,
 		DispatchPermits:   dispatchPermits,
 		TurnReceipts:      codexTurnReceipts,
 		Upstream:          cfg.CodexUpstream,

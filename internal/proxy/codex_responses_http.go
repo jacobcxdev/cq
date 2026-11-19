@@ -355,8 +355,7 @@ func (s *Server) codexSessionPolicyExclusions(ctx context.Context, request Codex
 	if s == nil || s.SessionPolicy == nil {
 		return nil, nil
 	}
-	session := []byte(request.Metadata.Metadata.SessionID)
-	if decision := s.SessionPolicy.Resolve(session, nil); decision.Status == PolicyDecisionUnbound {
+	if decision, _ := s.SessionPolicy.resolveCodexSession(request, nil); decision.Status == PolicyDecisionUnbound {
 		return nil, nil
 	}
 	if s.CodexRequests == nil {
@@ -367,7 +366,7 @@ func (s *Server) codexSessionPolicyExclusions(ctx context.Context, request Codex
 		return nil, errors.Join(ErrSessionPolicyUnavailable, err)
 	}
 	caller, _ := runtimeCallerAuthority(ctx)
-	decision, err := enforceSessionPolicy(s.SessionPolicy, caller, session, accounts, continuity, time.Now())
+	decision, err := enforceSessionPolicy(s.SessionPolicy, caller, request, accounts, continuity, time.Now())
 	if err != nil {
 		return nil, err
 	}

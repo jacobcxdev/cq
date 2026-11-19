@@ -677,11 +677,17 @@ programme evidence. Background discovery runs every five minutes. Inspect
 `cq proxy policy status` for the current policy instead of manually declaring
 unknown accounts eligible.
 
-When a supported client sends an active Cyber access-programme request, CQ
-selects the generated pool for that request. The chat's saved ordinary pool
-binding remains intact, so turning Cyber access off does not rewrite it.
-Selection still checks the particular account, model and programme; membership
-alone does not grant entitlement. Failed/absent discovery is unknown rather
+When a turn explicitly requests Daybreak and routes through the `Cyber` pool,
+CQ binds the chat's session to that pool. While Daybreak remains enabled, later
+turns and prewarms that omit `access_programs.cyber` use the pool binding.
+During an active `/goal`,
+CQ restores the programme on a turn only when Codex omitted the field and the
+chat's saved Daybreak toggle is still enabled. CQ reads the toggle for each
+continuation. Disabling the saved toggle selects ordinary routing for omitted
+fields. A turn with `access_programs.cyber` set to `standard`
+clears the automatic binding and uses the chat's existing ordinary routing
+policy. Requests that specify an active programme still check the particular
+account, model and programme. Failed/absent discovery is unknown rather
 than an explicit denial, while a confirmed upstream access denial temporarily
 excludes that exact combination. Do not fabricate capability evidence or imply
 that binding an account to a pool enrols it in an upstream programme.

@@ -55,6 +55,7 @@ type proxyCodexNativeHTTPDependencies struct {
 	Refresher         codexprov.CredentialReferenceRefresher
 	SessionPolicy     *proxy.SessionPolicyResolver
 	CyberEligibility  *proxy.CyberEligibilityStore
+	DaybreakState     proxy.CodexDaybreakState
 	DispatchPermits   proxy.CallerDispatchPermitAuthority
 	TurnReceipts      *proxy.CodexTurnReceiptStore
 	Headroom          proxy.CodexRequestHeadroom
@@ -79,6 +80,7 @@ type proxyCodexWebSocketDependencies struct {
 	Refresher         codexprov.CredentialReferenceRefresher
 	SessionPolicy     *proxy.SessionPolicyResolver
 	CyberEligibility  *proxy.CyberEligibilityStore
+	DaybreakState     proxy.CodexDaybreakState
 	DispatchPermits   proxy.CallerDispatchPermitAuthority
 	TurnReceipts      *proxy.CodexTurnReceiptStore
 	Upstream          string
@@ -141,6 +143,7 @@ func newProxyCodexNativeHTTP(deps proxyCodexNativeHTTPDependencies) (proxy.Codex
 		PinnedAccountKey:  deps.PinnedAccountKey,
 		SessionPolicy:     deps.SessionPolicy,
 		CyberEligibility:  deps.CyberEligibility,
+		DaybreakState:     deps.DaybreakState,
 		DispatchPermits:   deps.DispatchPermits,
 		TurnReceipts:      deps.TurnReceipts,
 		TransportKind:     "http",
@@ -206,6 +209,7 @@ func newProxyCodexWebSocket(deps proxyCodexWebSocketDependencies) (proxy.CodexWe
 		PinnedAccountKey:  deps.PinnedAccountKey,
 		SessionPolicy:     deps.SessionPolicy,
 		CyberEligibility:  deps.CyberEligibility,
+		DaybreakState:     deps.DaybreakState,
 		DispatchPermits:   deps.DispatchPermits,
 		TurnReceipts:      deps.TurnReceipts,
 		TransportKind:     "websocket",

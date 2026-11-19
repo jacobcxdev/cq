@@ -145,8 +145,12 @@ func (s *Server) handlePolicySessionDigest(writer http.ResponseWriter, request *
 	}
 	defer zeroRuntimeBytes(session)
 	writePolicyControlJSON(writer, struct {
-		SessionDigest string `json:"session_digest"`
-	}{SessionDigest: s.RoutingPolicy.SessionDigest(session)})
+		SessionDigest         string `json:"session_digest"`
+		DaybreakSessionDigest string `json:"daybreak_session_digest"`
+	}{
+		SessionDigest:         s.RoutingPolicy.SessionDigest(session),
+		DaybreakSessionDigest: keyedDaybreakSessionDigest(s.RoutingPolicy.key[:], session),
+	})
 }
 
 func validCanonicalSessionID(session []byte) bool {

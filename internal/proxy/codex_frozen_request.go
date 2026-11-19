@@ -247,6 +247,53 @@ func (inspection *CodexFrozenRequestInspection) Protocol() (CodexProtocolRequest
 	return state.protocol, nil
 }
 
+// restoreDaybreak adds a saved programme only when neither request location
+// contains an access-programmes field. The inspection remains the sole owner
+// of the bytes consumed by Freeze and all later replays.
+func (inspection *CodexFrozenRequestInspection) restoreDaybreak(programme string) error {
+	if inspection == nil || inspection.state == nil || !isExplicitDaybreakProgramme(programme) {
+		return ErrCodexFrozenRequestReleased
+	}
+	state := inspection.state
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.released {
+		return ErrCodexFrozenRequestReleased
+	}
+	scanner := codexFrozenJSONScanner{source: state.decoded}
+	fields, err := scanner.scanRequest()
+	if err != nil {
+		return err
+	}
+	if fields.rootAccessPrograms.present || fields.paramsAccessPrograms.present {
+		return nil
+	}
+	end := bytes.LastIndexByte(state.decoded, '}')
+	if end < 0 {
+		return newCodexFrozenRequestError(CodexFrozenRequestProtocolInvalid, errors.New("missing request object terminator"))
+	}
+	addition := []byte(`"access_programs":{"cyber":"` + programme + `"}`)
+	if len(bytes.TrimSpace(state.decoded[1:end])) != 0 {
+		addition = append([]byte{','}, addition...)
+	}
+	decoded := make([]byte, 0, len(state.decoded)+len(addition))
+	decoded = append(decoded, state.decoded[:end]...)
+	decoded = append(decoded, addition...)
+	decoded = append(decoded, state.decoded[end:]...)
+	encoded, err := inspection.encode(decoded, state.encoding, codexHTTPZstdLimits())
+	if err != nil {
+		clearBytes(decoded)
+		return classifyCodexFrozenCodecError(err, true)
+	}
+	clearBytes(state.encoded)
+	clearBytes(state.decoded)
+	state.encoded = encoded
+	state.decoded = decoded
+	state.protocol.CyberAccessProgram = programme
+	normaliseCodexFrozenFraming(state.headers, state.encoding)
+	return nil
+}
+
 // Freeze consumes inspection, applies the chosen model and optional Headroom
 // operation once, encodes at most once, and transfers ownership to an immutable
 // replay envelope. Every return consumes inspection, including errors.

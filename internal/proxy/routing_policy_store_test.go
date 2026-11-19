@@ -95,6 +95,35 @@ func TestRoutingPolicyMigrationFailureLeavesV1Authoritative(t *testing.T) {
 	}
 }
 
+func TestRoutingPolicyStoreRejectsOversizedPublication(t *testing.T) {
+	ctx := context.Background()
+	inspector, directory, publisher, key := newRoutingPolicyAuthorityForTest(t)
+	store, err := OpenRoutingPolicyStore(ctx, inspector, directory, publisher, bytes.NewReader(make([]byte, 32)), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior := RoutingPolicyV2{
+		SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+		Pools: []AccountPoolV2{{ID: testPoolIDA, Name: "Cyber", Members: []providerCodex.AccountKey{"account-a"}}},
+	}
+	if err := store.Publish(prior); err != nil {
+		t.Fatal(err)
+	}
+	oversized := store.Current()
+	advanceRoutingPolicy(&oversized)
+	oversized.Pools[0].Members = append(oversized.Pools[0].Members, providerCodex.AccountKey(strings.Repeat("x", routingPolicyMaxBytes)))
+	if err := store.Publish(oversized); err == nil {
+		t.Fatal("published policy too large to reopen")
+	}
+	reopened, err := OpenRoutingPolicyStore(ctx, inspector, directory, publisher, bytes.NewReader(make([]byte, 32)), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Current().RoutingGeneration; got != prior.RoutingGeneration {
+		t.Fatalf("rejected policy replaced generation %d with %d", prior.RoutingGeneration, got)
+	}
+}
+
 type failingRoutingPolicyPublisher struct {
 	DurableObjectPublisher
 	stage string

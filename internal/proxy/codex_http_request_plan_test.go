@@ -612,7 +612,17 @@ func TestCodexHTTPRequestPlanFactoryPreservesSystemAccount(t *testing.T) {
 }
 
 func TestCodexHTTPRequestPlanFactoryAdoptsReadyWebSocketPrewarm(t *testing.T) {
+	testCodexHTTPRequestPlanFactoryAdoptsReadyWebSocketPrewarm(t, false)
+}
+
+func TestCodexHTTPRequestPlanFactoryBindsDaybreakAfterPrewarmAdoption(t *testing.T) {
+	testCodexHTTPRequestPlanFactoryAdoptsReadyWebSocketPrewarm(t, true)
+}
+
+func testCodexHTTPRequestPlanFactoryAdoptsReadyWebSocketPrewarm(t *testing.T, daybreak bool) {
+	t.Helper()
 	t.Parallel()
+	ctx := context.Background()
 	coordinator, _, now := openCodexLeaseRuntimeTestCoordinator(t)
 	runtimeLease := newCodexLeaseRuntimeTest(t, coordinator)
 	account := frozenDispatchTestLogicalAccount("account-a",
@@ -626,8 +636,33 @@ func TestCodexHTTPRequestPlanFactoryAdoptsReadyWebSocketPrewarm(t *testing.T) {
 		Authority:         CodexLeaseAuthorityPolicy{ModeEpoch: 9, Authoritative: true},
 		Now:               func() time.Time { return *now },
 	}
+	var routing *RoutingPolicyStore
+	if daybreak {
+		fsys, directory, publisher, key := newRoutingPolicyAuthorityForTest(t)
+		var err error
+		routing, err = OpenRoutingPolicyStore(ctx, fsys, directory, publisher, bytes.NewReader(make([]byte, 32)), key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := routing.Publish(RoutingPolicyV2{
+			SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+			Pools: []AccountPoolV2{{ID: testPoolIDA, Name: "Cyber", Members: []codex.AccountKey{"account-a"}}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		factory.SessionPolicy = routing.Resolver()
+		factory.CyberEligibility = NewCyberEligibilityStore(routing)
+		factory.CyberEligibility.ReplaceAccount("account-a", map[string]map[string]CyberAccessState{
+			"gpt-5.6-sol": {"daybreak_blue": CyberAccessEligible},
+		})
+		ctx = withRuntimeCallerAuthority(ctx, RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"})
+	}
+
 	prewarm := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session-a\",\"thread_id\":\"thread-a\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
-	dispatch, err := factory.planWebSocketPrewarm(context.Background(), CodexHTTPRequestPlanInput{Encoded: prewarm})
+	if daybreak {
+		prewarm = []byte(strings.TrimSuffix(string(prewarm), "}") + `,"access_programs":{"cyber":"daybreak_blue"}}`)
+	}
+	dispatch, err := factory.planWebSocketPrewarm(ctx, CodexHTTPRequestPlanInput{Encoded: prewarm})
 	if err != nil || len(dispatch.Accounts()) != 1 {
 		t.Fatalf("prewarm dispatch = %#v, %v", dispatch.Accounts(), err)
 	}
@@ -644,7 +679,13 @@ func TestCodexHTTPRequestPlanFactoryAdoptsReadyWebSocketPrewarm(t *testing.T) {
 		t.Fatal(err)
 	}
 	turn := []byte(`{"type":"response.create","model":"gpt-5.6-sol","previous_response_id":"prewarm-a","client_metadata":{"x-codex-turn-metadata":{"session_id":"session-a","thread_id":"thread-a","turn_id":"turn-a","request_kind":"turn"}},"input":[]}`)
-	prepared, err := factory.adoptWebSocketPrewarm(context.Background(), CodexHTTPRequestPlanInput{Encoded: turn}, reservation, func(_ context.Context, account codex.AccountKey, fence CodexPrewarmAdoptionFence) error {
+	if daybreak {
+		if len(routing.Current().SessionBindings) != 0 {
+			t.Fatal("prewarm alone created a Daybreak binding")
+		}
+		turn = []byte(strings.TrimSuffix(string(turn), "}") + `,"access_programs":{"cyber":"daybreak_blue"}}`)
+	}
+	prepared, err := factory.adoptWebSocketPrewarm(ctx, CodexHTTPRequestPlanInput{Encoded: turn}, reservation, func(_ context.Context, account codex.AccountKey, fence CodexPrewarmAdoptionFence) error {
 		if account != "account-a" || fence.ReservationGeneration != reservation.Generation || fence.DownstreamSocketGeneration != 41 || fence.UpstreamSocketGeneration != 43 {
 			t.Fatalf("adoption fence = %q/%#v", account, fence)
 		}
@@ -659,6 +700,11 @@ func TestCodexHTTPRequestPlanFactoryAdoptsReadyWebSocketPrewarm(t *testing.T) {
 	}
 	if prepared.leaseHandle.record.CorrelationHash != coordinator.store.hash("correlation", "prewarm-a") {
 		t.Fatal("adopted response anchor was not bound")
+	}
+	if daybreak {
+		if bindings := routing.Current().SessionBindings; len(bindings) != 1 || bindings[0].PoolID != testPoolIDA {
+			t.Fatalf("adoption did not persist a Cyber pool binding: %+v", bindings)
+		}
 	}
 }
 
@@ -1074,6 +1120,42 @@ func TestCodexHTTPRequestPlanFactoryPreservesAuthenticatedContinuationAcrossSess
 		if strings.Contains(string(encoded), private) {
 			t.Fatalf("caller trace exposed private value %q: %s", private, encoded)
 		}
+	}
+}
+
+func TestCodexHTTPRequestPlanFactoryRejectsStalePoolPolicy(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+	key := []byte("01234567890123456789012345678901")
+	policy := RoutingPolicyV2{
+		SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+		Pools:           []AccountPoolV2{{ID: testPoolIDA, Name: "Ordinary", Members: []codex.AccountKey{"ordinary"}}},
+		SessionBindings: []SessionBindingV2{{SessionDigest: keyedSessionDigest(key, []byte("session")), PoolID: testPoolIDA}},
+	}
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "ordinary"}}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+			frozenDispatchTestLogicalAccount("ordinary", frozenDispatchCandidate("ordinary", "candidate-ordinary", "revision", codex.SourceManaged, false, now.Add(time.Hour))),
+		}}},
+		Routes:  &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{Classification: CodexRestoredLaneUnseen, JournalGeneration: 1}},
+		Runtime: runtime, DefaultAccountKey: "ordinary",
+		SessionPolicy: NewSessionPolicyResolver(key, policy), DispatchPermits: &sessionPolicyPermitRecorder{},
+		Authority: CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true}, Now: func() time.Time { return now },
+	}
+	factory.operations.buildDispatch = func(ctx context.Context, input CodexFrozenDispatchInput) (CodexFrozenDispatchPlan, error) {
+		advanceRoutingPolicy(&policy)
+		factory.SessionPolicy.Replace(policy)
+		return BuildCodexFrozenDispatchPlan(ctx, input)
+	}
+	ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{
+		Domain: NormalCallerLocal, SubjectID: "local", ConsumptionDigest: strings.Repeat("a", 64),
+	})
+	prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: frozenRequestBody("gpt-6-sol", CodexRequestTurn, "full history")})
+	if prepared.Frozen != nil {
+		prepared.Frozen.Release()
+	}
+	var planErr *CodexHTTPRequestPlanError
+	if !errors.As(err, &planErr) || planErr.Reason != CodexRequestFailureSessionPolicyUnavailable {
+		t.Fatalf("concurrent routing policy update returned %v, want session policy unavailable", err)
 	}
 }
 
@@ -2956,6 +3038,171 @@ func TestCodexHTTPRequestPlanFactoryStandardAccessUsesOrdinaryQuota(t *testing.T
 			}
 		})
 	}
+}
+
+type testCodexDaybreakState struct {
+	enabled    bool
+	goalActive bool
+}
+
+func (state *testCodexDaybreakState) Current(context.Context, string) (bool, bool, error) {
+	return state.enabled, state.goalActive, nil
+}
+
+func TestCodexHTTPRequestPlanFactoryRecordsDaybreakSessionBinding(t *testing.T) {
+	ctx := context.Background()
+	fsys, directory, publisher, key := newRoutingPolicyAuthorityForTest(t)
+	routing, err := OpenRoutingPolicyStore(ctx, fsys, directory, publisher, bytes.NewReader(make([]byte, 32)), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := RoutingPolicyV2{
+		SchemaVersion: 2, AuthorityGeneration: 1, RoutingGeneration: 1, EffectiveGeneration: 1,
+		Pools: []AccountPoolV2{
+			{ID: testPoolIDA, Name: "Cyber", Value: 10, Members: []codex.AccountKey{"cyber"}},
+			{ID: testPoolIDB, Name: "Ordinary", Members: []codex.AccountKey{"ordinary"}},
+		},
+	}
+	if err := routing.Publish(policy); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(1_700_000_000, 0).UTC()
+	eligibility := NewCyberEligibilityStore(routing)
+	eligibility.ReplaceAccount("cyber", map[string]map[string]CyberAccessState{"gpt-6-sol": {"daybreak_blue": CyberAccessEligible}})
+	eligibility.ReplaceAccount("ordinary", map[string]map[string]CyberAccessState{"gpt-6-sol": {"daybreak_blue": CyberAccessIneligible}})
+	permits := &sessionPolicyPermitRecorder{}
+	factory := &CodexHTTPRequestPlanFactory{
+		Inventory: &codexHTTPRequestPlanTestInventory{inventory: codex.Inventory{Accounts: []codex.LogicalAccount{
+			frozenDispatchTestLogicalAccount("ordinary", frozenDispatchCandidate("ordinary", "candidate-ordinary", "revision", codex.SourceManaged, false, now.Add(time.Hour))),
+			frozenDispatchTestLogicalAccount("cyber", frozenDispatchCandidate("cyber", "candidate-cyber", "revision", codex.SourceManaged, false, now.Add(time.Hour))),
+		}}},
+		Routes:            &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{Classification: CodexRestoredLaneUnseen, JournalGeneration: 1}},
+		Runtime:           &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{}},
+		DefaultAccountKey: "ordinary", SessionPolicy: routing.Resolver(), CyberEligibility: eligibility,
+		DispatchPermits: permits, Authority: CodexLeaseAuthorityPolicy{ModeEpoch: 1, Authoritative: true},
+		Now: func() time.Time { return now },
+	}
+	ctx = withRuntimeCallerAuthority(ctx, RuntimeCallerAuthorityV1{
+		Domain: NormalCallerLocal, SubjectID: "local", ConsumptionDigest: strings.Repeat("a", 64),
+	})
+	route := func(session, turn, programme string, want codex.AccountKey, forwarded ...string) {
+		t.Helper()
+		body := frozenRequestBody("gpt-6-sol", CodexRequestTurn, "full history")
+		body = bytes.Replace(body, []byte(`"session_id":"session"`), []byte(`"session_id":"`+session+`"`), 1)
+		body = bytes.Replace(body, []byte(`"turn_id":"turn"`), []byte(`"turn_id":"`+turn+`"`), 1)
+		if programme != "" {
+			body = []byte(strings.TrimSuffix(string(body), "}") + `,"access_programs":{"cyber":"` + programme + `"}}`)
+		}
+		prepared, err := factory.Build(ctx, CodexHTTPRequestPlanInput{Encoded: body})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Frozen.Release()
+		if got := prepared.Dispatch.Accounts()[0].Choice().AccountKey; got != want {
+			t.Fatalf("%s/%s programme %q selected account %q, want %q", session, turn, programme, got, want)
+		}
+		replay, err := prepared.Frozen.Replay()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer replay.Release()
+		wantBody := body
+		if len(forwarded) != 0 {
+			wantBody = []byte(strings.TrimSuffix(string(body), "}") + `,"access_programs":{"cyber":"` + forwarded[0] + `"}}`)
+		}
+		if sent := readFrozenRequestReplay(t, replay); !bytes.Equal(sent, wantBody) {
+			t.Fatalf("replay changed the request body: %s", sent)
+		}
+	}
+
+	route("session", "initial", "", "ordinary")
+	route("session", "standard", "standard", "ordinary")
+	if len(routing.Current().SessionBindings) != 0 {
+		t.Fatal("standard traffic created a session binding")
+	}
+	route("session", "enabled", "daybreak_blue", "cyber")
+	bound := routing.Current()
+	if len(bound.SessionBindings) != 1 || bound.SessionBindings[0].PoolID != testPoolIDA || bound.SessionBindings[0].DaybreakProgramme != "daybreak_blue" {
+		t.Fatalf("explicit Daybreak request did not persist a Cyber pool binding: %+v", bound.SessionBindings)
+	}
+	reopened, err := OpenRoutingPolicyStore(ctx, fsys, directory, publisher, bytes.NewReader(make([]byte, 32)), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := reopened.Current().SessionBindings; !slices.Equal(got, bound.SessionBindings) {
+		t.Fatalf("reopened bindings = %+v, want %+v", got, bound.SessionBindings)
+	}
+	factory.SessionPolicy = reopened.Resolver()
+	factory.CyberEligibility.routing = reopened
+	route("session", "repeat", "daybreak_blue", "cyber")
+	if got := reopened.Current().RoutingGeneration; got != bound.RoutingGeneration {
+		t.Fatalf("same binding republished routing policy: generation %d, want %d", got, bound.RoutingGeneration)
+	}
+	route("session", "later", "", "cyber")
+	route("other-session", "later", "", "ordinary")
+	factory.Capacity = NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	frozenDispatchObserveCapacity(t, factory.Capacity, "ordinary", CapacityBucketBase, 50, now)
+	later, err := ParseCodexProtocolRequest(frozenRequestBody("gpt-6-sol", CodexRequestTurn, "later"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if factory.ShouldResetCyberOff(ctx, later, "cyber") {
+		t.Fatal("omitted programme requested a WebSocket reset for the bound session")
+	}
+	later.CyberAccessProgram = "standard"
+	if !factory.ShouldResetCyberOff(ctx, later, "cyber") {
+		t.Fatal("explicit standard did not request a WebSocket reset for the cheaper available account")
+	}
+	prewarm := []byte(`{"type":"response.create","model":"gpt-6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":{"session_id":"session","thread_id":"thread","turn_id":"","request_kind":"prewarm"}},"input":[]}`)
+	dispatch, err := factory.planWebSocketPrewarm(ctx, CodexHTTPRequestPlanInput{Encoded: prewarm})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accounts := dispatch.Accounts(); len(accounts) != 1 || accounts[0].Choice().AccountKey != "cyber" {
+		t.Fatalf("prewarm dispatch = %+v, want Cyber pool accounts", accounts)
+	}
+	if reopened.Current().RoutingGeneration != bound.RoutingGeneration {
+		t.Fatal("omitted programme republished the task binding")
+	}
+	saved := &testCodexDaybreakState{enabled: true, goalActive: true}
+	factory.DaybreakState = saved
+	route("session", "goal-continuation", "", "cyber", "daybreak_blue")
+	route("other-session", "goal-continuation", "", "ordinary")
+	saved.goalActive = false
+	route("session", "non-goal", "", "cyber")
+	saved.goalActive = true
+	saved.enabled = false
+	if !factory.ShouldResetCyberOff(ctx, later, "cyber") {
+		t.Fatal("disabled Daybreak did not allow a WebSocket reset to an ordinary account")
+	}
+	route("session", "toggle-off", "", "ordinary")
+	saved.enabled = true
+
+	manual := reopened.Current()
+	manual.SessionBindings = append(manual.SessionBindings, SessionBindingV2{
+		SessionDigest: reopened.SessionDigest([]byte("session")), PoolID: testPoolIDB,
+	})
+	advanceRoutingPolicy(&manual)
+	if err := reopened.Publish(manual); err != nil {
+		t.Fatal(err)
+	}
+	if err := reopened.RenamePool("Cyber", "Security Research"); err != nil {
+		t.Fatal(err)
+	}
+	factory.SessionPolicy.Replace(reopened.Current())
+	route("session", "after-rename", "daybreak_blue", "cyber")
+	if got := permits.requests[len(permits.requests)-1].PoolID; got != testPoolIDA {
+		t.Fatalf("Daybreak binding did not preserve pool identity across rename: %q", got)
+	}
+	route("session", "manual-binding", "", "cyber", "daybreak_blue")
+	route("session", "disabled", "standard", "ordinary")
+	if got := permits.requests[len(permits.requests)-1].PoolID; got != testPoolIDB {
+		t.Fatalf("ordinary request lost manual binding: %q", got)
+	}
+	if bindings := reopened.Current().SessionBindings; len(bindings) != 1 || bindings[0].PoolID != testPoolIDB {
+		t.Fatalf("explicit standard did not clear only the automatic binding: %+v", bindings)
+	}
+	route("session", "after-disable", "", "ordinary")
 }
 
 func TestCodexHTTPRequestPlanFactorySwitchesCyberOnAndOff(t *testing.T) {

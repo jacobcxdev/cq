@@ -95,8 +95,9 @@ type AccountPoolV2 struct {
 }
 
 type SessionBindingV2 struct {
-	SessionDigest string `json:"session_digest"`
-	PoolID        PoolID `json:"pool_id"`
+	SessionDigest     string `json:"session_digest"`
+	PoolID            PoolID `json:"pool_id"`
+	DaybreakProgramme string `json:"daybreak_programme,omitempty"`
 }
 
 type RoutingPolicyV2 struct {
@@ -121,8 +122,9 @@ type AccountPoolDocument struct {
 }
 
 type SessionBindingDocument struct {
-	SessionDigest string `json:"session_digest"`
-	Pool          string `json:"pool"`
+	SessionDigest     string `json:"session_digest"`
+	Pool              string `json:"pool"`
+	DaybreakProgramme string `json:"daybreak_programme,omitempty"`
 }
 
 // RoutingPolicyDocument is the name-based public policy format. Schema v1 is
@@ -300,6 +302,50 @@ func (s *RoutingPolicyStore) ReconcileCyberPool(known map[providerCodex.AccountK
 	return true, nil
 }
 
+// updateDaybreakSessionBinding stores the automatic binding separately from
+// the manual binding. An empty pool clears the automatic binding.
+func (s *RoutingPolicyStore) updateDaybreakSessionBinding(exactSession []byte, routedPool PoolID, programme string) (bool, error) {
+	if s == nil || !validCanonicalSessionID(exactSession) {
+		return false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.current == nil || s.anchorID == nil {
+		return false, nil
+	}
+	digest := keyedDaybreakSessionDigest(s.key[:], exactSession)
+	bindingIndex := slices.IndexFunc(s.current.SessionBindings, func(binding SessionBindingV2) bool {
+		return binding.SessionDigest == digest
+	})
+	if routedPool == "" {
+		if bindingIndex < 0 {
+			return false, nil
+		}
+	} else {
+		poolIndex := poolIndexByName(s.current, "Cyber")
+		if !isExplicitDaybreakProgramme(programme) || poolIndex < 0 || s.current.Pools[poolIndex].ID != routedPool {
+			return false, nil
+		}
+		if bindingIndex >= 0 && s.current.SessionBindings[bindingIndex].PoolID == routedPool && s.current.SessionBindings[bindingIndex].DaybreakProgramme == programme {
+			return false, nil
+		}
+	}
+	policy := cloneRoutingPolicyV2(*s.current)
+	if routedPool == "" {
+		policy.SessionBindings = slices.Delete(policy.SessionBindings, bindingIndex, bindingIndex+1)
+	} else if bindingIndex < 0 {
+		policy.SessionBindings = append(policy.SessionBindings, SessionBindingV2{SessionDigest: digest, PoolID: routedPool, DaybreakProgramme: programme})
+	} else {
+		policy.SessionBindings[bindingIndex].PoolID = routedPool
+		policy.SessionBindings[bindingIndex].DaybreakProgramme = programme
+	}
+	advanceRoutingPolicy(&policy)
+	if err := s.publishLocked(policy); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func poolIndexByName(policy *RoutingPolicyV2, name string) int {
 	if policy == nil || !validPoolName(name) {
 		return -1
@@ -330,6 +376,9 @@ func (s *RoutingPolicyStore) publishLocked(policy RoutingPolicyV2) error {
 	body, err := sealRoutingPolicyV2(policy, s.key[:])
 	if err != nil {
 		return err
+	}
+	if len(body) > routingPolicyMaxBytes {
+		return errors.New("routing policy exceeds size limit")
 	}
 	digest := sha256.Sum256(body)
 	objectDigest := hex.EncodeToString(digest[:])
@@ -637,7 +686,7 @@ func validateRoutingPolicyV2(policy RoutingPolicyV2, prior *RoutingPolicyV2) err
 	}
 	bindings := make(map[string]struct{}, len(policy.SessionBindings))
 	for _, binding := range policy.SessionBindings {
-		if !lowerHexDigest(binding.SessionDigest) || pools[binding.PoolID] == nil {
+		if !lowerHexDigest(binding.SessionDigest) || pools[binding.PoolID] == nil || (binding.DaybreakProgramme != "" && !isExplicitDaybreakProgramme(binding.DaybreakProgramme)) {
 			return errors.New("invalid session binding")
 		}
 		if _, exists := bindings[binding.SessionDigest]; exists {
@@ -827,7 +876,7 @@ func routingPolicyDocument(policy RoutingPolicyV2) (RoutingPolicyDocument, error
 		if name == "" {
 			return RoutingPolicyDocument{}, errors.New("invalid session binding")
 		}
-		document.SessionBindings[index] = SessionBindingDocument{SessionDigest: binding.SessionDigest, Pool: name}
+		document.SessionBindings[index] = SessionBindingDocument{SessionDigest: binding.SessionDigest, Pool: name, DaybreakProgramme: binding.DaybreakProgramme}
 	}
 	if policy.CapabilityPool != "" {
 		document.CapabilityPool = names[policy.CapabilityPool]
@@ -889,7 +938,7 @@ func compileRoutingPolicyDocument(document RoutingPolicyDocument, prior *Routing
 		if id == "" {
 			return RoutingPolicyV2{}, errors.New("invalid session binding")
 		}
-		policy.SessionBindings[index] = SessionBindingV2{SessionDigest: binding.SessionDigest, PoolID: id}
+		policy.SessionBindings[index] = SessionBindingV2{SessionDigest: binding.SessionDigest, PoolID: id, DaybreakProgramme: binding.DaybreakProgramme}
 	}
 	if document.CapabilityPool != "" {
 		policy.CapabilityPool = poolIDs[foldPoolName(document.CapabilityPool)]
