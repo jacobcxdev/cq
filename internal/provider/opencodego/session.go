@@ -43,8 +43,9 @@ const (
 )
 
 type sessionRecord struct {
-	Session OAuthSession  `json:"session"`
-	Refresh refreshStatus `json:"refresh,omitempty"`
+	Session   OAuthSession  `json:"session"`
+	Refresh   refreshStatus `json:"refresh,omitempty"`
+	Preferred bool          `json:"preferred,omitempty"`
 }
 
 func (a SessionAuthority) Read() (OAuthSession, error) {
@@ -66,6 +67,67 @@ func (a SessionAuthority) ReadAll() ([]OAuthSession, error) {
 		sessions[i] = record.Session
 	}
 	return sessions, nil
+}
+
+// Preferred returns the saved preference without rotating credentials.
+func (a SessionAuthority) Preferred() (OAuthSession, error) {
+	records, err := a.read()
+	if err != nil {
+		return OAuthSession{}, err
+	}
+	for _, record := range records {
+		if record.Preferred {
+			return record.Session, nil
+		}
+	}
+	return OAuthSession{}, os.ErrNotExist
+}
+
+// SetPreferred selects a unique saved email and pins the preference to its
+// verified member and workspace.
+func (a SessionAuthority) SetPreferred(ctx context.Context, email string) (OAuthSession, error) {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return OAuthSession{}, errors.New("provide an OpenCode Go account email")
+	}
+	store, unlock, err := a.lock(ctx)
+	if err != nil {
+		return OAuthSession{}, err
+	}
+	defer unlock()
+	records, err := store.read()
+	if err != nil {
+		return OAuthSession{}, err
+	}
+	selected := -1
+	for i, record := range records {
+		if !strings.EqualFold(record.Session.Email, email) {
+			continue
+		}
+		if selected >= 0 {
+			return OAuthSession{}, errors.New("OpenCode Go email matches multiple saved workspaces")
+		}
+		selected = i
+	}
+	if selected < 0 {
+		return OAuthSession{}, os.ErrNotExist
+	}
+	record := records[selected]
+	if err := record.refreshError(); err != nil {
+		return OAuthSession{}, err
+	}
+	if !record.Preferred {
+		for i := range records {
+			records[i].Preferred = i == selected
+		}
+		if err := ctx.Err(); err != nil {
+			return OAuthSession{}, err
+		}
+		if err := store.write(records); err != nil {
+			return OAuthSession{}, err
+		}
+	}
+	return record.Session, nil
 }
 
 func (a SessionAuthority) Save(ctx context.Context, session OAuthSession) error {
@@ -91,7 +153,7 @@ func (a SessionAuthority) Save(ctx context.Context, session OAuthSession) error 
 	if index < 0 {
 		records = append(records, sessionRecord{Session: session})
 	} else {
-		records[index] = sessionRecord{Session: session}
+		records[index] = sessionRecord{Session: session, Preferred: records[index].Preferred}
 	}
 	return store.write(records)
 }
@@ -174,7 +236,7 @@ func (a SessionAuthority) FreshFor(ctx context.Context, memberID, workspaceID st
 		next.RefreshToken == record.Session.RefreshToken {
 		return OAuthSession{}, recordIndeterminate()
 	}
-	records[index] = sessionRecord{Session: next}
+	records[index] = sessionRecord{Session: next, Preferred: record.Preferred}
 	if err := store.write(records); err != nil {
 		return OAuthSession{}, recordIndeterminate()
 	}
@@ -347,10 +409,15 @@ func (s sessionStore) read() ([]sessionRecord, error) {
 		return nil, errors.New("invalid OpenCode OAuth session")
 	}
 	identities := make(map[string]map[string]bool, len(records))
+	preferred := false
 	for _, record := range records {
 		if !validSession(record.Session) ||
-			(record.Refresh != "" && record.Refresh != refreshPending && record.Refresh != refreshRejected) {
+			(record.Refresh != "" && record.Refresh != refreshPending && record.Refresh != refreshRejected) ||
+			(preferred && record.Preferred) {
 			return nil, errors.New("invalid OpenCode OAuth session")
+		}
+		if record.Preferred {
+			preferred = true
 		}
 		member := record.Session.MemberID
 		workspace := record.Session.WorkspaceID

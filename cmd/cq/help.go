@@ -29,7 +29,7 @@ Commands:
   gemini      Show Gemini account
   zai         Manage Z.ai Coding Plan accounts
   grok        Manage Grok subscription accounts
-  opencode    Sign in to OpenCode Go
+  opencode    Manage OpenCode Go accounts
   refresh     Refresh stored OAuth tokens
   agent       Manage the background refresh agent
   service     Manage complete background service lifecycle
@@ -59,9 +59,14 @@ native Responses backend in the account's catalogue.
 	"opencode": `Usage: cq opencode <command>
 
 Commands:
-  opencode login    Sign in to OpenCode Go through the browser
+  opencode login           Sign in to OpenCode Go through the browser
+  opencode switch <email>  Choose the preferred OpenCode Go account
 
-Run cq check opencode-go to inspect the selected workspace’s allowance.
+Run cq check opencode-go to inspect saved workspaces' allowances.
+`,
+	"opencode switch": `Usage: cq opencode switch <email>
+
+Choose the preferred saved OpenCode Go account by its registered email.
 `,
 	"codex": `Usage: cq codex <command>
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,7 +20,8 @@ import (
 )
 
 type OpenCodeCmd struct {
-	Login struct{} `cmd:"" help:"Sign in to OpenCode Go through the browser"`
+	Login  struct{}  `cmd:"" help:"Sign in to OpenCode Go through the browser"`
+	Switch SwitchCmd `cmd:"" help:"Choose the preferred OpenCode Go account"`
 }
 
 func openCodeSessionAuthority(fsys fsutil.FileSystem, configDir string, client httputil.Doer) *opencodego.SessionAuthority {
@@ -80,6 +82,15 @@ func openCodeAuthorization(fsys fsutil.FileSystem, configDir string, client http
 			return convert(fresh), nil
 		}
 		return sharedBudgetLogin{}, errors.New("OpenCode Go account is no longer available")
+	}, Preferred: func(ctx context.Context) (sharedBudgetLogin, error) {
+		if err := ctx.Err(); err != nil {
+			return sharedBudgetLogin{}, err
+		}
+		session, err := authority.Preferred()
+		if err != nil {
+			return sharedBudgetLogin{}, err
+		}
+		return convert(session), nil
 	}}
 }
 
@@ -109,12 +120,38 @@ func runOpenCodeLogin(ctx context.Context) error {
 	return nil
 }
 
+func runOpenCodeSwitch(ctx context.Context, email string, jsonOutput bool) error {
+	roots, err := userdirs.Default()
+	if err != nil {
+		return fmt.Errorf("resolve CQ directories: %w", err)
+	}
+	fsys := fsutil.OSFileSystem{}
+	if err := openCodeOAuthPreference(loadSharedBudgetSettings(fsys, roots.Config, modelregistry.ProviderOpenCodeGo)); err != nil {
+		return err
+	}
+	authority := opencodego.SessionAuthority{FS: fsys, ConfigDir: roots.Config}
+	selected, err := authority.SetPreferred(ctx, email)
+	if errors.Is(err, os.ErrNotExist) {
+		return errors.New("OpenCode Go account not found. Run cq opencode login to add an account")
+	}
+	if err != nil {
+		return err
+	}
+	if jsonOutput {
+		return json.NewEncoder(os.Stdout).Encode(struct {
+			Email string `json:"email"`
+		}{Email: selected.Email})
+	}
+	_, err = fmt.Fprintf(os.Stdout, "Preferred OpenCode Go account is %s.\n", selected.Email)
+	return err
+}
+
 func openCodeOAuthPreference(settings sharedBudgetSettings) error {
 	if settings.invalid {
 		return errors.New("OpenCode Go settings unavailable")
 	}
 	if settings.Auth == "api_key" {
-		return errors.New("OpenCode Go is set to API-key auth; remove the auth override in opencode-go.json to sign in")
+		return errors.New("OpenCode Go is set to API-key auth; remove the auth override in opencode-go.json to use OAuth accounts")
 	}
 	return nil
 }

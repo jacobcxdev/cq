@@ -867,13 +867,19 @@ once. CQ prefers the first-party route. Automatic fallback to Go is opt-in.
 After a definite pre-generation rejection or known lack of an eligible
 first-party account, CQ can retry with full input. Provider response IDs and
 encrypted reasoning state prevent fallback. Within Go, CQ distributes new
-sessions across accounts that offer the selected model. A definite 401 or 429
-before generation can retry another eligible Go account. Network errors and
-ambiguous responses cannot be retried safely. A WebSocket stays on its selected
-account once generation begins. CQ binds later turns in the same session, plus
-recognised OpenCode response IDs and encrypted reasoning, to the chosen account
-while the proxy is running. OAuth refresh keeps that account binding. After a
-restart, workspace change or API-key rotation, resume with full readable input.
+sessions across accounts that offer the selected model and keeps the selected
+account for later turns. After a definite 401 or 429 before generation, a
+request with full readable input can retry another eligible Go account, even
+on a WebSocket that already served earlier turns. Network errors and ambiguous
+responses cannot be retried safely. Recognised OpenCode response IDs,
+encrypted reasoning and encrypted tool outputs stay with their original
+account. OAuth refresh keeps that binding. After a restart, workspace change or
+API-key rotation, resume with full readable input.
+
+Run `cq opencode switch <email>` to choose a preferred browser login. CQ tries
+that account first for portable requests on the Go route when its catalogue
+offers the selected model. This also applies to eligible requests on already
+open WebSockets. A definite pre-generation rejection can still fail over.
 
 When a GLM parent turn falls back from Z.ai to Go, fresh Codex workers using
 the same model inherit that Go account while CQ is running. CQ passes their

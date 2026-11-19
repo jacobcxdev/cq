@@ -41,7 +41,7 @@ type CLI struct {
 	Codex     CodexCmd    `cmd:"" help:"Manage Codex accounts"`
 	Gemini    GeminiCmd   `cmd:"" help:"Show Gemini account configuration"`
 	Grok      GrokCmd     `cmd:"" help:"Manage Grok subscription accounts"`
-	OpenCode  OpenCodeCmd `cmd:"" name:"opencode" help:"Sign in to OpenCode Go"`
+	OpenCode  OpenCodeCmd `cmd:"" name:"opencode" help:"Manage OpenCode Go accounts"`
 	ZAI       ZAICmd      `cmd:"" help:"Manage Z.ai Coding Plan accounts"`
 	RefreshFn RefreshCmd  `cmd:"" name:"refresh" help:"Refresh stored OAuth tokens"`
 	Agent     AgentCmd    `cmd:"" help:"Manage background quota refresh agent"`
@@ -558,6 +558,8 @@ func dispatch(ctx *kong.Context, cli *CLI) error {
 
 	case "opencode login":
 		return runOpenCodeLogin(context.Background())
+	case "opencode switch <email>":
+		return runOpenCodeSwitch(context.Background(), cli.OpenCode.Switch.Email, cli.JSON)
 	case "grok login", "grok accounts", "grok switch <reference>", "grok remove <reference>", "grok resets list", "grok resets list <reference>":
 		deps, err := defaultGrokCommandDependencies()
 		if err != nil {

@@ -95,11 +95,16 @@ func (s *Server) sharedBudgetTurnRoute(ctx context.Context, header http.Header, 
 	if !available || route.Credential == nil && route.CredentialFor == nil || (bound.Fallback && !route.AllowFallback) || !portableSharedBudgetInput(body) {
 		return sharedBudgetSelection{}, true
 	}
+	selected := sharedBudgetSelection{id: bound.Provider, route: route, model: bound.Model, fallback: bound.Fallback}
+	if preferred, ok := s.preferredSharedBudgetAccount(ctx, selected, bound.Credential); ok {
+		return preferred, true
+	}
 	credential, err := route.credentialFor(ctx, bound.Credential)
 	if err != nil || credential.Bearer == "" || credential.binding() != bound.Credential {
 		return sharedBudgetSelection{}, true
 	}
-	return sharedBudgetSelection{id: bound.Provider, route: route, credential: credential, model: bound.Model, fallback: bound.Fallback, bound: true}, true
+	selected.credential = credential
+	return selected, true
 }
 
 func (routes *sharedBudgetTurnRoutes) lookup(key sharedBudgetTurnKey) (sharedBudgetBoundState, bool) {
