@@ -1811,6 +1811,13 @@ func (broker *codexTerminatingWSBroker) writeResponseMessage(ctx context.Context
 			}
 		}
 	}
+	if messageType == websocket.TextMessage && (kind == CodexSSEIgnored || kind == CodexSSECompleted) {
+		updated, err := plaintextCollaborationResponse(frame)
+		if err != nil {
+			return err
+		}
+		frame = updated
+	}
 	writeCtx, cancelWrite := context.WithTimeout(ctx, broker.config.ResponseIdleTimeout)
 	defer cancelWrite()
 	return writeCodexWSMessage(writeCtx, downstream, messageType, frame)

@@ -107,3 +107,61 @@ func TestCodexWSResponseWriterPreservesOtherFrames(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexWSResponseWriterMarksCollaborationCallsPlaintext(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		frame string
+		want  string
+	}{
+		{
+			name:  "output item",
+			frame: `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration","name":"spawn_agent","arguments":"{\"message\":\"work\"}"}}`,
+			want:  `{"type":"response.output_item.done","item":{"arguments":"{\"message\":\"work\"}","encrypted_function_args":[],"name":"spawn_agent","namespace":"collaboration","type":"function_call"}}`,
+		},
+		{
+			name:  "completed response",
+			frame: `{"type":"response.completed","response":{"output":[{"type":"function_call","namespace":"collaboration","name":"send_message","arguments":"{\"message\":\"hello\"}"}]}}`,
+			want:  `{"response":{"output":[{"arguments":"{\"message\":\"hello\"}","encrypted_function_args":[],"name":"send_message","namespace":"collaboration","type":"function_call"}]},"type":"response.completed"}`,
+		},
+		{
+			name:  "encrypted call remains encrypted",
+			frame: `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration","name":"followup_task","encrypted_function_args":["ciphertext"],"arguments":"encrypted"}}`,
+			want:  `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"collaboration","name":"followup_task","encrypted_function_args":["ciphertext"],"arguments":"encrypted"}}`,
+		},
+		{
+			name:  "other namespace remains unchanged",
+			frame: `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"functions","name":"spawn_agent","arguments":"{}"}}`,
+			want:  `{"type":"response.output_item.done","item":{"type":"function_call","namespace":"functions","name":"spawn_agent","arguments":"{}"}}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			downstream := &codexWSBrokerConnStub{}
+			broker := &codexTerminatingWSBroker{config: codexTerminatingWSBrokerConfig{ResponseIdleTimeout: time.Second}}
+			kind := CodexSSEIgnored
+			if test.name == "completed response" {
+				kind = CodexSSECompleted
+			}
+			if err := broker.writeResponseMessage(context.Background(), downstream, websocket.TextMessage, []byte(test.frame), kind); err != nil {
+				t.Fatal(err)
+			}
+			writes := downstream.writtenPayloads()
+			if len(writes) != 1 {
+				t.Fatalf("downstream frame = %q, want %q", writes, test.want)
+			}
+			var got, want any
+			if err := json.Unmarshal(writes[0], &got); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal([]byte(test.want), &want); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("downstream frame = %s, want %s", writes[0], test.want)
+			}
+		})
+	}
+}

@@ -374,9 +374,38 @@ func relayCodexAcceptedHTTPResponse(ctx context.Context, writer http.ResponseWri
 		}
 	}
 	writer.WriteHeader(response.StatusCode)
-	relayErr := relayCodexObservedHTTPBody(ctx, writer, response.Body, mode == codexHTTPResponseModeSSE, observer.Observe)
+	var relayErr error
+	if mode == codexHTTPResponseModeSSE {
+		relayErr = relayCodexNormalisedHTTPBody(ctx, writer, response.Body, observer.Observe)
+	} else {
+		relayErr = relayCodexObservedHTTPBody(ctx, writer, response.Body, false, observer.Observe)
+	}
 	closeErr := closeCodexHTTPResponseBody(response.Body)
 	return observer.Finish(errors.Join(relayErr, closeErr, ctx.Err()))
+}
+
+type codexHTTPNormalisedReader struct {
+	ctx     context.Context
+	body    io.Reader
+	observe func([]byte) error
+}
+
+func (reader codexHTTPNormalisedReader) Read(buffer []byte) (int, error) {
+	if err := reader.ctx.Err(); err != nil {
+		return 0, err
+	}
+	read, err := readCodexHTTPResponseBody(reader.body, buffer)
+	if read > 0 {
+		if observeErr := reader.observe(buffer[:read]); observeErr != nil {
+			return 0, observeErr
+		}
+	}
+	return read, err
+}
+
+func relayCodexNormalisedHTTPBody(ctx context.Context, writer http.ResponseWriter, body io.Reader, observe func([]byte) error) error {
+	source := codexHTTPNormalisedReader{ctx: ctx, body: body, observe: observe}
+	return copyNormalisedResponsesSSE(zaiFlushWriter{writer}, source, plaintextCollaborationResponse, true)
 }
 
 func relayCodexObservedHTTPBody(ctx context.Context, writer http.ResponseWriter, body io.Reader, flush bool, observe func([]byte) error) error {
