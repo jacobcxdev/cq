@@ -9,15 +9,33 @@ import (
 )
 
 type sharedBudgetTurnKey struct{ thread, turn, model string }
+type sharedBudgetSessionKey struct{ session, model string }
 
 type sharedBudgetTurnRoutes struct {
-	mu     sync.Mutex
-	byTurn map[sharedBudgetTurnKey]sharedBudgetBoundState
+	mu        sync.Mutex
+	byTurn    map[sharedBudgetTurnKey]sharedBudgetBoundState
+	bySession map[sharedBudgetSessionKey]sharedBudgetBoundState
 }
 
 // Remember the subscription before streaming, so a reconnect or fresh worker
 // can retain the same route even before the original response completes.
 func (s *Server) recordSharedBudgetTurn(header http.Header, body []byte, state sharedBudgetBoundState) {
+	if key := sharedBudgetAffinity(header); key != "" {
+		routes := &s.sharedBudgetTurns
+		routes.mu.Lock()
+		if routes.bySession == nil {
+			routes.bySession = make(map[sharedBudgetSessionKey]sharedBudgetBoundState)
+		}
+		sessionKey := sharedBudgetSessionKey{key, strings.ToLower(state.Model)}
+		if _, exists := routes.bySession[sessionKey]; !exists && len(routes.bySession) >= 4096 {
+			for old := range routes.bySession {
+				delete(routes.bySession, old)
+				break
+			}
+		}
+		routes.bySession[sessionKey] = state
+		routes.mu.Unlock()
+	}
 	info, err := ParseCodexTurnMetadata(body, header.Get(codexTurnMetadataKey), nil)
 	if err != nil || !info.Strong || info.Metadata.ThreadID == "" || info.Metadata.TurnID == "" {
 		return
@@ -36,6 +54,21 @@ func (s *Server) recordSharedBudgetTurn(header http.Header, body []byte, state s
 		}
 	}
 	routes.byTurn[key] = state
+}
+
+func sharedBudgetAffinity(header http.Header) string {
+	key, source := sessionCorrelation(header)
+	if source == "session_id" || source == "x-codex-window-id" {
+		return key
+	}
+	return ""
+}
+
+func (routes *sharedBudgetTurnRoutes) session(key, model string) (sharedBudgetBoundState, bool) {
+	routes.mu.Lock()
+	defer routes.mu.Unlock()
+	state, found := routes.bySession[sharedBudgetSessionKey{key, strings.ToLower(ParseModel(model))}]
+	return state, found
 }
 
 func (s *Server) sharedBudgetTurnRoute(ctx context.Context, header http.Header, body []byte, model string) (sharedBudgetSelection, bool) {
@@ -59,14 +92,14 @@ func (s *Server) sharedBudgetTurnRoute(ctx context.Context, header http.Header, 
 		return sharedBudgetSelection{}, false
 	}
 	route, available := s.SharedBudgetRoutes[bound.Provider]
-	if !available || route.Credential == nil || (bound.Fallback && !route.AllowFallback) || !portableSharedBudgetInput(body) {
+	if !available || route.Credential == nil && route.CredentialFor == nil || (bound.Fallback && !route.AllowFallback) || !portableSharedBudgetInput(body) {
 		return sharedBudgetSelection{}, true
 	}
-	credential, err := route.Credential(ctx)
+	credential, err := route.credentialFor(ctx, bound.Credential)
 	if err != nil || credential.Bearer == "" || credential.binding() != bound.Credential {
 		return sharedBudgetSelection{}, true
 	}
-	return sharedBudgetSelection{id: bound.Provider, route: route, credential: credential, model: bound.Model, fallback: bound.Fallback}, true
+	return sharedBudgetSelection{id: bound.Provider, route: route, credential: credential, model: bound.Model, fallback: bound.Fallback, bound: true}, true
 }
 
 func (routes *sharedBudgetTurnRoutes) lookup(key sharedBudgetTurnKey) (sharedBudgetBoundState, bool) {

@@ -81,6 +81,45 @@ func TestOpenCodeGoRegistryPrefersFirstParty(t *testing.T) {
 	}
 }
 
+func TestOpenCodeGoRegistryKeepsAccountScopes(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-OpenCode-Org-Id") == "wrk_second" && r.Header.Get("Authorization") != "Bearer second-token" {
+			t.Error("second workspace used wrong token")
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"glm-5.3","type":"chat","limit":{"context":1000},"capabilities":{"tools":{"supported":true}},"go":{"monthly_usage":{"go":1}}}]}`))
+	}))
+	defer server.Close()
+	source := &OpenCodeGoSource{Client: server.Client(), URL: server.URL, Credentials: func(context.Context) ([]OpenCodeGoCredential, error) {
+		return []OpenCodeGoCredential{{Bearer: "first-token", Account: "first", WorkspaceID: "wrk_first"}, {Bearer: "second-token", Account: "second", WorkspaceID: "wrk_second"}}, nil
+	}}
+	catalog := NewCatalog(Snapshot{})
+	refresher := Refresher{Catalog: catalog, SharedBudgets: []SharedBudgetSource{{Provider: ProviderOpenCodeGo, Source: source}}}
+	if _, err := refresher.Refresh(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	routes := catalog.SharedBudgetModels("glm-5.3")
+	if len(routes) != 2 || routes[0].SharedBudget.CredentialScope == routes[1].SharedBudget.CredentialScope {
+		t.Fatalf("account routes = %v", routes)
+	}
+	if got := len(CodexModelsResponse(catalog.Snapshot()).Models); got != 1 {
+		t.Fatalf("picker rows = %d, want 1", got)
+	}
+}
+
+func TestOpenCodeGoConfiguredEmptyCatalogue(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"data":[]}`))
+	}))
+	defer server.Close()
+	source := &OpenCodeGoSource{Client: server.Client(), URL: server.URL, Credentials: func(context.Context) ([]OpenCodeGoCredential, error) {
+		return []OpenCodeGoCredential{{Bearer: "saved-token", Account: "member", WorkspaceID: "workspace"}}, nil
+	}}
+	result, err := source.Fetch(t.Context())
+	if err != nil || result.NotConfigured || len(result.Entries) != 0 {
+		t.Fatalf("configured empty catalogue: %+v, %v", result, err)
+	}
+}
+
 func TestOpenCodeGoCatalogueDoesNotRedirectWorkspaceCredentials(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("workspace discovery followed a redirect")

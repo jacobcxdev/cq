@@ -23,7 +23,7 @@ const (
 	oauthKeyFile     = "opencode-go-session.key"
 	oauthLockFile    = "opencode-go-session.lock"
 	oauthFileVersion = 1
-	oauthFileLimit   = 32 << 10
+	oauthFileLimit   = 1 << 20
 )
 
 // SessionAuthority owns CQ's OpenCode OAuth login and serialises refreshes
@@ -48,8 +48,24 @@ type sessionRecord struct {
 }
 
 func (a SessionAuthority) Read() (OAuthSession, error) {
-	record, err := a.read()
-	return record.Session, err
+	records, err := a.read()
+	if err != nil {
+		return OAuthSession{}, err
+	}
+	return records[len(records)-1].Session, nil
+}
+
+// ReadAll returns every saved identity without rotating its credentials.
+func (a SessionAuthority) ReadAll() ([]OAuthSession, error) {
+	records, err := a.read()
+	if err != nil {
+		return nil, err
+	}
+	sessions := make([]OAuthSession, len(records))
+	for i, record := range records {
+		sessions[i] = record.Session
+	}
+	return sessions, nil
 }
 
 func (a SessionAuthority) Save(ctx context.Context, session OAuthSession) error {
@@ -67,17 +83,41 @@ func (a SessionAuthority) Save(ctx context.Context, session OAuthSession) error 
 		return err
 	}
 	defer unlock()
-	return store.write(sessionRecord{Session: session})
+	records, err := store.read()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	index := sessionIndex(records, session.MemberID, session.WorkspaceID)
+	if index < 0 {
+		records = append(records, sessionRecord{Session: session})
+	} else {
+		records[index] = sessionRecord{Session: session}
+	}
+	return store.write(records)
 }
 
 func (a SessionAuthority) Fresh(ctx context.Context) (OAuthSession, error) {
-	if err := ctx.Err(); err != nil {
-		return OAuthSession{}, err
-	}
-	record, err := a.read()
+	session, err := a.Read()
 	if err != nil {
 		return OAuthSession{}, err
 	}
+	return a.FreshFor(ctx, session.MemberID, session.WorkspaceID)
+}
+
+// FreshFor refreshes one member/workspace without changing other logins.
+func (a SessionAuthority) FreshFor(ctx context.Context, memberID, workspaceID string) (OAuthSession, error) {
+	if err := ctx.Err(); err != nil {
+		return OAuthSession{}, err
+	}
+	records, err := a.read()
+	if err != nil {
+		return OAuthSession{}, err
+	}
+	index := sessionIndex(records, memberID, workspaceID)
+	if index < 0 {
+		return OAuthSession{}, os.ErrNotExist
+	}
+	record := records[index]
 	if record.Refresh == refreshRejected {
 		return OAuthSession{}, record.refreshError()
 	}
@@ -91,10 +131,15 @@ func (a SessionAuthority) Fresh(ctx context.Context) (OAuthSession, error) {
 	}
 	defer unlock()
 
-	record, err = store.read()
+	records, err = store.read()
 	if err != nil {
 		return OAuthSession{}, err
 	}
+	index = sessionIndex(records, memberID, workspaceID)
+	if index < 0 {
+		return OAuthSession{}, os.ErrNotExist
+	}
+	record = records[index]
 	if err := record.refreshError(); err != nil {
 		return OAuthSession{}, err
 	}
@@ -111,13 +156,15 @@ func (a SessionAuthority) Fresh(ctx context.Context) (OAuthSession, error) {
 	// Record the attempt before spending the one-use refresh token. A lost
 	// response or interrupted commit requires a new login.
 	record.Refresh = refreshPending
-	if err := store.write(record); err != nil {
+	records[index] = record
+	if err := store.write(records); err != nil {
 		return OAuthSession{}, err
 	}
 	next, err := a.Exchange(ctx, record.Session)
 	if errors.Is(err, ErrOAuthRejected) {
 		record.Refresh = refreshRejected
-		if writeErr := store.write(record); writeErr != nil {
+		records[index] = record
+		if writeErr := store.write(records); writeErr != nil {
 			return OAuthSession{}, recordIndeterminate()
 		}
 		return OAuthSession{}, record.refreshError()
@@ -127,10 +174,20 @@ func (a SessionAuthority) Fresh(ctx context.Context) (OAuthSession, error) {
 		next.RefreshToken == record.Session.RefreshToken {
 		return OAuthSession{}, recordIndeterminate()
 	}
-	if err := store.write(sessionRecord{Session: next}); err != nil {
+	records[index] = sessionRecord{Session: next}
+	if err := store.write(records); err != nil {
 		return OAuthSession{}, recordIndeterminate()
 	}
 	return next, nil
+}
+
+func sessionIndex(records []sessionRecord, memberID, workspaceID string) int {
+	for i, record := range records {
+		if record.Session.MemberID == memberID && record.Session.WorkspaceID == workspaceID {
+			return i
+		}
+	}
+	return -1
 }
 
 func (r sessionRecord) refreshError() error {
@@ -187,17 +244,17 @@ func (a SessionAuthority) open() (sessionStore, error) {
 	return sessionStore{SecureDirectory: directory, inspector: inspector, fence: fence}, nil
 }
 
-func (a SessionAuthority) read() (sessionRecord, error) {
+func (a SessionAuthority) read() ([]sessionRecord, error) {
 	// An unconfigured provider needs no private storage yet. Existing
 	// sessions still go through the secure directory and file checks.
 	if inspector, ok := a.FS.(fsutil.SecurePathInspector); ok && a.ConfigDir != "" {
 		if _, err := inspector.Lstat(filepath.Join(a.ConfigDir, oauthSessionFile)); errors.Is(err, os.ErrNotExist) {
-			return sessionRecord{}, os.ErrNotExist
+			return nil, os.ErrNotExist
 		}
 	}
 	s, err := a.open()
 	if err != nil {
-		return sessionRecord{}, err
+		return nil, err
 	}
 	defer s.Close()
 	return s.read()
@@ -252,35 +309,63 @@ func (a SessionAuthority) lock(ctx context.Context) (sessionStore, func(), error
 	}
 }
 
-func (s sessionStore) read() (sessionRecord, error) {
-	var record sessionRecord
+func (s sessionStore) read() ([]sessionRecord, error) {
 	if err := s.fence(); err != nil {
-		return record, errors.New("verify OpenCode OAuth store")
+		return nil, errors.New("verify OpenCode OAuth store")
 	}
 	data, err := fsutil.ReadSecureFileInDirectory(s.inspector, s.SecureDirectory, oauthSessionFile, oauthFileLimit)
 	if errors.Is(err, os.ErrNotExist) {
-		return record, os.ErrNotExist
+		return nil, os.ErrNotExist
 	}
 	if err != nil || len(data) < 2 || data[0] != oauthFileVersion {
-		return record, errors.New("read OpenCode OAuth session")
+		return nil, errors.New("read OpenCode OAuth session")
 	}
 	aead, err := s.cipher()
 	if err != nil {
-		return record, errors.New("read OpenCode OAuth storage key")
+		return nil, errors.New("read OpenCode OAuth storage key")
 	}
 	plain, err := aead.Open(nil, nil, data[1:], []byte(oauthSessionFile))
 	if err != nil {
-		return record, errors.New("decrypt OpenCode OAuth session")
+		return nil, errors.New("decrypt OpenCode OAuth session")
 	}
 	defer clear(plain)
-	if json.Unmarshal(plain, &record) != nil || !validSession(record.Session) ||
-		(record.Refresh != "" && record.Refresh != refreshPending && record.Refresh != refreshRejected) {
-		return sessionRecord{}, errors.New("invalid OpenCode OAuth session")
+	var file struct {
+		Accounts []sessionRecord `json:"accounts"`
+		Session  *OAuthSession   `json:"session"`
+		Refresh  refreshStatus   `json:"refresh"`
+	}
+	if json.Unmarshal(plain, &file) != nil {
+		return nil, errors.New("invalid OpenCode OAuth session")
+	}
+	records := file.Accounts
+	if records == nil && file.Session != nil {
+		records = []sessionRecord{{Session: *file.Session, Refresh: file.Refresh}}
+	} else if file.Session != nil || file.Refresh != "" {
+		return nil, errors.New("invalid OpenCode OAuth session")
+	}
+	if len(records) == 0 {
+		return nil, errors.New("invalid OpenCode OAuth session")
+	}
+	identities := make(map[string]map[string]bool, len(records))
+	for _, record := range records {
+		if !validSession(record.Session) ||
+			(record.Refresh != "" && record.Refresh != refreshPending && record.Refresh != refreshRejected) {
+			return nil, errors.New("invalid OpenCode OAuth session")
+		}
+		member := record.Session.MemberID
+		workspace := record.Session.WorkspaceID
+		if identities[member][workspace] {
+			return nil, errors.New("invalid OpenCode OAuth session")
+		}
+		if identities[member] == nil {
+			identities[member] = make(map[string]bool)
+		}
+		identities[member][workspace] = true
 	}
 	if err := s.fence(); err != nil {
-		return sessionRecord{}, errors.New("verify OpenCode OAuth store")
+		return nil, errors.New("verify OpenCode OAuth store")
 	}
-	return record, nil
+	return records, nil
 }
 
 func (s sessionStore) cipher() (cipher.AEAD, error) {
@@ -299,7 +384,7 @@ func (s sessionStore) cipher() (cipher.AEAD, error) {
 	return cipher.NewGCMWithRandomNonce(block)
 }
 
-func (s sessionStore) write(record sessionRecord) error {
+func (s sessionStore) write(records []sessionRecord) error {
 	if err := s.fence(); err != nil {
 		return errors.New("verify OpenCode OAuth store")
 	}
@@ -323,12 +408,17 @@ func (s sessionStore) write(record sessionRecord) error {
 	if err != nil {
 		return errors.New("read OpenCode OAuth storage key")
 	}
-	plain, err := json.Marshal(record)
+	plain, err := json.Marshal(struct {
+		Accounts []sessionRecord `json:"accounts"`
+	}{Accounts: records})
 	if err != nil {
 		return errors.New("encode OpenCode OAuth session")
 	}
 	defer clear(plain)
 	sealed := aead.Seal([]byte{oauthFileVersion}, nil, plain, []byte(oauthSessionFile))
+	if len(sealed) > oauthFileLimit {
+		return errors.New("OpenCode OAuth session store is full")
+	}
 	if err := fsutil.SecureAtomicWriteInDirectoryChecked(s.inspector, s.SecureDirectory, oauthSessionFile, sealed, s.fence); err != nil {
 		return errors.New("save OpenCode OAuth session")
 	}

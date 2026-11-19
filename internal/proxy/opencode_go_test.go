@@ -516,6 +516,66 @@ func TestOpenCodeGoWebSocketFallbackKeepsContinuationOnGo(t *testing.T) {
 	}
 }
 
+func TestOpenCodeGoWebSocketFailoverKeepsAccount(t *testing.T) {
+	first := SharedBudgetCredential{Bearer: "first-token", Account: "first", WorkspaceID: "wrk_first"}
+	second := SharedBudgetCredential{Bearer: "second-token", Account: "second", WorkspaceID: "wrk_second"}
+	entry := func(credential SharedBudgetCredential) modelregistry.Entry {
+		return modelregistry.Entry{Provider: modelregistry.ProviderOpenCodeGo, ID: "kimi-k3", SharedBudget: &modelregistry.SharedBudgetModel{
+			ProviderName: "OpenCode Go", CredentialScope: credential.binding(),
+		}}
+	}
+	catalog := modelregistry.NewCatalog(modelregistry.Snapshot{Entries: []modelregistry.Entry{entry(first)},
+		SharedBudgetModels: map[string][]modelregistry.Entry{"kimi-k3": {entry(first), entry(second)}},
+	})
+	var firstCalls, secondCalls atomic.Int32
+	route := SharedBudgetRoute{Name: "OpenCode Go", URL: "https://opencode.example/responses", RequireCatalogueScope: true,
+		WorkspaceHeader: "X-OpenCode-Org-Id",
+		Credential:      func(context.Context) (SharedBudgetCredential, error) { return first, nil },
+		Credentials: func(context.Context) ([]SharedBudgetCredential, error) {
+			return []SharedBudgetCredential{first, second}, nil
+		},
+		CredentialFor: func(_ context.Context, scope modelregistry.SharedBudgetCredentialScope) (SharedBudgetCredential, error) {
+			if scope == first.binding() {
+				return first, nil
+			}
+			if scope == second.binding() {
+				return second, nil
+			}
+			return SharedBudgetCredential{}, errors.New("account unavailable")
+		},
+		Transport: openCodeGoTestTransport(func(r *http.Request) (*http.Response, error) {
+			w := httptest.NewRecorder()
+			if r.Header.Get("Authorization") == "Bearer first-token" {
+				firstCalls.Add(1)
+				w.WriteHeader(http.StatusTooManyRequests)
+				return w.Result(), nil
+			}
+			if r.Header.Get("Authorization") != "Bearer second-token" || r.Header.Get("X-OpenCode-Org-Id") != "wrk_second" {
+				t.Error("WebSocket request used wrong account")
+			}
+			call := secondCalls.Add(1)
+			writeZAITestSSE(w, fmt.Sprintf("second-%d", call), nil)
+			return w.Result(), nil
+		}),
+	}
+	s := &Server{Config: &Config{}, Catalog: catalog, SharedBudgetRoutes: map[modelregistry.Provider]SharedBudgetRoute{modelregistry.ProviderOpenCodeGo: route}}
+	conn := openZAITestWebSocket(t, s, nil)
+	for i, frame := range []string{
+		`{"type":"response.create","model":"kimi-k3","input":"hello"}`,
+		`{"type":"response.create","model":"kimi-k3","previous_response_id":"second-1","input":"again"}`,
+	} {
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(frame)); err != nil {
+			t.Fatal(err)
+		}
+		if got := readZAITestCompletion(t, conn).Response.ID; got != fmt.Sprintf("second-%d", i+1) {
+			t.Fatalf("response ID = %q", got)
+		}
+	}
+	if firstCalls.Load() != 1 || secondCalls.Load() != 2 {
+		t.Fatalf("account calls: first=%d second=%d", firstCalls.Load(), secondCalls.Load())
+	}
+}
+
 func TestOpenCodeGoNoRedirectWithCredential(t *testing.T) {
 	var calls int
 	s := &Server{
@@ -563,6 +623,99 @@ func openCodeGoTestRoutes(transport openCodeGoTestTransport) map[modelregistry.P
 			},
 			Transport: transport, AllowFallback: true, OmitStreamOptions: true, OmitEmptyCallIDOutputs: true, PlaintextCollaboration: true,
 		},
+	}
+}
+
+func TestOpenCodeGoAccountsFailOverAndBindContinuation(t *testing.T) {
+	first := SharedBudgetCredential{Bearer: "first-token", Account: "first", WorkspaceID: "wrk_first"}
+	second := SharedBudgetCredential{Bearer: "second-token", Account: "second", WorkspaceID: "wrk_second"}
+	entry := func(credential SharedBudgetCredential) modelregistry.Entry {
+		return modelregistry.Entry{Provider: modelregistry.ProviderOpenCodeGo, ID: "glm-5.3", SharedBudget: &modelregistry.SharedBudgetModel{
+			ProviderName: "OpenCode Go", CredentialScope: credential.binding(),
+		}}
+	}
+	catalog := modelregistry.NewCatalog(modelregistry.Snapshot{Entries: []modelregistry.Entry{entry(first)},
+		SharedBudgetModels: map[string][]modelregistry.Entry{"glm-5.3": {entry(first), entry(second)}},
+	})
+	var firstCalls, secondCalls int
+	accounts := []SharedBudgetCredential{first, second}
+	route := SharedBudgetRoute{Name: "OpenCode Go", URL: "https://opencode.example/responses", RequireCatalogueScope: true,
+		Credential:  func(context.Context) (SharedBudgetCredential, error) { return accounts[0], nil },
+		Credentials: func(context.Context) ([]SharedBudgetCredential, error) { return accounts, nil },
+		CredentialFor: func(_ context.Context, scope modelregistry.SharedBudgetCredentialScope) (SharedBudgetCredential, error) {
+			for _, account := range accounts {
+				if account.binding() == scope {
+					return account, nil
+				}
+			}
+			return SharedBudgetCredential{}, errors.New("account unavailable")
+		},
+		Transport: openCodeGoTestTransport(func(r *http.Request) (*http.Response, error) {
+			w := httptest.NewRecorder()
+			w.Header().Set("Content-Type", "application/json")
+			switch r.Header.Get("Authorization") {
+			case "Bearer first-token":
+				firstCalls++
+				w.WriteHeader(http.StatusTooManyRequests)
+			case "Bearer second-token":
+				secondCalls++
+				_, _ = io.WriteString(w, `{"id":"second-response"}`)
+			default:
+				t.Error("unexpected account credential")
+			}
+			return w.Result(), nil
+		}),
+	}
+	s := &Server{Catalog: catalog, SharedBudgetRoutes: map[modelregistry.Provider]SharedBudgetRoute{modelregistry.ProviderOpenCodeGo: route}}
+	request := func(body string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(body))
+		r.Header.Set("Session-Id", "same-chat")
+		if !s.serveSharedBudgetContinuation(w, r, []byte(body), "glm-5.3") {
+			s.serveSharedBudgetHTTP(w, r, []byte(body))
+		}
+		return w
+	}
+	if got := request(`{"model":"glm-5.3","input":"hello"}`); got.Code != http.StatusOK || firstCalls != 1 || secondCalls != 1 {
+		t.Fatalf("initial failover: status=%d first=%d second=%d", got.Code, firstCalls, secondCalls)
+	}
+	if got := request(`{"model":"glm-5.3","previous_response_id":"second-response","input":[]}`); got.Code != http.StatusOK || secondCalls != 2 {
+		t.Fatalf("bound continuation: status=%d first=%d second=%d", got.Code, firstCalls, secondCalls)
+	}
+	if got := request(`{"model":"glm-5.3","input":"next turn"}`); got.Code != http.StatusOK || secondCalls != 3 || firstCalls != 1 {
+		t.Fatalf("session affinity: status=%d first=%d second=%d", got.Code, firstCalls, secondCalls)
+	}
+	accounts = accounts[:1]
+	if got := request(`{"model":"glm-5.3","previous_response_id":"second-response","input":[]}`); got.Code != http.StatusConflict || firstCalls != 1 {
+		t.Fatalf("missing bound account used another: status=%d first=%d", got.Code, firstCalls)
+	}
+	if got := request(`{"model":"glm-5.3","input":"full readable turn"}`); got.Code != http.StatusTooManyRequests || firstCalls != 2 {
+		t.Fatalf("full input did not rebind available account: status=%d first=%d", got.Code, firstCalls)
+	}
+}
+
+func TestSharedBudgetAvailabilityProbeDoesNotRotateAccounts(t *testing.T) {
+	first := SharedBudgetCredential{Bearer: "first", Account: "first", WorkspaceID: "workspace"}
+	second := SharedBudgetCredential{Bearer: "second", Account: "second", WorkspaceID: "workspace"}
+	entry := func(credential SharedBudgetCredential) modelregistry.Entry {
+		return modelregistry.Entry{Provider: modelregistry.ProviderOpenCodeGo, ID: "glm-5.3", SharedBudget: &modelregistry.SharedBudgetModel{
+			ProviderName: "OpenCode Go", CredentialScope: credential.binding(),
+		}}
+	}
+	s := &Server{Catalog: modelregistry.NewCatalog(modelregistry.Snapshot{SharedBudgetModels: map[string][]modelregistry.Entry{
+		"glm-5.3": {entry(first), entry(second)},
+	}}), SharedBudgetRoutes: map[modelregistry.Provider]SharedBudgetRoute{modelregistry.ProviderOpenCodeGo: {
+		AllowFallback: true, Credentials: func(context.Context) ([]SharedBudgetCredential, error) {
+			return []SharedBudgetCredential{first, second}, nil
+		},
+	}}}
+	body := []byte(`{"model":"glm-5.3","input":"hello"}`)
+	if !s.canFallbackToSharedBudget(t.Context(), body) || !s.canFallbackToSharedBudget(t.Context(), body) || s.sharedBudgetNext.Load() != 0 {
+		t.Fatal("availability probe rotated account selection")
+	}
+	selected, ok := s.selectSharedBudgetFallback(t.Context(), body)
+	if !ok || selected.credential.Account != "first" {
+		t.Fatal("first dispatched account changed after probes")
 	}
 }
 

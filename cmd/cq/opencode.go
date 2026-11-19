@@ -29,25 +29,58 @@ func openCodeSessionAuthority(fsys fsutil.FileSystem, configDir string, client h
 
 func openCodeAuthorization(fsys fsutil.FileSystem, configDir string, client httputil.Doer) sharedBudgetAuthorization {
 	authority := openCodeSessionAuthority(fsys, configDir, client)
-	return func(ctx context.Context, refresh bool) (sharedBudgetLogin, error) {
+	convert := func(session opencodego.OAuthSession) sharedBudgetLogin {
+		return sharedBudgetLogin{
+			SharedBudgetCredential: proxy.SharedBudgetCredential{Bearer: session.AccessToken, Account: session.MemberID, WorkspaceID: session.WorkspaceID},
+			Email:                  session.Email,
+		}
+	}
+	return sharedBudgetAuthorization{List: func(ctx context.Context, refresh bool) ([]sharedBudgetLogin, error) {
 		if err := ctx.Err(); err != nil {
-			return sharedBudgetLogin{}, err
+			return nil, err
 		}
-		read := authority.Read
-		if refresh {
-			read = func() (opencodego.OAuthSession, error) { return authority.Fresh(ctx) }
+		sessions, err := authority.ReadAll()
+		if err != nil {
+			return nil, err
 		}
-		session, err := read()
+		logins := make([]sharedBudgetLogin, 0, len(sessions))
+		for _, session := range sessions {
+			if refresh {
+				session, err = authority.FreshFor(ctx, session.MemberID, session.WorkspaceID)
+				if err != nil {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
+					continue
+				}
+			}
+			logins = append(logins, convert(session))
+		}
+		if len(logins) == 0 && refresh {
+			return nil, errors.New("OpenCode Go credentials unavailable")
+		}
+		return logins, nil
+	}, For: func(ctx context.Context, scope modelregistry.SharedBudgetCredentialScope) (sharedBudgetLogin, error) {
+		sessions, err := authority.ReadAll()
 		if err != nil {
 			return sharedBudgetLogin{}, err
 		}
-		return sharedBudgetLogin{
-			SharedBudgetCredential: proxy.SharedBudgetCredential{
-				Bearer: session.AccessToken, Account: session.MemberID, WorkspaceID: session.WorkspaceID,
-			},
-			Email: session.Email,
-		}, nil
-	}
+		for _, session := range sessions {
+			login := convert(session)
+			if login.scope() != scope {
+				continue
+			}
+			fresh, err := authority.FreshFor(ctx, session.MemberID, session.WorkspaceID)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) {
+					return sharedBudgetLogin{}, errors.New("OpenCode Go account is no longer available")
+				}
+				return sharedBudgetLogin{}, err
+			}
+			return convert(fresh), nil
+		}
+		return sharedBudgetLogin{}, errors.New("OpenCode Go account is no longer available")
+	}}
 }
 
 func runOpenCodeLogin(ctx context.Context) error {
@@ -119,9 +152,19 @@ func refreshOpenCodeOAuth(ctx context.Context, client httputil.Doer) error {
 	if err := openCodeOAuthPreference(settings); err != nil {
 		return err
 	}
-	_, err = openCodeSessionAuthority(fsys, roots.Config, client).Fresh(ctx)
+	authority := openCodeSessionAuthority(fsys, roots.Config, client)
+	sessions, err := authority.ReadAll()
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, session := range sessions {
+		if _, err := authority.FreshFor(ctx, session.MemberID, session.WorkspaceID); err != nil {
+			failures = append(failures, fmt.Errorf("OpenCode Go account %s: %w", session.Email, err))
+		}
+	}
+	return errors.Join(failures...)
 }

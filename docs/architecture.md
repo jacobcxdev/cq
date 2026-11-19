@@ -383,6 +383,15 @@ Registry sources distinguish no configured accounts from successful empty model
 lists, so removing Grok access clears its entries without hiding other providers'
 typed errors. Display catalogue unions never authorize another account's model.
 
+Shared-budget adapters list credentials by account and resolve a catalogue scope
+again at dispatch, so OAuth rotation preserves the member/workspace binding.
+One provider source collects account-scoped model routes while the public picker
+keeps one row per model. A successful empty catalogue clears stale routes.
+Allowance reports stay per account; route selection does not use token-quota
+pace, burn or weighted-capacity estimates. A confirmed pre-generation 401 or
+429 can try another eligible account, while opaque continuations retain their
+original account.
+
 The Grok proxy adapter reuses the WebSocket-to-HTTP bridge extracted from Z.ai and
 shared Responses SSE handling. Both original and new callers retain regression
 coverage. Grok-specific code owns subscription headers, schema/tool projection,
