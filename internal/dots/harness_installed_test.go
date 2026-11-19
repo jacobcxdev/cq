@@ -309,7 +309,9 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 	write("codex/config.toml", configText)
 	profile := `(version 1) (allow default) (deny network*) (deny file-write*) (allow network-outbound (remote ip "localhost:*")) (allow file-write* (literal "/dev/null")) (allow file-write* (subpath ` + fmt.Sprintf("%q", root) + `))`
 	timeout := 45 * time.Second
-	if goalProbe {
+	if selective {
+		timeout = 120 * time.Second
+	} else if goalProbe {
 		timeout = 90 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
