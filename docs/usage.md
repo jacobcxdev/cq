@@ -831,8 +831,10 @@ Proxy endpoints also expose model metadata and authenticated registry refresh/sn
 
 Run `cq opencode login` and approve the browser sign-in for your OpenCode Go
 workspace. CQ verifies the workspace's Go allowance before saving the login.
-CQ uses the verified account email and renews access automatically for
-inference, allowance checks, and `cq refresh`.
+Run the command again for each additional account or workspace. CQ keeps each
+verified member/workspace separately; signing in to an existing one updates
+that login. CQ displays each registered email and renews each access token
+independently for inference, allowance checks, and `cq refresh`.
 
 For API-key auth, create a personal key in a
 [workspace subscribed to Go](https://opencode.ai/docs/console/harnesses/#get-an-api-key).
@@ -850,17 +852,20 @@ the current user, SYSTEM and Administrators with inherited entries removed.
 
 Run `cq models refresh` to publish Go models, then start a fresh Codex session
 through your existing CQ connection. The Codex model picker uses the same
-Responses route for both Go and provider subscriptions. CQ lists the Go models
-enabled for the signed-in workspace. Refresh models after changing access in
-OpenCode Console.
+Responses route for both Go and provider subscriptions. CQ lists the union of
+Go models enabled for saved workspaces, with one picker row per model. Refresh
+models after changing access in OpenCode Console.
 
 A model offered by both Go and a first-party Responses subscription appears
 once. CQ prefers the first-party route. Automatic fallback to Go is opt-in.
 After a definite pre-generation rejection or known lack of an eligible
 first-party account, CQ can retry with full input. Provider response IDs and
-encrypted reasoning state prevent fallback. A WebSocket stays on its selected
-provider once generation begins. CQ also keeps recognised OpenCode response
-IDs and encrypted reasoning on their original account between HTTP requests
+encrypted reasoning state prevent fallback. Within Go, CQ distributes new
+sessions across accounts that offer the selected model. A definite 401 or 429
+before generation can retry another eligible Go account. Network errors and
+ambiguous responses cannot be retried safely. A WebSocket stays on its selected
+account once generation begins. CQ binds later turns in the same session, plus
+recognised OpenCode response IDs and encrypted reasoning, to the chosen account
 while the proxy is running. OAuth refresh keeps that account binding. After a
 restart, workspace change or API-key rotation, resume with full readable input.
 
@@ -875,8 +880,9 @@ instead of an HTTP `previous_response_id`. CQ expands WebSocket continuations
 from its local history. CQ omits Codex's standard access programme on Go
 requests and rejects other programme selections before dispatch to Go.
 
-Use `cq check opencode-go` to inspect the 5h, 7d and monthly allowance windows.
-CQ shows the remaining percentages and reset times supplied by OpenCode.
+Use `cq check opencode-go` to inspect each account's 5h, 7d and monthly
+allowance windows. CQ shows the remaining percentages and reset times supplied
+by OpenCode.
 These windows have no pace or burn projections. If CQ cannot read the limits,
 the report shows `Allowance unavailable`.
 

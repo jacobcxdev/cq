@@ -57,6 +57,21 @@ func TestSharedBudgetSettingsAndCheckSelection(t *testing.T) {
 	}
 }
 
+func TestSharedBudgetKeyUsesWorkspaceOnlyForAllowance(t *testing.T) {
+	fsys, dir := privateSharedBudgetConfig(t)
+	adapter := sharedBudgetAdapters[0]
+	auth := adapter.resolve(fsys, func(string) string { return "headless-key" }, dir, nil,
+		sharedBudgetSettings{Auth: "api_key", WorkspaceID: "wrk_allowance"})
+	login, err := auth.first(t.Context(), false)
+	if err != nil || login.WorkspaceID != "wrk_allowance" || login.routeCredential().WorkspaceID != "" {
+		t.Fatalf("API key workspace handling: %v", err)
+	}
+	resolved, err := auth.For(t.Context(), login.scope())
+	if err != nil || resolved.WorkspaceID != "wrk_allowance" {
+		t.Fatalf("API key allowance account: %v", err)
+	}
+}
+
 func TestSharedBudgetKeyPrefersEnvironmentAndRequiresPrivateFile(t *testing.T) {
 	fsys, dir := privateSharedBudgetConfig(t)
 	path := filepath.Join(dir, "opencode-go.key")

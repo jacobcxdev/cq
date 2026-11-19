@@ -100,6 +100,7 @@ type Server struct {
 	grokBindings         grokStateBindings
 	sharedBudgetBindings responsesStateBindings[sharedBudgetBoundState]
 	sharedBudgetTurns    sharedBudgetTurnRoutes
+	sharedBudgetNext     atomic.Uint64
 	ZAIAPIKey            func() (string, error)
 	ZAIAccounts          func() ([]zaiprov.Account, error)
 	ZAIQuota             func() []quota.Result
@@ -713,7 +714,7 @@ func isWebSocketUpgrade(r *http.Request) bool {
 }
 
 func (s *Server) handleCodexResponsesRoute(w http.ResponseWriter, r *http.Request) {
-	r = r.WithContext(context.WithValue(r.Context(), cqCompactionTokenContextKey{}, s.cqCompactionToken()))
+	r = r.WithContext(context.WithValue(withSharedBudgetAffinity(r.Context(), r.Header), cqCompactionTokenContextKey{}, s.cqCompactionToken()))
 	if isWebSocketUpgrade(r) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", fmt.Sprintf("websocket transport is not supported on %s; use %s", codexResponsesPath, legacyCodexResponsesPath))
 		return
@@ -736,7 +737,7 @@ func (s *Server) handleCodexResponsesRoute(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleLegacyCodexResponsesRoute(w http.ResponseWriter, r *http.Request) {
-	r = r.WithContext(context.WithValue(r.Context(), cqCompactionTokenContextKey{}, s.cqCompactionToken()))
+	r = r.WithContext(context.WithValue(withSharedBudgetAffinity(r.Context(), r.Header), cqCompactionTokenContextKey{}, s.cqCompactionToken()))
 	if isWebSocketUpgrade(r) {
 		s.proxyCodexUpgrade(w, r)
 		return
@@ -1254,7 +1255,7 @@ func (s *Server) parseCodexHTTPEnforcementDecoded(body []byte, header http.Heade
 // headroom compression — the handshake body is minimal and subsequent frames
 // are relayed without transformation.
 func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
-	r = r.WithContext(withCacheProfile(r.Context(), s.CacheProfiler, r.Header))
+	r = r.WithContext(withSharedBudgetAffinity(withCacheProfile(r.Context(), s.CacheProfiler, r.Header), r.Header))
 	start := time.Now()
 	statusCode := 0
 	diagError := ""
@@ -1418,7 +1419,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 		if firstKind == websocket.TextMessage && s.routeCodexModel(extractCodexWebSocketFrameModel(firstFrame)) == ProviderSharedBudget {
 			routeKind = "shared_budget_websocket"
-			selected, ok := s.selectSharedBudgetRoute(r.Context(), extractCodexWebSocketFrameModel(firstFrame), false)
+			selected, ok := s.selectSharedBudgetRoute(withSharedBudgetRebind(r.Context(), firstFrame), extractCodexWebSocketFrameModel(firstFrame), false, true)
 			if ok {
 				diagnosticsProvider = string(selected.id)
 				err = s.serveSharedBudgetWebSocket(r.Context(), clientConn, r.Header, firstKind, firstFrame, selected)
