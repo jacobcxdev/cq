@@ -413,7 +413,9 @@ func (s *Server) serveSelectedSharedBudgetHTTP(w http.ResponseWriter, r *http.Re
 	}
 	canRebind := !selected.bound && !compactEndpoint && portableSharedBudgetInput(body)
 	if canRebind {
-		selected = s.preferSharedBudgetAccount(ctx, selected)
+		if preferred, ok := s.preferredSharedBudgetAccount(ctx, selected, selected.credential.binding()); ok {
+			selected = preferred
+		}
 	}
 	session := sharedBudgetSession(r.Header, selected.route.SessionHeader)
 	response, compact, err := s.sharedBudgetResponse(ctx, &selected, session, r.Header, body, compactEndpoint)
@@ -469,19 +471,15 @@ func (s *Server) serveSelectedSharedBudgetHTTP(w http.ResponseWriter, r *http.Re
 	s.relaySharedBudgetHTTP(w, response, selected, body)
 }
 
-func (s *Server) preferSharedBudgetAccount(ctx context.Context, selected sharedBudgetSelection) sharedBudgetSelection {
+func (s *Server) preferredSharedBudgetAccount(ctx context.Context, selected sharedBudgetSelection, current modelregistry.SharedBudgetCredentialScope) (sharedBudgetSelection, bool) {
 	if selected.route.Preferred == nil {
-		return selected
+		return sharedBudgetSelection{}, false
 	}
 	preferred, ok := selected.route.Preferred(ctx)
-	if !ok || preferred == selected.credential.binding() {
-		return selected
+	if !ok || preferred == current {
+		return sharedBudgetSelection{}, false
 	}
-	candidate, ok := s.matchSharedBudgetAccount(ctx, selected, func(scope modelregistry.SharedBudgetCredentialScope) bool { return scope == preferred })
-	if !ok {
-		return selected
-	}
-	return candidate
+	return s.matchSharedBudgetAccount(ctx, selected, func(scope modelregistry.SharedBudgetCredentialScope) bool { return scope == preferred })
 }
 
 func (s *Server) matchSharedBudgetAccount(ctx context.Context, selected sharedBudgetSelection, eligible func(modelregistry.SharedBudgetCredentialScope) bool) (sharedBudgetSelection, bool) {
@@ -521,19 +519,25 @@ func (s *Server) sharedBudgetBridge(selected sharedBudgetSelection, header http.
 }
 
 func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.Conn, header http.Header, selected *sharedBudgetSelection, binding *sharedBudgetBoundState, session string, body []byte) (string, []json.RawMessage, error) {
-	credential, err := selected.route.credentialFor(ctx, binding.Credential)
-	if err != nil || credential.Bearer == "" || credential.binding() != binding.Credential {
-		return "", nil, errSharedBudgetContinuation
-	}
 	bound, found, complete := s.sharedBudgetRequestBinding(body)
 	if !complete || (found && bound != *binding) {
 		return "", nil, errSharedBudgetContinuation
 	}
-	selected.credential = credential
 	canRebind := !selected.bound && !found && portableSharedBudgetInput(body)
+	var preferred sharedBudgetSelection
+	var hasPreference bool
 	if canRebind {
-		*selected = s.preferSharedBudgetAccount(ctx, *selected)
+		preferred, hasPreference = s.preferredSharedBudgetAccount(ctx, *selected, binding.Credential)
+	}
+	if hasPreference {
+		*selected = preferred
 		*binding = selected.binding()
+	} else {
+		credential, err := selected.route.credentialFor(ctx, binding.Credential)
+		if err != nil || credential.Bearer == "" || credential.binding() != binding.Credential {
+			return "", nil, errSharedBudgetContinuation
+		}
+		selected.credential = credential
 	}
 	s.observeHarness(header, extractModel(body), body)
 	if s.CacheProfiler != nil {
@@ -609,11 +613,31 @@ func portableSharedBudgetInput(body []byte) bool {
 			EncryptedContent      string            `json:"encrypted_content"`
 			EncryptedFunctionArgs []json.RawMessage `json:"encrypted_function_args"`
 			EncryptedArguments    []json.RawMessage `json:"encrypted_arguments"`
+			Output                json.RawMessage   `json:"output"`
 		}
 		if json.Unmarshal(raw, &item) != nil || item.EncryptedContent != "" ||
 			len(item.EncryptedFunctionArgs) != 0 || len(item.EncryptedArguments) != 0 ||
 			item.Type == "item_reference" || item.Type == "compaction" {
 			return false
+		}
+		if item.Type != "function_call_output" && item.Type != "custom_tool_call_output" {
+			continue
+		}
+		output := bytes.TrimSpace(item.Output)
+		if len(output) == 0 || output[0] != '[' {
+			continue
+		}
+		var parts []struct {
+			Type             string `json:"type"`
+			EncryptedContent string `json:"encrypted_content"`
+		}
+		if json.Unmarshal(output, &parts) != nil {
+			return false
+		}
+		for _, part := range parts {
+			if part.Type == "encrypted_content" || part.EncryptedContent != "" {
+				return false
+			}
 		}
 	}
 	return true

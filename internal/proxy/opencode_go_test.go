@@ -553,7 +553,7 @@ func testOpenCodeGoWebSocketAccountFailover(t *testing.T, firstSucceeds, switchA
 			return []SharedBudgetCredential{first, second}, nil
 		},
 		CredentialFor: func(_ context.Context, scope modelregistry.SharedBudgetCredentialScope) (SharedBudgetCredential, error) {
-			if scope == first.binding() {
+			if scope == first.binding() && !prefersSecond.Load() {
 				return first, nil
 			}
 			if scope == second.binding() {
@@ -617,6 +617,24 @@ func testOpenCodeGoWebSocketAccountFailover(t *testing.T, firstSucceeds, switchA
 	}
 	if firstCalls.Load() != wantFirst || secondCalls.Load() != 2 {
 		t.Fatalf("account calls: first=%d second=%d", firstCalls.Load(), secondCalls.Load())
+	}
+}
+
+func TestSharedBudgetPortabilityOfToolOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name, item string
+		portable   bool
+	}{
+		{"readable tool output", `{"type":"function_call_output","output":[{"type":"input_text","text":"ok"}]}`, true},
+		{"encrypted tool output", `{"type":"function_call_output","output":[{"type":"encrypted_content","encrypted_content":"opaque"}]}`, false},
+		{"encrypted custom tool output", `{"type":"custom_tool_call_output","output":[{"type":"encrypted_content","encrypted_content":"opaque"}]}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`{"model":"glm-5.3","input":[` + tc.item + `]}`)
+			if got := portableSharedBudgetInput(body); got != tc.portable {
+				t.Fatalf("portable = %t, want %t", got, tc.portable)
+			}
+		})
 	}
 }
 
