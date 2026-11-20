@@ -1,77 +1,85 @@
 ---
 name: curate-harness
-description: Curate and apply CQ capability profiles when asked to reduce, restore, reuse or configure skills, MCP servers or plugins for a chat, workspace or model.
+description: Reduce, expand, replace or restore a Codex chat's CQ harness profile when its role changes or new skills, MCP servers or plugins are needed. Also manage reusable profiles and requested workspace or model bindings.
 metadata:
-  short-description: Curate scoped Codex capabilities through CQ
+  short-description: Update Codex capabilities in place with CQ
 ---
 
 <!-- cq-owned:curate-harness -->
 
-Use CQ's CLI; make task-specific choices without another MCP or model service.
+## Discover
 
-1. Check `cq codex harness --help` and relevant subcommand help. If inventory,
-   named profiles or bind/explain are unavailable, report the version mismatch.
-   Do not claim success, install an upgrade or change unrelated launch settings.
-   Use a development CLI only when the session provides its location.
-2. Default to current chat. Change workspace/global policy only when requested.
-   An explicit GLM restriction uses `--model 'glm-*'`; omitting model applies to
-   all models at that scope. Identify the workspace root from task context; it
-   can contain several repositories. Do not substitute a nested Git root.
-3. Use `--chat current`: CQ validates `CODEX_THREAD_ID`. Never substitute a shared
-   session ID, cache key, latest chat or guessed ID. Ask for the target if missing.
-4. Read `cq codex harness inventory --project ROOT --json`, optionally filtering
-   by kind/search. This is the full configured metadata inventory, including
-   capabilities excluded by current profiles. Do not curate only from tools
-   visible in this chat or temporarily enable everything to discover choices.
-   Read `explain --chat current --project ROOT --json` for inheritance and model;
-   supply `--model ID` when native model lookup is unavailable.
-   After capabilities are added, removed or updated for the task, re-read both
-   inventory and explain, then reassess the intended selection. Discovery alone
-   does not select capabilities. Keep the current binding when its selection
-   already matches the task; do not grow profiles automatically or poll for new
-   capabilities on every turn.
-5. Select relevant capabilities and available dependencies. A plugin-owned skill
-   may require its plugin and expose coupled tools. Use exact stable inventory
-   IDs. Plugins are bundles: selecting one includes its declared `mcp_servers`;
-   standalone MCP rows are controlled separately. Read details only for plausible
-   candidates. Never store native paths,
-   versioned cache locations, commands, URLs, environment values or credentials.
-6. Save a Definition JSON containing description and changes. Decisions are
-   enabled/disabled/inherit in plugins, mcp and skills maps. Use default:disabled
-   plus enabled IDs for a complete allowlist; omit default for a narrower delta.
-   Do not reset inherited policy unless asked to restore the native baseline.
-   Use `profile save NAME --file FILE`; task profiles belong in user registry,
-   workspace profiles use `--project ROOT`. Do not replace a shared definition to
-   change one chat. Use profile copy for an independent variant or save a delta.
-7. Bind with `cq codex harness bind NAME --scope chat --chat current --project ROOT`.
-   Use --scope project or global only when requested. Add --model only for the
-   intended restriction. Bindings request application automatically. For reuse
-   outside a workspace, export/import definitions; copy stable IDs, not private
-   chat bindings or receipts. Follow actual CLI help for flags.
-8. Re-read explain before reporting. Distinguish saved/requested/pending/partial
-   from confirmed application. State retained/removed capabilities and scope
-   briefly. Read `application_status.mode` from the current receipt: `full`
-   covers plugins, standalone MCP servers and local skills; `plugins` covers
-   plugins only. Do not infer the active mode from launch method or generic help.
-   If no current receipt establishes the mode, report it as unconfirmed.
-   Report unsupported controls, missing capabilities and
-   dependency conflicts. Existing history/catalogue text stays intact.
-   A matching failed receipt is an application failure, separate from stale
-   selection. Inspect its stage/reason and address the underlying cause. If the
-   CLI and full-mode receipt support retry, request one attempt with
-   `retry --chat current --project ROOT`, adding the intended model only when
-   needed, then re-read explain. The full bridge can hold automatic goal
-   continuation, finish the current turn, apply the configuration and resume the
-   same goal. Native pause accounting preserves the objective and budget limit
-   while excluding the rest of the paused turn from usage counters.
-   `native_goal_api_unavailable` means native goal control needs a valid probe
-   before application. `native_goal_restore_ambiguous` retains a recovery marker
-   and a partial receipt until an explicit user goal update resolves ownership;
-   do not reactivate a possibly user-paused goal by guessing.
-   If retry is unsupported or the same failure persists, report that limit.
-   Do not change fingerprints or repeatedly bind an unchanged profile to force
-   another attempt.
+Use `cq codex harness --help` and relevant subcommand help. If inventory, profiles
+or bind/explain are missing, report the version mismatch. Use a development CLI
+only if its location was provided. Leave installation and launch settings alone.
 
-Keep CQ's small curation entrypoint and native core tools available. Native child
-agents inherit parent capabilities; independent model-based changes before an
-internally spawned child's first turn are not guaranteed.
+Use the actual workspace root, including for multi-repo workspaces. Default to
+`--chat current`, which validates `CODEX_THREAD_ID`. If missing, request the
+exact chat link or ID. Change project/global scope only when requested.
+
+- `cq codex harness inventory --project ROOT --json` lists configured plugins,
+  standalone MCP servers and skills **including those excluded by curation**.
+  Use `--kind` and `--search` for named additions. Refresh discovery when the
+  inventory or chat role changes, without enabling everything or polling each turn.
+- `cq codex harness explain --chat current --project ROOT --json` shows model,
+  `effective.layers`, capability decisions and application status. Filter JSON
+  output before reading it into context. Keep the layers, receipt status, issues
+  and relevant capability rows. Supply the exact `--model ID` if lookup fails.
+
+## Choose and bind
+
+Use stable inventory IDs and include dependencies. A plugin is a bundle with its
+declared `mcp_servers`. Standalone MCP rows are separate. Preserve CQ's curation
+entrypoint and native core tools such as web search, shell, file edits, user input
+and task control. Native tools sit outside the inventory. The Browser plugin
+controls the in-app browser.
+
+Save a definition with `cq codex harness profile save NAME --file FILE`. Example
+delta, using a placeholder ID:
+
+```json
+{"description":"Add release review","changes":{"skills":{"repo:release-review":"enabled"}}}
+```
+
+Decisions in `plugins`, `mcp` and `skills` are `enabled`, `disabled` or
+`inherit` (keep the prior decision). Omit `default` for a delta. Use
+`"default":"disabled"` plus enabled IDs for a complete allowlist. Store only
+portable decisions, without native paths, commands, URLs or secrets.
+
+- **Expand or tune:** Save a delta and append it to the current chat layer's
+  profile list. Newly discovered entries may need explicit enables under an
+  allowlist. Keep the current binding if it already matches.
+- **Change role:** Edit the JSON from `profile show NAME --json` and save under
+  a new name, or create a fresh definition. Preserve shared definitions.
+  Save chat profiles in the user registry. Pass `--project ROOT` to
+  `profile save` for workspace definitions.
+- **Restore:** Rebind the previous profile list to undo a chat update. Use
+  `unbind` to remove that layer and inherit policy, or bind `full` to
+  intentionally reset to native choices. Use export/import to share definitions.
+
+Run `cq codex harness bind PROFILE... --scope chat --chat current --project ROOT`.
+Binding replaces the list for that scope and selector. Names apply in order.
+Preserve the existing model selector when updating a binding. Omit `--model`
+for all models at that scope or use the intended ID/family (e.g. `'glm-*'`).
+Binding requests application and keeps the same chat and history.
+
+## Verify and recover
+
+Re-read `explain`. Use the matching `application_status` to report state and
+mode. `full` applies plugin, standalone MCP and skill changes at idle boundaries.
+`plugins` covers plugins only. Report pending or partial changes, unsupported
+controls and dependency issues. If no receipt matches, application is unconfirmed.
+After application, check the changed capabilities and basic tools. If curation
+removed a core tool, restore the previous binding and verify recovery.
+
+For a matching failed full-mode receipt, address its failure stage/reason and use
+`cq codex harness retry --chat current --project ROOT` once if supported. Use the
+attempted model/project when the receipt records a failed context switch. Re-read
+`explain`. Rebinding an unchanged profile does not replace this recovery step.
+
+CQ may hold and resume automatic goal continuation during an idle reload.
+`native_goal_api_unavailable` requires a valid native goal probe.
+`native_goal_restore_ambiguous` requires an explicit user goal update. Leave
+the recovery marker and goal state intact. Native child agents inherit the
+parent's capabilities. Independent curation before their first turn is not
+guaranteed.
