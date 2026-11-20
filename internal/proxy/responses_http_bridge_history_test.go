@@ -1,0 +1,118 @@
+package proxy
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/gorilla/websocket"
+)
+
+func TestResponsesHTTPBridgeBoundsRetainedHistory(t *testing.T) {
+	item := func(value any) json.RawMessage {
+		t.Helper()
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return encoded
+	}
+	state := responsesHTTPBridgeState{
+		previousID: "previous",
+		history: []json.RawMessage{
+			item(map[string]any{"type": "message", "role": "developer", "content": "Keep instructions."}),
+			item(map[string]any{"type": "message", "role": "user", "content": strings.Repeat("old", 1000)}),
+			item(map[string]any{"type": "message", "role": "assistant", "content": "old reply"}),
+			item(map[string]any{"type": "message", "role": "user", "content": "recent"}),
+			item(map[string]any{"type": "function_call", "call_id": "call-1", "name": "lookup", "arguments": "{}"}),
+			item(map[string]any{"type": "function_call_output", "call_id": "call-1", "output": "result"}),
+		},
+	}
+	frame := item(map[string]any{
+		"type": "response.create", "model": "glm-5.3", "previous_response_id": "previous",
+		"input": []any{map[string]any{"type": "message", "role": "user", "content": "now"}},
+	})
+	var sent []json.RawMessage
+	bridge := responsesHTTPBridge{
+		Name: "OpenCode Go", MaxInputBytes: 1000,
+		Compaction: func([]byte) (bool, error) { return false, nil },
+		Stream: func(_ context.Context, _ *websocket.Conn, _ http.Header, body []byte) (string, []json.RawMessage, error) {
+			var request struct {
+				Input []json.RawMessage `json:"input"`
+			}
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Fatal(err)
+			}
+			sent = request.Input
+			return "next", []json.RawMessage{item(map[string]any{"type": "message", "role": "assistant", "content": "answer"})}, nil
+		},
+	}
+	if err := state.serveFrame(context.Background(), nil, nil, websocket.TextMessage, frame, bridge); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) < 6 || len(state.history) != len(sent)+1 {
+		t.Fatalf("sent %d items, retained %d", len(sent), len(state.history))
+	}
+	var first, marker, recent, call, output, current struct {
+		Type, Role, Content string
+		CallID              string `json:"call_id"`
+	}
+	for index, target := range []any{&first, &marker, &recent, &call, &output, &current} {
+		if err := json.Unmarshal(sent[index], target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if first.Role != "developer" || first.Content != "Keep instructions." ||
+		marker.Role != "developer" || !strings.Contains(marker.Content, "omitted") ||
+		recent.Content != "recent" || call.CallID != "call-1" || output.CallID != "call-1" || current.Content != "now" {
+		t.Fatalf("bounded history lost required context: %s", sent)
+	}
+	if strings.Contains(string(sent[0]), "oldold") || strings.Contains(string(sent[2]), "old reply") {
+		t.Fatal("old history remained in bounded request")
+	}
+}
+
+func TestResponsesHTTPBridgePreservesOversizedCurrentInput(t *testing.T) {
+	input := []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"` + strings.Repeat("x", 200) + `"}`)}
+	bounded, changed := boundResponsesBridgeInput(input, len(input), 100)
+	if changed || len(bounded) != 1 || string(bounded[0]) != string(input[0]) {
+		t.Fatal("oversized current input changed")
+	}
+}
+
+func TestResponsesHTTPBridgeBoundsFullReconnectInput(t *testing.T) {
+	frame, err := json.Marshal(map[string]any{
+		"type": "response.create", "model": "glm-5.3",
+		"input": []any{
+			map[string]any{"type": "message", "role": "developer", "content": "Keep instructions."},
+			map[string]any{"type": "message", "role": "user", "content": strings.Repeat("old", 1000)},
+			map[string]any{"type": "message", "role": "assistant", "content": "old answer"},
+			map[string]any{"type": "message", "role": "user", "content": "current"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent []json.RawMessage
+	bridge := responsesHTTPBridge{
+		Name: "OpenCode Go", MaxInputBytes: 500,
+		Compaction: func([]byte) (bool, error) { return false, nil },
+		Stream: func(_ context.Context, _ *websocket.Conn, _ http.Header, body []byte) (string, []json.RawMessage, error) {
+			var request struct{ Input []json.RawMessage }
+			if err := json.Unmarshal(body, &request); err != nil {
+				t.Fatal(err)
+			}
+			sent = request.Input
+			return "next", nil, nil
+		},
+	}
+	var state responsesHTTPBridgeState
+	if err := state.serveFrame(context.Background(), nil, nil, websocket.TextMessage, frame, bridge); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 3 || !strings.Contains(string(sent[2]), "current") || strings.Contains(string(sent[2]), "old") {
+		t.Fatalf("reconnect input not bounded: %s", sent)
+	}
+}

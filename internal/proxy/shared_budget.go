@@ -509,8 +509,14 @@ func (s *Server) sharedBudgetBridge(selected sharedBudgetSelection, header http.
 	session := sharedBudgetSession(header, selected.route.SessionHeader)
 	binding := selected.binding()
 	selected.credential = SharedBudgetCredential{}
+	maxInputBytes := 0
+	if selected.id == modelregistry.ProviderOpenCodeGo {
+		// Go translates GLM Responses requests and rejects oversized replay
+		// histories with an unqualified invalid_request response.
+		maxInputBytes = 1 << 20
+	}
 	return responsesHTTPBridge{
-		Name: selected.route.Name, PrewarmPrefix: "cq_" + strings.ReplaceAll(string(selected.id), "-", "_") + "_prewarm_",
+		Name: selected.route.Name, PrewarmPrefix: "cq_" + strings.ReplaceAll(string(selected.id), "-", "_") + "_prewarm_", MaxInputBytes: maxInputBytes,
 		Stream: func(ctx context.Context, downstream *websocket.Conn, header http.Header, body []byte) (string, []json.RawMessage, error) {
 			return s.streamSharedBudget(ctx, downstream, header, &selected, &binding, session, body)
 		},

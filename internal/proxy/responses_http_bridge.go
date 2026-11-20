@@ -16,6 +16,7 @@ import (
 type responsesHTTPBridge struct {
 	Name          string
 	PrewarmPrefix string
+	MaxInputBytes int
 	AcceptsModel  func(string) bool
 	Stream        func(context.Context, *websocket.Conn, http.Header, []byte) (string, []json.RawMessage, error)
 	Compaction    func([]byte) (bool, error)
@@ -111,6 +112,7 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 	if err != nil {
 		return err
 	}
+	currentItems := len(input)
 	var previous string
 	_ = json.Unmarshal(request["previous_response_id"], &previous)
 	if previous != "" {
@@ -118,8 +120,20 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 			return errors.New(bridge.Name + " previous response unavailable; reconnect with full input")
 		}
 		input = append(append([]json.RawMessage(nil), state.history...), input...)
+	} else if bridge.MaxInputBytes > 0 {
+		// A reconnect can supply the whole conversation instead of a delta.
+		// Keep its latest user turn when bounding older replay history.
+		for index := len(input) - 1; index >= 0; index-- {
+			if responsesBridgeMessageRole(input[index]) == "user" {
+				currentItems = len(input) - index
+				break
+			}
+		}
 	}
 	delete(request, "previous_response_id")
+	if bridge.MaxInputBytes > 0 {
+		input, _ = boundResponsesBridgeInput(input, currentItems, bridge.MaxInputBytes)
+	}
 	request["input"], _ = json.Marshal(input)
 	if prewarm {
 		state.previousID = fmt.Sprintf(bridge.PrewarmPrefix+"%x", time.Now().UnixNano())
@@ -164,6 +178,80 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 		}
 	}
 	return nil
+}
+
+var responsesHistoryOmittedMessage = json.RawMessage(`{"type":"message","role":"developer","content":"Earlier conversation omitted to fit provider context. Continue using available messages; ask user for missing details."}`)
+
+// boundResponsesBridgeInput keeps the latest complete turn when a stateless
+// Responses provider would otherwise receive an ever-growing replay.
+func boundResponsesBridgeInput(input []json.RawMessage, currentItems, maxBytes int) ([]json.RawMessage, bool) {
+	if maxBytes <= 0 || len(input) == 0 {
+		return input, false
+	}
+	size := 2
+	for _, item := range input {
+		size += len(item) + 1
+	}
+	if size <= maxBytes {
+		return input, false
+	}
+	if currentItems < 0 || currentItems > len(input) {
+		return input, false
+	}
+	var preamble []json.RawMessage
+	if responsesBridgeMessageRole(input[0]) == "developer" {
+		preamble = input[:1]
+	}
+	reserved := 2 + len(responsesHistoryOmittedMessage) + 1
+	for _, item := range preamble {
+		reserved += len(item) + 1
+	}
+	currentStart := len(input) - currentItems
+	if currentItems == 0 {
+		currentStart = len(input) - 1
+	}
+	suffixSize := 0
+	start := -1
+	for index := len(input) - 1; index >= 1; index-- {
+		suffixSize += len(input[index]) + 1
+		if reserved+suffixSize > maxBytes {
+			break
+		}
+		if index <= currentStart {
+			role := responsesBridgeMessageRole(input[index])
+			if role == "user" || role == "developer" {
+				start = index
+			}
+		}
+	}
+	if start < 0 {
+		// A single large current turn may be valid upstream. Only discard
+		// complete older history, never part of the current turn.
+		role := ""
+		if currentStart < len(input) {
+			role = responsesBridgeMessageRole(input[currentStart])
+		}
+		if currentStart == 0 || (role != "user" && role != "developer") {
+			return input, false
+		}
+		start = currentStart
+	}
+	bounded := make([]json.RawMessage, 0, len(preamble)+1+len(input)-start)
+	bounded = append(bounded, preamble...)
+	bounded = append(bounded, responsesHistoryOmittedMessage)
+	bounded = append(bounded, input[start:]...)
+	return bounded, true
+}
+
+func responsesBridgeMessageRole(item json.RawMessage) string {
+	var message struct {
+		Type string `json:"type"`
+		Role string `json:"role"`
+	}
+	if json.Unmarshal(item, &message) != nil || message.Type != "message" {
+		return ""
+	}
+	return message.Role
 }
 
 func responsesBridgeInput(raw json.RawMessage, name string) ([]json.RawMessage, error) {
