@@ -21,8 +21,12 @@ Use CQ's CLI; make task-specific choices without another MCP or model service.
    session ID, cache key, latest chat or guessed ID. Ask for the target if missing.
 4. Read `cq codex harness inventory --project ROOT --json`, optionally filtering
    by kind/search. This is the full configured metadata inventory, including
-   capabilities excluded by current profiles. Do not curate only from tools
-   visible in this chat or temporarily enable everything to discover choices.
+   plugins, standalone MCP servers and skills excluded by current profiles.
+   Built-in tools are outside this inventory: web search, shell and file edits,
+   user input and task control must remain available. The Browser plugin controls
+   the in-app browser; it does not stand for native web search. Do not curate only
+   from tools visible in this chat or temporarily enable everything to discover
+   choices.
    Read `explain --chat current --project ROOT --json` for inheritance and model;
    supply `--model ID` when native model lookup is unavailable.
    After capabilities are added, removed or updated for the task, re-read both
@@ -37,8 +41,12 @@ Use CQ's CLI; make task-specific choices without another MCP or model service.
    candidates. Never store native paths,
    versioned cache locations, commands, URLs, environment values or credentials.
 6. Save a Definition JSON containing description and changes. Decisions are
-   enabled/disabled/inherit in plugins, mcp and skills maps. Use default:disabled
-   plus enabled IDs for a complete allowlist; omit default for a narrower delta.
+   enabled/disabled/inherit in plugins, mcp and skills maps. Prefer a narrow
+   delta that disables only capabilities irrelevant to the task. Use
+   default:disabled plus enabled IDs only when a complete allowlist is requested;
+   keep baseline-enabled capabilities needed for basic chat operation. Never
+   treat absence of a built-in tool from inventory as permission to remove it.
+   Omit default for a narrower delta.
    Do not reset inherited policy unless asked to restore the native baseline.
    Use `profile save NAME --file FILE`; task profiles belong in user registry,
    workspace profiles use `--project ROOT`. Do not replace a shared definition to
@@ -48,7 +56,11 @@ Use CQ's CLI; make task-specific choices without another MCP or model service.
    intended restriction. Bindings request application automatically. For reuse
    outside a workspace, export/import definitions; copy stable IDs, not private
    chat bindings or receipts. Follow actual CLI help for flags.
-8. Re-read explain before reporting. Distinguish saved/requested/pending/partial
+8. Re-read explain before reporting. After confirmed application, check that
+   native web search and other basic tools needed for the task remain available.
+   If a basic tool disappears, unbind the new chat profile, verify restoration,
+   and report the failed application rather than leaving the chat impaired.
+   Distinguish saved/requested/pending/partial
    from confirmed application. State retained/removed capabilities and scope
    briefly. Read `application_status.mode` from the current receipt: `full`
    covers plugins, standalone MCP servers and local skills; `plugins` covers
