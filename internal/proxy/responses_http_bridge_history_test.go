@@ -154,6 +154,27 @@ func TestResponsesHTTPBridgeCountsEncodedInputBytes(t *testing.T) {
 	}
 }
 
+func TestResponsesHTTPBridgeDoesNotSplitParallelToolCalls(t *testing.T) {
+	input := []json.RawMessage{
+		json.RawMessage(`{"type":"message","role":"developer","content":"Keep instructions."}`),
+		json.RawMessage(`{"type":"message","role":"user","content":"` + strings.Repeat("old", 1000) + `"}`),
+		json.RawMessage(`{"type":"message","role":"user","content":"` + strings.Repeat("latest", 200) + `"}`),
+		json.RawMessage(`{"type":"function_call","call_id":"a","name":"lookup","arguments":"{}"}`),
+		json.RawMessage(`{"type":"custom_tool_call","call_id":"b","name":"lookup","input":"query"}`),
+		json.RawMessage(`{"type":"function_call_output","call_id":"a","output":"done"}`),
+		json.RawMessage(`{"type":"message","role":"user","content":"steer"}`),
+		json.RawMessage(`{"type":"custom_tool_call_output","call_id":"b","output":"done"}`),
+	}
+	if bounded, changed := boundResponsesBridgeInput(input, 1, 400); changed || len(bounded) != len(input) {
+		t.Fatalf("split an indivisible tool sequence: changed=%t items=%d", changed, len(bounded))
+	}
+	bounded, changed := boundResponsesBridgeInput(input, 1, 2300)
+	if !changed || len(bounded) != 8 || !strings.Contains(string(bounded[2]), "latest") ||
+		!strings.Contains(string(bounded[7]), `"call_id":"b"`) {
+		t.Fatalf("lost complete tool sequence: changed=%t items=%d", changed, len(bounded))
+	}
+}
+
 func TestResponsesHTTPBridgeBoundsContinuationBeforeBodyLimit(t *testing.T) {
 	state := responsesHTTPBridgeState{
 		previousID: "previous",

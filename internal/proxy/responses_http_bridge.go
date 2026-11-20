@@ -205,6 +205,31 @@ func boundResponsesBridgeInput(input []json.RawMessage, currentItems, maxBytes i
 	if currentItems < 0 || currentItems > len(input) {
 		return input, false
 	}
+	// A cut cannot leave a tool result without its earlier call.
+	safeCut := make([]bool, len(input))
+	pendingCalls := make(map[string]int)
+	for index := len(input) - 1; index >= 0; index-- {
+		var call struct {
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+		}
+		if json.Unmarshal(input[index], &call) != nil {
+			return input, false
+		}
+		if call.CallID != "" {
+			switch call.Type {
+			case "function_call_output", "custom_tool_call_output", "computer_call_output":
+				pendingCalls[call.CallID]++
+			case "function_call", "custom_tool_call", "computer_call":
+				if pendingCalls[call.CallID] > 1 {
+					pendingCalls[call.CallID]--
+				} else {
+					delete(pendingCalls, call.CallID)
+				}
+			}
+		}
+		safeCut[index] = len(pendingCalls) == 0
+	}
 	var preamble []json.RawMessage
 	if responsesBridgeMessageRole(input[0]) == "developer" {
 		preamble = input[:1]
@@ -226,7 +251,7 @@ func boundResponsesBridgeInput(input []json.RawMessage, currentItems, maxBytes i
 		}
 		if index <= currentStart {
 			role := responsesBridgeMessageRole(input[index])
-			if role == "user" || role == "developer" {
+			if safeCut[index] && (role == "user" || role == "developer") {
 				start = index
 			}
 		}
@@ -238,7 +263,7 @@ func boundResponsesBridgeInput(input []json.RawMessage, currentItems, maxBytes i
 		if currentStart < len(input) {
 			role = responsesBridgeMessageRole(input[currentStart])
 		}
-		if currentStart == 0 || (role != "user" && role != "developer") {
+		if currentStart == 0 || !safeCut[currentStart] || (role != "user" && role != "developer") {
 			return input, false
 		}
 		start = currentStart
