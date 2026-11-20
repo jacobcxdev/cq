@@ -62,6 +62,7 @@ func (s *Server) serveResponsesHTTPWebSocket(ctx context.Context, downstream *we
 		err := state.serveFrame(serveCtx, downstream, header, kind, first, bridge)
 		releaseTurn()
 		if err != nil {
+			_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "subscription stream failed"), time.Now().Add(time.Second))
 			return err
 		}
 		kind, first, err = reader.read(ctx, serveCtx, nil, upgrade)

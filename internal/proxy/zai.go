@@ -95,6 +95,12 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 		return true, model
 	}
 	if compact {
+		if accounts, err := s.zaiAccounts(); err == nil && s.zaiAccountsKnownUnavailable(accounts) {
+			if selected, ok := s.selectSharedBudgetFallback(r.Context(), decodedBody); ok {
+				s.serveSelectedSharedBudgetHTTP(w, r, decodedBody, selected)
+				return true, model
+			}
+		}
 		fmt.Fprintf(os.Stderr, "cq: route POST %s model=%q provider=zai (native compaction)\n", r.URL.Path, model)
 		s.handleZAICompaction(w, r, decodedBody)
 		return true, model
@@ -125,6 +131,12 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 		}
 		writeError(w, http.StatusServiceUnavailable, "api_error", "Z.ai API key unavailable")
 		return true, model
+	}
+	if s.zaiAccountsKnownUnavailable(accounts) {
+		if selected, ok := s.selectSharedBudgetFallback(r.Context(), originalBody); ok {
+			s.serveSelectedSharedBudgetHTTP(w, r, originalBody, selected)
+			return true, model
+		}
 	}
 	upstream, err := s.zaiResponsesURL()
 	if err != nil {
