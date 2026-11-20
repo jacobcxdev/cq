@@ -653,6 +653,51 @@ func TestOpenCodeGoWebSocketFallbackKeepsContinuationOnGo(t *testing.T) {
 	}
 }
 
+func TestOpenCodeGoWebSocketFallbackBoundsZAIReplay(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer primary.Close()
+	var goCalls atomic.Int32
+	s := &Server{
+		Config: &Config{ClaudeUpstream: primary.URL}, Catalog: openCodeGoTestCatalog(),
+		ZAIUpstream: primary.URL, ZAIAPIKey: func() (string, error) { return "primary-key", nil },
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
+			var request struct{ Input []json.RawMessage }
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatal(err)
+			}
+			if len(request.Input) != 3 || !bytes.Contains(request.Input[1], []byte("omitted")) ||
+				!bytes.Contains(request.Input[2], []byte("current")) {
+				t.Errorf("Go received unbounded Z.ai replay: %d input items", len(request.Input))
+			}
+			call := goCalls.Add(1)
+			w := httptest.NewRecorder()
+			writeZAITestSSE(w, fmt.Sprintf("go-%d", call), nil)
+			return w.Result(), nil
+		}),
+	}
+	frame, err := json.Marshal(map[string]any{
+		"type": "response.create", "model": "glm-5.3",
+		"input": []any{
+			map[string]any{"type": "message", "role": "developer", "content": "Keep instructions."},
+			map[string]any{"type": "message", "role": "user", "content": strings.Repeat("old", 450_000)},
+			map[string]any{"type": "message", "role": "assistant", "content": "old answer"},
+			map[string]any{"type": "message", "role": "user", "content": "current"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := openZAITestWebSocket(t, s, nil)
+	if err := conn.WriteMessage(websocket.TextMessage, frame); err != nil {
+		t.Fatal(err)
+	}
+	if got := readZAITestCompletion(t, conn).Response.ID; got != "go-1" || goCalls.Load() != 1 {
+		t.Fatalf("response %q, Go calls %d", got, goCalls.Load())
+	}
+}
+
 func TestOpenCodeGoWebSocketFailoverKeepsAccount(t *testing.T) {
 	for _, tc := range []struct {
 		name          string

@@ -694,12 +694,15 @@ func (s *Server) withSharedBudgetWebSocketFallback(primary func(context.Context,
 	var primarySelected bool
 	var fallback responsesHTTPBridge
 	var fallbackModel string
+	streamFallback := func(ctx context.Context, downstream *websocket.Conn, header http.Header, body []byte) (string, []json.RawMessage, error) {
+		return fallback.Stream(ctx, downstream, header, boundedSharedBudgetFallbackBody(body, fallback.MaxInputBytes))
+	}
 	return func(ctx context.Context, downstream *websocket.Conn, header http.Header, body []byte) (string, []json.RawMessage, error) {
 		if fallback.Stream != nil {
 			if !strings.EqualFold(ParseModel(extractModel(body)), ParseModel(fallbackModel)) {
 				return "", nil, errors.New("subscription model changed; reconnect with full input")
 			}
-			return fallback.Stream(ctx, downstream, header, body)
+			return streamFallback(ctx, downstream, header, body)
 		}
 		if primarySelected {
 			ctx = context.WithValue(ctx, sharedBudgetFallbackDisabled{}, true)
@@ -717,7 +720,7 @@ func (s *Server) withSharedBudgetWebSocketFallback(primary func(context.Context,
 				}
 				fallbackModel = model
 				fallback = s.sharedBudgetBridge(selected, header)
-				return fallback.Stream(ctx, downstream, header, body)
+				return streamFallback(ctx, downstream, header, body)
 			}
 		}
 		id, output, err := primary(ctx, downstream, header, body)
@@ -732,11 +735,42 @@ func (s *Server) withSharedBudgetWebSocketFallback(primary func(context.Context,
 				return "", nil, errors.New("subscription credential unavailable")
 			}
 			fallback = s.sharedBudgetBridge(selected, header)
-			return fallback.Stream(ctx, downstream, header, body)
+			return streamFallback(ctx, downstream, header, body)
 		}
 		primarySelected = err == nil
 		return id, output, err
 	}
+}
+
+func boundedSharedBudgetFallbackBody(body []byte, maxInputBytes int) []byte {
+	if maxInputBytes <= 0 {
+		return body
+	}
+	var request map[string]json.RawMessage
+	if json.Unmarshal(body, &request) != nil {
+		return body
+	}
+	input, err := responsesBridgeInput(request["input"], "subscription")
+	if err != nil {
+		return body
+	}
+	currentItems := len(input)
+	for index := len(input) - 1; index >= 0; index-- {
+		if responsesBridgeMessageRole(input[index]) == "user" {
+			currentItems = len(input) - index
+			break
+		}
+	}
+	bounded, changed := boundResponsesBridgeInput(input, currentItems, maxInputBytes)
+	if !changed {
+		return body
+	}
+	request["input"], _ = json.Marshal(bounded)
+	encoded, err := json.Marshal(request)
+	if err != nil {
+		return body
+	}
+	return encoded
 }
 
 func decodeSharedBudgetFallbackRequest(encoded []byte, header http.Header) []byte {
