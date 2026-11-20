@@ -80,12 +80,21 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 		}
 		model.Sections = append(model.Sections, section)
 	}
-	for i, subscription := range report.SharedBudgetSubscriptions {
-		if i == 0 || report.SharedBudgetSubscriptions[i-1].ProviderID != subscription.ProviderID {
+	subscriptions := report.SharedBudgetSubscriptions
+	lastAccount := make(map[string]int)
+	for i, subscription := range subscriptions {
+		lastAccount[subscription.ProviderID] = i
+	}
+	for i, subscription := range subscriptions {
+		if i == 0 || subscriptions[i-1].ProviderID != subscription.ProviderID {
 			providerFirstIdx = append(providerFirstIdx, len(model.Sections))
 		}
 		header, rows := buildSharedBudgetBlock(subscription, nowEpoch)
-		model.Sections = append(model.Sections, TTYSection{Header: header, WindowRows: rows})
+		section := TTYSection{Header: header, WindowRows: rows}
+		if summary, ok := report.SharedBudgetAggregates[subscription.ProviderID]; ok && lastAccount[subscription.ProviderID] == i {
+			section.AggHeader, section.AggRows = buildSharedBudgetAggregate(subscription, summary)
+		}
+		model.Sections = append(model.Sections, section)
 	}
 
 	// Measure actual max width across all rendered content.
@@ -273,16 +282,9 @@ func buildSharedBudgetBlock(subscription quota.SharedBudgetReport, nowEpoch int6
 	for _, window := range subscription.Windows {
 		pct := int(math.Round(window.RemainingPct))
 		minPct = min(minPct, pct)
-		percentage := fmt.Sprintf("%d%%", pct)
-		if window.RemainingPct > 0 && window.RemainingPct < 1 {
-			percentage = "<1%"
-		}
-		rows = append(rows, TTYWindowRow{
-			Label: windowLabel(window.Name),
-			Bar:   renderBar(pct, lipgloss.Style{}, -1),
-			Pct:   windowPercentage(pctStyle(pct), percentage),
-			Reset: windowReset(resetStyle(pct, window.ResetAtUnix, nowEpoch, 0), window.ResetAtUnix, nowEpoch),
-		})
+		row := buildSharedBudgetAllowanceRow(window.Name, window.RemainingPct)
+		row.Reset = windowReset(resetStyle(pct, window.ResetAtUnix, nowEpoch, 0), window.ResetAtUnix, nowEpoch)
+		rows = append(rows, row)
 	}
 	iconStyle := pctStyle(minPct)
 	if len(rows) == 0 {
@@ -293,6 +295,36 @@ func buildSharedBudgetBlock(subscription quota.SharedBudgetReport, nowEpoch int6
 		header += " " + brightBlackStyle.Render("\u00b7") + " " + dimStyle.Render("Allowance unavailable")
 	}
 	return header, rows
+}
+
+func buildSharedBudgetAllowanceRow(name string, remaining float64) TTYWindowRow {
+	pct := int(math.Round(remaining))
+	percentage := fmt.Sprintf("%d%%", pct)
+	if remaining > 0 && remaining < 1 {
+		percentage = "<1%"
+	}
+	return TTYWindowRow{
+		Label: windowLabel(name),
+		Bar:   renderBar(pct, lipgloss.Style{}, -1),
+		Pct:   windowPercentage(pctStyle(pct), percentage),
+	}
+}
+
+func buildSharedBudgetAggregate(subscription quota.SharedBudgetReport, summary app.SharedBudgetAggregateReport) (string, []TTYWindowRow) {
+	minPct := 100
+	rows := make([]TTYWindowRow, 0, len(summary.Windows))
+	for _, window := range summary.Windows {
+		minPct = min(minPct, int(math.Round(window.MeanRemainingPct)))
+		row := buildSharedBudgetAllowanceRow(string(window.Name), window.MeanRemainingPct)
+		detail := fmt.Sprintf("%d/%d non-zero", window.NonZeroAccounts, window.ReportedAccounts)
+		if window.ReportedAccounts < summary.AccountCount {
+			detail += fmt.Sprintf(" · %d/%d reported", window.ReportedAccounts, summary.AccountCount)
+		}
+		row.Detail = dimStyle.Render(detail)
+		rows = append(rows, row)
+	}
+	label := fmt.Sprintf("%d accounts · mean allowance", summary.AccountCount)
+	return ttyAccountHeader(pctStyle(minPct).Render(subscription.Icon), "", subscription.ProviderName, label, ""), rows
 }
 
 func windowLabel(name string) string {
@@ -504,12 +536,13 @@ func measuredSepWidth(model TTYModel) int {
 // rowVisibleWidth returns the visible character width of a rendered window row.
 // Mirrors the concatenation in writeWindowRow.
 func rowVisibleWidth(row TTYWindowRow) int {
-	if row.Bar == "" && row.Pct == "" && row.Reset == "" && row.PaceDiff == "" && row.Burndown == "" {
+	detail := row.resetOrDetail()
+	if row.Bar == "" && row.Pct == "" && detail == "" && row.PaceDiff == "" && row.Burndown == "" {
 		return visibleWidth(row.Label)
 	}
 	width := visibleWidth(row.Label) + visibleWidth(row.Bar) +
 		2 + visibleWidth(row.Pct) +
-		2 + visibleWidth(row.Reset)
+		2 + visibleWidth(detail)
 	if row.PaceDiff != "" || row.Burndown != "" {
 		width += 2 + visibleWidth(row.PaceDiff) + 2 + visibleWidth(row.Burndown)
 	}
