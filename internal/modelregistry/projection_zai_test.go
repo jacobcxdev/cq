@@ -36,6 +36,10 @@ func TestZAIProjectionCompactionLimit(t *testing.T) {
 			}
 			delete(before, "auto_compact_token_limit")
 			delete(after, "auto_compact_token_limit")
+			if string(after["web_search_provider"]) != `"search_mcp"` {
+				t.Fatal("Z.ai projection did not select Codex Search MCP")
+			}
+			delete(after, "web_search_provider")
 			if !reflect.DeepEqual(before, after) || string(entry.Raw) != string(raw) {
 				t.Fatal("compaction policy changed provider metadata")
 			}
@@ -66,7 +70,13 @@ func TestZAIProjectionPreservesOtherModelsAndInvalidWindows(t *testing.T) {
 			t.Fatal(err)
 		}
 		response := CodexModelsResponse(Snapshot{Entries: []Entry{{Provider: ProviderZAI, ID: identity.Slug, Raw: json.RawMessage(raw)}}})
-		if string(response.Models[0]) != raw {
+		var before, after map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(raw), &before)
+		if err := json.Unmarshal(response.Models[0], &after); err != nil || string(after["web_search_provider"]) != `"search_mcp"` {
+			t.Fatalf("Z.ai projection did not select Codex Search MCP: %s", response.Models[0])
+		}
+		delete(after, "web_search_provider")
+		if !reflect.DeepEqual(before, after) {
 			t.Fatalf("unrelated or unusable model metadata changed: %s", response.Models[0])
 		}
 	}

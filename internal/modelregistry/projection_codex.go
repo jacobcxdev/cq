@@ -32,7 +32,8 @@ const codexFallbackTruncationBytesLimit = 10000
 // CodexModelsResponse builds the models response payload from the snapshot.
 // Includes first-party and shared-budget Responses models.
 //
-// Native fields are preserved, with a model-specific compaction cap for GLM-5.3.
+// Native fields are preserved, with a model-specific compaction cap for GLM-5.3
+// and Codex Search MCP selection for third-party inference.
 //
 // For overlay/non-native entries:
 //   - If CloneFrom refers to a native entry with raw JSON, the raw bytes are
@@ -121,6 +122,22 @@ func codexProjectionEntry(e Entry, sharedModels map[string][]Entry) Entry {
 
 // codexEntryRaw returns the JSON bytes for a single Codex entry.
 func codexEntryRaw(e Entry, rawByID map[string]json.RawMessage) json.RawMessage {
+	raw := codexEntryMetadata(e, rawByID)
+	if e.Provider == ProviderCodex && e.SharedBudget == nil {
+		return raw
+	}
+	// Let Codex execute search through its own connector. The inference
+	// endpoint receives an ordinary function call and its result.
+	var record map[string]json.RawMessage
+	if json.Unmarshal(raw, &record) != nil || record == nil {
+		return raw
+	}
+	record["web_search_provider"] = json.RawMessage(`"search_mcp"`)
+	body, _ := json.Marshal(record)
+	return body
+}
+
+func codexEntryMetadata(e Entry, rawByID map[string]json.RawMessage) json.RawMessage {
 	if e.SharedBudget != nil {
 		return sharedBudgetCodexEntryRaw(e)
 	}

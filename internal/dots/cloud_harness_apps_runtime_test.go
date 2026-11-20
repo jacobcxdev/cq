@@ -21,7 +21,14 @@ func TestCloudHarnessRetainedOrUnknownAppRuntimeWasPartial(t *testing.T) {
 			f.deps.harnessReceipts = store
 			f.start()
 			f.initialize()
-			id := f.startThread("gpt-5.5", "/project")
+			started := f.request(2, "thread/start", map[string]any{
+				"model": "gpt-5.5", "cwd": "/project",
+				"config": map[string]any{"apps." + cloudHarnessSearchApp + ".enabled": false},
+			})
+			id := cloudThreadID(started["result"])
+			if id == "" {
+				t.Fatal("missing original chat")
+			}
 			f.completeStoredTurn(id)
 			f.mu.Lock()
 			f.onRequest = func(request cloudMessage) (any, error, bool) {

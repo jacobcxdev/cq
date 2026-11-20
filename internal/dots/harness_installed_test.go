@@ -295,13 +295,15 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 `, upstream.URL, os.Args[0])
 	if selective {
 		configText += fmt.Sprintf(`
+[apps.%s]
+enabled = false
 [mcp_servers.design]
 command = %q
 args = ["-test.run=^TestHarnessInstalledMCPHelper$"]
 startup_timeout_sec = 5
 [mcp_servers.design.env]
 CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
-`, os.Args[0])
+`, cloudHarnessSearchApp, os.Args[0])
 	}
 	if goalProbe {
 		configText = strings.Replace(configText, "[features]\n", "[features]\ngoals = true\n", 1)
@@ -843,8 +845,8 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			t.Fatal("late dependency selection did not attach the selected skill")
 		}
 		lateReceipt, err := receipts.Load(outsideGLM)
-		// Reset also disables unowned Apps, so its feature transition independently
-		// witnesses the configuration rebuild which attached this skill.
+		// Search is disabled by the native baseline in this fixture. Reset disables
+		// the other unowned Apps, and the feature transition witnesses the rebuild.
 		assertAppsGate(outsideGLM, false)
 		if err != nil || lateReceipt.State != "applied" || len(lateReceipt.Issues) != 0 || len(lateReceipt.Unsupported) != 0 {
 			t.Fatalf("Apps transition did not attest the late skill configuration: %#v, %v", lateReceipt, err)
@@ -1395,7 +1397,7 @@ func (r *harnessInstalledRPC) call(method string, params any) json.RawMessage {
 			continue
 		}
 		if len(message.Error) != 0 && string(message.Error) != "null" {
-			r.t.Fatalf("installed app-server rejected %s", method)
+			r.t.Fatalf("installed app-server rejected %s: %s", method, message.Error)
 		}
 		return message.Result
 	}

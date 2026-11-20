@@ -61,8 +61,9 @@ func TestOpenCodeGoRegistryPrefersFirstParty(t *testing.T) {
 	}
 	var picker struct {
 		Models []struct {
-			Slug          string `json:"slug"`
-			ContextWindow int    `json:"context_window"`
+			Slug              string `json:"slug"`
+			ContextWindow     int    `json:"context_window"`
+			WebSearchProvider string `json:"web_search_provider"`
 		} `json:"models"`
 	}
 	if err := json.Unmarshal(body, &picker); err != nil {
@@ -70,6 +71,11 @@ func TestOpenCodeGoRegistryPrefersFirstParty(t *testing.T) {
 	}
 	if len(picker.Models) != 2 || picker.Models[1].Slug != "kimi-k3" || picker.Models[1].ContextWindow != 1048576 {
 		t.Fatalf("picker = %+v", picker)
+	}
+	for _, model := range picker.Models {
+		if model.WebSearchProvider != "search_mcp" {
+			t.Errorf("%s did not select Codex Search MCP", model.Slug)
+		}
 	}
 	key = ""
 	if _, err := refresher.Refresh(context.Background()); err != nil {

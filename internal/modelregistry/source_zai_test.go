@@ -53,8 +53,9 @@ func TestZAISourcePreservesNativeCodexMetadata(t *testing.T) {
 	_ = json.Unmarshal([]byte(raw), &want)
 	_ = json.Unmarshal(projected.Models[0], &got)
 	want["auto_compact_token_limit"] = json.RawMessage("697302")
+	want["web_search_provider"] = json.RawMessage(`"search_mcp"`)
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("projection changed fields beyond compaction policy: %s", projected.Models[0])
+		t.Fatalf("projection changed fields beyond compaction and search policy: %s", projected.Models[0])
 	}
 
 	fsys := fsutil.NewMemFS()

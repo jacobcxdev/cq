@@ -31,6 +31,7 @@ sed -n '/^TestHarnessInstalled/{ /MCPHelper/d; p; }' "$root/tests" >"$root/requi
 for required in \
   TestHarnessInstalledGatewayReload \
   TestHarnessInstalledChatCapabilityIsolation \
+  TestHarnessInstalledCuratedWebSearch \
   TestHarnessInstalledGoalContinuationHold \
   TestHarnessInstalledGoalUserMutations \
   TestHarnessInstalledInactiveMCPOverrides \
