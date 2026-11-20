@@ -143,14 +143,14 @@ func TestRunnerReportsSharedBudgetAggregatesByDefault(t *testing.T) {
 	runner := Runner{
 		Clock: fixedClock(time.Unix(1000, 0)),
 		SharedBudgets: []SharedBudgetCheck{
-			check("first", quota.SharedBudgetWindow{Name: "1mo", RemainingPct: 85},
+			check("first", quota.SharedBudgetWindow{Name: "1mo", RemainingPct: 85, ResetAtUnix: 1400},
 				quota.SharedBudgetWindow{Name: "7d", RemainingPct: 60},
-				quota.SharedBudgetWindow{Name: "5h", RemainingPct: 0},
-				quota.SharedBudgetWindow{Name: "5h", RemainingPct: 80}),
-			check("second", quota.SharedBudgetWindow{Name: "5h", RemainingPct: 95}),
-			check("first", quota.SharedBudgetWindow{Name: "5h", RemainingPct: 0.5},
+				quota.SharedBudgetWindow{Name: "5h", RemainingPct: 0, ResetAtUnix: 4000},
+				quota.SharedBudgetWindow{Name: "5h", RemainingPct: 80, ResetAtUnix: 1001}),
+			check("second", quota.SharedBudgetWindow{Name: "5h", RemainingPct: 95, ResetAtUnix: 999}),
+			check("first", quota.SharedBudgetWindow{Name: "5h", RemainingPct: 0.5, ResetAtUnix: 2000},
 				quota.SharedBudgetWindow{Name: "7d", RemainingPct: 101},
-				quota.SharedBudgetWindow{Name: "1mo", RemainingPct: 95}),
+				quota.SharedBudgetWindow{Name: "1mo", RemainingPct: 95, ResetAtUnix: 1000}),
 			check("second", quota.SharedBudgetWindow{Name: "5h", RemainingPct: 45}),
 			check("first"),
 			check("single", quota.SharedBudgetWindow{Name: "5h", RemainingPct: 100}),
@@ -169,6 +169,7 @@ func TestRunnerReportsSharedBudgetAggregatesByDefault(t *testing.T) {
 		MeanRemaining float64 `json:"mean_remaining_pct"`
 		Reported      int     `json:"reported_accounts"`
 		NonZero       int     `json:"non_zero_accounts"`
+		NextReset     int64   `json:"next_reset_at_unix"`
 	}
 	var decoded struct {
 		Subscriptions []quota.SharedBudgetReport `json:"shared_budget_subscriptions"`
@@ -184,10 +185,10 @@ func TestRunnerReportsSharedBudgetAggregatesByDefault(t *testing.T) {
 		t.Fatalf("unexpected shared-budget reports: %s", data)
 	}
 	first, second := decoded.Aggregates["first"], decoded.Aggregates["second"]
-	if first.AccountCount != 3 || !slices.Equal(first.Windows, []window{{"5h", 0.25, 2, 1}, {"1mo", 90, 2, 2}}) {
+	if first.AccountCount != 3 || !slices.Equal(first.Windows, []window{{"5h", 0.25, 2, 1, 2000}, {"1mo", 90, 2, 2, 1400}}) {
 		t.Errorf("first aggregate = %+v", first)
 	}
-	if second.AccountCount != 2 || !slices.Equal(second.Windows, []window{{"5h", 70, 2, 2}}) {
+	if second.AccountCount != 2 || !slices.Equal(second.Windows, []window{{"5h", 70, 2, 2, 0}}) {
 		t.Errorf("second aggregate = %+v", second)
 	}
 }

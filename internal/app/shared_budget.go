@@ -14,9 +14,10 @@ type SharedBudgetAggregateWindow struct {
 	MeanRemainingPct float64          `json:"mean_remaining_pct"`
 	ReportedAccounts int              `json:"reported_accounts"`
 	NonZeroAccounts  int              `json:"non_zero_accounts"`
+	NextResetAtUnix  int64            `json:"next_reset_at_unix,omitempty"`
 }
 
-func aggregateSharedBudgets(subscriptions []quota.SharedBudgetReport) map[string]SharedBudgetAggregateReport {
+func aggregateSharedBudgets(subscriptions []quota.SharedBudgetReport, nowEpoch int64) map[string]SharedBudgetAggregateReport {
 	byProvider := make(map[string][]quota.SharedBudgetReport)
 	for _, subscription := range subscriptions {
 		byProvider[subscription.ProviderID] = append(byProvider[subscription.ProviderID], subscription)
@@ -26,7 +27,7 @@ func aggregateSharedBudgets(subscriptions []quota.SharedBudgetReport) map[string
 		if len(accounts) < 2 {
 			continue
 		}
-		windows := aggregateSharedBudgetWindows(accounts)
+		windows := aggregateSharedBudgetWindows(accounts, nowEpoch)
 		if len(windows) == 0 {
 			continue
 		}
@@ -35,11 +36,12 @@ func aggregateSharedBudgets(subscriptions []quota.SharedBudgetReport) map[string
 	return reports
 }
 
-func aggregateSharedBudgetWindows(accounts []quota.SharedBudgetReport) []SharedBudgetAggregateWindow {
+func aggregateSharedBudgetWindows(accounts []quota.SharedBudgetReport, nowEpoch int64) []SharedBudgetAggregateWindow {
 	type allowance struct {
-		sum      float64
-		reported int
-		nonZero  int
+		sum         float64
+		reported    int
+		nonZero     int
+		nextResetAt int64
 	}
 	totals := make(map[quota.WindowName]allowance)
 	var names []quota.WindowName
@@ -61,6 +63,9 @@ func aggregateSharedBudgetWindows(accounts []quota.SharedBudgetReport) []SharedB
 			if remaining > 0 {
 				total.nonZero++
 			}
+			if reset := window.ResetAtUnix; reset > max(nowEpoch, 0) && (total.nextResetAt == 0 || reset < total.nextResetAt) {
+				total.nextResetAt = reset
+			}
 			totals[name] = total
 		}
 	}
@@ -73,6 +78,7 @@ func aggregateSharedBudgetWindows(accounts []quota.SharedBudgetReport) []SharedB
 				MeanRemainingPct: total.sum / float64(total.reported),
 				ReportedAccounts: total.reported,
 				NonZeroAccounts:  total.nonZero,
+				NextResetAtUnix:  total.nextResetAt,
 			})
 		}
 	}

@@ -95,8 +95,7 @@ func writeTTY(w io.Writer, model TTYModel) error {
 }
 
 func writeWindowRow(ew *errWriter, row TTYWindowRow) {
-	detail := row.resetOrDetail()
-	if row.Bar == "" && row.Pct == "" && detail == "" && row.PaceDiff == "" && row.Burndown == "" {
+	if row.Bar == "" && row.Pct == "" && row.Reset == "" && row.PaceDiff == "" && row.Burndown == "" {
 		ew.write("\n")
 		ew.write(row.Label)
 		ew.write("\n")
@@ -108,7 +107,7 @@ func writeWindowRow(ew *errWriter, row TTYWindowRow) {
 	ew.write("  ")
 	ew.write(row.Pct)
 	ew.write("  ")
-	ew.write(detail)
+	ew.write(row.Reset)
 	if row.PaceDiff != "" || row.Burndown != "" {
 		ew.write("  ")
 		ew.write(row.PaceDiff)

@@ -92,7 +92,7 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 		header, rows := buildSharedBudgetBlock(subscription, nowEpoch)
 		section := TTYSection{Header: header, WindowRows: rows}
 		if summary, ok := report.SharedBudgetAggregates[subscription.ProviderID]; ok && lastAccount[subscription.ProviderID] == i {
-			section.AggHeader, section.AggRows = buildSharedBudgetAggregate(subscription, summary)
+			section.AggHeader, section.AggRows = buildSharedBudgetAggregate(subscription, summary, nowEpoch)
 		}
 		model.Sections = append(model.Sections, section)
 	}
@@ -282,9 +282,7 @@ func buildSharedBudgetBlock(subscription quota.SharedBudgetReport, nowEpoch int6
 	for _, window := range subscription.Windows {
 		pct := int(math.Round(window.RemainingPct))
 		minPct = min(minPct, pct)
-		row := buildSharedBudgetAllowanceRow(window.Name, window.RemainingPct)
-		row.Reset = windowReset(resetStyle(pct, window.ResetAtUnix, nowEpoch, 0), window.ResetAtUnix, nowEpoch)
-		rows = append(rows, row)
+		rows = append(rows, buildSharedBudgetAllowanceRow(window.Name, window.RemainingPct, window.ResetAtUnix, nowEpoch))
 	}
 	iconStyle := pctStyle(minPct)
 	if len(rows) == 0 {
@@ -297,7 +295,7 @@ func buildSharedBudgetBlock(subscription quota.SharedBudgetReport, nowEpoch int6
 	return header, rows
 }
 
-func buildSharedBudgetAllowanceRow(name string, remaining float64) TTYWindowRow {
+func buildSharedBudgetAllowanceRow(name string, remaining float64, resetAt, nowEpoch int64) TTYWindowRow {
 	pct := int(math.Round(remaining))
 	percentage := fmt.Sprintf("%d%%", pct)
 	if remaining > 0 && remaining < 1 {
@@ -307,21 +305,16 @@ func buildSharedBudgetAllowanceRow(name string, remaining float64) TTYWindowRow 
 		Label: windowLabel(name),
 		Bar:   renderBar(pct, lipgloss.Style{}, -1),
 		Pct:   windowPercentage(pctStyle(pct), percentage),
+		Reset: windowReset(resetStyle(pct, resetAt, nowEpoch, 0), resetAt, nowEpoch),
 	}
 }
 
-func buildSharedBudgetAggregate(subscription quota.SharedBudgetReport, summary app.SharedBudgetAggregateReport) (string, []TTYWindowRow) {
+func buildSharedBudgetAggregate(subscription quota.SharedBudgetReport, summary app.SharedBudgetAggregateReport, nowEpoch int64) (string, []TTYWindowRow) {
 	minPct := 100
 	rows := make([]TTYWindowRow, 0, len(summary.Windows))
 	for _, window := range summary.Windows {
 		minPct = min(minPct, int(math.Round(window.MeanRemainingPct)))
-		row := buildSharedBudgetAllowanceRow(string(window.Name), window.MeanRemainingPct)
-		detail := fmt.Sprintf("%d/%d non-zero", window.NonZeroAccounts, window.ReportedAccounts)
-		if window.ReportedAccounts < summary.AccountCount {
-			detail += fmt.Sprintf(" · %d/%d reported", window.ReportedAccounts, summary.AccountCount)
-		}
-		row.Detail = dimStyle.Render(detail)
-		rows = append(rows, row)
+		rows = append(rows, buildSharedBudgetAllowanceRow(string(window.Name), window.MeanRemainingPct, window.NextResetAtUnix, nowEpoch))
 	}
 	label := fmt.Sprintf("%d accounts · mean allowance", summary.AccountCount)
 	return ttyAccountHeader(pctStyle(minPct).Render(subscription.Icon), "", subscription.ProviderName, label, ""), rows
@@ -536,13 +529,12 @@ func measuredSepWidth(model TTYModel) int {
 // rowVisibleWidth returns the visible character width of a rendered window row.
 // Mirrors the concatenation in writeWindowRow.
 func rowVisibleWidth(row TTYWindowRow) int {
-	detail := row.resetOrDetail()
-	if row.Bar == "" && row.Pct == "" && detail == "" && row.PaceDiff == "" && row.Burndown == "" {
+	if row.Bar == "" && row.Pct == "" && row.Reset == "" && row.PaceDiff == "" && row.Burndown == "" {
 		return visibleWidth(row.Label)
 	}
 	width := visibleWidth(row.Label) + visibleWidth(row.Bar) +
 		2 + visibleWidth(row.Pct) +
-		2 + visibleWidth(detail)
+		2 + visibleWidth(row.Reset)
 	if row.PaceDiff != "" || row.Burndown != "" {
 		width += 2 + visibleWidth(row.PaceDiff) + 2 + visibleWidth(row.Burndown)
 	}
