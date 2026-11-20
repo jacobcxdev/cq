@@ -188,9 +188,16 @@ func boundResponsesBridgeInput(input []json.RawMessage, currentItems, maxBytes i
 	if maxBytes <= 0 || len(input) == 0 {
 		return input, false
 	}
+	// RawMessage content can expand when json.Marshal escapes HTML characters.
+	encodedSizes := make([]int, len(input))
 	size := 2
-	for _, item := range input {
-		size += len(item) + 1
+	for index, item := range input {
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			return input, false
+		}
+		encodedSizes[index] = len(encoded) + 1
+		size += encodedSizes[index]
 	}
 	if size <= maxBytes {
 		return input, false
@@ -203,8 +210,8 @@ func boundResponsesBridgeInput(input []json.RawMessage, currentItems, maxBytes i
 		preamble = input[:1]
 	}
 	reserved := 2 + len(responsesHistoryOmittedMessage) + 1
-	for _, item := range preamble {
-		reserved += len(item) + 1
+	for index := range preamble {
+		reserved += encodedSizes[index]
 	}
 	currentStart := len(input) - currentItems
 	if currentItems == 0 {
@@ -213,7 +220,7 @@ func boundResponsesBridgeInput(input []json.RawMessage, currentItems, maxBytes i
 	suffixSize := 0
 	start := -1
 	for index := len(input) - 1; index >= 1; index-- {
-		suffixSize += len(input[index]) + 1
+		suffixSize += encodedSizes[index]
 		if reserved+suffixSize > maxBytes {
 			break
 		}

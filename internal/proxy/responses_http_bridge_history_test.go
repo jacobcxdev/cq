@@ -133,6 +133,27 @@ func TestResponsesHTTPBridgeBoundsRoleOnlyMessages(t *testing.T) {
 	}
 }
 
+func TestResponsesHTTPBridgeCountsEncodedInputBytes(t *testing.T) {
+	input := []json.RawMessage{
+		json.RawMessage(`{"role":"developer","content":"Keep instructions."}`),
+		json.RawMessage(`{"role":"user","content":"` + strings.Repeat("<", 100) + `"}`),
+		json.RawMessage(`{"role":"assistant","content":"old answer"}`),
+		json.RawMessage(`{"role":"user","content":"current"}`),
+	}
+	const limit = 350
+	bounded, changed := boundResponsesBridgeInput(input, 1, limit)
+	encoded, err := json.Marshal(bounded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed || len(encoded) > limit || len(bounded) != 3 ||
+		!strings.Contains(string(encoded), "Keep instructions.") ||
+		!strings.Contains(string(encoded), "omitted") ||
+		!strings.Contains(string(encoded), "current") {
+		t.Fatalf("encoded replay not bounded: changed=%t bytes=%d items=%d", changed, len(encoded), len(bounded))
+	}
+}
+
 func TestResponsesHTTPBridgeBoundsContinuationBeforeBodyLimit(t *testing.T) {
 	state := responsesHTTPBridgeState{
 		previousID: "previous",
