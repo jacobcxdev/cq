@@ -31,6 +31,14 @@ type TTYWindowRow struct {
 	Bar      string // 20-char bar with pace marker
 	Pct      string // "󰪟  42%"
 	Reset    string // "󰦖 4h 30m"
+	Detail   string // allowance summary text in the reset column
 	PaceDiff string // "󰓅   +3"
 	Burndown string // "󰅒 6h 12m"
+}
+
+func (row TTYWindowRow) resetOrDetail() string {
+	if row.Detail != "" {
+		return row.Detail
+	}
+	return row.Reset
 }

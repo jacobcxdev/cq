@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -128,6 +130,65 @@ func TestRunnerRun(t *testing.T) {
 	}
 	if cr.report.Providers[0].ID != provider.Codex {
 		t.Errorf("provider ID = %q, want %q", cr.report.Providers[0].ID, provider.Codex)
+	}
+}
+
+func TestRunnerReportsSharedBudgetAggregatesByDefault(t *testing.T) {
+	check := func(providerID string, windows ...quota.SharedBudgetWindow) SharedBudgetCheck {
+		return SharedBudgetCheck{
+			Report: quota.SharedBudgetReport{ProviderID: providerID},
+			Fetch:  func(context.Context) []quota.SharedBudgetWindow { return windows },
+		}
+	}
+	runner := Runner{
+		Clock: fixedClock(time.Unix(1000, 0)),
+		SharedBudgets: []SharedBudgetCheck{
+			check("first", quota.SharedBudgetWindow{Name: "1mo", RemainingPct: 85},
+				quota.SharedBudgetWindow{Name: "7d", RemainingPct: 60},
+				quota.SharedBudgetWindow{Name: "5h", RemainingPct: 0},
+				quota.SharedBudgetWindow{Name: "5h", RemainingPct: 80}),
+			check("second", quota.SharedBudgetWindow{Name: "5h", RemainingPct: 95}),
+			check("first", quota.SharedBudgetWindow{Name: "5h", RemainingPct: 0.5},
+				quota.SharedBudgetWindow{Name: "7d", RemainingPct: 101},
+				quota.SharedBudgetWindow{Name: "1mo", RemainingPct: 95}),
+			check("second", quota.SharedBudgetWindow{Name: "5h", RemainingPct: 45}),
+			check("first"),
+			check("single", quota.SharedBudgetWindow{Name: "5h", RemainingPct: 100}),
+		},
+	}
+	report, err := runner.BuildReport(t.Context(), RunRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	type window struct {
+		Name          string  `json:"name"`
+		MeanRemaining float64 `json:"mean_remaining_pct"`
+		Reported      int     `json:"reported_accounts"`
+		NonZero       int     `json:"non_zero_accounts"`
+	}
+	var decoded struct {
+		Subscriptions []quota.SharedBudgetReport `json:"shared_budget_subscriptions"`
+		Aggregates    map[string]struct {
+			AccountCount int      `json:"account_count"`
+			Windows      []window `json:"windows"`
+		} `json:"shared_budget_aggregates"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Subscriptions) != 6 || len(decoded.Aggregates) != 2 {
+		t.Fatalf("unexpected shared-budget reports: %s", data)
+	}
+	first, second := decoded.Aggregates["first"], decoded.Aggregates["second"]
+	if first.AccountCount != 3 || !slices.Equal(first.Windows, []window{{"5h", 0.25, 2, 1}, {"1mo", 90, 2, 2}}) {
+		t.Errorf("first aggregate = %+v", first)
+	}
+	if second.AccountCount != 2 || !slices.Equal(second.Windows, []window{{"5h", 70, 2, 2}}) {
+		t.Errorf("second aggregate = %+v", second)
 	}
 }
 

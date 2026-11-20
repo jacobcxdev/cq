@@ -93,9 +93,74 @@ func TestSharedBudgetTTYMultipleAccounts(t *testing.T) {
 		{ProviderID: "opencode-go", ProviderName: "OpenCode", Plan: "Go", Icon: "\U000F0C15", Email: "second@example.test"},
 	}}, time.Unix(1000, 0))
 	if len(model.Sections) != 2 || model.Sections[0].Separator == "" || model.Sections[1].Separator != "" ||
+		model.Sections[1].AggHeader != "" ||
 		!strings.Contains(stripANSI(model.Sections[0].Header), "first@example.test") ||
 		!strings.Contains(stripANSI(model.Sections[1].Header), "second@example.test") {
 		t.Fatalf("multi-account OpenCode layout = %+v", model.Sections)
+	}
+}
+
+func TestSharedBudgetTTYDisplaysAllowanceAggregate(t *testing.T) {
+	account := func(windows ...quota.SharedBudgetWindow) quota.SharedBudgetReport {
+		return quota.SharedBudgetReport{
+			ProviderID: "opencode-go", ProviderName: "OpenCode", Plan: "Go",
+			Icon: "\U000F0C15", Windows: windows,
+		}
+	}
+	model := BuildTTYModel(app.Report{
+		SharedBudgetSubscriptions: []quota.SharedBudgetReport{
+			account(quota.SharedBudgetWindow{Name: "5h", RemainingPct: 100, ResetAtUnix: 1300}),
+			account(), account(), account(),
+			{ProviderID: "another", ProviderName: "Another"},
+		},
+		SharedBudgetAggregates: map[string]app.SharedBudgetAggregateReport{
+			"opencode-go": {
+				AccountCount: 4,
+				Windows: []app.SharedBudgetAggregateWindow{
+					{Name: "5h", MeanRemainingPct: 43.33, ReportedAccounts: 3, NonZeroAccounts: 2},
+					{Name: "7d", MeanRemainingPct: 0.25, ReportedAccounts: 2, NonZeroAccounts: 1},
+					{Name: "1mo", MeanRemainingPct: 50, ReportedAccounts: 4, NonZeroAccounts: 3},
+				},
+			},
+		},
+	}, time.Unix(1000, 0))
+
+	for _, i := range []int{0, 1, 2, 4} {
+		if model.Sections[i].AggHeader != "" {
+			t.Fatalf("unexpected aggregate on section %d", i)
+		}
+	}
+	summary := model.Sections[3]
+	if got := stripANSI(summary.AggHeader); got != "  󰰕        OpenCode 4 accounts · mean allowance" || summary.ThinSep == "" {
+		t.Fatalf("aggregate header = %q", got)
+	}
+
+	var terminal bytes.Buffer
+	if err := writeTTY(&terminal, model); err != nil {
+		t.Fatal(err)
+	}
+	wants := []struct{ name, pct, detail string }{
+		{"5h", "43%", "2/3 non-zero · 3/4 reported"},
+		{"7d", "<1%", "1/2 non-zero · 2/4 reported"},
+		{"1mo", "50%", "3/4 non-zero"},
+	}
+	if len(summary.AggRows) != len(wants) {
+		t.Fatalf("aggregate row count = %d, want %d", len(summary.AggRows), len(wants))
+	}
+	base := model.Sections[0].WindowRows[0]
+	for i, want := range wants {
+		row := summary.AggRows[i]
+		if strings.TrimSpace(stripANSI(row.Label)) != want.name || !strings.HasSuffix(stripANSI(row.Pct), want.pct) ||
+			row.Reset != "" || row.PaceDiff != "" || row.Burndown != "" || strings.Contains(row.Bar, "|") {
+			t.Errorf("unexpected aggregate row for %s: %#v", want.name, row)
+		}
+		if visibleWidth(row.Label+row.Bar+row.Pct) != visibleWidth(base.Label+base.Bar+base.Pct) {
+			t.Errorf("aggregate columns did not align for %s", want.name)
+		}
+		line := stripANSI(row.Label + row.Bar + "  " + row.Pct + "  " + want.detail)
+		if !strings.Contains(stripANSI(terminal.String()), line+"\n") || rowVisibleWidth(row) != visibleWidth(line) {
+			t.Errorf("aggregate row for %s did not render with measured coverage: %q", want.name, line)
+		}
 	}
 }
 

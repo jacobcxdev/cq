@@ -49,9 +49,10 @@ type RunRequest struct {
 }
 
 type Report struct {
-	GeneratedAt               time.Time                  `json:"generated_at"`
-	Providers                 []ProviderReport           `json:"providers"`
-	SharedBudgetSubscriptions []quota.SharedBudgetReport `json:"shared_budget_subscriptions,omitempty"`
+	GeneratedAt               time.Time                              `json:"generated_at"`
+	Providers                 []ProviderReport                       `json:"providers"`
+	SharedBudgetSubscriptions []quota.SharedBudgetReport             `json:"shared_budget_subscriptions,omitempty"`
+	SharedBudgetAggregates    map[string]SharedBudgetAggregateReport `json:"shared_budget_aggregates,omitempty"`
 }
 
 type ProviderReport struct {

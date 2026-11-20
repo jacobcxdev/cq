@@ -103,6 +103,7 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 	attachRecentBurnRates(fetched, estimates)
 	report := buildReport(now, req.Providers, fetched, burnRates)
 	report.SharedBudgetSubscriptions = sharedBudgets
+	report.SharedBudgetAggregates = aggregateSharedBudgets(sharedBudgets)
 	return report, nil
 }
 
