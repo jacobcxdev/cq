@@ -30,9 +30,10 @@ exact chat link or ID. Change project/global scope only when requested.
 
 Use stable inventory IDs and include dependencies. A plugin is a bundle with its
 declared `mcp_servers`. Standalone MCP rows are separate. Preserve CQ's curation
-entrypoint and native core tools such as web search, shell, file edits, user input
-and task control. Native tools sit outside the inventory. The Browser plugin
-controls the in-app browser.
+entrypoint and core tools such as web search, shell, file edits, user input and
+task control. Built-in tools and Codex's Search connector sit outside the profile
+inventory. CQ preserves Search when native app settings allow it, including with
+a complete allowlist. The Browser plugin controls the in-app browser.
 
 Save a definition with `cq codex harness profile save NAME --file FILE`. Example
 delta, using a placeholder ID:

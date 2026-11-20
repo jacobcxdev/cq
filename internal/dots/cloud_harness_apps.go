@@ -10,6 +10,9 @@ import (
 	"github.com/jacobcxdev/cq/internal/harness"
 )
 
+// Codex's Search MCP service is a core harness tool. It has no plugin owner.
+const cloudHarnessSearchApp = "connector_openai_search_service"
+
 // Apps use an independent native feature gate. Plugin exclusion alone does not
 // remove connected app tools. Keep ownership in the existing plugin selectors.
 func cloudHarnessCompileApps(effective harness.Effective, inventory harness.Inventory, selected harness.CapabilitySelection, baseline, config cloudMessage) {
@@ -36,6 +39,11 @@ func cloudHarnessCompileApps(effective harness.Effective, inventory harness.Inve
 			apps[id] = cloudHarnessRaw(cloudMessage{})
 		}
 	}
+	// Give baseline-enabled search an explicit entry before disabling the app
+	// default. Existing connector settings, including native denials, win.
+	if _, present := apps[cloudHarnessSearchApp]; !present && gate && defaultEnabled && !unowned {
+		apps[cloudHarnessSearchApp] = cloudHarnessRaw(cloudMessage{})
+	}
 	anyApp := false
 	for id, raw := range apps {
 		if id == "_default" {
@@ -43,7 +51,9 @@ func cloudHarnessCompileApps(effective harness.Effective, inventory harness.Inve
 		}
 		entry := cloudHarnessObject(raw)
 		allowed, owned := owners[id]
-		if !owned {
+		if id == cloudHarnessSearchApp {
+			allowed = true
+		} else if !owned {
 			allowed = unowned
 		}
 		wanted := gate && allowed && cloudHarnessBool(entry, "enabled", defaultEnabled)
@@ -80,6 +90,21 @@ func cloudHarnessMergeAppSettings(target, override cloudMessage) {
 			target[key] = cloudHarnessRaw(entry)
 		} else {
 			target[key] = bytes.Clone(raw)
+		}
+	}
+}
+
+// Native config/read serialises absent optional settings as null. Omit these
+// keys before replaying the tables as TOML configuration overrides.
+func cloudHarnessOmitAbsentAppSettings(settings cloudMessage) {
+	for key, raw := range settings {
+		raw = bytes.TrimSpace(raw)
+		if bytes.Equal(raw, []byte("null")) {
+			delete(settings, key)
+		} else if len(raw) > 0 && raw[0] == '{' {
+			child := cloudHarnessObject(raw)
+			cloudHarnessOmitAbsentAppSettings(child)
+			settings[key] = cloudHarnessRaw(child)
 		}
 	}
 }
@@ -145,6 +170,9 @@ func cloudHarnessBaselineApps(native, original, restore cloudMessage) error {
 	if len(raw) > 0 && (json.Unmarshal(raw, &apps) != nil || apps == nil) {
 		return errors.New("native app baseline is not a table")
 	}
+	if bytes.Equal(bytes.TrimSpace(apps["_default"]), []byte("null")) {
+		delete(apps, "_default")
+	}
 	if raw, present := original["apps"]; present {
 		var override cloudMessage
 		if json.Unmarshal(raw, &override) != nil || override == nil {
@@ -155,7 +183,7 @@ func cloudHarnessBaselineApps(native, original, restore cloudMessage) error {
 	merged := cloudHarnessClone(original)
 	merged["apps"] = cloudHarnessRaw(apps)
 	apps = cloudHarnessAppSettings(merged)
-	for _, raw := range apps {
+	for id, raw := range apps {
 		var entry cloudMessage
 		if json.Unmarshal(raw, &entry) != nil || entry == nil {
 			return errors.New("native app baseline entry is not a table")
@@ -166,6 +194,8 @@ func cloudHarnessBaselineApps(native, original, restore cloudMessage) error {
 				return errors.New("native app baseline setting is not boolean")
 			}
 		}
+		cloudHarnessOmitAbsentAppSettings(entry)
+		apps[id] = cloudHarnessRaw(entry)
 	}
 	restore["apps"] = cloudHarnessRaw(apps)
 	restore["features.apps"] = cloudHarnessRaw(gate)

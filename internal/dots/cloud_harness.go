@@ -579,7 +579,7 @@ func (h *cloudHarness) prepareFrom(source string, request cloudMessage, raw []by
 			}
 			pending.fullConfigCwd = cwd
 			updated := cloudHarnessClone(params)
-			updated["config"] = cloudHarnessRaw(cloudHarnessMinimalConfig(native, params["config"]))
+			updated["config"] = cloudHarnessRaw(cloudHarnessMinimalConfig(native, cloudHarnessRaw(pending.fullConfig)))
 			message := cloudHarnessClone(request)
 			message["params"] = cloudHarnessRaw(updated)
 			raw = append(cloudHarnessRaw(message), '\n')
@@ -1428,7 +1428,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 	if desiredPlan != nil {
 		desiredConfig = desiredPlan.config
 	} else if minimal {
-		desiredConfig = cloudHarnessMinimalConfig(native, snapshot.baseline["config"])
+		desiredConfig = cloudHarnessMinimalConfig(native, cloudHarnessRaw(snapshot.fullConfig))
 	}
 	// Read only changing MCPs through their selected thread connections. Broad
 	// discovery can start unrelated servers and does not attest this assembly.
@@ -1468,7 +1468,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 	if desiredPlan != nil {
 		params["config"] = cloudHarnessRaw(desiredPlan.config)
 	} else if minimal {
-		params["config"] = cloudHarnessRaw(cloudHarnessMinimalConfig(native, snapshot.baseline["config"]))
+		params["config"] = cloudHarnessRaw(desiredConfig)
 	}
 	attemptEpoch := snapshot.sourceEpoch
 	primary, restoreSubscriptions, err := h.suspendSubscriptions(id)

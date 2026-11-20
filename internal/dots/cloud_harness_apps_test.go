@@ -9,6 +9,53 @@ import (
 	"github.com/jacobcxdev/cq/internal/harness"
 )
 
+func TestCloudHarnessMinimalPreservesBaselineSearch(t *testing.T) {
+	const search = "connector_openai_search_service"
+	for _, test := range []struct {
+		name, native, override string
+		want                   bool
+	}{
+		{"implicit native enable", `{"features":{"apps":true}}`, `{}`, true},
+		{"explicit enable under disabled default", `{"apps":{"_default":{"enabled":false},"connector_openai_search_service":{"enabled":true}}}`, `{}`, true},
+		{"native connector disabled", `{"apps":{"connector_openai_search_service":{"enabled":false}}}`, `{}`, false},
+		{"native default absent with connector disabled", `{"apps":{"_default":null,"connector_openai_search_service":{"enabled":false,"default_tools_enabled":null}}}`, `{}`, false},
+		{"native app feature disabled", `{"features":{"apps":false}}`, `{}`, false},
+		{"native app default disabled", `{"apps":{"_default":{"enabled":false}}}`, `{}`, false},
+		{"thread connector disabled", `{}`, `{"apps.connector_openai_search_service.enabled":false}`, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			native := cloudMessage{"config": json.RawMessage(test.native)}
+			baseline := cloudHarnessClone(cloudHarnessObject(json.RawMessage(test.override)))
+			baseline["apps.other.enabled"] = json.RawMessage("true")
+			if err := cloudHarnessBaselineApps(native, baseline, baseline); err != nil {
+				t.Fatal(err)
+			}
+			original := cloudHarnessRaw(baseline)
+			effective := harness.Effective{Changes: harness.Changes{Default: harness.Disabled}}
+			plan := cloudHarnessCompileProfile(effective, harness.Inventory{}, baseline, nil)
+			for name, config := range map[string]cloudMessage{
+				"named profile":  plan.config,
+				"legacy minimal": cloudHarnessMinimalConfig(native, cloudHarnessRaw(baseline)),
+			} {
+				apps := cloudHarnessAppSettings(config)
+				if got := cloudHarnessBool(config, "features.apps", false); got != test.want {
+					t.Errorf("%s: app feature = %t, want %t", name, got, test.want)
+				}
+				defaultEnabled := cloudHarnessBool(cloudHarnessObject(apps["_default"]), "enabled", true)
+				if got := cloudHarnessBool(cloudHarnessObject(apps[search]), "enabled", defaultEnabled); got != test.want {
+					t.Errorf("%s: search = %t, want %t", name, got, test.want)
+				}
+				if defaultEnabled || cloudHarnessBool(cloudHarnessObject(apps["other"]), "enabled", defaultEnabled) {
+					t.Errorf("%s: minimal exposed unrelated apps", name)
+				}
+			}
+			if !bytes.Equal(original, cloudHarnessRaw(baseline)) {
+				t.Fatal("compilation changed original settings")
+			}
+		})
+	}
+}
+
 func TestCloudHarnessProfileKeptOnlySelectedPluginApps(t *testing.T) {
 	inventory := harness.Inventory{Capabilities: []harness.Capability{
 		{Kind: harness.PluginKind, ID: "keep@market", NativeID: "keep@market", AppIDs: []string{"keep", "shared", "blocked"}, Enabled: true, Available: true},
@@ -20,7 +67,7 @@ func TestCloudHarnessProfileKeptOnlySelectedPluginApps(t *testing.T) {
 		wantGate                       bool
 		wantApps                       map[string]bool
 	}{
-		{"minimal", true, true, false, false, map[string]bool{"keep": false, "shared": false, "blocked": false, "drop": false, "unowned": false}},
+		{"minimal", true, true, false, true, map[string]bool{"keep": false, "shared": false, "blocked": false, "drop": false, "unowned": false}},
 		{"selected owner", true, true, true, true, map[string]bool{"keep": true, "shared": true, "blocked": false, "drop": false, "unowned": false}},
 		{"global feature disabled", false, true, true, false, map[string]bool{"keep": false, "shared": false, "blocked": false, "drop": false, "unowned": false}},
 		{"global default disabled", true, false, true, true, map[string]bool{"keep": false, "shared": true, "blocked": false, "drop": false, "unowned": false}},
@@ -71,10 +118,12 @@ func TestCloudHarnessAppBaselineRestoredEmptyAndOriginalSettings(t *testing.T) {
 	for _, test := range []struct {
 		name, native, original string
 		want                   map[string]any
+		wantMinimalGate        bool
 	}{
-		{"absent", `{"config":{"features":{"plugins":true,"apps":true}},"layers":[]}`, `{}`, map[string]any{}},
-		{"empty", `{"config":{"features":{"plugins":true,"apps":true},"apps":{}},"layers":[]}`, `{}`, map[string]any{}},
-		{"original app override", `{"config":{"features":{"plugins":true,"apps":false},"apps":{"_default":{"enabled":false},"keep":{"enabled":true,"default_tools_approval_mode":"approve"}}},"layers":[]}`, `{"apps.keep.enabled":false}`, map[string]any{"_default": map[string]any{"enabled": false}, "keep": map[string]any{"enabled": false, "default_tools_approval_mode": "approve"}}},
+		{"absent", `{"config":{"features":{"plugins":true,"apps":true}},"layers":[]}`, `{}`, map[string]any{}, true},
+		{"empty", `{"config":{"features":{"plugins":true,"apps":true},"apps":{}},"layers":[]}`, `{}`, map[string]any{}, true},
+		{"native optional settings", `{"config":{"features":{"plugins":true},"apps":{"_default":null,"keep":{"enabled":true,"approvals_reviewer":null,"tools":{"read":{"enabled":true,"approval_mode":null}}}}}}`, `{}`, map[string]any{"keep": map[string]any{"enabled": true, "tools": map[string]any{"read": map[string]any{"enabled": true}}}}, true},
+		{"original app override", `{"config":{"features":{"plugins":true,"apps":false},"apps":{"_default":{"enabled":false},"keep":{"enabled":true,"default_tools_approval_mode":"approve"}}},"layers":[]}`, `{"apps.keep.enabled":false}`, map[string]any{"_default": map[string]any{"enabled": false}, "keep": map[string]any{"enabled": false, "default_tools_approval_mode": "approve"}}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			h := &cloudHarness{}
@@ -87,8 +136,8 @@ func TestCloudHarnessAppBaselineRestoredEmptyAndOriginalSettings(t *testing.T) {
 				t.Fatalf("app baseline = %s, want %v", baseline["apps"], test.want)
 			}
 			plan := cloudHarnessCompileProfile(harness.Effective{Changes: harness.Changes{Default: harness.Disabled}}, harness.Inventory{}, baseline, nil)
-			if !bytes.Equal(plan.config["features.apps"], []byte("false")) {
-				t.Fatal("minimal profile did not disable connected apps")
+			if !bytes.Equal(plan.config["features.apps"], cloudHarnessRaw(test.wantMinimalGate)) {
+				t.Fatal("minimal profile did not preserve the search connector's app gate")
 			}
 			if !bytes.Equal(baseline["apps"], cloudHarnessRaw(test.want)) {
 				t.Fatal("minimal profile changed app restoration settings")
@@ -99,8 +148,8 @@ func TestCloudHarnessAppBaselineRestoredEmptyAndOriginalSettings(t *testing.T) {
 
 func TestCloudHarnessLegacyMinimalSuppressedConnectedApps(t *testing.T) {
 	config := cloudHarnessMinimalConfig(nil, json.RawMessage(`{"features.apps":true,"apps":{"existing":{"enabled":true,"default_tools_approval_mode":"approve"}}}`))
-	if !bytes.Equal(config["features.apps"], []byte("false")) {
-		t.Fatal("legacy minimal still exposes connected apps")
+	if !bytes.Equal(config["features.apps"], []byte("true")) {
+		t.Fatal("legacy minimal disabled the app gate needed for search")
 	}
 	apps := cloudHarnessObject(config["apps"])
 	if !bytes.Equal(cloudHarnessObject(apps["_default"])["enabled"], []byte("false")) || !bytes.Equal(cloudHarnessObject(apps["existing"])["enabled"], []byte("false")) {

@@ -65,6 +65,9 @@ func TestGrokSourceUsesSubscriptionCatalogueAndExistingProjection(t *testing.T) 
 	if json.Unmarshal(projected.Models[0], &wire) != nil || string(wire["apply_patch_tool_type"]) != "null" || string(wire["default_verbosity"]) != "null" || string(wire["default_reasoning_summary"]) != `"none"` || string(wire["web_search_tool_type"]) != `"text"` || string(wire["truncation_policy"]) != `{"limit":10000,"mode":"bytes"}` {
 		t.Fatalf("invalid Codex metadata field types: %s", projected.Models[0])
 	}
+	if string(wire["web_search_provider"]) != `"search_mcp"` {
+		t.Fatalf("Grok projection did not select Codex Search MCP: %s", projected.Models[0])
+	}
 	fs := fsutil.NewMemFS()
 	roots := userdirs.Roots{Cache: "/cq/cache"}
 	if err := PublishCodexRegistryCache(fs, roots, Snapshot{Entries: result.Entries}); err != nil {
