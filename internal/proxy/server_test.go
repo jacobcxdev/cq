@@ -1214,7 +1214,8 @@ func TestServerLegacyCodexWebSocketRejectsOversizedDecodedRequest(t *testing.T) 
 	if err := client.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	request := normalTransportGateWSFrameAtSize("legacy-oversize", (128<<20)+1)
+	request := bytes.Repeat([]byte{' '}, (128<<20)+1)
+	copy(request, `{"type":"response.create","model":"gpt-5.6-sol","input":[]}`)
 	if err := client.WriteMessage(websocket.TextMessage, request); err != nil {
 		t.Fatal(err)
 	}
