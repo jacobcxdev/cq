@@ -23,6 +23,11 @@ type responsesHTTPBridge struct {
 }
 
 func (s *Server) serveResponsesHTTPWebSocket(ctx context.Context, downstream *websocket.Conn, header http.Header, kind int, first []byte, bridge responsesHTTPBridge) error {
+	if len(first) > codexWebSocketMessageMaxBytes {
+		_ = downstream.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "message too big"), time.Now().Add(time.Second))
+		return nil
+	}
+	downstream.SetReadLimit(codexWebSocketMessageMaxBytes)
 	var upgrade <-chan struct{}
 	if gate := s.runtimeUpgrade; gate != nil {
 		release, err := gate.beginSession()

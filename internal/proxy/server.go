@@ -1350,7 +1350,8 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	statusCode = http.StatusSwitchingProtocols
 	emitCodexTrace(ctx, CodexTraceEvent{Phase: "downstream_upgrade", Outcome: "success", StatusCode: statusCode})
 	defer clientConn.Close()
-	clientConn.SetReadLimit(codexWebSocketMessageMaxBytes)
+	clientConn.SetReadLimit(codexWebSocketUpstreamRequestMaxBytes)
+	clientRequests := codexWSRequestConn{Conn: clientConn, closeOnLimit: !webSocketEnforcing}
 
 	var firstKind int
 	var firstFrame []byte
@@ -1367,7 +1368,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 					firstRead <- codexWSUpstreamRead{err: errors.New("WebSocket initial frame read failed")}
 				}
 			}()
-			kind, payload, readErr := readCodexWSMessage(readCtx, clientConn)
+			kind, payload, readErr := readCodexWSMessage(readCtx, clientRequests)
 			firstRead <- codexWSUpstreamRead{messageType: kind, payload: payload, err: readErr}
 		}()
 		select {
@@ -1382,6 +1383,10 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 		cancelRead()
 		if err != nil {
+			if webSocketEnforcing && errors.Is(err, websocket.ErrReadLimit) {
+				s.codexWSHTTPFallback.remember(fallbackKey)
+				_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseMessageTooBig, "message too big"), time.Now().Add(time.Second))
+			}
 			return
 		}
 		if firstKind == websocket.TextMessage {
@@ -1510,7 +1515,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	messageType, message := firstKind, firstFrame
 	if message == nil {
-		messageType, message, err = clientConn.ReadMessage()
+		messageType, message, err = clientRequests.ReadMessage()
 		if err != nil {
 			return
 		}
@@ -1573,7 +1578,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	downstreamFrameIndex.Store(1)
 	var upstreamFrameIndex atomic.Int64
 	downstreamRelay := websocketRelayConn(clientConn)
-	boundRelay := &providerBoundWebSocketConn{websocketRelayConn: clientConn, normalise: func(body []byte) ([]byte, error) {
+	boundRelay := &providerBoundWebSocketConn{websocketRelayConn: clientRequests, normalise: func(body []byte) ([]byte, error) {
 		if s.knownSharedBudgetState(body) {
 			return nil, errSharedBudgetContinuation
 		}
