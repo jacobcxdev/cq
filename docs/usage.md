@@ -896,10 +896,10 @@ Use `cq check opencode-go` to inspect each account's 5h, 7d and monthly
 allowance windows. CQ shows the remaining percentages and reset times supplied
 by OpenCode. CQ includes a summary by default for every shared-budget provider
 with at least two accounts reporting the same window. The summary gives their
-mean remaining percentage and counts the accounts with a non-zero allowance.
-The terminal row shows how many accounts reported when readings are missing.
-JSON includes the summary in `shared_budget_aggregates`, keyed by provider ID,
-with the reported and non-zero counts for each window.
+mean remaining percentage and the earliest upcoming reset among those accounts.
+The terminal shows `—` when no upcoming reset is available. JSON includes the
+summary in `shared_budget_aggregates`, keyed by provider ID, with the optional
+`next_reset_at_unix` and the reported and non-zero account counts for each window.
 These windows have no pace or burn projections. If CQ cannot read the limits,
 the report shows `Allowance unavailable`.
 

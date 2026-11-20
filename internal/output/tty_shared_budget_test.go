@@ -101,6 +101,7 @@ func TestSharedBudgetTTYMultipleAccounts(t *testing.T) {
 }
 
 func TestSharedBudgetTTYDisplaysAllowanceAggregate(t *testing.T) {
+	now := time.Unix(1000, 0)
 	account := func(windows ...quota.SharedBudgetWindow) quota.SharedBudgetReport {
 		return quota.SharedBudgetReport{
 			ProviderID: "opencode-go", ProviderName: "OpenCode", Plan: "Go",
@@ -117,13 +118,13 @@ func TestSharedBudgetTTYDisplaysAllowanceAggregate(t *testing.T) {
 			"opencode-go": {
 				AccountCount: 4,
 				Windows: []app.SharedBudgetAggregateWindow{
-					{Name: "5h", MeanRemainingPct: 43.33, ReportedAccounts: 3, NonZeroAccounts: 2},
-					{Name: "7d", MeanRemainingPct: 0.25, ReportedAccounts: 2, NonZeroAccounts: 1},
+					{Name: "5h", MeanRemainingPct: 43.33, ReportedAccounts: 3, NonZeroAccounts: 2, NextResetAtUnix: now.Add(2*time.Hour + 27*time.Minute).Unix()},
+					{Name: "7d", MeanRemainingPct: 0.25, ReportedAccounts: 2, NonZeroAccounts: 1, NextResetAtUnix: now.Add(45 * time.Minute).Unix()},
 					{Name: "1mo", MeanRemainingPct: 50, ReportedAccounts: 4, NonZeroAccounts: 3},
 				},
 			},
 		},
-	}, time.Unix(1000, 0))
+	}, now)
 
 	for _, i := range []int{0, 1, 2, 4} {
 		if model.Sections[i].AggHeader != "" {
@@ -139,10 +140,10 @@ func TestSharedBudgetTTYDisplaysAllowanceAggregate(t *testing.T) {
 	if err := writeTTY(&terminal, model); err != nil {
 		t.Fatal(err)
 	}
-	wants := []struct{ name, pct, detail string }{
-		{"5h", "43%", "2/3 non-zero · 3/4 reported"},
-		{"7d", "<1%", "1/2 non-zero · 2/4 reported"},
-		{"1mo", "50%", "3/4 non-zero"},
+	wants := []struct{ name, pct, reset string }{
+		{"5h", "43%", "󰦖  2h 27m"},
+		{"7d", "<1%", "󰦖     45m"},
+		{"1mo", "50%", "󰦖       —"},
 	}
 	if len(summary.AggRows) != len(wants) {
 		t.Fatalf("aggregate row count = %d, want %d", len(summary.AggRows), len(wants))
@@ -151,15 +152,15 @@ func TestSharedBudgetTTYDisplaysAllowanceAggregate(t *testing.T) {
 	for i, want := range wants {
 		row := summary.AggRows[i]
 		if strings.TrimSpace(stripANSI(row.Label)) != want.name || !strings.HasSuffix(stripANSI(row.Pct), want.pct) ||
-			row.Reset != "" || row.PaceDiff != "" || row.Burndown != "" || strings.Contains(row.Bar, "|") {
+			stripANSI(row.Reset) != want.reset || row.PaceDiff != "" || row.Burndown != "" || strings.Contains(row.Bar, "|") {
 			t.Errorf("unexpected aggregate row for %s: %#v", want.name, row)
 		}
-		if visibleWidth(row.Label+row.Bar+row.Pct) != visibleWidth(base.Label+base.Bar+base.Pct) {
+		if visibleWidth(row.Label+row.Bar+row.Pct+row.Reset) != visibleWidth(base.Label+base.Bar+base.Pct+base.Reset) {
 			t.Errorf("aggregate columns did not align for %s", want.name)
 		}
-		line := stripANSI(row.Label + row.Bar + "  " + row.Pct + "  " + want.detail)
+		line := stripANSI(row.Label + row.Bar + "  " + row.Pct + "  " + row.Reset)
 		if !strings.Contains(stripANSI(terminal.String()), line+"\n") || rowVisibleWidth(row) != visibleWidth(line) {
-			t.Errorf("aggregate row for %s did not render with measured coverage: %q", want.name, line)
+			t.Errorf("aggregate row for %s did not render with measured width: %q", want.name, line)
 		}
 	}
 }
