@@ -8,11 +8,8 @@ func TestCodexHTTPRequestPolicyHasNoCQByteLimit(t *testing.T) {
 	}
 }
 
-func TestCodexWebSocketPolicyMatchesInstalledClient(t *testing.T) {
+func TestCodexWebSocketMessageLimitForLiveAndRelay(t *testing.T) {
 	if codexWebSocketMessageMaxBytes != 64<<20 {
 		t.Fatalf("WebSocket message limit = %d, want %d", codexWebSocketMessageMaxBytes, 64<<20)
-	}
-	if codexWebSocketUpstreamRequestMaxBytes != 16<<20 {
-		t.Fatalf("WebSocket upstream request limit = %d, want %d", codexWebSocketUpstreamRequestMaxBytes, 16<<20)
 	}
 }

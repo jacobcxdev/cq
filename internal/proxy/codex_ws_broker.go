@@ -227,7 +227,8 @@ func (handler *codexTerminatingWebSocketHandler) Serve(ctx context.Context, down
 	if ctx != nil {
 		token, _ = ctx.Value(cqCompactionTokenContextKey{}).(string)
 	}
-	bound := &providerBoundWebSocketConn{websocketRelayConn: downstream, normalise: func(body []byte) ([]byte, error) {
+	downstream.SetReadLimit(codexWebSocketUpstreamRequestMaxBytes)
+	bound := &providerBoundWebSocketConn{websocketRelayConn: codexWSRequestConn{Conn: downstream}, normalise: func(body []byte) ([]byte, error) {
 		restored, _, err := normaliseCQCompactionInput(body, token)
 		return restored, err
 	}}
@@ -238,7 +239,7 @@ func (handler *codexTerminatingWebSocketHandler) ServeInitial(ctx context.Contex
 	if downstream == nil {
 		return ErrCodexLeaseWriterUnavailable
 	}
-	bound := &providerBoundWebSocketConn{websocketRelayConn: downstream, acceptsModel: acceptsModel}
+	bound := &providerBoundWebSocketConn{websocketRelayConn: codexWSRequestConn{Conn: downstream}, acceptsModel: acceptsModel}
 	token := ""
 	if ctx != nil {
 		token, _ = ctx.Value(cqCompactionTokenContextKey{}).(string)
@@ -273,9 +274,6 @@ func (handler *codexTerminatingWebSocketHandler) serve(ctx context.Context, down
 	})
 	if err != nil {
 		return err
-	}
-	if conn, ok := downstream.(*websocket.Conn); ok {
-		conn.SetReadLimit(codexWebSocketMessageMaxBytes)
 	}
 	return broker.Serve(ctx, downstream)
 }
@@ -2070,8 +2068,11 @@ func codexWSPreparedPendingFrame(frozen *CodexFrozenRequest, original *codexWSPe
 	if err != nil {
 		return nil, err
 	}
-	encoded, readErr := ioReadBounded(body, codexWebSocketUpstreamRequestMaxBytes)
+	encoded, readErr := readCodexWSRequestPayload(body)
 	closeErr := body.Close()
+	if errors.Is(readErr, websocket.ErrReadLimit) {
+		readErr = newCodexWebSocketBrokerError(codexWebSocketFailureStageFrameDecode, codexWebSocketFailureReasonMessageTooBig)
+	}
 	if readErr != nil || closeErr != nil {
 		return nil, errors.Join(readErr, closeErr)
 	}

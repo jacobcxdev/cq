@@ -1183,6 +1183,46 @@ func TestServerDiagnosticsLegacyCodexWebsocketRouteEmitsEvent(t *testing.T) {
 	assertDiagnosticsLogDoesNotContain(t, path, "codex-tok")
 }
 
+func TestServerLegacyCodexWebSocketRejectsOversizedDecodedRequest(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("oversized legacy request reached upstream")
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+	server := &Server{
+		Config: &Config{ClaudeUpstream: "https://claude.test", CodexUpstream: upstream.URL, LocalToken: "local-token"},
+		CodexUpgradeTransport: &legacyCodexTokenTransport{
+			Selector: &fakeCodexSelector{account: &codex.CodexAccount{AccessToken: "codex-token"}},
+			Inner:    http.DefaultTransport,
+		},
+	}
+	handler, err := server.handler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyServer := httptest.NewServer(handler)
+	defer proxyServer.Close()
+	dialer := websocket.Dialer{EnableCompression: true, HandshakeTimeout: 5 * time.Second}
+	client, response, err := dialer.Dial("ws"+strings.TrimPrefix(proxyServer.URL, "http")+legacyCodexResponsesPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if !strings.Contains(response.Header.Get("Sec-WebSocket-Extensions"), "permessage-deflate") {
+		t.Fatal("WebSocket compression was not negotiated")
+	}
+	if err := client.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	request := normalTransportGateWSFrameAtSize("legacy-oversize", (128<<20)+1)
+	if err := client.WriteMessage(websocket.TextMessage, request); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.ReadMessage(); !websocket.IsCloseError(err, websocket.CloseMessageTooBig) {
+		t.Fatalf("oversized legacy request close = %v, want 1009", err)
+	}
+}
+
 func TestServerPayloadDiagnosticsLegacyCodexWebSocketFrameEmitsEvent(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "payloads.jsonl")
 	payloadDiag, err := OpenPayloadWriter(path)
