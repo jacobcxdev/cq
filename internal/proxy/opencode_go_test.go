@@ -14,12 +14,149 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
 	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
+
+func TestOpenCodeGoSkipsKnownExhaustedZAI(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		results []quota.Result
+		body    string
+		wantZAI int32
+		wantGo  int32
+	}{
+		{"all exhausted", []quota.Result{
+			{AccountID: "first", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0, ResetAtUnix: time.Now().Add(time.Hour).Unix()}}},
+			{AccountID: "second", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0, ResetAtUnix: time.Now().Add(time.Hour).Unix()}}},
+		}, `{"model":"glm-5.3","input":"hello"}`, 0, 1},
+		{"one healthy", []quota.Result{
+			{AccountID: "first", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0, ResetAtUnix: time.Now().Add(time.Hour).Unix()}}},
+			{AccountID: "second", Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 50}}},
+		}, `{"model":"glm-5.3","input":"hello"}`, 1, 0},
+		{"quota unknown", nil, `{"model":"glm-5.3","input":"hello"}`, 1, 0},
+		{"opaque continuation", []quota.Result{
+			{AccountID: "first", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0}}},
+			{AccountID: "second", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0}}},
+		}, `{"model":"glm-5.3","previous_response_id":"zai-owned","input":"hello"}`, 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var zaiCalls, goCalls atomic.Int32
+			s := &Server{Config: &Config{}, Catalog: openCodeGoTestCatalog(), ZAIAccounts: zaiTestAccounts,
+				ZAIQuota: func() []quota.Result { return tc.results },
+				ZAITransport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+					zaiCalls.Add(1)
+					w := httptest.NewRecorder()
+					_, _ = io.WriteString(w, `{"id":"zai-answer"}`)
+					return w.Result(), nil
+				}),
+				SharedBudgetRoutes: openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
+					goCalls.Add(1)
+					assertOpenCodeGoUpstream(t, r)
+					w := httptest.NewRecorder()
+					_, _ = io.WriteString(w, `{"id":"go-answer"}`)
+					return w.Result(), nil
+				}),
+			}
+			w := httptest.NewRecorder()
+			s.handleLegacyCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(tc.body)))
+			if w.Code != http.StatusOK || zaiCalls.Load() != tc.wantZAI || goCalls.Load() != tc.wantGo {
+				t.Fatalf("status=%d Z.ai=%d Go=%d", w.Code, zaiCalls.Load(), goCalls.Load())
+			}
+		})
+	}
+}
+
+func TestOpenCodeGoWebSocketSkipsKnownExhaustedZAI(t *testing.T) {
+	var zaiCalls, goCalls atomic.Int32
+	s := &Server{Config: &Config{ClaudeUpstream: "https://claude.test"}, Catalog: openCodeGoTestCatalog(), ZAIAccounts: zaiTestAccounts,
+		ZAIQuota: func() []quota.Result {
+			return []quota.Result{
+				{AccountID: "first", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0}}},
+				{AccountID: "second", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0}}},
+			}
+		},
+		ZAITransport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			zaiCalls.Add(1)
+			w := httptest.NewRecorder()
+			writeZAITestSSE(w, "zai-answer", nil)
+			return w.Result(), nil
+		}),
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
+			goCalls.Add(1)
+			assertOpenCodeGoUpstream(t, r)
+			w := httptest.NewRecorder()
+			writeZAITestSSE(w, "go-answer", nil)
+			return w.Result(), nil
+		}),
+	}
+	c := openZAITestWebSocket(t, s, nil)
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"glm-5.3","input":"hello"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if got := readZAITestCompletion(t, c).Response.ID; got != "go-answer" || zaiCalls.Load() != 0 || goCalls.Load() != 1 {
+		t.Fatalf("response=%q Z.ai=%d Go=%d", got, zaiCalls.Load(), goCalls.Load())
+	}
+}
+
+func TestOpenCodeGoWebSocketFailureSendsCloseFrame(t *testing.T) {
+	s := &Server{Config: &Config{ClaudeUpstream: "https://claude.test"}, Catalog: openCodeGoTestCatalog(),
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(*http.Request) (*http.Response, error) {
+			w := httptest.NewRecorder()
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"type\":\"response.created\",\"response\":{\"id\":\"started\"}}\n\n")
+			return w.Result(), nil
+		}),
+	}
+	c := openZAITestWebSocket(t, s, nil)
+	if err := c.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"kimi-k3","input":"hello"}`)); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		_, _, err := c.ReadMessage()
+		if err == nil {
+			continue
+		}
+		var closeErr *websocket.CloseError
+		if !errors.As(err, &closeErr) || closeErr.Code != websocket.CloseInternalServerErr {
+			t.Fatalf("close error = %v, want WebSocket 1011 close frame", err)
+		}
+		return
+	}
+}
+
+func TestOpenCodeGoCompactionSkipsKnownExhaustedZAI(t *testing.T) {
+	var zaiCalls, goCalls atomic.Int32
+	s := &Server{Config: &Config{LocalToken: "proxy-token"}, Catalog: openCodeGoTestCatalog(), ZAIAccounts: zaiTestAccounts,
+		ZAIQuota: func() []quota.Result {
+			return []quota.Result{
+				{AccountID: "first", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0}}},
+				{AccountID: "second", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0}}},
+			}
+		},
+		ZAITransport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			zaiCalls.Add(1)
+			return httptest.NewRecorder().Result(), nil
+		}),
+		SharedBudgetRoutes: openCodeGoTestRoutes(func(r *http.Request) (*http.Response, error) {
+			goCalls.Add(1)
+			assertOpenCodeGoUpstream(t, r)
+			w := httptest.NewRecorder()
+			writeZAICompactionTestSSE(w, "go-summary", []json.RawMessage{json.RawMessage(zaiTestSummaryMessage)})
+			return w.Result(), nil
+		}),
+	}
+	w := httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(`{"model":"glm-5.3","input":[{"role":"user","content":"Remember fixture."},{"type":"compaction_trigger"}]}`)))
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), zaiCompactionPrefix) || zaiCalls.Load() != 0 || goCalls.Load() != 1 {
+		t.Fatalf("status=%d Z.ai=%d Go=%d response=%s", w.Code, zaiCalls.Load(), goCalls.Load(), w.Body.String())
+	}
+}
 
 func TestOpenCodeGoHTTPPrefersZAIAndOnlyRetriesRejectedRequests(t *testing.T) {
 	const overlappingModel = "glm-5.3"

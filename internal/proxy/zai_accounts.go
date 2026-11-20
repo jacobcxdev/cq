@@ -22,6 +22,22 @@ import (
 // followed by subscriptions known to be unavailable. Callers supply fresh quota
 // results. Every credential remains available for explicit rejection fallback.
 func PrioritiseZAIAccounts(accounts []zaiprov.Account, results []quota.Result, now time.Time) []zaiprov.Account {
+	unavailable := zaiUnavailableAccounts(results, now)
+	ordered := make([]zaiprov.Account, 0, len(accounts))
+	for _, account := range accounts {
+		if !unavailable[account.ID] {
+			ordered = append(ordered, account)
+		}
+	}
+	for _, account := range accounts {
+		if unavailable[account.ID] {
+			ordered = append(ordered, account)
+		}
+	}
+	return ordered
+}
+
+func zaiUnavailableAccounts(results []quota.Result, now time.Time) map[string]bool {
 	unavailable := make(map[string]bool)
 	for _, result := range results {
 		if result.AccountID == "" {
@@ -48,18 +64,20 @@ func PrioritiseZAIAccounts(accounts []zaiprov.Account, results []quota.Result, n
 			}
 		}
 	}
-	ordered := make([]zaiprov.Account, 0, len(accounts))
+	return unavailable
+}
+
+func (s *Server) zaiAccountsKnownUnavailable(accounts []zaiprov.Account) bool {
+	if len(accounts) == 0 || s.ZAIQuota == nil {
+		return false
+	}
+	unavailable := zaiUnavailableAccounts(s.ZAIQuota(), time.Now())
 	for _, account := range accounts {
-		if !unavailable[account.ID] {
-			ordered = append(ordered, account)
+		if account.ID == "" || !unavailable[account.ID] {
+			return false
 		}
 	}
-	for _, account := range accounts {
-		if unavailable[account.ID] {
-			ordered = append(ordered, account)
-		}
-	}
-	return ordered
+	return true
 }
 
 // Read credentials for each request so account changes do not require a proxy

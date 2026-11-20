@@ -1437,6 +1437,15 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if firstKind == websocket.TextMessage && s.routeCodexModel(extractCodexWebSocketFrameModel(firstFrame)) == ProviderZAI {
+			if accounts, accountErr := s.zaiAccounts(); accountErr == nil && s.zaiAccountsKnownUnavailable(accounts) {
+				if selected, ok := s.selectSharedBudgetFallback(withSharedBudgetAffinity(r.Context(), r.Header), firstFrame); ok {
+					diagnosticsProvider, routeKind = string(selected.id), "shared_budget_websocket"
+					if err := s.serveSharedBudgetWebSocket(r.Context(), clientConn, r.Header, firstKind, firstFrame, selected); err != nil {
+						_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "subscription upstream unavailable"), time.Now().Add(time.Second))
+					}
+					return
+				}
+			}
 			diagnosticsProvider = "zai"
 			routeKind = "zai_native_websocket"
 			fmt.Fprintf(os.Stderr, "cq: route %s /responses model=%q provider=zai (native websocket)\n", r.Method, extractCodexWebSocketFrameModel(firstFrame))
