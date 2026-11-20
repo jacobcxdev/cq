@@ -16,6 +16,7 @@ import (
 type responsesHTTPBridge struct {
 	Name          string
 	PrewarmPrefix string
+	MaxInputBytes int
 	AcceptsModel  func(string) bool
 	Stream        func(context.Context, *websocket.Conn, http.Header, []byte) (string, []json.RawMessage, error)
 	Compaction    func([]byte) (bool, error)
@@ -111,6 +112,7 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 	if err != nil {
 		return err
 	}
+	currentItems := len(input)
 	var previous string
 	_ = json.Unmarshal(request["previous_response_id"], &previous)
 	if previous != "" {
@@ -118,8 +120,20 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 			return errors.New(bridge.Name + " previous response unavailable; reconnect with full input")
 		}
 		input = append(append([]json.RawMessage(nil), state.history...), input...)
+	} else if bridge.MaxInputBytes > 0 {
+		// A reconnect can supply the whole conversation instead of a delta.
+		// Keep its latest user turn when bounding older replay history.
+		for index := len(input) - 1; index >= 0; index-- {
+			if responsesBridgeMessageRole(input[index]) == "user" {
+				currentItems = len(input) - index
+				break
+			}
+		}
 	}
 	delete(request, "previous_response_id")
+	if bridge.MaxInputBytes > 0 {
+		input, _ = boundResponsesBridgeInput(input, currentItems, bridge.MaxInputBytes)
+	}
 	request["input"], _ = json.Marshal(input)
 	if prewarm {
 		state.previousID = fmt.Sprintf(bridge.PrewarmPrefix+"%x", time.Now().UnixNano())
@@ -164,6 +178,113 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 		}
 	}
 	return nil
+}
+
+var responsesHistoryOmittedMessage = json.RawMessage(`{"type":"message","role":"developer","content":"Earlier conversation omitted to fit provider context. Continue using available messages; ask user for missing details."}`)
+
+// boundResponsesBridgeInput keeps the latest complete turn when a stateless
+// Responses provider would otherwise receive an ever-growing replay.
+func boundResponsesBridgeInput(input []json.RawMessage, currentItems, maxBytes int) ([]json.RawMessage, bool) {
+	if maxBytes <= 0 || len(input) == 0 {
+		return input, false
+	}
+	// RawMessage content can expand when json.Marshal escapes HTML characters.
+	encodedSizes := make([]int, len(input))
+	size := 2
+	for index, item := range input {
+		encoded, err := json.Marshal(item)
+		if err != nil {
+			return input, false
+		}
+		encodedSizes[index] = len(encoded) + 1
+		size += encodedSizes[index]
+	}
+	if size <= maxBytes {
+		return input, false
+	}
+	if currentItems < 0 || currentItems > len(input) {
+		return input, false
+	}
+	// A cut cannot leave a tool result without its earlier call.
+	safeCut := make([]bool, len(input))
+	pendingCalls := make(map[string]int)
+	for index := len(input) - 1; index >= 0; index-- {
+		var call struct {
+			Type   string `json:"type"`
+			CallID string `json:"call_id"`
+		}
+		if json.Unmarshal(input[index], &call) != nil {
+			return input, false
+		}
+		if call.CallID != "" {
+			switch call.Type {
+			case "function_call_output", "custom_tool_call_output", "computer_call_output":
+				pendingCalls[call.CallID]++
+			case "function_call", "custom_tool_call", "computer_call":
+				if pendingCalls[call.CallID] > 1 {
+					pendingCalls[call.CallID]--
+				} else {
+					delete(pendingCalls, call.CallID)
+				}
+			}
+		}
+		safeCut[index] = len(pendingCalls) == 0
+	}
+	var preamble []json.RawMessage
+	if responsesBridgeMessageRole(input[0]) == "developer" {
+		preamble = input[:1]
+	}
+	reserved := 2 + len(responsesHistoryOmittedMessage) + 1
+	for index := range preamble {
+		reserved += encodedSizes[index]
+	}
+	currentStart := len(input) - currentItems
+	if currentItems == 0 {
+		currentStart = len(input) - 1
+	}
+	suffixSize := 0
+	start := -1
+	for index := len(input) - 1; index >= 1; index-- {
+		suffixSize += encodedSizes[index]
+		if reserved+suffixSize > maxBytes {
+			break
+		}
+		if index <= currentStart {
+			role := responsesBridgeMessageRole(input[index])
+			if safeCut[index] && (role == "user" || role == "developer") {
+				start = index
+			}
+		}
+	}
+	if start < 0 {
+		// A single large current turn may be valid upstream. Only discard
+		// complete older history, never part of the current turn.
+		role := ""
+		if currentStart < len(input) {
+			role = responsesBridgeMessageRole(input[currentStart])
+		}
+		if currentStart == 0 || !safeCut[currentStart] || (role != "user" && role != "developer") {
+			return input, false
+		}
+		start = currentStart
+	}
+	bounded := make([]json.RawMessage, 0, len(preamble)+1+len(input)-start)
+	bounded = append(bounded, preamble...)
+	bounded = append(bounded, responsesHistoryOmittedMessage)
+	bounded = append(bounded, input[start:]...)
+	return bounded, true
+}
+
+func responsesBridgeMessageRole(item json.RawMessage) string {
+	var message struct {
+		Type    string          `json:"type"`
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(item, &message) != nil || (message.Type != "message" && (message.Type != "" || message.Content == nil)) {
+		return ""
+	}
+	return message.Role
 }
 
 func responsesBridgeInput(raw json.RawMessage, name string) ([]json.RawMessage, error) {
