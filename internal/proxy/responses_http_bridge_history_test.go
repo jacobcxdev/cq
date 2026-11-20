@@ -116,3 +116,52 @@ func TestResponsesHTTPBridgeBoundsFullReconnectInput(t *testing.T) {
 		t.Fatalf("reconnect input not bounded: %s", sent)
 	}
 }
+
+func TestResponsesHTTPBridgeBoundsRoleOnlyMessages(t *testing.T) {
+	input := []json.RawMessage{
+		json.RawMessage(`{"role":"developer","content":"Keep instructions."}`),
+		json.RawMessage(`{"role":"user","content":"` + strings.Repeat("old", 1000) + `"}`),
+		json.RawMessage(`{"role":"assistant","content":"old answer"}`),
+		json.RawMessage(`{"role":"user","content":"current"}`),
+	}
+	bounded, changed := boundResponsesBridgeInput(input, 1, 500)
+	if !changed || len(bounded) != 3 ||
+		!strings.Contains(string(bounded[0]), "Keep instructions.") ||
+		!strings.Contains(string(bounded[1]), "omitted") ||
+		!strings.Contains(string(bounded[2]), "current") {
+		t.Fatalf("role-only replay not bounded: %s", bounded)
+	}
+}
+
+func TestResponsesHTTPBridgeBoundsContinuationBeforeBodyLimit(t *testing.T) {
+	state := responsesHTTPBridgeState{
+		previousID: "previous",
+		history: []json.RawMessage{
+			json.RawMessage(`{"role":"developer","content":"Keep instructions."}`),
+			json.RawMessage(`{"role":"user","content":"` + strings.Repeat("old", 3_200_000) + `"}`),
+			json.RawMessage(`{"role":"assistant","content":"old answer"}`),
+		},
+	}
+	frame, err := json.Marshal(map[string]any{
+		"type": "response.create", "model": "glm-5.3", "previous_response_id": "previous",
+		"input": []any{map[string]any{"role": "user", "content": strings.Repeat("current", 135_000)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge := responsesHTTPBridge{
+		Name: "Z.ai", MaxInputBytes: maxRequestBody - (1 << 20),
+		Stream: func(_ context.Context, _ *websocket.Conn, _ http.Header, body []byte) (string, []json.RawMessage, error) {
+			if len(body) > maxRequestBody || !strings.Contains(string(body), "Keep instructions.") ||
+				!strings.Contains(string(body), "Earlier conversation omitted") ||
+				!strings.Contains(string(body), "current") || strings.Contains(string(body), "oldold") {
+				t.Errorf("continuation was not bounded before body limit: bytes=%d", len(body))
+			}
+			return "next", nil, nil
+		},
+		Compaction: func([]byte) (bool, error) { return false, nil },
+	}
+	if err := state.serveFrame(context.Background(), nil, nil, websocket.TextMessage, frame, bridge); err != nil {
+		t.Fatal(err)
+	}
+}

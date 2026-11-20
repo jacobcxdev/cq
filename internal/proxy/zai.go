@@ -223,7 +223,7 @@ func (s *Server) zaiRejectedBeforeGeneration(ctx context.Context, body []byte, r
 
 func (s *Server) serveZAIWebSocket(ctx context.Context, downstream *websocket.Conn, header http.Header, kind int, first []byte) error {
 	return s.serveResponsesHTTPWebSocket(ctx, downstream, header, kind, first, responsesHTTPBridge{
-		Name: "Z.ai", PrewarmPrefix: "cq_zai_prewarm_",
+		Name: "Z.ai", PrewarmPrefix: "cq_zai_prewarm_", MaxInputBytes: maxRequestBody - (1 << 20),
 		AcceptsModel: func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) == ProviderZAI },
 		Stream:       s.withSharedBudgetWebSocketFallback(s.streamZAIWebSocketResponse), Compaction: zaiCompactionRequested,
 	})

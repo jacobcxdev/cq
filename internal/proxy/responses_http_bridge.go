@@ -245,10 +245,11 @@ func boundResponsesBridgeInput(input []json.RawMessage, currentItems, maxBytes i
 
 func responsesBridgeMessageRole(item json.RawMessage) string {
 	var message struct {
-		Type string `json:"type"`
-		Role string `json:"role"`
+		Type    string          `json:"type"`
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
 	}
-	if json.Unmarshal(item, &message) != nil || message.Type != "message" {
+	if json.Unmarshal(item, &message) != nil || (message.Type != "message" && (message.Type != "" || message.Content == nil)) {
 		return ""
 	}
 	return message.Role
