@@ -33,7 +33,16 @@ if [[ $1 == version ]]; then
   exit 0
 fi
 [[ " $* " == *' -race '* ]]
-tests=(TestHarnessInstalledGatewayReload TestHarnessInstalledChatCapabilityIsolation TestHarnessInstalledGoalContinuationHold TestHarnessInstalledGoalUserMutations TestHarnessInstalledInactiveMCPOverrides TestHarnessInstalledMultipleSubscriberRuntime TestHarnessInstalledNewCase)
+tests=(
+  TestHarnessInstalledGatewayReload
+  TestHarnessInstalledChatCapabilityIsolation
+  TestHarnessInstalledCuratedWebSearch
+  TestHarnessInstalledGoalContinuationHold
+  TestHarnessInstalledGoalUserMutations
+  TestHarnessInstalledInactiveMCPOverrides
+  TestHarnessInstalledMultipleSubscriberRuntime
+  TestHarnessInstalledNewCase
+)
 if [[ " $* " == *' -list '* ]]; then
   if [[ ${HARNESS_CASE:-} == empty ]]; then
     echo TestHarnessInstalledMCPHelper
