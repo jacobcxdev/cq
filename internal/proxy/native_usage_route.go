@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"slices"
 	"sync"
 
 	"github.com/jacobcxdev/cq/internal/nativeusage"
@@ -67,7 +68,7 @@ func routeNativeUsage(ctx context.Context, original net.Conn, config *tls.Config
 			first = &value
 		case value := <-hellos:
 			hello = &value
-			if nativeusage.IsHost(value.host) && serve != nil {
+			if value.usageHost != "" && serve != nil {
 				// A server-first protocol must retain its original connection.
 				select {
 				case value := <-origins:
@@ -76,7 +77,7 @@ func routeNativeUsage(ctx context.Context, original net.Conn, config *tls.Config
 				}
 				if first == nil || len(first.data) == 0 {
 					_ = original.Close()
-					serve(life, &nativeUsageReplayConn{Conn: downstream, reader: io.MultiReader(bytes.NewReader(value.prefix), downstream)}, net.JoinHostPort(value.host, "443"), config)
+					serve(life, &nativeUsageReplayConn{Conn: downstream, reader: io.MultiReader(bytes.NewReader(value.prefix), downstream)}, net.JoinHostPort(value.usageHost, "443"), config)
 					return
 				}
 			}
@@ -104,22 +105,27 @@ type nativeUsageFirstRead struct {
 }
 
 type nativeUsageHello struct {
-	host    string
-	prefix  []byte
-	readErr error
+	usageHost string
+	prefix    []byte
+	readErr   error
 }
 
 func inspectNativeUsageHello(ctx context.Context, conn net.Conn) nativeUsageHello {
 	probe := &nativeUsageHelloConn{Conn: conn}
-	var host string
+	var usageHost string
 	server := tls.Server(probe, &tls.Config{GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-		host = hello.ServerName
+		// Chromium offers HTTP/2 for HTTPS usage requests on chatgpt.com.
+		// Leave HTTP/1.1 peer WebSockets on the original TLS connection.
+		// The separate ws.chatgpt.com usage feed uses HTTP/1.1 upgrades.
+		if nativeusage.IsHost(hello.ServerName) && (hello.ServerName != "chatgpt.com" || slices.Contains(hello.SupportedProtos, "h2")) {
+			usageHost = hello.ServerName
+		}
 		return nil, errNativeUsageHelloDone
 	}})
 	if err := server.HandshakeContext(ctx); !errors.Is(err, errNativeUsageHelloDone) {
-		host = ""
+		usageHost = ""
 	}
-	return nativeUsageHello{host, probe.prefix.Bytes(), probe.readErr}
+	return nativeUsageHello{usageHost, probe.prefix.Bytes(), probe.readErr}
 }
 
 // The probe consumes only a bounded hello. Its synthetic replies never reach
