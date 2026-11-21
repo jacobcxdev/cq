@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
@@ -553,6 +555,17 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 	if err != nil {
 		return "", nil, err
 	}
+	var retryAt time.Time
+	var retrySelection sharedBudgetSelection
+	considerRetry := func() {
+		if selected.id != modelregistry.ProviderOpenCodeGo || response == nil || response.StatusCode != http.StatusTooManyRequests {
+			return
+		}
+		if at, ok := sharedBudgetRetryAt(response.Header.Get("Retry-After")); ok && (retryAt.IsZero() || at.Before(retryAt)) {
+			retryAt, retrySelection = at, *selected
+		}
+	}
+	considerRetry()
 	tried := map[modelregistry.SharedBudgetCredentialScope]bool{selected.credential.binding(): true}
 	for canRebind && response != nil && firstPartyRejectedBeforeGeneration(response.StatusCode) {
 		alternate, ok := s.matchSharedBudgetAccount(ctx, *selected, func(scope modelregistry.SharedBudgetCredentialScope) bool { return !tried[scope] })
@@ -563,6 +576,24 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 		*selected = alternate
 		*binding = alternate.binding()
 		tried[selected.credential.binding()] = true
+		response, compact, err = s.sharedBudgetResponse(ctx, selected, session, header, body, false)
+		if err != nil {
+			return "", nil, err
+		}
+		considerRetry()
+	}
+	if response != nil && response.StatusCode == http.StatusTooManyRequests && !retryAt.IsZero() {
+		response.Body.Close()
+		if err := waitSharedBudgetRetry(ctx, downstream, retryAt); err != nil {
+			return "", nil, err
+		}
+		*selected = retrySelection
+		*binding = selected.binding()
+		credential, err := selected.route.credentialFor(ctx, binding.Credential)
+		if err != nil || credential.Bearer == "" || credential.binding() != binding.Credential {
+			return "", nil, errSharedBudgetContinuation
+		}
+		selected.credential = credential
 		response, compact, err = s.sharedBudgetResponse(ctx, selected, session, header, body, false)
 		if err != nil {
 			return "", nil, err
@@ -597,6 +628,54 @@ func (s *Server) streamSharedBudget(ctx context.Context, downstream *websocket.C
 		normalise = func(data []byte) ([]byte, error) { return data, nil }
 	}
 	return relayResponsesSSE(response.Body, selected.route.Name, normalise, emit)
+}
+
+const sharedBudgetMaxQuotaWait = 30 * time.Minute
+
+func sharedBudgetRetryAt(value string) (time.Time, bool) {
+	if value == "" {
+		return time.Time{}, false
+	}
+	var at time.Time
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds <= 0 || seconds > int64(sharedBudgetMaxQuotaWait/time.Second) {
+			return time.Time{}, false
+		}
+		at = time.Now().Add(time.Duration(seconds) * time.Second)
+	} else {
+		at, err = http.ParseTime(value)
+		if err != nil {
+			return time.Time{}, false
+		}
+	}
+	if delay := time.Until(at); delay <= 0 || delay > sharedBudgetMaxQuotaWait {
+		return time.Time{}, false
+	}
+	return at.Add(250 * time.Millisecond), true
+}
+
+func waitSharedBudgetRetry(ctx context.Context, downstream *websocket.Conn, at time.Time) error {
+	timer := time.NewTimer(time.Until(at))
+	defer timer.Stop()
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	// Codex ignores unknown text events but counts them as stream activity.
+	keepalive := []byte(`{"type":"cq.subscription_wait"}`)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := downstream.WriteMessage(websocket.TextMessage, keepalive); err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+			return nil
+		case <-ticker.C:
+		}
+	}
 }
 
 func portableSharedBudgetInput(body []byte) bool {

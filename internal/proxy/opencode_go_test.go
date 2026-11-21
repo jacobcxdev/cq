@@ -714,6 +714,87 @@ func TestOpenCodeGoWebSocketFailoverKeepsAccount(t *testing.T) {
 	}
 }
 
+func TestOpenCodeGoWaitsForQuotaResetAfterAllAccountsReject(t *testing.T) {
+	first := SharedBudgetCredential{Bearer: "first-token", Account: "first", WorkspaceID: "wrk_first"}
+	second := SharedBudgetCredential{Bearer: "second-token", Account: "second", WorkspaceID: "wrk_second"}
+	entry := func(credential SharedBudgetCredential) modelregistry.Entry {
+		return modelregistry.Entry{Provider: modelregistry.ProviderOpenCodeGo, ID: "kimi-k3", SharedBudget: &modelregistry.SharedBudgetModel{
+			ProviderName: "OpenCode Go", CredentialScope: credential.binding(),
+		}}
+	}
+	catalog := modelregistry.NewCatalog(modelregistry.Snapshot{Entries: []modelregistry.Entry{entry(first)},
+		SharedBudgetModels: map[string][]modelregistry.Entry{"kimi-k3": {entry(first), entry(second)}},
+	})
+	var firstCalls, secondCalls atomic.Int32
+	route := SharedBudgetRoute{Name: "OpenCode Go", URL: "https://opencode.example/responses", RequireCatalogueScope: true,
+		Credentials: func(context.Context) ([]SharedBudgetCredential, error) {
+			return []SharedBudgetCredential{first, second}, nil
+		},
+		CredentialFor: func(_ context.Context, scope modelregistry.SharedBudgetCredentialScope) (SharedBudgetCredential, error) {
+			switch scope {
+			case first.binding():
+				return first, nil
+			case second.binding():
+				return second, nil
+			}
+			return SharedBudgetCredential{}, errors.New("account unavailable")
+		},
+		Transport: openCodeGoTestTransport(func(r *http.Request) (*http.Response, error) {
+			w := httptest.NewRecorder()
+			switch r.Header.Get("Authorization") {
+			case "Bearer first-token":
+				firstCalls.Add(1)
+				w.Header().Set("Retry-After", "60")
+				w.WriteHeader(http.StatusTooManyRequests)
+			case "Bearer second-token":
+				if secondCalls.Add(1) == 1 {
+					w.Header().Set("Retry-After", "1")
+					w.WriteHeader(http.StatusTooManyRequests)
+				} else {
+					writeZAITestSSE(w, "after-reset", nil)
+				}
+			default:
+				t.Error("request used unknown account")
+			}
+			return w.Result(), nil
+		}),
+	}
+	s := &Server{Config: &Config{}, Catalog: catalog, SharedBudgetRoutes: map[modelregistry.Provider]SharedBudgetRoute{modelregistry.ProviderOpenCodeGo: route}}
+	conn := openZAITestWebSocket(t, s, nil)
+	if err := conn.SetReadDeadline(time.Now().Add(8 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(map[string]any{"type": "response.create", "model": "kimi-k3", "input": "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	_, waiting, err := conn.ReadMessage()
+	if err != nil || !bytes.Contains(waiting, []byte(`"type":"cq.subscription_wait"`)) {
+		t.Fatalf("missing subscription wait event: event=%s, err=%v", waiting, err)
+	}
+	if got := readZAITestCompletion(t, conn).Response.ID; got != "after-reset" {
+		t.Fatalf("response ID = %q", got)
+	}
+	if firstCalls.Load() != 1 || secondCalls.Load() != 2 {
+		t.Fatalf("account calls: first=%d second=%d", firstCalls.Load(), secondCalls.Load())
+	}
+}
+
+func TestSharedBudgetRetryAtRejectsUnboundedWaits(t *testing.T) {
+	for _, value := range []string{"", "0", "-1", "1801", "999999999999999999", "invalid", time.Now().Add(time.Hour).UTC().Format(http.TimeFormat)} {
+		if _, ok := sharedBudgetRetryAt(value); ok {
+			t.Fatalf("accepted unbounded Retry-After %q", value)
+		}
+	}
+	if at, ok := sharedBudgetRetryAt("1"); !ok || time.Until(at) < 500*time.Millisecond || time.Until(at) > 2*time.Second {
+		t.Fatalf("valid Retry-After rejected: ok=%t, at=%v", ok, at)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := waitSharedBudgetRetry(ctx, nil, time.Now().Add(time.Minute)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled wait returned %v", err)
+	}
+}
+
 func testOpenCodeGoWebSocketAccountFailover(t *testing.T, firstSucceeds, switchAccount bool) {
 	t.Helper()
 	first := SharedBudgetCredential{Bearer: "first-token", Account: "first", WorkspaceID: "wrk_first"}
