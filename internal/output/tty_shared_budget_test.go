@@ -11,7 +11,45 @@ import (
 	"github.com/jacobcxdev/cq/internal/app"
 	"github.com/jacobcxdev/cq/internal/provider"
 	"github.com/jacobcxdev/cq/internal/quota"
+	"github.com/muesli/termenv"
 )
+
+func TestSharedBudgetTTYDimsBlockedAccountWindows(t *testing.T) {
+	oldProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.ANSI)
+	t.Cleanup(func() { lipgloss.SetColorProfile(oldProfile) })
+
+	now := time.Unix(1000, 0)
+	account := func(weekly float64) quota.SharedBudgetReport {
+		return quota.SharedBudgetReport{
+			ProviderID: "opencode-go", ProviderName: "OpenCode", Plan: "Go", Icon: "\U000F0C15",
+			Windows: []quota.SharedBudgetWindow{
+				{Name: "5h", RemainingPct: 100, ResetAtUnix: 2000},
+				{Name: "7d", RemainingPct: weekly, ResetAtUnix: 3000},
+			},
+		}
+	}
+	model := BuildTTYModel(app.Report{SharedBudgetSubscriptions: []quota.SharedBudgetReport{account(0), account(0.25)}}, now)
+	blocked, available := model.Sections[0].WindowRows, model.Sections[1].WindowRows
+	if got, want := blocked[0].Bar, renderBar(100, redStyle, -1); got != want {
+		t.Errorf("blocked 5h bar = %q, want %q", got, want)
+	}
+	if got, want := blocked[0].Pct, windowPercentage(dimStyle, "100%"); got != want {
+		t.Errorf("blocked 5h percentage = %q, want %q", got, want)
+	}
+	if got, want := blocked[0].Reset, windowReset(dimStyle, 2000, now.Unix()); got != want {
+		t.Errorf("blocked 5h reset = %q, want %q", got, want)
+	}
+	if got, want := blocked[1].Pct, windowPercentage(dimStyle, "0%"); got != want {
+		t.Errorf("depleted 7d percentage = %q, want %q", got, want)
+	}
+	if got, want := blocked[1].Reset, windowReset(boldRedStyle, 3000, now.Unix()); got != want {
+		t.Errorf("depleted 7d reset = %q, want %q", got, want)
+	}
+	if got, want := available[0].Pct, windowPercentage(greenStyle, "100%"); got != want {
+		t.Errorf("available 5h percentage = %q, want %q", got, want)
+	}
+}
 
 func TestSharedBudgetTTYAlignment(t *testing.T) {
 	now := time.Unix(1000, 0)

@@ -278,11 +278,15 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 
 func buildSharedBudgetBlock(subscription quota.SharedBudgetReport, nowEpoch int64) (string, []TTYWindowRow) {
 	minPct := 100
-	rows := make([]TTYWindowRow, 0, len(subscription.Windows))
+	blocked := false
 	for _, window := range subscription.Windows {
 		pct := int(math.Round(window.RemainingPct))
 		minPct = min(minPct, pct)
-		rows = append(rows, buildSharedBudgetAllowanceRow(window.Name, window.RemainingPct, window.ResetAtUnix, nowEpoch))
+		blocked = blocked || window.RemainingPct == 0
+	}
+	rows := make([]TTYWindowRow, 0, len(subscription.Windows))
+	for _, window := range subscription.Windows {
+		rows = append(rows, buildSharedBudgetAllowanceRow(window.Name, window.RemainingPct, window.ResetAtUnix, nowEpoch, blocked))
 	}
 	iconStyle := pctStyle(minPct)
 	if len(rows) == 0 {
@@ -295,17 +299,27 @@ func buildSharedBudgetBlock(subscription quota.SharedBudgetReport, nowEpoch int6
 	return header, rows
 }
 
-func buildSharedBudgetAllowanceRow(name string, remaining float64, resetAt, nowEpoch int64) TTYWindowRow {
+func buildSharedBudgetAllowanceRow(name string, remaining float64, resetAt, nowEpoch int64, blocked bool) TTYWindowRow {
 	pct := int(math.Round(remaining))
 	percentage := fmt.Sprintf("%d%%", pct)
 	if remaining > 0 && remaining < 1 {
 		percentage = "<1%"
 	}
+	barStyle := lipgloss.Style{}
+	pctColor := pctStyle(pct)
+	resetColor := resetStyle(pct, resetAt, nowEpoch, 0)
+	if blocked {
+		barStyle = redStyle
+		pctColor = dimStyle
+		if remaining > 0 {
+			resetColor = dimStyle
+		}
+	}
 	return TTYWindowRow{
 		Label: windowLabel(name),
-		Bar:   renderBar(pct, lipgloss.Style{}, -1),
-		Pct:   windowPercentage(pctStyle(pct), percentage),
-		Reset: windowReset(resetStyle(pct, resetAt, nowEpoch, 0), resetAt, nowEpoch),
+		Bar:   renderBar(pct, barStyle, -1),
+		Pct:   windowPercentage(pctColor, percentage),
+		Reset: windowReset(resetColor, resetAt, nowEpoch),
 	}
 }
 
@@ -314,7 +328,7 @@ func buildSharedBudgetAggregate(subscription quota.SharedBudgetReport, summary a
 	rows := make([]TTYWindowRow, 0, len(summary.Windows))
 	for _, window := range summary.Windows {
 		minPct = min(minPct, int(math.Round(window.MeanRemainingPct)))
-		rows = append(rows, buildSharedBudgetAllowanceRow(string(window.Name), window.MeanRemainingPct, window.NextResetAtUnix, nowEpoch))
+		rows = append(rows, buildSharedBudgetAllowanceRow(string(window.Name), window.MeanRemainingPct, window.NextResetAtUnix, nowEpoch, false))
 	}
 	label := fmt.Sprintf("%d accounts · mean allowance", summary.AccountCount)
 	return ttyAccountHeader(pctStyle(minPct).Render(subscription.Icon), "", subscription.ProviderName, label, ""), rows
