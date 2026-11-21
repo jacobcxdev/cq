@@ -66,6 +66,7 @@ func (r nativeUsageTestRoute) NativeReady() bool { return r.ready }
 type nativeUsageTestFixture struct {
 	root   string
 	client *tls.Config
+	origin *tls.Config
 	dial   func(context.Context, string, string) (net.Conn, error)
 	cancel context.CancelFunc
 	dials  atomic.Int32
@@ -82,10 +83,6 @@ func newNativeUsageTestFixture(t *testing.T, handler http.Handler) *nativeUsageT
 	if err := nativeusage.SetEnabled(f.root, fs, true); err != nil {
 		t.Fatal(err)
 	}
-	serverTLS, err := nativeusage.LoadTLS(f.root, fs)
-	if err != nil {
-		t.Fatal(err)
-	}
 	certificate, err := os.ReadFile(info.CertificatePath)
 	if err != nil {
 		t.Fatal(err)
@@ -96,9 +93,11 @@ func newNativeUsageTestFixture(t *testing.T, handler http.Handler) *nativeUsageT
 	}
 	f.client = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
 	origin := httptest.NewUnstartedServer(handler)
-	origin.TLS = serverTLS.Clone()
+	origin.TLS, f.origin = nativeUsageRouteConfigs(t)
+	origin.TLS.NextProtos = nil
 	origin.StartTLS()
 	t.Cleanup(origin.Close)
+	roots.AddCert(origin.Certificate())
 	base := nativeUsageTestRoute{ready: true, EgressDialer: egressBrokerTestDialer(func(ctx context.Context, network, target string) (net.Conn, error) {
 		if network != "tcp" || target != "chatgpt.com:443" && target != "ws.chatgpt.com:443" && target != "8.8.8.8:443" {
 			return nil, fmt.Errorf("unexpected native route: %s %s", network, target)
@@ -107,7 +106,7 @@ func newNativeUsageTestFixture(t *testing.T, handler http.Handler) *nativeUsageT
 		return (&net.Dialer{}).DialContext(ctx, "tcp", origin.Listener.Addr().String())
 	})}
 	adapter := NewNativeUsageDialer(base, f.root, fs).(*nativeUsageDialer)
-	adapter.publicTLS = f.client
+	adapter.publicTLS = f.origin
 	adapter.event = func(string) {}
 	socket, cancel := egressBrokerTestServe(t, NewNativeEgressBroker(adapter, "native-usage-test-token"))
 	f.cancel = cancel
@@ -146,11 +145,57 @@ type nativeUsageTestBufferedConn struct {
 
 func (c *nativeUsageTestBufferedConn) Read(p []byte) (int, error) { return c.reader.Read(p) }
 
+func TestNativeUsagePreservesRemoteControlWebSocket(t *testing.T) {
+	f := newNativeUsageTestFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/backend-api/codex/remote/control/client" {
+			t.Errorf("unexpected peer request path %q", r.URL.Path)
+		}
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("peer upgrade failed: %v", err)
+			return
+		}
+		defer conn.Close()
+		if err := conn.WriteMessage(websocket.TextMessage, []byte("peer ready")); err != nil {
+			t.Errorf("write peer data: %v", err)
+		}
+	}))
+	for _, test := range []struct {
+		name, target string
+		protocols    []string
+	}{
+		{"named without ALPN", "chatgpt.com:443", nil},
+		{"numeric without ALPN", "8.8.8.8:443", nil},
+		{"explicit HTTP/1.1", "chatgpt.com:443", []string{"http/1.1"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tlsConfig := f.origin.Clone()
+			tlsConfig.NextProtos = test.protocols
+			dialer := websocket.Dialer{
+				NetDialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+					return f.dial(ctx, network, test.target)
+				},
+				TLSClientConfig: tlsConfig, HandshakeTimeout: 5 * time.Second,
+			}
+			conn, _, err := dialer.Dial("wss://chatgpt.com/backend-api/codex/remote/control/client", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+			if _, message, err := conn.ReadMessage(); err != nil || string(message) != "peer ready" {
+				t.Fatalf("read peer data: %q, %v", message, err)
+			}
+		})
+	}
+}
+
 func TestNativeUsageNumericDestinationUsesTLSServiceName(t *testing.T) {
 	f := newNativeUsageTestFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, nativeUsageTestBody)
 	}))
-	transport := &http.Transport{TLSClientConfig: f.client, DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+	transport := &http.Transport{TLSClientConfig: f.client, ForceAttemptHTTP2: true, DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return f.dial(ctx, network, "8.8.8.8:443")
 	}}
 	t.Cleanup(transport.CloseIdleConnections)
@@ -270,7 +315,7 @@ func TestNativeUsageHTTPSOverAuthenticatedConnect(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, nativeUsageTestBody)
 	}))
-	transport := &http.Transport{Proxy: nil, DialContext: f.dial, TLSClientConfig: f.client, DisableCompression: true}
+	transport := &http.Transport{Proxy: nil, DialContext: f.dial, TLSClientConfig: f.client, ForceAttemptHTTP2: true, DisableCompression: true}
 	t.Cleanup(transport.CloseIdleConnections)
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 	for _, test := range []struct {
@@ -469,7 +514,7 @@ func TestNativeUsageRejectsMismatchedHostAndUntrustedCertificate(t *testing.T) {
 	f := newNativeUsageTestFixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		t.Error("rejected request reached origin")
 	}))
-	transport := &http.Transport{Proxy: nil, DialContext: f.dial, TLSClientConfig: f.client}
+	transport := &http.Transport{Proxy: nil, DialContext: f.dial, TLSClientConfig: f.client, ForceAttemptHTTP2: true}
 	t.Cleanup(transport.CloseIdleConnections)
 	client := &http.Client{Transport: transport, Timeout: 5 * time.Second}
 	request, _ := http.NewRequest(http.MethodGet, "https://chatgpt.com/backend-api/wham/usage", nil)
@@ -488,7 +533,7 @@ func TestNativeUsageRejectsMismatchedHostAndUntrustedCertificate(t *testing.T) {
 	}
 	defer raw.Close()
 	_ = raw.SetDeadline(time.Now().Add(3 * time.Second))
-	conn := tls.Client(raw, &tls.Config{ServerName: "chatgpt.com", RootCAs: x509.NewCertPool(), MinVersion: tls.VersionTLS12})
+	conn := tls.Client(raw, &tls.Config{ServerName: "chatgpt.com", RootCAs: x509.NewCertPool(), MinVersion: tls.VersionTLS12, NextProtos: []string{"h2"}})
 	var unknown x509.UnknownAuthorityError
 	if err := conn.Handshake(); !errors.As(err, &unknown) {
 		t.Fatalf("untrusted certificate was not rejected: %v", err)
@@ -728,6 +773,7 @@ func TestNativeUsageCancellationClosesTLSConnect(t *testing.T) {
 	defer raw.Close()
 	config := f.client.Clone()
 	config.ServerName = "chatgpt.com"
+	config.NextProtos = []string{"h2"}
 	conn := tls.Client(raw, config)
 	if err := conn.HandshakeContext(context.Background()); err != nil {
 		t.Fatal(err)

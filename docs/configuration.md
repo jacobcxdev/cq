@@ -147,6 +147,10 @@ availability in the usage HTTP response and Electron live updates. Provider
 balances and account routing remain unchanged. Multi-account Dots use the
 existing CQ launcher.
 
+On `chatgpt.com`, usage handling selects TLS clients that offer HTTP/2. Codex
+Remote Control's HTTP/1.1 WebSocket keeps the service's original TLS connection.
+The usage update feed on `ws.chatgpt.com` also supports HTTP/1.1 WebSockets.
+
 This option needs a dedicated local TLS certificate for `chatgpt.com` and
 `ws.chatgpt.com`. The certificate has no CA capability and remains separate from
 Dots certificates. Prepare it without changing traffic:
