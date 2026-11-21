@@ -72,6 +72,9 @@ func TestNativeUsageRouteSelectsTLSService(t *testing.T) {
 				}
 				config := clientTLS.Clone()
 				config.ServerName = host
+				if host == "chatgpt.com" {
+					config.NextProtos = []string{"h2", "http/1.1"}
+				}
 				client := tls.Client(front, config)
 				if err := client.HandshakeContext(ctx); err != nil {
 					t.Fatal(err)

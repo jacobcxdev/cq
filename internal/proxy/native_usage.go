@@ -75,8 +75,8 @@ func (d *nativeUsageDialer) DialContext(ctx context.Context, network, target str
 			if ctx.Err() != nil || len(hello.prefix) == 0 {
 				return
 			}
-			if nativeusage.IsHost(hello.host) {
-				d.serve(ctx, &nativeUsageReplayConn{Conn: server, reader: io.MultiReader(bytes.NewReader(hello.prefix), server)}, net.JoinHostPort(hello.host, "443"), config)
+			if hello.usageHost != "" {
+				d.serve(ctx, &nativeUsageReplayConn{Conn: server, reader: io.MultiReader(bytes.NewReader(hello.prefix), server)}, net.JoinHostPort(hello.usageHost, "443"), config)
 				return
 			}
 			original, err := d.upstream.DialContext(ctx, network, target)
