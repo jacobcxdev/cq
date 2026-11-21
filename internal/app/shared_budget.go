@@ -9,6 +9,8 @@ type SharedBudgetAggregateReport struct {
 }
 
 // SharedBudgetAggregateWindow describes the accounts that reported a window.
+// MeanRemainingPct treats accounts blocked by another reported window as zero.
+// NonZeroAccounts counts the raw non-zero reports for this window.
 type SharedBudgetAggregateWindow struct {
 	Name             quota.WindowName `json:"name"`
 	MeanRemainingPct float64          `json:"mean_remaining_pct"`
@@ -47,6 +49,8 @@ func aggregateSharedBudgetWindows(accounts []quota.SharedBudgetReport, nowEpoch 
 	var names []quota.WindowName
 	for _, account := range accounts {
 		seen := make(map[quota.WindowName]bool, len(account.Windows))
+		valid := make([]quota.SharedBudgetWindow, 0, len(account.Windows))
+		blocked := false
 		for _, window := range account.Windows {
 			name := quota.WindowName(window.Name)
 			remaining := window.RemainingPct
@@ -54,11 +58,19 @@ func aggregateSharedBudgetWindows(accounts []quota.SharedBudgetReport, nowEpoch 
 				continue
 			}
 			seen[name] = true
+			valid = append(valid, window)
+			blocked = blocked || remaining == 0
+		}
+		for _, window := range valid {
+			name := quota.WindowName(window.Name)
+			remaining := window.RemainingPct
 			total := totals[name]
 			if total.reported == 0 {
 				names = append(names, name)
 			}
-			total.sum += remaining
+			if !blocked {
+				total.sum += remaining
+			}
 			total.reported++
 			if remaining > 0 {
 				total.nonZero++

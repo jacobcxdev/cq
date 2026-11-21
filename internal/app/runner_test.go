@@ -185,7 +185,7 @@ func TestRunnerReportsSharedBudgetAggregatesByDefault(t *testing.T) {
 		t.Fatalf("unexpected shared-budget reports: %s", data)
 	}
 	first, second := decoded.Aggregates["first"], decoded.Aggregates["second"]
-	if first.AccountCount != 3 || !slices.Equal(first.Windows, []window{{"5h", 0.25, 2, 1, 2000}, {"1mo", 90, 2, 2, 1400}}) {
+	if first.AccountCount != 3 || !slices.Equal(first.Windows, []window{{"5h", 0.25, 2, 1, 2000}, {"1mo", 47.5, 2, 2, 1400}}) {
 		t.Errorf("first aggregate = %+v", first)
 	}
 	if second.AccountCount != 2 || !slices.Equal(second.Windows, []window{{"5h", 70, 2, 2, 0}}) {
