@@ -109,11 +109,14 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 		writeError(w, http.StatusNotImplemented, "not_implemented", "Z.ai does not support Responses compaction")
 		return true, model
 	}
-	if len(body) > maxRequestBody || len(decodedBody) > maxRequestBody {
-		writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "Z.ai request body exceeds 10 MiB")
-		return true, model
-	}
 	originalBody := decodedBody
+	if len(body) > maxRequestBody || len(decodedBody) > maxRequestBody {
+		decodedBody = boundZAIHTTPReplay(decodedBody)
+		if decodedBody == nil {
+			writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "Z.ai request body exceeds 10 MiB")
+			return true, model
+		}
+	}
 	decodedBody, err = normaliseZAIRequest(decodedBody)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -191,6 +194,33 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 	return true, model
 }
 
+const zaiMaxReplayInputBytes = maxRequestBody - (1 << 20)
+
+func boundZAIHTTPReplay(body []byte) []byte {
+	var request map[string]json.RawMessage
+	if json.Unmarshal(body, &request) != nil || request == nil {
+		return nil
+	}
+	if raw, ok := request["previous_response_id"]; ok {
+		var previousID string
+		if json.Unmarshal(raw, &previousID) != nil || previousID != "" {
+			return nil
+		}
+	}
+	input, err := responsesBridgeInput(request["input"], "Z.ai")
+	if err != nil || len(input) == 0 {
+		return nil
+	}
+	if _, err := setResponsesBridgeInput(request, input, responsesBridgeCurrentItems(input), zaiMaxReplayInputBytes); err != nil {
+		return nil
+	}
+	encoded, err := json.Marshal(request)
+	if err != nil || len(encoded) > maxRequestBody {
+		return nil
+	}
+	return encoded
+}
+
 // Build headers afresh: local bearer, cookies and ChatGPT account identities
 // must never cross into a different provider's trust boundary.
 func setZAIHeaders(dst, src http.Header, key string) {
@@ -223,7 +253,7 @@ func (s *Server) zaiRejectedBeforeGeneration(ctx context.Context, body []byte, r
 
 func (s *Server) serveZAIWebSocket(ctx context.Context, downstream *websocket.Conn, header http.Header, kind int, first []byte) error {
 	return s.serveResponsesHTTPWebSocket(ctx, downstream, header, kind, first, responsesHTTPBridge{
-		Name: "Z.ai", PrewarmPrefix: "cq_zai_prewarm_", MaxInputBytes: maxRequestBody - (1 << 20),
+		Name: "Z.ai", PrewarmPrefix: "cq_zai_prewarm_", MaxInputBytes: zaiMaxReplayInputBytes,
 		AcceptsModel: func(model string) bool { return RouteModelWithCatalog(model, s.Catalog) == ProviderZAI },
 		Stream:       s.withSharedBudgetWebSocketFallback(s.streamZAIWebSocketResponse), Compaction: zaiCompactionRequested,
 	})
