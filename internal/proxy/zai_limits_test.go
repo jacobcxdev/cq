@@ -12,6 +12,76 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func TestZAIBoundsReplayWithLargeRequestEnvelope(t *testing.T) {
+	old := strings.Repeat("x", (9<<20)-(256<<10))
+	instructions := strings.Repeat("y", 1536<<10)
+	fields := `"model":"glm-5.3-flash","instructions":"` + instructions +
+		`","input":[{"role":"developer","content":"preamble"},` +
+		`{"role":"user","content":"` + old + `"},` +
+		`{"role":"user","content":"latest user request"},` +
+		`{"type":"function_call","call_id":"latest-call","name":"lookup","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"latest-call","output":"latest result"}]`
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength > maxRequestBody {
+			t.Errorf("upstream body = %d bytes", r.ContentLength)
+		}
+		var got struct {
+			Instructions string
+			Input        []json.RawMessage
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Errorf("decode upstream body: %v", err)
+			return
+		}
+		if got.Instructions != instructions || len(got.Input) != 5 ||
+			!strings.Contains(string(got.Input[0]), "preamble") ||
+			!strings.Contains(string(got.Input[1]), "Earlier conversation omitted") ||
+			!strings.Contains(string(got.Input[2]), "latest user request") ||
+			!strings.Contains(string(got.Input[3]), "latest-call") ||
+			!strings.Contains(string(got.Input[4]), "latest result") {
+			t.Errorf("upstream lost request fields or current turn, input items = %d", len(got.Input))
+		}
+		writeZAITestSSE(w, "bounded-replay", nil)
+	}))
+	defer upstream.Close()
+	server := &Server{
+		Config: &Config{ClaudeUpstream: upstream.URL}, Catalog: zaiTestCatalog(), ZAIUpstream: upstream.URL,
+		ZAIAPIKey: func() (string, error) { return "test-key", nil },
+	}
+
+	t.Run("websocket", func(t *testing.T) {
+		client := openZAITestWebSocket(t, server, nil)
+		if err := client.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if err := client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create",`+fields+`}`)); err != nil {
+			t.Fatal(err)
+		}
+		if got := readZAITestCompletion(t, client); got.Response.ID != "bounded-replay" {
+			t.Fatalf("response id = %q", got.Response.ID)
+		}
+	})
+	t.Run("http", func(t *testing.T) {
+		body := `{"stream":true,` + fields + `}`
+		request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(body))
+		response := httptest.NewRecorder()
+		server.handleCodexResponsesRoute(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "bounded-replay") {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body)
+		}
+	})
+	t.Run("http continuation", func(t *testing.T) {
+		body := `{"stream":true,"previous_response_id":"previous",` + fields + `}`
+		request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(body))
+		response := httptest.NewRecorder()
+		server.handleCodexResponsesRoute(response, request)
+		if response.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body)
+		}
+	})
+}
+
 func TestZAIWebSocketRejectsOversizedNormalisedBody(t *testing.T) {
 	const prefix = `{"model":"glm-5.3-flash","stream":true,"input":[{"type":"agent_message","content":[{"type":"input_text","text":"`
 	const suffix = `"}]}]}`

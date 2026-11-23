@@ -203,7 +203,11 @@ homebrew_casks:
             version = pin.fetch("version")
             sha256 = pin.fetch("sha256")
             schema = pin["schema_version"]
-            native_tag = schema == 2 ? "v#{version}" : "cq-network-v#{version}"
+            native_tag = if schema == 2
+              "v#{version}"
+            else
+              "cq-network-v#{version}"
+            end
             url = "https://github.com/jacobcxdev/cq/releases/download/#{native_tag}/CQNetwork_#{version}_universal.zip"
             valid_bundles = true
             if pin.key?("bundles")
@@ -217,7 +221,11 @@ homebrew_casks:
                                   bundle["sha256"].is_a?(String) && bundle["sha256"].match?(/\A[0-9a-f]{64}\z/)
                               end
               if valid_bundles
-                architecture = Homebrew::SimulateSystem.current_arch == :arm ? "arm64" : "amd64"
+                architecture = if Homebrew::SimulateSystem.current_arch == :arm
+                  "arm64"
+                else
+                  "amd64"
+                end
                 bundle = bundles.fetch(architecture)
                 sha256 = bundle.fetch("sha256")
                 url = bundle.fetch("url")

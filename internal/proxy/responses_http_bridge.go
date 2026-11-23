@@ -128,18 +128,16 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 	} else if bridge.MaxInputBytes > 0 {
 		// A reconnect can supply the whole conversation instead of a delta.
 		// Keep its latest user turn when bounding older replay history.
-		for index := len(input) - 1; index >= 0; index-- {
-			if responsesBridgeMessageRole(input[index]) == "user" {
-				currentItems = len(input) - index
-				break
-			}
-		}
+		currentItems = responsesBridgeCurrentItems(input)
 	}
 	delete(request, "previous_response_id")
-	if bridge.MaxInputBytes > 0 {
-		input, _ = boundResponsesBridgeInput(input, currentItems, bridge.MaxInputBytes)
+	if !prewarm {
+		request["stream"] = json.RawMessage("true")
 	}
-	request["input"], _ = json.Marshal(input)
+	input, err = setResponsesBridgeInput(request, input, currentItems, bridge.MaxInputBytes)
+	if err != nil {
+		return errors.New("invalid " + bridge.Name + " WebSocket request")
+	}
 	if prewarm {
 		state.previousID = fmt.Sprintf(bridge.PrewarmPrefix+"%x", time.Now().UnixNano())
 		state.history = input
@@ -151,7 +149,6 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 			}
 		}
 	} else {
-		request["stream"] = json.RawMessage("true")
 		body, err := json.Marshal(request)
 		if err != nil {
 			return errors.New("invalid " + bridge.Name + " WebSocket request")
@@ -183,6 +180,31 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 		}
 	}
 	return nil
+}
+
+func responsesBridgeCurrentItems(input []json.RawMessage) int {
+	for index := len(input) - 1; index >= 0; index-- {
+		if responsesBridgeMessageRole(input[index]) == "user" {
+			return len(input) - index
+		}
+	}
+	return len(input)
+}
+
+func setResponsesBridgeInput(request map[string]json.RawMessage, input []json.RawMessage, currentItems, maxInputBytes int) ([]json.RawMessage, error) {
+	if maxInputBytes > 0 {
+		// Reserve the actual encoded size of fields outside the input array.
+		request["input"] = json.RawMessage("[]")
+		envelope, err := json.Marshal(request)
+		if err != nil {
+			return nil, err
+		}
+		budget := min(maxInputBytes, maxRequestBody-len(envelope)+2)
+		input, _ = boundResponsesBridgeInput(input, currentItems, budget)
+	}
+	encoded, err := json.Marshal(input)
+	request["input"] = encoded
+	return input, err
 }
 
 var responsesHistoryOmittedMessage = json.RawMessage(`{"type":"message","role":"developer","content":"Earlier conversation omitted to fit provider context. Continue using available messages; ask user for missing details."}`)
