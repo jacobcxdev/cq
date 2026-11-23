@@ -58,7 +58,8 @@ func TestZAIProjectionCompactionLimit(t *testing.T) {
 func TestZAIProjectionPreservesOtherModelsAndInvalidWindows(t *testing.T) {
 	for _, raw := range []string{
 		`{"slug":"glm-5.3-flash","context_window":1048576}`,
-		`{"slug":"glm-5.4","context_window":2097152,"auto_compact_token_limit":1800000}`,
+		`{"slug":"glm-5.4","context_window":2097152,"effective_context_window_percent":50,"auto_compact_token_limit":1800000}`,
+		`{"slug":"glm-5.4","context_window":1048576,"effective_context_window_percent":95}`,
 		`{"slug":"glm-5-turbo","context_window":204800}`,
 		`{"slug":"glm-5.3"}`,
 		`{"slug":"glm-5.3","context_window":-1}`,
@@ -79,5 +80,28 @@ func TestZAIProjectionPreservesOtherModelsAndInvalidWindows(t *testing.T) {
 		if !reflect.DeepEqual(before, after) {
 			t.Fatalf("unrelated or unusable model metadata changed: %s", response.Models[0])
 		}
+	}
+}
+
+func TestZAIProjectionRestoresGLM54ContextHeadroom(t *testing.T) {
+	raw := json.RawMessage(`{"slug":"glm-5.4","context_window":1048576,"max_context_window":1048576,"effective_context_window_percent":50,"auto_compact_token_limit":null}`)
+	snapshot := Snapshot{Entries: []Entry{{Provider: ProviderZAI, ID: "glm-5.4", Source: SourceNative, Raw: raw}}}
+	augmented, err := AugmentCodexModels([]byte(`{"models":[]}`), snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct{ Models []map[string]json.RawMessage }
+	if err := json.Unmarshal(augmented, &envelope); err != nil || len(envelope.Models) != 1 {
+		t.Fatalf("invalid model catalogue: %s (%v)", augmented, err)
+	}
+	projected := envelope.Models[0]
+	if got := string(projected["effective_context_window_percent"]); got != "95" {
+		t.Fatalf("GLM-5.4 effective context percent = %s, want 95", got)
+	}
+	delete(projected, "web_search_provider")
+	projected["effective_context_window_percent"] = json.RawMessage("50")
+	var original map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &original); err != nil || !reflect.DeepEqual(projected, original) || string(original["effective_context_window_percent"]) != "50" {
+		t.Fatal("projection changed raw provider metadata or unrelated fields")
 	}
 }

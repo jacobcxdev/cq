@@ -2,14 +2,23 @@ package modelregistry
 
 import "encoding/json"
 
-// Keep GLM-5.3 below reported late-context reasoning loops. Compact at 70% of the
-// usable window shown by Codex, without reducing the provider's context size.
-// Recompute from native metadata so catalogue updates retain the percentage;
-// other models, including future GLM releases, keep their provider defaults.
 func zaiCodexEntryRaw(e Entry) json.RawMessage {
+	if e.ID == "glm-5.4" {
+		// Z.ai reports a 1M window but gives Codex a 50% input budget.
+		// Use Codex's usual 5% headroom for this catalogue entry.
+		var raw map[string]json.RawMessage
+		if json.Unmarshal(e.Raw, &raw) != nil || string(raw["context_window"]) != "1048576" ||
+			string(raw["effective_context_window_percent"]) != "50" {
+			return e.Raw
+		}
+		raw["effective_context_window_percent"] = json.RawMessage("95")
+		encoded, _ := json.Marshal(raw)
+		return encoded
+	}
 	if e.ID != "glm-5.3" {
 		return e.Raw
 	}
+	// Compact GLM-5.3 at 70% of its usable window to avoid late-context reasoning loops.
 	var info struct {
 		ContextWindow    *int64 `json:"context_window"`
 		MaxWindow        *int64 `json:"max_context_window"`
