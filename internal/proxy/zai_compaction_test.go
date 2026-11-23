@@ -131,6 +131,41 @@ func TestZAICompactionTriggerHTTP(t *testing.T) {
 	}
 }
 
+func TestZAICompactionBoundsOversizedReplay(t *testing.T) {
+	var upstreamCalls int
+	s := &Server{
+		Config: &Config{LocalToken: "private-proxy-token"}, Catalog: zaiTestCatalog(),
+		ZAIAPIKey: func() (string, error) { return "test-key", nil },
+		ZAITransport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			upstreamCalls++
+			if r.ContentLength > maxRequestBody {
+				t.Errorf("compaction request is oversized: %d bytes", r.ContentLength)
+			}
+			var request struct{ Input []json.RawMessage }
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Fatalf("decode compaction request: %v", err)
+			}
+			if len(request.Input) != 3 ||
+				!bytes.Contains(request.Input[0], []byte("Earlier conversation omitted")) ||
+				!bytes.Contains(request.Input[1], []byte("latest user request")) ||
+				!bytes.Contains(request.Input[2], []byte(zaiCompactionPrompt)) {
+				t.Fatalf("compaction lost its latest turn or instruction, got %d items", len(request.Input))
+			}
+			w := httptest.NewRecorder()
+			writeZAICompactionTestSSE(w, "summary-response", []json.RawMessage{json.RawMessage(zaiTestSummaryMessage)})
+			return w.Result(), nil
+		}),
+	}
+	body := `{"model":"glm-5.3-flash","input":[{"role":"user","content":"` +
+		strings.Repeat("x", 11<<20) +
+		`"},{"role":"user","content":"latest user request"},{"type":"compaction_trigger"}]}`
+	w := httptest.NewRecorder()
+	s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(body)))
+	if w.Code != http.StatusOK || upstreamCalls != 1 || !bytes.Contains(w.Body.Bytes(), []byte(zaiCompactionPrefix)) {
+		t.Fatalf("status=%d calls=%d, want a saved compaction item", w.Code, upstreamCalls)
+	}
+}
+
 func TestZAICompactionFallsBackToOpenCodeGo(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 )
 
 // Native Codex v2 sends a trigger through ordinary Responses, not /compact.
@@ -103,6 +104,13 @@ func (s *Server) compactZAI(ctx context.Context, header http.Header, body []byte
 	if err != nil {
 		return empty, err
 	}
+	if len(encoded) > maxRequestBody {
+		bounded, _ := boundZAIReplay(encoded, zaiMaxReplayInputBytes)
+		if bounded == nil {
+			return empty, errors.New("Z.ai compaction request exceeds 10 MiB")
+		}
+		encoded = bounded
+	}
 	encoded, err = normaliseZAIRequest(encoded)
 	if err != nil {
 		return empty, err
@@ -125,6 +133,9 @@ func (s *Server) compactZAI(ctx context.Context, header http.Header, body []byte
 	header.Set("Accept", "text/event-stream")
 	response, err := s.doZAIRequest(ctx, target, header, encoded, accounts)
 	if err != nil {
+		if errors.Is(err, zcode.ErrContextLengthExceeded) {
+			return empty, err
+		}
 		return empty, errors.New("Z.ai compaction request failed")
 	}
 	defer response.Body.Close()
@@ -205,6 +216,10 @@ func zaiCompactionEvents(response zaiCompactResponse) []map[string]any {
 
 func (s *Server) handleZAICompaction(w http.ResponseWriter, r *http.Request, body []byte) {
 	response, err := s.compactZAI(r.Context(), r.Header, body)
+	if errors.Is(err, zcode.ErrContextLengthExceeded) {
+		writeZAIContextLengthError(w)
+		return
+	}
 	if errors.Is(err, errEncryptedSubscriptionAgentMessage) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return

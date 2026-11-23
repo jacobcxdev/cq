@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,7 +11,97 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	zaiprov "github.com/jacobcxdev/cq/internal/provider/zai"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 )
+
+func TestZCodeContextOverflowRetriesShorterReplay(t *testing.T) {
+	const marker = "latest user request"
+	oldText := strings.Repeat("x", 6<<20)
+	fields := `"model":"glm-5.3-flash","input":[` +
+		`{"role":"developer","content":"Keep this instruction."},` +
+		`{"role":"user","content":"` + oldText + `"},` +
+		`{"role":"user","content":"` + marker + `"},` +
+		`{"type":"function_call","name":"lookup","call_id":"latest-call","arguments":"{}"},` +
+		`{"type":"function_call_output","call_id":"latest-call","output":"latest result"}]`
+	for _, test := range []struct {
+		name, code string
+		wantStatus int
+		wantCalls  int
+		overflow   bool
+	}{
+		{name: "prompt too long", code: `"1261"`, wantStatus: http.StatusOK, wantCalls: 2},
+		{name: "unclassified rejection", code: `"1210"`, wantStatus: http.StatusBadRequest, wantCalls: 1},
+		{name: "retry still exceeds context", code: `1261`, wantStatus: http.StatusBadRequest, wantCalls: 2, overflow: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			gateway := &zcode.Gateway{Version: zcode.ClientVersion, HTTP: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				calls++
+				var projected struct {
+					Messages []json.RawMessage
+				}
+				if err := json.NewDecoder(r.Body).Decode(&projected); err != nil {
+					t.Fatalf("decode projected replay: %v", err)
+				}
+				if calls == 1 {
+					if r.ContentLength < int64(len(oldText)) {
+						t.Fatal("first request omitted history before provider rejection")
+					}
+					return &http.Response{
+						StatusCode: http.StatusBadRequest,
+						Header:     http.Header{"Content-Type": {"application/json"}},
+						Body:       io.NopCloser(strings.NewReader(`{"error":{"code":` + test.code + `,"message":"private upstream message"}}`)),
+					}, nil
+				}
+				encoded, err := json.Marshal(projected)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, want := range []string{marker, "tool_use", "tool_result", "latest-call", "latest result"} {
+					if !strings.Contains(string(encoded), want) {
+						t.Errorf("shorter replay lost %q", want)
+					}
+				}
+				if r.ContentLength >= int64(len(oldText)) {
+					t.Errorf("retry body still contains oversized history: %d bytes", r.ContentLength)
+				}
+				if test.overflow {
+					return makeResponse(http.StatusBadRequest, `{"error":{"code":"1261","message":"private upstream message"}}`), nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     http.Header{"Content-Type": {"application/json"}},
+					Body:       io.NopCloser(strings.NewReader(`{"id":"answer","type":"message","role":"assistant","model":"glm-5.3-flash","content":[{"type":"text","text":"continued"}],"stop_reason":"end_turn","usage":{"input_tokens":8,"output_tokens":1}}`)),
+				}, nil
+			})}}
+			server := &Server{
+				Config: &Config{}, Catalog: zaiTestCatalog(), ZAIGateway: gateway,
+				ZAIAccounts: func() ([]zaiprov.Account, error) {
+					return []zaiprov.Account{{
+						Transport: "zcode-start",
+						OAuth:     &zcode.LoginSession{ID: "fixture", ZCodeJWT: "fake"},
+					}}, nil
+				},
+			}
+			request := httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader("{"+fields+"}"))
+			response := httptest.NewRecorder()
+			server.handleCodexResponsesRoute(response, request)
+			if response.Code != test.wantStatus || calls != test.wantCalls {
+				t.Fatalf("status=%d calls=%d, want %d and %d", response.Code, calls, test.wantStatus, test.wantCalls)
+			}
+			if strings.Contains(response.Body.String(), "private upstream message") {
+				t.Fatal("upstream error body escaped the gateway")
+			}
+			if test.overflow && !strings.Contains(response.Body.String(), "context_length_exceeded") {
+				t.Fatal("request did not report the provider's context overflow to Codex")
+			}
+			if test.wantStatus == http.StatusOK && !strings.Contains(response.Body.String(), "continued") {
+				t.Fatal("retry did not return the completed turn")
+			}
+		})
+	}
+}
 
 func TestZAIBoundsReplayWithLargeRequestEnvelope(t *testing.T) {
 	old := strings.Repeat("x", (9<<20)-(256<<10))

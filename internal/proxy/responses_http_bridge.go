@@ -134,7 +134,7 @@ func (state *responsesHTTPBridgeState) serveFrame(ctx context.Context, downstrea
 	if !prewarm {
 		request["stream"] = json.RawMessage("true")
 	}
-	input, err = setResponsesBridgeInput(request, input, currentItems, bridge.MaxInputBytes)
+	input, _, err = setResponsesBridgeInput(request, input, currentItems, bridge.MaxInputBytes)
 	if err != nil {
 		return errors.New("invalid " + bridge.Name + " WebSocket request")
 	}
@@ -191,20 +191,21 @@ func responsesBridgeCurrentItems(input []json.RawMessage) int {
 	return len(input)
 }
 
-func setResponsesBridgeInput(request map[string]json.RawMessage, input []json.RawMessage, currentItems, maxInputBytes int) ([]json.RawMessage, error) {
+func setResponsesBridgeInput(request map[string]json.RawMessage, input []json.RawMessage, currentItems, maxInputBytes int) ([]json.RawMessage, bool, error) {
+	trimmed := false
 	if maxInputBytes > 0 {
 		// Reserve the actual encoded size of fields outside the input array.
 		request["input"] = json.RawMessage("[]")
 		envelope, err := json.Marshal(request)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		budget := min(maxInputBytes, maxRequestBody-len(envelope)+2)
-		input, _ = boundResponsesBridgeInput(input, currentItems, budget)
+		input, trimmed = boundResponsesBridgeInput(input, currentItems, budget)
 	}
 	encoded, err := json.Marshal(input)
 	request["input"] = encoded
-	return input, err
+	return input, trimmed, err
 }
 
 var responsesHistoryOmittedMessage = json.RawMessage(`{"type":"message","role":"developer","content":"Earlier conversation omitted to fit provider context. Continue using available messages; ask user for missing details."}`)
