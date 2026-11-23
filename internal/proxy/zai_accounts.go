@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -175,6 +176,14 @@ func (s *Server) doZAIRequest(ctx context.Context, target string, header http.He
 				auth.DeviceMid = account.OAuth.DeviceMid
 			}
 			response, err = s.ZAIGateway.Do(ctx, body, auth, sessionID)
+			if errors.Is(err, zcode.ErrContextLengthExceeded) && ctx.Err() == nil {
+				// An explicit overflow rejects the prompt before generation.
+				// Keep the account and latest turn while leaving more token headroom.
+				if shorter, trimmed := boundZAIReplay(body, 4<<20); trimmed {
+					body = shorter
+					response, err = s.ZAIGateway.Do(ctx, body, auth, sessionID)
+				}
+			}
 		} else {
 			var request *http.Request
 			request, err = http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))

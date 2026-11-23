@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
+	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 )
 
 const defaultZAIUpstream = "https://api.z.ai/api/v1"
@@ -111,7 +112,7 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 	}
 	originalBody := decodedBody
 	if len(body) > maxRequestBody || len(decodedBody) > maxRequestBody {
-		decodedBody = boundZAIHTTPReplay(decodedBody)
+		decodedBody, _ = boundZAIReplay(decodedBody, zaiMaxReplayInputBytes)
 		if decodedBody == nil {
 			writeError(w, http.StatusRequestEntityTooLarge, "invalid_request_error", "Z.ai request body exceeds 10 MiB")
 			return true, model
@@ -149,6 +150,10 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 	fmt.Fprintf(os.Stderr, "cq: route POST %s model=%q provider=zai (native)\n", r.URL.Path, model)
 	response, err := s.doZAIRequest(r.Context(), upstream, r.Header, decodedBody, accounts)
 	if err != nil {
+		if errors.Is(err, zcode.ErrContextLengthExceeded) {
+			writeZAIContextLengthError(w)
+			return true, model
+		}
 		writeError(w, http.StatusBadGateway, "api_error", "Z.ai upstream request failed")
 		return true, model
 	}
@@ -196,29 +201,47 @@ func (s *Server) tryHandleZAI(w http.ResponseWriter, r *http.Request) (bool, str
 
 const zaiMaxReplayInputBytes = maxRequestBody - (1 << 20)
 
-func boundZAIHTTPReplay(body []byte) []byte {
+func boundZAIReplay(body []byte, maxInputBytes int) ([]byte, bool) {
 	var request map[string]json.RawMessage
 	if json.Unmarshal(body, &request) != nil || request == nil {
-		return nil
+		return nil, false
 	}
 	if raw, ok := request["previous_response_id"]; ok {
 		var previousID string
 		if json.Unmarshal(raw, &previousID) != nil || previousID != "" {
-			return nil
+			return nil, false
 		}
 	}
 	input, err := responsesBridgeInput(request["input"], "Z.ai")
 	if err != nil || len(input) == 0 {
-		return nil
+		return nil, false
 	}
-	if _, err := setResponsesBridgeInput(request, input, responsesBridgeCurrentItems(input), zaiMaxReplayInputBytes); err != nil {
-		return nil
+	_, trimmed, err := setResponsesBridgeInput(request, input, responsesBridgeCurrentItems(input), maxInputBytes)
+	if err != nil {
+		return nil, false
 	}
 	encoded, err := json.Marshal(request)
 	if err != nil || len(encoded) > maxRequestBody {
-		return nil
+		return nil, false
 	}
-	return encoded
+	return encoded, trimmed
+}
+
+func zaiContextLengthError() map[string]string {
+	return map[string]string{
+		"type": "invalid_request_error", "code": "context_length_exceeded",
+		"message": "ZCode prompt exceeds the model context limit",
+	}
+}
+
+func writeZAIContextLengthError(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusBadRequest)
+	_ = json.NewEncoder(w).Encode(map[string]any{"type": "error", "error": zaiContextLengthError()})
+}
+
+func writeZAIWebSocketContextLengthError(downstream *websocket.Conn) {
+	_ = downstream.WriteJSON(map[string]any{"type": "error", "status": http.StatusBadRequest, "error": zaiContextLengthError()})
 }
 
 // Build headers afresh: local bearer, cookies and ChatGPT account identities
@@ -273,6 +296,9 @@ func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *web
 		fmt.Fprintln(os.Stderr, "cq: Z.ai native WebSocket compaction")
 		response, err := s.compactZAI(ctx, header, body)
 		if err != nil {
+			if errors.Is(err, zcode.ErrContextLengthExceeded) {
+				writeZAIWebSocketContextLengthError(downstream)
+			}
 			return "", nil, err
 		}
 		for _, event := range zaiCompactionEvents(response) {
@@ -316,6 +342,10 @@ func (s *Server) streamZAIWebSocketResponse(ctx context.Context, downstream *web
 	header.Set("Accept", "text/event-stream")
 	response, err := s.doZAIRequest(ctx, target, header, body, accounts)
 	if err != nil {
+		if errors.Is(err, zcode.ErrContextLengthExceeded) {
+			writeZAIWebSocketContextLengthError(downstream)
+			return "", nil, err
+		}
 		return "", nil, errors.New("Z.ai HTTP stream request failed")
 	}
 	defer func() { _ = response.Body.Close() }()

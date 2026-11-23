@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -20,6 +21,8 @@ import (
 const paidMessagesURL = "https://zcode.z.ai/api/v1/ultra-zai/anthropic/v1/messages"
 const startMessagesURL = "https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages"
 const maxGatewayRequest = 10 << 20
+
+var ErrContextLengthExceeded = errors.New("ZCode prompt exceeds the context limit")
 
 type GatewayAuth struct {
 	Credential string `json:"-"`
@@ -184,6 +187,17 @@ func (g *Gateway) Do(ctx context.Context, body []byte, auth GatewayAuth, session
 	}
 	result.Uncompressed = true
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		if response.StatusCode == http.StatusBadRequest {
+			var rejected struct {
+				Error struct{ Code json.RawMessage }
+			}
+			if data, err := httputil.ReadBody(source); err == nil && json.Unmarshal(data, &rejected) == nil {
+				switch string(rejected.Error.Code) {
+				case "1261", `"1261"`:
+					return nil, ErrContextLengthExceeded
+				}
+			}
+		}
 		setGatewayJSONBody(&result, []byte(`{"error":{"type":"api_error","message":"ZCode model request failed"}}`))
 		return &result, nil
 	}
