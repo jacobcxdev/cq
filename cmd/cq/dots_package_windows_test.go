@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/dots"
@@ -140,6 +141,39 @@ func TestRegisteredWindowsDotsPackageReadOnly(t *testing.T) {
 	}
 	if err := dots.CheckWindowsApp(&pin); err != nil {
 		t.Fatal(err)
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := dotsDefaultRoot(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options := dots.InstallOptions{
+		Root: root, App: pin.AppPath,
+		SystemAuth: filepath.Join(home, ".codex", "auth.json"),
+		CQAccounts: filepath.Join(home, ".codex", "accounts"),
+	}
+	if _, err := dots.ValidateInstallLocation(options); err != nil {
+		t.Fatalf("registered package failed first-install path validation: %v", err)
+	}
+	pin.RuntimeRoot = filepath.Join(root, "runtime")
+	pin.SystemAuth = options.SystemAuth
+	pin.CQAccounts = options.CQAccounts
+	pin.SystemAlias = dots.AccountAlias("registered-package-test")
+	pin.IntegrationMode = "native"
+	if err := pin.Validate(); err != nil {
+		t.Fatalf("registered package failed persisted settings validation: %v", err)
+	}
+	registeredPath := pin.AppPath
+	retiredName := strings.Replace(filepath.Base(registeredPath), "_"+pin.AppVersion+"_", "_0.0.0.0_", 1)
+	pin.AppPath = filepath.Join(filepath.Dir(registeredPath), retiredName)
+	if pin.AppPath == registeredPath {
+		t.Fatal("could not construct a retired package path")
+	}
+	if err := pin.Validate(); err != nil {
+		t.Fatalf("retired package settings could not load for refresh: %v", err)
 	}
 	t.Logf("registered package qualified: version=%s renderer=%s", pin.AppVersion, pin.ModuleAsset)
 }

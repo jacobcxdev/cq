@@ -190,7 +190,7 @@ func ValidateInstallLocation(options InstallOptions) (string, error) {
 		if !cleanAbsolute(path) {
 			return "", fmt.Errorf("Installation paths must be absolute")
 		}
-		boundary, err := CanonicalPath(path)
+		boundary, err := canonicalProtectedPath(path, options.App)
 		if err != nil {
 			return "", err
 		}
