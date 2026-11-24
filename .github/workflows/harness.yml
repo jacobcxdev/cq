@@ -330,17 +330,40 @@ jobs:
             @'
             package main
             import (
+                "errors"
+                "fmt"
                 "os"
                 "os/exec"
+                "path/filepath"
                 "slices"
+                "syscall"
             )
             func main() {
                 args := os.Args[1:]
-                if !slices.Contains(args, "app-server") { os.Exit(2) }
-                if err := os.WriteFile(os.Getenv("CQ_DESKTOP_WITNESS"), []byte("app-server\n"), 0600); err != nil { os.Exit(3) }
-                cmd := exec.Command(os.Getenv("CQ_DESKTOP_CONTROL_CQ"), args...)
+                app := slices.Index(args, "app-server")
+                if app < 0 { os.Exit(2) }
+                cq := os.Getenv("CQ_DESKTOP_CONTROL_CQ")
+                stock := os.Getenv("CQ_WINDOWS_HARNESS_STOCK_CLI")
+                record := func(stage string) {
+                    file, err := os.OpenFile(os.Getenv("CQ_DESKTOP_WITNESS"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+                    if err != nil { os.Exit(3) }
+                    fmt.Fprintln(file, stage)
+                    file.Close()
+                }
+                prefix := args[:app]
+                for len(prefix) >= 2 && (prefix[0] == "-c" || prefix[0] == "--config") { prefix = prefix[2:] }
+                record(fmt.Sprintf("invoked argc=%d app-index=%d config-prefix=%t cq-absolute=%t stock-absolute=%t", len(args), app, len(prefix) == 0, filepath.IsAbs(cq), filepath.IsAbs(stock)))
+                cmd := exec.Command(cq, args...)
                 cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-                if err := cmd.Run(); err != nil { os.Exit(4) }
+                if err := cmd.Start(); err != nil {
+                    var code syscall.Errno
+                    errors.As(err, &code)
+                    record(fmt.Sprintf("start-failed win32=%d", code))
+                    os.Exit(4)
+                }
+                record("cq-started")
+                _ = cmd.Wait()
+                record(fmt.Sprintf("cq-exited code=%d", cmd.ProcessState.ExitCode()))
             }
           '@ | Set-Content -LiteralPath $source -Encoding utf8
             go build -trimpath -o $selector $source
@@ -478,6 +501,11 @@ jobs:
             $outcome = "Packaged CQ Desktop: desktop-image=$desktopSeen; selector-witness=$(Test-Path -LiteralPath $witness); adapter-image=$cqImageSeen; stock-image=$stockImageSeen; fresh-log=$freshLogSeen; bootstrap=$bootstrapSeen; spawn=$spawnSeen; startup-error=$startupErrorSeen; adapter=$cqChildSeen; stock-child=$stockChildSeen; initialized-local-connection=$connectedSeen; bootstrap-markers=$($bootstrapMarkers -join ',')."
             Write-Output $outcome
             $outcome >> $env:GITHUB_STEP_SUMMARY
+            if ($shellControl -and (Test-Path -LiteralPath $witness)) {
+              Get-Content -LiteralPath $witness -TotalCount 12 | Where-Object {
+                $_ -match '^(invoked argc=\d+ app-index=\d+ config-prefix=(true|false) cq-absolute=(true|false) stock-absolute=(true|false)|start-failed win32=\d+|cq-started|cq-exited code=-?\d+)$'
+              } | ForEach-Object { Write-Output "Desktop selector control: $_" }
+            }
             for ($attempt = 0; $attempt -lt 20 -and (& $owned).Count -ne 0; $attempt++) {
               foreach ($process in & $owned) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
               Start-Sleep -Milliseconds 250
