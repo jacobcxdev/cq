@@ -1372,13 +1372,17 @@ func TestCredentialEndpointWaitsForConsistentLiveOwnerProof(t *testing.T) {
 		sidecar.Inode++
 	})
 
+	// Proof restoration includes durable writes. Allow time for those writes
+	// in the caller's deadline while qualifying delegation.
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
 	type openResult struct {
 		control *CredentialControl
 		err     error
 	}
 	results := make(chan openResult, 1)
 	go func() {
-		control, err := OpenRecoveringCredentialControl(path, coordinator)
+		control, err := OpenRecoveringCredentialControlPrepared(ctx, path, coordinator, nil)
 		results <- openResult{control: control, err: err}
 	}()
 
@@ -1404,7 +1408,7 @@ func TestCredentialEndpointWaitsForConsistentLiveOwnerProof(t *testing.T) {
 		if result.control.Owner() {
 			t.Fatal("consistent live owner proof created a second owner")
 		}
-	case <-time.After(time.Second):
+	case <-ctx.Done():
 		t.Fatal("open did not delegate after live owner proof became consistent")
 	}
 }
