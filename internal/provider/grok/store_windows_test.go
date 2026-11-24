@@ -121,8 +121,8 @@ func secureTestAnchor(t *testing.T, path string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	flags := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
-	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, flags, nil, nil, dacl, nil); err != nil {
+	flags := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, flags, user.User.Sid, nil, dacl, nil); err != nil {
 		t.Fatal(err)
 	}
 }

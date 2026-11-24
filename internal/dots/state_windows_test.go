@@ -20,8 +20,7 @@ import (
 )
 
 func TestWindowsPrivateDotsStateCreateAndRepeat(t *testing.T) {
-	anchor := t.TempDir()
-	privateWindowsDotsTestAnchor(t, anchor)
+	anchor := windowsDotsTestRoot(t)
 	root := filepath.Join(anchor, "dots")
 	if err := PrivateDirectory(root); err != nil {
 		t.Fatalf("create private root: %v", err)
@@ -56,8 +55,7 @@ func TestWindowsDotsSystemAuthAcceptsOnlyCodexSandboxReader(t *testing.T) {
 	if err != nil || !strings.EqualFold(domain, computer) || kind != windows.SidTypeAlias {
 		t.Skipf("local Codex sandbox group unavailable: %v", err)
 	}
-	home := t.TempDir()
-	privateWindowsDotsTestAnchor(t, home)
+	home := windowsDotsTestRoot(t)
 	t.Setenv("USERPROFILE", home)
 	codex := filepath.Join(home, ".codex")
 	if err := os.Mkdir(codex, 0o700); err != nil {
@@ -91,12 +89,12 @@ func TestWindowsDotsSystemAuthAcceptsOnlyCodexSandboxReader(t *testing.T) {
 	if _, err := NewNativeGate(settings, catalogue).load(); err != nil {
 		t.Fatalf("native system gate: %v", err)
 	}
-	anchor := t.TempDir()
-	privateWindowsDotsTestAnchor(t, anchor)
+	anchor := windowsDotsTestRoot(t)
 	executable := filepath.Join(anchor, "cq.exe")
 	if err := os.WriteFile(executable, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	windowsDotsTestACL(t, executable, false)
 	options := InstallOptions{Root: filepath.Join(anchor, "dots"), App: windowsAppFixture(t), SystemAuth: path,
 		CQAccounts: accounts, Mode: "native", Executable: executable,
 		launcher: func(string, string, string) (string, error) {
@@ -151,8 +149,7 @@ func setWindowsDotsCredentialReader(t *testing.T, path string, reader *windows.S
 }
 
 func TestWindowsDotsInstallPreservesPrivateStateWithoutLaunching(t *testing.T) {
-	anchor := t.TempDir()
-	privateWindowsDotsTestAnchor(t, anchor)
+	anchor := windowsDotsTestRoot(t)
 	credentials := filepath.Join(anchor, "credentials")
 	if err := PrivateDirectory(credentials); err != nil {
 		t.Fatal(err)
@@ -178,6 +175,7 @@ func TestWindowsDotsInstallPreservesPrivateStateWithoutLaunching(t *testing.T) {
 	if err := os.WriteFile(options.Executable, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	windowsDotsTestACL(t, options.Executable, false)
 	var original []byte
 	for index := range 2 {
 		result, err := Install(context.Background(), options)
@@ -242,8 +240,7 @@ func TestWindowsDotsInstallPreservesPrivateStateWithoutLaunching(t *testing.T) {
 }
 
 func TestWindowsDotsShortcutFirstRepeatAndForeignPreserved(t *testing.T) {
-	anchor := t.TempDir()
-	privateWindowsDotsTestAnchor(t, anchor)
+	anchor := windowsDotsTestRoot(t)
 	programs := filepath.Join(anchor, "Programs")
 	if err := PrivateDirectory(programs); err != nil {
 		t.Fatal(err)
@@ -253,6 +250,7 @@ func TestWindowsDotsShortcutFirstRepeatAndForeignPreserved(t *testing.T) {
 	if err := os.WriteFile(executable, []byte("fixture"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	windowsDotsTestACL(t, executable, false)
 	app := filepath.Join(anchor, "package")
 	if err := os.MkdirAll(filepath.Join(app, "app"), 0o700); err != nil {
 		t.Fatal(err)
@@ -281,8 +279,7 @@ func TestWindowsDotsShortcutFirstRepeatAndForeignPreserved(t *testing.T) {
 }
 
 func TestWindowsDotsStagedHelperAndOperationLock(t *testing.T) {
-	anchor := t.TempDir()
-	privateWindowsDotsTestAnchor(t, anchor)
+	anchor := windowsDotsTestRoot(t)
 	root := filepath.Join(anchor, "dots")
 	runtimeRoot := filepath.Join(root, "runtime")
 	if err := PrivateDirectory(runtimeRoot); err != nil {
@@ -311,6 +308,7 @@ func TestWindowsDotsStagedHelperAndOperationLock(t *testing.T) {
 		if err := os.WriteFile(source, []byte(value), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		windowsDotsTestACL(t, source, false)
 		staged, err := StageExecutable(source, runtimeRoot)
 		if err != nil || staged != filepath.Join(runtimeRoot, "cq-dots-runtime.exe") {
 			t.Fatalf("stage Windows helper: %q, %v", staged, err)
@@ -342,8 +340,7 @@ func TestWindowsDotsCurrentUserStartMenuReadOnly(t *testing.T) {
 func TestWindowsDotsPrivateStateRejectsWritableAndReparseRoots(t *testing.T) {
 	for _, kind := range []string{"writable", "reparse"} {
 		t.Run(kind, func(t *testing.T) {
-			anchor := t.TempDir()
-			privateWindowsDotsTestAnchor(t, anchor)
+			anchor := windowsDotsTestRoot(t)
 			root := filepath.Join(anchor, "dots")
 			if kind == "writable" {
 				if err := os.Mkdir(root, 0o700); err != nil {
@@ -366,21 +363,42 @@ func TestWindowsDotsPrivateStateRejectsWritableAndReparseRoots(t *testing.T) {
 	}
 }
 
+func windowsDotsTestRoot(t *testing.T) string {
+	t.Helper()
+	root, err := CanonicalPath(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateWindowsDotsTestAnchor(t, root)
+	return root
+}
+
 func privateWindowsDotsTestAnchor(t *testing.T, path string) {
 	t.Helper()
 	windowsDotsTestACL(t, path, false)
+	if info, err := os.Lstat(path); err != nil || !info.IsDir() {
+		t.Fatalf("fixture anchor: %v", err)
+	}
 }
 
 func windowsDotsTestACL(t *testing.T, path string, writable bool) {
 	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("fixture path: %v", err)
+	}
+	inherit := ""
+	if info.IsDir() {
+		inherit = "OICI"
+	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
 	}
 	sid := user.User.Sid.String()
-	sddl := fmt.Sprintf("O:%sD:P(A;OICI;FA;;;%s)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", sid, sid)
+	sddl := fmt.Sprintf("O:%sD:P(A;%s;FA;;;%s)(A;%s;FA;;;SY)(A;%s;FA;;;BA)", sid, inherit, sid, inherit, inherit)
 	if writable {
-		sddl += "(A;OICI;FA;;;WD)"
+		sddl += fmt.Sprintf("(A;%s;FA;;;WD)", inherit)
 	}
 	security, err := windows.SecurityDescriptorFromString(sddl)
 	if err != nil {
@@ -396,8 +414,5 @@ func windowsDotsTestACL(t *testing.T, path string, writable bool) {
 	}
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, owner, nil, dacl, nil); err != nil {
 		t.Fatal(err)
-	}
-	if info, err := os.Lstat(path); err != nil || !info.IsDir() {
-		t.Fatalf("fixture anchor: %v", err)
 	}
 }
