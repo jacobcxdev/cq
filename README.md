@@ -221,6 +221,7 @@ cq codex harness explain
 cq codex harness export
 cq codex harness import
 cq codex harness inventory
+cq codex harness launch
 cq codex harness profile copy
 cq codex harness profile list
 cq codex harness profile save
