@@ -250,15 +250,14 @@ jobs:
             throw 'Registered Desktop package lacks the expected signed identity'
           }
           "Official Desktop MSIX registered: $($installed.PackageFullName), SHA256 $digest" >> $env:GITHUB_STEP_SUMMARY
-      - uses: actions/setup-go@v6
-        if: steps.preflight.outputs.interactive == 'true'
-        with:
-          go-version: '1.26.1'
-          cache: false
       - uses: actions/checkout@v5
         if: steps.preflight.outputs.interactive == 'true'
         with:
           persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        if: steps.preflight.outputs.interactive == 'true'
+        with:
+          go-version-file: go.mod
       - name: Build native CQ harness launcher
         if: steps.preflight.outputs.interactive == 'true'
         run: |
@@ -314,125 +313,6 @@ jobs:
               throw "Insufficient free space on $root for Desktop launch probe"
             }
           }
-      - name: Observe isolated Desktop CLI adapter selection
-        if: steps.preflight.outputs.interactive == 'true'
-        run: |
-          $root = Join-Path $env:RUNNER_TEMP 'cq-desktop-preflight'
-          $source = Join-Path $root 'adapter.go'
-          $adapter = Join-Path $root 'adapter.exe'
-          $witness = Join-Path $root 'adapter-witness'
-          @'
-          package main
-          import (
-              "fmt"
-              "os"
-          )
-          func main() {
-              kind := ""
-              for _, arg := range os.Args[1:] {
-                  if arg == "--version" && kind == "" { kind = "version" }
-                  if arg == "app-server" { kind = "app-server" }
-              }
-              if kind == "" { os.Exit(2) }
-              path := os.Getenv("CQ_DESKTOP_WITNESS") + "." + kind
-              if err := os.WriteFile(path, []byte(kind+"\n"), 0600); err != nil { os.Exit(3) }
-              if kind == "version" { fmt.Println("codex-cli 0.171.0-alpha.13") }
-          }
-          '@ | Set-Content -LiteralPath $source -Encoding utf8
-          $env:GOWORK = 'off'
-          $env:GOCACHE = Join-Path $root 'go-cache'
-          $env:GOTMPDIR = $root
-          if ((go env GOVERSION) -ne 'go1.26.1') { throw 'Desktop adapter fixture requires Go 1.26.1' }
-          go build -trimpath -o $adapter $source
-          if ($LASTEXITCODE -ne 0) { throw 'Desktop adapter fixture build failed' }
-          $installed = Get-AppxPackage -Name OpenAI.Codex -ErrorAction Stop
-          $manifest = Get-AppxPackageManifest -Package $installed.PackageFullName -ErrorAction Stop
-          $application = @($manifest.Package.Applications.Application | Where-Object { $_.Id -eq 'App' -and $_.EntryPoint -eq 'Windows.FullTrustApplication' })
-          if ($application.Count -ne 1) { throw 'Registered Desktop application entry is unavailable' }
-          $packagePrefix = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $installed.InstallLocation).Path).TrimEnd('\') + '\'
-          $desktop = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath (Join-Path $installed.InstallLocation $application[0].Executable)).Path)
-          if (-not $desktop.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            throw 'Desktop application executable escapes its registered package'
-          }
-          $session = (Get-Process -Id $PID).SessionId
-          $owned = { @(Get-CimInstance Win32_Process | Where-Object {
-            $_.SessionId -eq $session -and $_.ExecutablePath -and (
-              $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) -or
-              $_.ExecutablePath.Equals($adapter, [StringComparison]::OrdinalIgnoreCase))
-          }) }
-          $registeredProcesses = @(& $owned | Where-Object { $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) })
-          if ($registeredProcesses.Count -ne 0) {
-            $names = ($registeredProcesses | ForEach-Object { [IO.Path]::GetFileName($_.ExecutablePath) } | Sort-Object -Unique) -join ', '
-            $registrationOutcome = "Registration started $($registeredProcesses.Count) package process(es) in session $session ($names); stopping those PIDs before launch."
-            Write-Output $registrationOutcome
-            $registrationOutcome >> $env:GITHUB_STEP_SUMMARY
-          }
-          for ($attempt = 0; $attempt -lt 20 -and $registeredProcesses.Count -ne 0; $attempt++) {
-            foreach ($process in $registeredProcesses) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
-            Start-Sleep -Milliseconds 250
-            $registeredProcesses = @(& $owned | Where-Object { $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) })
-          }
-          if ((& $owned).Count -ne 0) { throw 'Registered Desktop package processes remain before isolated launch' }
-          $env:CODEX_HOME = Join-Path $root 'codex-home'
-          $env:CODEX_ELECTRON_USER_DATA_PATH = Join-Path $root 'electron-user-data'
-          $env:CODEX_CLI_PATH = $adapter
-          $env:CQ_DESKTOP_WITNESS = $witness
-          $env:HTTP_PROXY = $null
-          $env:HTTPS_PROXY = $null
-          $env:ALL_PROXY = $null
-          New-Item -ItemType Directory -Path $env:CODEX_HOME, $env:CODEX_ELECTRON_USER_DATA_PATH -ErrorAction Stop | Out-Null
-          $launched = $null
-          $stockCodex = [Collections.Generic.HashSet[int]]::new()
-          $stockAppServer = [Collections.Generic.HashSet[int]]::new()
-          $scanStock = {
-            Get-CimInstance Win32_Process | Where-Object {
-              $_.SessionId -eq $session -and $_.ExecutablePath -and
-              $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase)
-            } | ForEach-Object {
-              if ([IO.Path]::GetFileName($_.ExecutablePath) -eq 'codex.exe') {
-                [void]$stockCodex.Add([int]$_.ProcessId)
-              }
-              if ($_.CommandLine -match '(^|\s)app-server(\s|$)') {
-                [void]$stockAppServer.Add([int]$_.ProcessId)
-              }
-            }
-          }
-          try {
-            $launched = Start-Process -FilePath $desktop -PassThru -WindowStyle Hidden -ErrorAction Stop
-            $deadline = [DateTime]::UtcNow.AddSeconds(30)
-            while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath "$witness.app-server")) {
-              & $scanStock
-              Start-Sleep -Milliseconds 500
-            }
-            & $scanStock
-            if (-not (Test-Path -LiteralPath "$witness.app-server")) {
-              if (Test-Path -LiteralPath "$witness.version") {
-                'Desktop selected the isolated CLI adapter for --version only.' >> $env:GITHUB_STEP_SUMMARY
-              }
-              throw 'Desktop did not invoke the isolated CLI adapter with app-server'
-            }
-            'Desktop invoked the isolated CLI adapter with app-server; no account or profile RPC was attempted.' >> $env:GITHUB_STEP_SUMMARY
-          } finally {
-            $launchPID = if ($null -eq $launched) { 'none' } else { $launched.Id }
-            $exitCode = 'not-started'
-            if ($null -ne $launched) {
-              $launched.Refresh()
-              $exitCode = if ($launched.HasExited) { $launched.ExitCode } else { 'running' }
-            }
-            $versionWitness = Test-Path -LiteralPath "$witness.version"
-            $appServerWitness = Test-Path -LiteralPath "$witness.app-server"
-            $outcome = "Desktop startup: PID=$launchPID; exit=$exitCode; version=$versionWitness; app-server=$appServerWitness; stock-codex=$($stockCodex.Count); stock-app-server=$($stockAppServer.Count)."
-            Write-Output $outcome
-            $outcome >> $env:GITHUB_STEP_SUMMARY
-            if ($null -ne $launched -and -not $launched.HasExited) {
-              Stop-Process -Id $launched.Id -Force -ErrorAction SilentlyContinue
-            }
-            for ($attempt = 0; $attempt -lt 20 -and (& $owned).Count -ne 0; $attempt++) {
-              foreach ($process in & $owned) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
-              Start-Sleep -Milliseconds 250
-            }
-            if ((& $owned).Count -ne 0) { throw 'Desktop package process cleanup failed' }
-          }
       - name: Qualify isolated packaged CQ Desktop launch
         if: steps.preflight.outputs.interactive == 'true'
         run: |
@@ -450,7 +330,12 @@ jobs:
               $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) -or
               $_.ExecutablePath.Equals($cq, [StringComparison]::OrdinalIgnoreCase))
           }) }
-          if ((& $owned).Count -ne 0) { throw 'Desktop or CQ process remained after selector proof' }
+          # Registration can start packaged processes before the first deliberate launch.
+          for ($attempt = 0; $attempt -lt 20 -and (& $owned).Count -ne 0; $attempt++) {
+            foreach ($process in & $owned) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Milliseconds 250
+          }
+          if ((& $owned).Count -ne 0) { throw 'Desktop or CQ process remained before isolated launch' }
           $env:CODEX_HOME = Join-Path $root 'cq-codex-home'
           $env:CODEX_ELECTRON_USER_DATA_PATH = Join-Path $root 'cq-electron-user-data'
           $env:HTTP_PROXY = $null
