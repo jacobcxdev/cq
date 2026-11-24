@@ -128,7 +128,7 @@ func TestWindowsDotsPrepareLaunchUsesPrivateRuntimeAndNativeProfile(t *testing.T
 }
 
 func TestWindowsDotsCustomTrustDoesNotReplacePlatformRoots(t *testing.T) {
-	if data, err := launchPublicTrust(nil); err != nil || len(data) != 0 {
+	if data, err := launchPublicTrust(nil, "CODEX_CA_CERTIFICATE"); err != nil || len(data) != 0 {
 		t.Fatalf("Windows launch required an external system PEM: %d bytes, %v", len(data), err)
 	}
 	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -140,7 +140,7 @@ func TestWindowsDotsCustomTrustDoesNotReplacePlatformRoots(t *testing.T) {
 	}
 	t.Setenv("CODEX_CA_CERTIFICATE", path)
 	t.Setenv("SSL_CERT_FILE", path+".unused")
-	if data, err := launchPublicTrust(os.Environ()); err != nil || !bytes.Equal(data, additional) {
+	if data, err := launchPublicTrust(os.Environ(), "CODEX_CA_CERTIFICATE"); err != nil || !bytes.Equal(data, additional) {
 		t.Fatalf("Codex custom PEM changed: %d bytes, %v", len(data), err)
 	}
 	config, err := cloudPublicTLS()
