@@ -105,7 +105,8 @@ check_for_update_on_startup = false
 [analytics]
 enabled = false
 [features]
-plugins = true
+# Keep the synthetic fixture independent of the curated marketplace sync.
+plugins = false
 [model_providers.fixture]
 name = "Synthetic"
 base_url = %q

@@ -51,6 +51,23 @@ func TestWindowsPolicyFirstAndRepeatWriteUnderOwnerControlledCQRoot(t *testing.T
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Elevated runners may assign Administrators as the new directory's owner.
+	// Set only the owner so the child keeps its inherited read-only ACE.
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, user.User.Sid, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	control, _, err := descriptor.Control()
+	if err != nil || control&windows.SE_DACL_PROTECTED != 0 {
+		t.Fatalf("CQ root lost inherited ACL: control = %v, err = %v", control, err)
+	}
 	fsys, err := fsutil.NewPrivateDestinationFileSystem(dir)
 	if err != nil {
 		t.Fatal(err)
