@@ -332,12 +332,18 @@ jobs:
             import (
                 "errors"
                 "fmt"
+                "io"
                 "os"
                 "os/exec"
                 "path/filepath"
                 "slices"
+                "strings"
+                "sync/atomic"
                 "syscall"
+                "time"
             )
+            type wireCount struct { bytes atomic.Int64 }
+            func (w *wireCount) Write(p []byte) (int, error) { w.bytes.Add(int64(len(p))); return len(p), nil }
             func main() {
                 args := os.Args[1:]
                 app := slices.Index(args, "app-server")
@@ -353,8 +359,20 @@ jobs:
                 prefix := args[:app]
                 for len(prefix) >= 2 && (prefix[0] == "-c" || prefix[0] == "--config") { prefix = prefix[2:] }
                 record(fmt.Sprintf("invoked argc=%d app-index=%d config-prefix=%t cq-absolute=%t stock-absolute=%t", len(args), app, len(prefix) == 0, filepath.IsAbs(cq), filepath.IsAbs(stock)))
+                for _, arg := range args[app+1:] {
+                    switch arg {
+                    case "--listen", "--stdio", "--strict-config", "--analytics-default-enabled", "--print-startup-config", "-c", "--config":
+                        record("option " + arg)
+                    default:
+                        if arg == "stdio://" || strings.HasPrefix(arg, "--listen=stdio") { record("transport stdio") }
+                    }
+                }
+                var input, output, diagnostics wireCount
                 cmd := exec.Command(cq, args...)
-                cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+                cmd.Stdin = io.TeeReader(os.Stdin, &input)
+                cmd.Stdout = io.MultiWriter(os.Stdout, &output)
+                cmd.Stderr = io.MultiWriter(os.Stderr, &diagnostics)
+                cmd.WaitDelay = 2 * time.Second
                 if err := cmd.Start(); err != nil {
                     var code syscall.Errno
                     errors.As(err, &code)
@@ -363,7 +381,7 @@ jobs:
                 }
                 record("cq-started")
                 _ = cmd.Wait()
-                record(fmt.Sprintf("cq-exited code=%d", cmd.ProcessState.ExitCode()))
+                record(fmt.Sprintf("cq-exited code=%d input=%d output=%d diagnostics=%d", cmd.ProcessState.ExitCode(), input.bytes.Load(), output.bytes.Load(), diagnostics.bytes.Load()))
             }
           '@ | Set-Content -LiteralPath $source -Encoding utf8
             go build -trimpath -o $selector $source
@@ -502,8 +520,8 @@ jobs:
             Write-Output $outcome
             $outcome >> $env:GITHUB_STEP_SUMMARY
             if ($shellControl -and (Test-Path -LiteralPath $witness)) {
-              Get-Content -LiteralPath $witness -TotalCount 12 | Where-Object {
-                $_ -match '^(invoked argc=\d+ app-index=\d+ config-prefix=(true|false) cq-absolute=(true|false) stock-absolute=(true|false)|start-failed win32=\d+|cq-started|cq-exited code=-?\d+)$'
+              Get-Content -LiteralPath $witness -TotalCount 20 | Where-Object {
+                $_ -match '^(invoked argc=\d+ app-index=\d+ config-prefix=(true|false) cq-absolute=(true|false) stock-absolute=(true|false)|start-failed win32=\d+|cq-started|cq-exited code=-?\d+ input=\d+ output=\d+ diagnostics=\d+|option [a-z-]+|transport stdio)$'
               } | ForEach-Object { Write-Output "Desktop selector control: $_" }
             }
             for ($attempt = 0; $attempt -lt 20 -and (& $owned).Count -ne 0; $attempt++) {
