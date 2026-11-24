@@ -8,10 +8,6 @@ on:
         description: Probe the official Windows Desktop package on an isolated runner
         type: boolean
         default: false
-      desktop_shell_control:
-        description: Compare the PowerShell launch path with the CQ Desktop adapter
-        type: boolean
-        default: false
   schedule:
     - cron: '17 6 * * 1'
 
@@ -322,71 +318,6 @@ jobs:
         run: |
           $root = Join-Path $env:RUNNER_TEMP 'cq-desktop-preflight'
           $cq = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath (Join-Path $root 'cq.exe')).Path)
-          $selector = Join-Path $root 'adapter.exe'
-          $witness = Join-Path $root 'adapter-witness.app-server'
-          $shellControl = '${{ inputs.desktop_shell_control }}' -eq 'true'
-          if ($shellControl) {
-            $source = Join-Path $root 'adapter.go'
-            @'
-            package main
-            import (
-                "errors"
-                "fmt"
-                "io"
-                "os"
-                "os/exec"
-                "path/filepath"
-                "slices"
-                "strings"
-                "sync/atomic"
-                "syscall"
-                "time"
-            )
-            type wireCount struct { bytes atomic.Int64 }
-            func (w *wireCount) Write(p []byte) (int, error) { w.bytes.Add(int64(len(p))); return len(p), nil }
-            func main() {
-                args := os.Args[1:]
-                app := slices.Index(args, "app-server")
-                if app < 0 { os.Exit(2) }
-                cq := os.Getenv("CQ_DESKTOP_CONTROL_CQ")
-                stock := os.Getenv("CQ_WINDOWS_HARNESS_STOCK_CLI")
-                record := func(stage string) {
-                    file, err := os.OpenFile(os.Getenv("CQ_DESKTOP_WITNESS"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
-                    if err != nil { os.Exit(3) }
-                    fmt.Fprintln(file, stage)
-                    file.Close()
-                }
-                prefix := args[:app]
-                for len(prefix) >= 2 && (prefix[0] == "-c" || prefix[0] == "--config") { prefix = prefix[2:] }
-                record(fmt.Sprintf("invoked argc=%d app-index=%d config-prefix=%t cq-absolute=%t stock-absolute=%t", len(args), app, len(prefix) == 0, filepath.IsAbs(cq), filepath.IsAbs(stock)))
-                for _, arg := range args[app+1:] {
-                    switch arg {
-                    case "--listen", "--stdio", "--strict-config", "--analytics-default-enabled", "--print-startup-config", "-c", "--config":
-                        record("option " + arg)
-                    default:
-                        if arg == "stdio://" || strings.HasPrefix(arg, "--listen=stdio") { record("transport stdio") }
-                    }
-                }
-                var input, output, diagnostics wireCount
-                cmd := exec.Command(cq, args...)
-                cmd.Stdin = io.TeeReader(os.Stdin, &input)
-                cmd.Stdout = io.MultiWriter(os.Stdout, &output)
-                cmd.Stderr = io.MultiWriter(os.Stderr, &diagnostics)
-                cmd.WaitDelay = 2 * time.Second
-                if err := cmd.Start(); err != nil {
-                    var code syscall.Errno
-                    errors.As(err, &code)
-                    record(fmt.Sprintf("start-failed win32=%d", code))
-                    os.Exit(4)
-                }
-                record("cq-started")
-                _ = cmd.Wait()
-                record(fmt.Sprintf("cq-exited code=%d input=%d output=%d diagnostics=%d", cmd.ProcessState.ExitCode(), input.bytes.Load(), output.bytes.Load(), diagnostics.bytes.Load()))
-            }
-          '@ | Set-Content -LiteralPath $source -Encoding utf8
-            go build -trimpath -o $selector $source
-            if ($LASTEXITCODE -ne 0) { throw 'Desktop selector control build failed' }
-          }
           $installed = Get-AppxPackage -Name OpenAI.Codex -ErrorAction Stop
           $packagePrefix = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $installed.InstallLocation).Path).TrimEnd('\') + '\'
           $stock = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath (Join-Path $installed.InstallLocation 'app/resources/codex.exe')).Path)
@@ -397,8 +328,7 @@ jobs:
           $owned = { @(Get-CimInstance Win32_Process | Where-Object {
             $_.SessionId -eq $session -and $_.ExecutablePath -and (
               $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) -or
-              $_.ExecutablePath.Equals($cq, [StringComparison]::OrdinalIgnoreCase) -or
-              ($shellControl -and $_.ExecutablePath.Equals($selector, [StringComparison]::OrdinalIgnoreCase)))
+              $_.ExecutablePath.Equals($cq, [StringComparison]::OrdinalIgnoreCase))
           }) }
           # Registration can start packaged processes before the first deliberate launch.
           for ($attempt = 0; $attempt -lt 20 -and (& $owned).Count -ne 0; $attempt++) {
@@ -439,22 +369,8 @@ jobs:
           $stockChildSeen = $false
           $connectedSeen = $false
           try {
-            if ($shellControl) {
-              $manifest = Get-AppxPackageManifest -Package $installed.PackageFullName -ErrorAction Stop
-              $application = @($manifest.Package.Applications.Application | Where-Object { $_.Id -eq 'App' -and $_.EntryPoint -eq 'Windows.FullTrustApplication' })
-              if ($application.Count -ne 1) { throw 'Registered Desktop application entry is unavailable' }
-              $desktop = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath (Join-Path $installed.InstallLocation $application[0].Executable)).Path)
-              if (-not $desktop.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Desktop executable escapes its package' }
-              $env:CODEX_CLI_PATH = $selector
-              $env:CQ_DESKTOP_WITNESS = $witness
-              $env:CQ_DESKTOP_CONTROL_CQ = $cq
-              $env:CQ_WINDOWS_HARNESS_STOCK_CLI = $stock
-              $control = Start-Process -FilePath $desktop -PassThru -WindowStyle Hidden -ErrorAction Stop
-              Write-Output "PowerShell Desktop control started PID $($control.Id)."
-            } else {
-              & $cq codex harness launch
-              if ($LASTEXITCODE -ne 0) { throw 'CQ Desktop harness launch failed' }
-            }
+            & $cq codex harness launch
+            if ($LASTEXITCODE -ne 0) { throw 'CQ Desktop harness launch failed' }
             $deadline = [DateTime]::UtcNow.AddSeconds(60)
             while ([DateTime]::UtcNow -lt $deadline -and -not ($cqChildSeen -and $stockChildSeen -and $connectedSeen)) {
               $processes = & $owned
@@ -462,13 +378,10 @@ jobs:
               if ($packagePids.Count -gt 0) { $desktopSeen = $true }
               if (@($processes | Where-Object { $_.ExecutablePath.Equals($cq, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { $cqImageSeen = $true }
               if (@($processes | Where-Object { $_.ExecutablePath.Equals($stock, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { $stockImageSeen = $true }
-              $adapterParents = $packagePids + @($processes | Where-Object {
-                $shellControl -and $_.ExecutablePath.Equals($selector, [StringComparison]::OrdinalIgnoreCase) -and $packagePids -contains $_.ParentProcessId
-              } | ForEach-Object ProcessId)
               $cqChildren = @($processes | Where-Object {
                 $_.ExecutablePath.Equals($cq, [StringComparison]::OrdinalIgnoreCase) -and
                 $_.CommandLine -match '(^|[\s"])app-server([\s"]|$)' -and
-                $adapterParents -contains $_.ParentProcessId
+                $packagePids -contains $_.ParentProcessId
               })
               if ($cqChildren.Count -gt 0) { $cqChildSeen = $true }
               $cqPids = @($cqChildren | ForEach-Object ProcessId)
@@ -516,14 +429,9 @@ jobs:
               throw 'Packaged CQ Desktop launch did not prove the adapter, stock CLI and initialized local connection'
             }
           } finally {
-            $outcome = "Packaged CQ Desktop: desktop-image=$desktopSeen; selector-witness=$(Test-Path -LiteralPath $witness); adapter-image=$cqImageSeen; stock-image=$stockImageSeen; fresh-log=$freshLogSeen; bootstrap=$bootstrapSeen; spawn=$spawnSeen; startup-error=$startupErrorSeen; adapter=$cqChildSeen; stock-child=$stockChildSeen; initialized-local-connection=$connectedSeen; bootstrap-markers=$($bootstrapMarkers -join ',')."
+            $outcome = "Packaged CQ Desktop: desktop-image=$desktopSeen; adapter-image=$cqImageSeen; stock-image=$stockImageSeen; fresh-log=$freshLogSeen; bootstrap=$bootstrapSeen; spawn=$spawnSeen; startup-error=$startupErrorSeen; adapter=$cqChildSeen; stock-child=$stockChildSeen; initialized-local-connection=$connectedSeen; bootstrap-markers=$($bootstrapMarkers -join ',')."
             Write-Output $outcome
             $outcome >> $env:GITHUB_STEP_SUMMARY
-            if ($shellControl -and (Test-Path -LiteralPath $witness)) {
-              Get-Content -LiteralPath $witness -TotalCount 20 | Where-Object {
-                $_ -match '^(invoked argc=\d+ app-index=\d+ config-prefix=(true|false) cq-absolute=(true|false) stock-absolute=(true|false)|start-failed win32=\d+|cq-started|cq-exited code=-?\d+ input=\d+ output=\d+ diagnostics=\d+|option [a-z-]+|transport stdio)$'
-              } | ForEach-Object { Write-Output "Desktop selector control: $_" }
-            }
             for ($attempt = 0; $attempt -lt 20 -and (& $owned).Count -ne 0; $attempt++) {
               foreach ($process in & $owned) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
               Start-Sleep -Milliseconds 250
