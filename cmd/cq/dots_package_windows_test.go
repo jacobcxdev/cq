@@ -29,6 +29,11 @@ func TestWindowsDotsDefaultRootUsesCurrentUserCQState(t *testing.T) {
 func TestWindowsDotsInstallForwardsRegisteredPackageWithoutLaunch(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "private dots")
+	canonicalHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoot := filepath.Join(canonicalHome, "private dots")
 	packageRoot := filepath.Join(home, "OpenAI.Codex_26.1120.5083.0_x64__2p2nqsd0c76g0")
 	runner := dotsRunner{
 		home:       func() (string, error) { return home, nil },
@@ -38,7 +43,7 @@ func TestWindowsDotsInstallForwardsRegisteredPackageWithoutLaunch(t *testing.T) 
 			return dots.Settings{AppPath: packageRoot}, filepath.Join(packageRoot, "app", "ChatGPT.exe"), nil
 		},
 		run: func(_ context.Context, controller dots.Controller, request dots.Request) (map[string]any, error) {
-			if request.Operation != "install" || request.Install.App != packageRoot || request.Install.Mode != "native" || controller.Root != root {
+			if request.Operation != "install" || request.Install.App != packageRoot || request.Install.Mode != "native" || controller.Root != wantRoot {
 				t.Fatalf("Windows install request: %#v %#v", controller, request)
 			}
 			return map[string]any{"installed": true}, nil
@@ -60,10 +65,15 @@ func TestWindowsDotsInstallForwardsRegisteredPackageWithoutLaunch(t *testing.T) 
 func TestWindowsDotsLaunchForwardsOnlyTheSelectedRoot(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, "dots")
+	canonicalHome, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRoot := filepath.Join(canonicalHome, "dots")
 	runner := dotsRunner{
 		home: func() (string, error) { return home, nil },
 		launch: func(_ context.Context, selected string, _, _ io.Writer) error {
-			if selected != root {
+			if selected != wantRoot {
 				t.Fatalf("launcher root = %q", selected)
 			}
 			return nil
