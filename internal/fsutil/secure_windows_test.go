@@ -1376,6 +1376,24 @@ func TestWindowsOwnerControlledDirectoryOpensOutsideCQRoots(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
+	const shortcut = "ChatGPT via CQ.lnk"
+	if err := SecureAtomicCreateInOwnerControlledDirectory(OSFileSystem{}, directory, directoryPath, shortcut, []byte("first")); err != nil {
+		t.Fatalf("create private file in readable directory: %v", err)
+	}
+	if err := SecureAtomicCreateInOwnerControlledDirectory(OSFileSystem{}, directory, directoryPath, shortcut, []byte("second")); !errors.Is(err, os.ErrExist) {
+		t.Fatalf("no-replace create error = %v, want existing file", err)
+	}
+	opened, err := directory.OpenNoFollow(shortcut)
+	if err != nil {
+		t.Fatalf("created file is not private: %v", err)
+	}
+	if err := opened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(directoryPath, shortcut))
+	if err != nil || string(got) != "first" {
+		t.Fatalf("no-replace file = %q, %v", got, err)
+	}
 }
 
 func TestWindowsSecureOpenRejectsBroadIntermediateBelowAnchor(t *testing.T) {

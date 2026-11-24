@@ -141,6 +141,15 @@ func SecureAtomicCreateInDirectoryChecked(inspector SecurePathInspector, directo
 	return secureAtomicWriteInDirectory(inspector, directory, name, data, beforePublish, nil, true)
 }
 
+// SecureAtomicCreateInOwnerControlledDirectory publishes only a new
+// private file through a retained owner-controlled directory. The destination
+// cannot replace an existing entry, including one created concurrently.
+func SecureAtomicCreateInOwnerControlledDirectory(inspector SecurePathInspector, directory SecureDirectory, path, name string, data []byte) error {
+	return secureAtomicWriteInDirectory(inspector, directory, name, data, nil, func() error {
+		return ValidateOwnerControlledDirectoryHandle(inspector, directory, path)
+	}, true)
+}
+
 func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, data []byte, beforeReplace, fence func() error, noReplace bool) (result error) {
 	if inspector == nil || directory == nil {
 		return commitFailure("validate filesystem", ErrSecureCapabilityUnavailable)

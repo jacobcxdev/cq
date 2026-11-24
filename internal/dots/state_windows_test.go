@@ -242,9 +242,10 @@ func TestWindowsDotsInstallPreservesPrivateStateWithoutLaunching(t *testing.T) {
 func TestWindowsDotsShortcutFirstRepeatAndForeignPreserved(t *testing.T) {
 	anchor := windowsDotsTestRoot(t)
 	programs := filepath.Join(anchor, "Programs")
-	if err := PrivateDirectory(programs); err != nil {
+	if err := os.Mkdir(programs, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	windowsDotsTestReadableDirectory(t, programs)
 	path := filepath.Join(programs, windowsDotsShortcutName)
 	executable := filepath.Join(anchor, "cq.exe")
 	if err := os.WriteFile(executable, []byte("fixture"), 0o600); err != nil {
@@ -259,11 +260,28 @@ func TestWindowsDotsShortcutFirstRepeatAndForeignPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := filepath.Join(anchor, "dots")
+	if err := PrivateDirectory(root); err != nil {
+		t.Fatal(err)
+	}
 	for range 2 {
 		got, err := installWindowsDotsLauncherAt(path, root, app, executable)
 		if err != nil || got != path {
 			t.Fatalf("install Start Menu shortcut: %q, %v", got, err)
 		}
+	}
+	retained, err := fsutil.OpenOwnerControlledDirectory(fsutil.OSFileSystem{}, programs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateLink, err := retained.OpenNoFollow(windowsDotsShortcutName)
+	if err != nil {
+		retained.Close()
+		t.Fatalf("published shortcut is not private: %v", err)
+	}
+	privateLink.Close()
+	retained.Close()
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Fatalf("shortcut staging left files: %d entries, %v", len(entries), err)
 	}
 	before, err := os.ReadFile(path)
 	if err != nil {
@@ -414,5 +432,33 @@ func windowsDotsTestACL(t *testing.T, path string, writable bool) {
 	}
 	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, owner, nil, dacl, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func windowsDotsTestReadableDirectory(t *testing.T, path string) {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := user.User.Sid.String()
+	sddl := fmt.Sprintf("O:%sD:P(A;OICI;FA;;;%s)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;GRGX;;;WD)", sid, sid)
+	security, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := security.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := security.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, owner, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := fsutil.ValidateOwnerControlledDirectory(fsutil.OSFileSystem{}, path); err != nil {
+		t.Fatalf("readable Programs fixture is not owner controlled: %v", err)
 	}
 }
