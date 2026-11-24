@@ -291,6 +291,13 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if handled, err := runWindowsHarnessStdioEntry(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+			os.Exit(dotsExitCode(err))
+		}
+		return
+	}
 	if handled, err := runNativeProxyEntry(os.Args[1:], os.Stdout); handled {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: native proxy: %v\n", err)

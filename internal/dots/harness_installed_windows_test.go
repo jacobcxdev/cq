@@ -166,7 +166,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		}
 		receipts := harness.Receipts{FS: receiptFS, Dir: filepath.Join(root, "bridge-receipts")}
 		deps := cloudStdioDependencies{
-			environment: command.Env, now: time.Now, statusInterval: 25 * time.Millisecond,
+			localExecutable: executable, environment: command.Env, now: time.Now, statusInterval: 25 * time.Millisecond,
 			harnessTimeout: 5 * time.Second, harnessReceipts: receipts,
 			event: func(event map[string]any) {
 				profile, ok := event["harness_profile"].(string)
@@ -205,7 +205,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		finished := make(chan error, 1)
 		go func() {
 			finished <- runCloudStdio(bridgeCtx, &Settings{RuntimeRoot: root}, nil,
-				[]string{"app-server", "-c", cloudAppMarker + "true"}, bridgeInput, bridgeOutput, io.Discard, deps)
+				[]string{"app-server"}, bridgeInput, bridgeOutput, io.Discard, deps)
 			_ = bridgeOutput.Close()
 		}()
 		defer func() {

@@ -88,9 +88,10 @@ leaf help for exact arguments before making changes.
 For harness profiles, distinguish enforcement paths. On macOS, normal ChatGPT
 launching can apply plugin exclusions after CQ observes a request; first-turn
 application is not guaranteed, and standalone MCP/skill catalogues remain
-available. The macOS CQ launcher adds broader standalone MCP and fresh
-skill-catalogue controls. This CQ version cannot apply profiles to a standard
-Windows ChatGPT launch; saving a binding does not change that Desktop. Another
+available. The Windows and macOS CQ launchers add standalone MCP and fresh
+skill-catalogue controls. On Windows, quit Codex Desktop and run
+`cq codex harness launch` from PowerShell. Use the native Windows execution
+environment in Desktop. Another
 native subscriber can retain the previous configuration despite a successful
 reload. Retained or unverified changes, including restoration, remain `partial`;
 check the application receipt before claiming success. Core

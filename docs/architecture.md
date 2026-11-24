@@ -302,11 +302,12 @@ current reduced context. Application receipts record effective fingerprints and
 supported/unsupported/pending outcomes; a saved policy alone is not application
 proof. `explain` reports the current receipt's application mode separately from
 its state; a `partial` full-bridge receipt still identifies full controls, with
-its remaining issues listed. On macOS, stock Desktop controls plugins only and
-cannot guarantee first-turn application. This CQ version has no application
-path to a standard Windows ChatGPT launch. The macOS launcher can cover standalone MCP
-servers and skills. Full configuration changes made after an empty chat starts
-wait until its first turn completes: native Codex has no durable history to
+its remaining issues listed. A standard macOS Desktop launch supports plugin
+exclusions on a subsequent eligible turn. On Windows, `cq codex harness launch`
+starts the installed Desktop with a local stdio adapter. The Windows and macOS
+launchers can control standalone MCP servers and skills. Full configuration
+changes made after an empty chat starts wait until its first turn completes.
+Native Codex has no durable history to
 reload before then. Plugin exclusions still apply immediately through native
 settings; standalone MCP and skill configuration remains pending. Ephemeral
 chats retain that initial configuration because they cannot be reloaded from

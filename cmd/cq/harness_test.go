@@ -23,6 +23,7 @@ func TestCodexHarnessCommandParsing(t *testing.T) {
 		want string
 	}{
 		{[]string{"codex", "harness"}, "codex harness status"},
+		{[]string{"codex", "harness", "launch"}, "codex harness launch"},
 		{[]string{"codex", "harness", "status", "--model", "glm-5.3", "--project", ".", "--chat", "01a198eb-f8e9-72a1-856c-0e986d10f6f7"}, "codex harness status"},
 		{[]string{"--json", "codex", "harness", "enable"}, "codex harness enable"},
 		{[]string{"codex", "harness", "disable", "--json"}, "codex harness disable"},
@@ -44,7 +45,7 @@ func TestCodexHarnessCommandParsing(t *testing.T) {
 }
 
 func TestCodexHarnessHelpUsesPureInspection(t *testing.T) {
-	for _, operation := range []string{"", "status", "enable", "disable", "project", "chat"} {
+	for _, operation := range []string{"", "status", "launch", "enable", "disable", "project", "chat"} {
 		args := []string{"codex", "harness"}
 		if operation != "" {
 			args = append(args, operation)
@@ -57,7 +58,7 @@ func TestCodexHarnessHelpUsesPureInspection(t *testing.T) {
 		}
 		if operation == "" || operation == "status" {
 			rendered := strings.Join(strings.Fields(output.String()), " ")
-			for _, detail := range []string{"automatically", "CQ launcher", "standard ChatGPT launch", "standalone MCP", "local skills", "For standard launches", "not guaranteed", "observes a GLM request", "standard Windows ChatGPT launch"} {
+			for _, detail := range []string{"cq codex harness launch", "CQ launchers", "standard ChatGPT launch", "standalone MCP", "local skills", "later eligible turn", "observes a GLM request", "native Windows execution environment"} {
 				if !strings.Contains(rendered, detail) {
 					t.Fatalf("help %v omitted %q: %s", args, detail, &output)
 				}
@@ -188,7 +189,7 @@ func TestCodexHarnessStatusPreviewAndSavedJSON(t *testing.T) {
 		if status.Selection == nil || *status.Selection != test.want || !status.Policy.Enabled || status.Policy.Projects[project] != harness.Full || status.Policy.Chats[chat] != harness.Minimal {
 			t.Fatalf("preview = %#v", status)
 		}
-		if !strings.Contains(status.Application, "automatically") || !strings.Contains(status.Application, "CQ launcher") || !strings.Contains(status.Application, "standard ChatGPT launch") || !strings.Contains(status.Application, "For standard launches") || !strings.Contains(status.Application, "not guaranteed") {
+		if !strings.Contains(status.Application, "cq codex harness launch") || !strings.Contains(status.Application, "standard ChatGPT launch") || !strings.Contains(status.Application, "later eligible turn") {
 			t.Fatalf("status omitted scope or application limits: %s", &output)
 		}
 	}
@@ -282,7 +283,7 @@ func TestCodexHarnessOnlyChangesPrivatePolicy(t *testing.T) {
 		if err := runHarnessTestCLI(t, runner, &output, operation); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(output.String(), "standalone MCP") || !strings.Contains(output.String(), "local skills") || !strings.Contains(output.String(), "next eligible turn") {
+		if !strings.Contains(output.String(), "standalone MCP") || !strings.Contains(output.String(), "local skills") || !strings.Contains(output.String(), "later eligible turn") {
 			t.Fatalf("%s scope or timing is unclear: %s", operation, &output)
 		}
 	}
