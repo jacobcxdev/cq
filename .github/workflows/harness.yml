@@ -342,7 +342,7 @@ jobs:
                 cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
                 if err := cmd.Run(); err != nil { os.Exit(4) }
             }
-            '@ | Set-Content -LiteralPath $source -Encoding utf8
+          '@ | Set-Content -LiteralPath $source -Encoding utf8
             go build -trimpath -o $selector $source
             if ($LASTEXITCODE -ne 0) { throw 'Desktop selector control build failed' }
           }
