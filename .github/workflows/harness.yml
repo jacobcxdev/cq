@@ -229,19 +229,22 @@ jobs:
             try { [xml]$manifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
           } finally { $archive.Dispose() }
           $identity = $manifest.SelectSingleNode('/*[local-name()="Package"]/*[local-name()="Identity"]')
+          $manifestVersion = [version]::new()
           if ($null -eq $identity -or
               $identity.GetAttribute('Name') -ne 'OpenAI.Codex' -or
               $identity.GetAttribute('Publisher') -ne 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B' -or
               $identity.GetAttribute('ProcessorArchitecture') -ne '${{ matrix.arch }}' -or
-              $identity.GetAttribute('Version') -ne $metadata.buildVersion) {
-            throw 'Downloaded Desktop package identity differs from official metadata'
+              -not [version]::TryParse($identity.GetAttribute('Version'), [ref]$manifestVersion) -or
+              $manifestVersion.Revision -lt 0) {
+            throw 'Downloaded Desktop package manifest identity is unexpected'
           }
+          Write-Output "Desktop CDN package version $manifestVersion; Store update metadata version $($metadata.buildVersion)."
           Add-AppxPackage -Path $packagePath -ErrorAction Stop
           $installed = Get-AppxPackage -Name OpenAI.Codex -ErrorAction Stop
           if ($null -eq $installed -or
               $installed.PackageFamilyName -ne 'OpenAI.Codex_2p2nqsd0c76g0' -or
               $installed.Publisher -ne $identity.GetAttribute('Publisher') -or
-              $installed.Version.ToString() -ne $identity.GetAttribute('Version') -or
+              $installed.Version -ne $manifestVersion -or
               $installed.Architecture.ToString() -ne '${{ matrix.arch }}' -or
               $installed.SignatureKind.ToString() -ne 'Store') {
             throw 'Registered Desktop package lacks the expected signed identity'
