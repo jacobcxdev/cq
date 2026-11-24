@@ -213,6 +213,8 @@ func LaunchNativeBroker(ctx context.Context, s *Settings, executable string, arg
 		return err
 	}
 	b.appPID = app.Pid
+	stopPresentation := nativeAppPresentation(s, app.Pid, env)
+	defer stopPresentation()
 	b.pipe = newNativePipe(parentRead, parentWrite)
 	// Reap exactly this child. This goroutine never cancels or kills it.
 	exited := make(chan error, 1)
