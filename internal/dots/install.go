@@ -456,7 +456,7 @@ func installPrepared(ctx context.Context, options InstallOptions, pin Settings) 
 		return nil, err
 	}
 	result := map[string]any{"installed": true, "system_app_modified": false, "runtime": "go"}
-	if options.Mode == "native" && runtime.GOOS == "darwin" {
+	if options.Mode == "native" && runtime.GOOS != "windows" {
 		if err := InstallLauncher(root, options.App, options.Executable); err != nil {
 			return nil, err
 		}
