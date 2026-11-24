@@ -1118,6 +1118,14 @@ func AcquireExclusiveLockInDirectory(inspector SecurePathInspector, directory Se
 	return acquireExclusiveLockInDirectory(inspector, directory, name, nil)
 }
 
+// AcquireExclusiveLockInOwnerControlledDirectory retains the same private lock
+// file guarantees while fencing an owner-controlled directory by path identity.
+func AcquireExclusiveLockInOwnerControlledDirectory(inspector SecurePathInspector, directory SecureDirectory, path, name string) (ExclusiveLock, error) {
+	return acquireExclusiveLockInDirectory(inspector, directory, name, func() error {
+		return ValidateOwnerControlledDirectoryHandle(inspector, directory, path)
+	})
+}
+
 // AcquireNewExclusiveLockInDirectory creates one new lifetime lock relative to
 // a retained directory. It never opens an existing entry. The descriptor,
 // named path, file metadata, and parent-directory commit are verified before

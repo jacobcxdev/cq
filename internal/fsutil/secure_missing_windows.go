@@ -5,31 +5,30 @@ package fsutil
 import (
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
 	"golang.org/x/sys/windows"
 )
 
-// VerifyMissingOwnerControlledCQFile permits a missing file directly below an
-// owner-controlled CQ root. It never permits reading a present file there.
-func (fsys OSFileSystem) VerifyMissingOwnerControlledCQFile(path string) (err error) {
+// OpenOwnerControlledCQPolicyDirectory retains an owner-controlled direct CQ
+// root for private harness policy files without changing its inherited ACL.
+func (fsys OSFileSystem) OpenOwnerControlledCQPolicyDirectory(path string) (SecureDirectory, error) {
 	clean, err := validateWindowsAbsolutePath(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	selection, err := fsys.resolveSecureBoundary(clean, secureBoundaryCQPrivate)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	dir := filepath.Dir(clean)
-	if !strings.EqualFold(dir, filepath.Join(selection.AnchorPath, "cq")) {
-		return fmt.Errorf("%w: policy outside direct CQ root", ErrUnsafeSecurePath)
+	if !strings.EqualFold(dir, filepath.Join(selection.AnchorPath, "cq")) || filepath.Base(clean) != "harness.json" {
+		return nil, fmt.Errorf("%w: policy outside direct CQ root", ErrUnsafeSecurePath)
 	}
 	boundary, err := fsys.windowsPathBoundary(selection, secureBoundaryCQPrivate)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	anchorFile, err := openWindowsAbsolutePath(
 		selection.AnchorPath,
@@ -38,25 +37,21 @@ func (fsys OSFileSystem) VerifyMissingOwnerControlledCQFile(path string) (err er
 		boundary,
 	)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	anchor := &windowsSecureDirectory{file: anchorFile}
-	defer func() { err = errors.Join(err, anchor.Close()) }()
 	opened, err := anchor.OpenDirectory("cq")
+	closeErr := anchor.Close()
 	if err != nil {
-		return err
+		return nil, errors.Join(err, closeErr)
 	}
 	directory := opened.(*windowsSecureDirectory)
-	defer func() { err = errors.Join(err, directory.Close()) }()
+	if closeErr != nil {
+		return nil, errors.Join(closeErr, directory.Close())
+	}
 	if err := ValidateOwnerControlledDirectoryHandle(fsys, directory, dir); err != nil {
-		return err
+		return nil, errors.Join(err, directory.Close())
 	}
-	file, err := directory.OpenNoFollow(filepath.Base(clean))
-	if err == nil {
-		return errors.Join(fmt.Errorf("%w: policy file exists", ErrUnsafeSecurePath), file.Close())
-	}
-	if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return ValidateOwnerControlledDirectoryHandle(fsys, directory, dir)
+	directory.ownerControlled = true
+	return directory, nil
 }
