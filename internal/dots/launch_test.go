@@ -75,6 +75,56 @@ func launchFixtureEnvironment(t *testing.T, s *Settings) ([]string, []byte, []by
 	return []string{"CODEX_HOME=" + filepath.Dir(s.SystemAuth), "SSL_CERT_FILE=" + publicPath, "NODE_EXTRA_CA_CERTS=" + extraPath, "OPENAI_BASE_URL=https://wrong.invalid", "OPENAI_BASE_URL=https://duplicate.invalid", "NO_PROXY=internal.example,localhost", "UNCHANGED=value with spaces"}, public, extra
 }
 
+func TestPrepareLaunchKeepsMacOSNativeTrust(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS native trust")
+	}
+	for _, inherited := range []string{"none", "previous CQ bundle", "custom bundle"} {
+		t.Run(inherited, func(t *testing.T) {
+			_, s := preparedInstallationFixture(t)
+			env, configured, _ := launchFixtureEnvironment(t, s)
+			custom := environmentValue(env, "SSL_CERT_FILE")
+			env = slices.DeleteFunc(env, func(entry string) bool {
+				return matchesEnvironmentKey(entry, "SSL_CERT_FILE")
+			})
+			wantSSL := ""
+			wantConfigured := 1
+			switch inherited {
+			case "none":
+				env = setEnvironment(env, "CODEX_CA_CERTIFICATE", custom)
+			case "previous CQ bundle":
+				wantConfigured = 0
+				oldBundle := filepath.Join(s.RuntimeRoot, "native-trust.pem")
+				if err := os.WriteFile(oldBundle, configured, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				env = setEnvironment(env, "SSL_CERT_FILE", oldBundle)
+			case "custom bundle":
+				wantSSL = custom
+				env = setEnvironment(env, "SSL_CERT_FILE", custom)
+			}
+			_, env, err := prepareLaunch(s, "http://127.0.0.1:12345", "/stable/cq", env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := environmentValue(env, "SSL_CERT_FILE"); got != wantSSL {
+				t.Fatalf("SSL_CERT_FILE = %q, want %q", got, wantSSL)
+			}
+			bundle, err := os.ReadFile(environmentValue(env, "CODEX_CA_CERTIFICATE"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			leaf, err := os.ReadFile(filepath.Join(s.RuntimeRoot, "leaf-cert.pem"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Count(bundle, leaf) != 1 || bytes.Count(bundle, configured) != wantConfigured {
+				t.Fatal("Codex bundle did not preserve the requested trust material")
+			}
+		})
+	}
+}
+
 func TestPrepareLaunchTrustBundlesStayedStableAcrossRelaunches(t *testing.T) {
 	_, s := preparedInstallationFixture(t)
 	env, public, extra := launchFixtureEnvironment(t, s)
@@ -88,20 +138,20 @@ func TestPrepareLaunchTrustBundlesStayedStableAcrossRelaunches(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for key, certificates := range map[string][][]byte{"SSL_CERT_FILE": {public, extra, leaf}, "NODE_EXTRA_CA_CERTS": {extra, leaf}} {
-			data, err := os.ReadFile(environmentValue(env, key))
+		for name, certificates := range map[string][][]byte{"native-trust.pem": {public, extra, leaf}, "native-extra-ca.pem": {extra, leaf}} {
+			data, err := os.ReadFile(filepath.Join(s.RuntimeRoot, name))
 			if err != nil {
 				t.Fatal(err)
 			}
 			for _, certificate := range certificates {
 				if bytes.Count(data, certificate) != 1 {
-					t.Fatalf("%s attempt %d lost or duplicated a configured certificate", key, attempt+1)
+					t.Fatalf("%s attempt %d lost or duplicated a configured certificate", name, attempt+1)
 				}
 			}
 			if attempt == 0 {
-				first[key] = data
-			} else if !bytes.Equal(first[key], data) {
-				t.Fatalf("%s grew or changed across relaunch: %d -> %d bytes", key, len(first[key]), len(data))
+				first[name] = data
+			} else if !bytes.Equal(first[name], data) {
+				t.Fatalf("%s grew or changed across relaunch: %d -> %d bytes", name, len(first[name]), len(data))
 			}
 		}
 	}
@@ -148,12 +198,12 @@ func TestPrepareLaunchPreservedNormalProfileTrustAndCQRouting(t *testing.T) {
 	if !slices.Equal(args, wantArgs) {
 		t.Fatalf("arguments %#v, want %#v", args, wantArgs)
 	}
-	for key, want := range map[string][]byte{"SSL_CERT_FILE": bytes.Join([][]byte{public, extra, leaf}, nil), "NODE_EXTRA_CA_CERTS": bytes.Join([][]byte{extra, leaf}, nil)} {
-		path := environmentValue(env, key)
+	for name, want := range map[string][]byte{"native-trust.pem": bytes.Join([][]byte{public, extra, leaf}, nil), "native-extra-ca.pem": bytes.Join([][]byte{extra, leaf}, nil)} {
+		path := filepath.Join(s.RuntimeRoot, name)
 		got, err := os.ReadFile(path)
 		info, statErr := os.Stat(path)
 		if err != nil || statErr != nil || !bytes.Equal(got, want) || info.Mode().Perm() != 0o600 {
-			t.Fatalf("%s did not preserve roots privately: %v, %v", key, err, statErr)
+			t.Fatalf("%s did not preserve roots privately: %v, %v", name, err, statErr)
 		}
 	}
 	var launch map[string]any

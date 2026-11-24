@@ -211,7 +211,20 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 	}
 	env = setEnvironment(env, "CODEX_API_BASE_URL", apiBaseURL)
 	env = setEnvironment(env, "CODEX_APP_SERVER_CHATGPT_BASE_URL", "https://localhost:"+strconv.Itoa(port)+"/backend-api")
-	public, err := launchPublicTrust(env)
+	trustPath := filepath.Join(s.RuntimeRoot, "native-trust.pem")
+	caVariable := "SSL_CERT_FILE"
+	if runtime.GOOS == "windows" || native && runtime.GOOS == "darwin" {
+		// An injected SSL_CERT_FILE replaces native root discovery and loses
+		// certificates the user approved in macOS Keychain.
+		caVariable = "CODEX_CA_CERTIFICATE"
+	}
+	if native && runtime.GOOS == "darwin" {
+		// A relaunch can inherit the old launcher's generated override.
+		env = slices.DeleteFunc(env, func(entry string) bool {
+			return entry == "SSL_CERT_FILE="+trustPath
+		})
+	}
+	public, err := launchPublicTrust(env, caVariable)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -224,17 +237,13 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 	}
 	trust := uniquePEMBundle(public, extra, certificate)
 	additional := uniquePEMBundle(extra, certificate)
-	if err = launchWrite(filepath.Join(s.RuntimeRoot, "native-trust.pem"), trust, 0o600); err != nil {
+	if err = launchWrite(trustPath, trust, 0o600); err != nil {
 		return nil, nil, err
 	}
 	if err = launchWrite(filepath.Join(s.RuntimeRoot, "native-extra-ca.pem"), additional, 0o600); err != nil {
 		return nil, nil, err
 	}
-	caVariable := "SSL_CERT_FILE"
-	if runtime.GOOS == "windows" {
-		caVariable = "CODEX_CA_CERTIFICATE"
-	}
-	env = setEnvironment(env, caVariable, filepath.Join(s.RuntimeRoot, "native-trust.pem"))
+	env = setEnvironment(env, caVariable, trustPath)
 	env = setEnvironment(env, "NODE_EXTRA_CA_CERTS", filepath.Join(s.RuntimeRoot, "native-extra-ca.pem"))
 	if native {
 		// Electron's Node WebSockets use the platform's configured roots.
@@ -261,17 +270,16 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 	return args, env, nil
 }
 
-func launchPublicTrust(env []string) ([]byte, error) {
-	path := environmentValue(env, "SSL_CERT_FILE")
-	if runtime.GOOS == "windows" {
-		if custom := environmentValue(env, "CODEX_CA_CERTIFICATE"); custom != "" {
-			path = custom
-		}
-		// Codex adds CODEX_CA_CERTIFICATE to its Windows native roots.
-		if path == "" {
+func launchPublicTrust(env []string, caVariable string) ([]byte, error) {
+	path := environmentValue(env, caVariable)
+	if path == "" && caVariable != "SSL_CERT_FILE" {
+		path = environmentValue(env, "SSL_CERT_FILE")
+	}
+	if path == "" {
+		// The Codex-specific bundle supplements the platform's native roots.
+		if caVariable == "CODEX_CA_CERTIFICATE" {
 			return nil, nil
 		}
-	} else if path == "" {
 		path = "/etc/ssl/cert.pem"
 	}
 	return publicCertificate(path)
