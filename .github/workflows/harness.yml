@@ -8,6 +8,10 @@ on:
         description: Probe the official Windows Desktop package on an isolated runner
         type: boolean
         default: false
+      desktop_shell_control:
+        description: Compare the PowerShell launch path with the CQ Desktop adapter
+        type: boolean
+        default: false
   schedule:
     - cron: '17 6 * * 1'
 
@@ -355,12 +359,30 @@ jobs:
           $bootstrapSeen = $false
           $spawnSeen = $false
           $startupErrorSeen = $false
+          $bootstrapMarkers = [Collections.Generic.HashSet[string]]::new()
+          $bootstrapMessages = [ordered]@{
+            'single-instance' = 'Exiting second desktop instance'
+            'network' = 'Desktop network requirements prevented startup'
+            'handoff' = 'Desktop bootstrap failed to start the main app'
+            'identity' = 'windows_runtime_framework_identity_unavailable'
+            'hydration' = 'windows_runtime_framework_gate_hydration_failed'
+            'core' = 'windows_core_runtime_launch_selected'
+            'activation' = 'windows_primary_runtime_framework_activation_failed'
+          }
           $cqChildSeen = $false
           $stockChildSeen = $false
           $connectedSeen = $false
           try {
-            & $cq codex harness launch
-            if ($LASTEXITCODE -ne 0) { throw 'CQ Desktop harness launch failed' }
+            if ('${{ inputs.desktop_shell_control }}' -eq 'true') {
+              $desktop = Join-Path $installed.InstallLocation 'app/ChatGPT.exe'
+              $env:CODEX_CLI_PATH = $cq
+              $env:CQ_WINDOWS_HARNESS_STOCK_CLI = $stock
+              $control = Start-Process -FilePath $desktop -PassThru -WindowStyle Hidden -ErrorAction Stop
+              Write-Output "PowerShell Desktop control started PID $($control.Id)."
+            } else {
+              & $cq codex harness launch
+              if ($LASTEXITCODE -ne 0) { throw 'CQ Desktop harness launch failed' }
+            }
             $deadline = [DateTime]::UtcNow.AddSeconds(60)
             while ([DateTime]::UtcNow -lt $deadline -and -not ($cqChildSeen -and $stockChildSeen -and $connectedSeen)) {
               $processes = & $owned
@@ -386,6 +408,9 @@ jobs:
                   if ($log.LastWriteTimeUtc -lt $started) { continue }
                   $freshLogSeen = $true
                   foreach ($line in [IO.File]::ReadLines($log.FullName)) {
+                    foreach ($key in $bootstrapMessages.Keys) {
+                      if ($line.Contains($bootstrapMessages[$key])) { [void]$bootstrapMarkers.Add($key) }
+                    }
                     if ($line.Contains('Launching app')) { $bootstrapSeen = $true }
                     if ($line.Contains('stdio_transport_spawned')) { $spawnSeen = $true }
                     if ($line -match 'Desktop network requirements prevented startup|app_server_connection.fail|Initialization failed|Codex CLI process exited|Failed to spawn Codex CLI|Unable to locate the Codex CLI binary') { $startupErrorSeen = $true }
@@ -409,7 +434,7 @@ jobs:
               throw 'Packaged CQ Desktop launch did not prove the adapter, stock CLI and initialized local connection'
             }
           } finally {
-            $outcome = "Packaged CQ Desktop: desktop-image=$desktopSeen; adapter-image=$cqImageSeen; stock-image=$stockImageSeen; fresh-log=$freshLogSeen; bootstrap=$bootstrapSeen; spawn=$spawnSeen; startup-error=$startupErrorSeen; adapter=$cqChildSeen; stock-child=$stockChildSeen; initialized-local-connection=$connectedSeen."
+            $outcome = "Packaged CQ Desktop: desktop-image=$desktopSeen; adapter-image=$cqImageSeen; stock-image=$stockImageSeen; fresh-log=$freshLogSeen; bootstrap=$bootstrapSeen; spawn=$spawnSeen; startup-error=$startupErrorSeen; adapter=$cqChildSeen; stock-child=$stockChildSeen; initialized-local-connection=$connectedSeen; bootstrap-markers=$($bootstrapMarkers -join ',')."
             Write-Output $outcome
             $outcome >> $env:GITHUB_STEP_SUMMARY
             for ($attempt = 0; $attempt -lt 20 -and (& $owned).Count -ne 0; $attempt++) {
