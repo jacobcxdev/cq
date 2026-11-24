@@ -11,11 +11,24 @@ release=$2
 checksums=$3
 homepage=https://github.com/jacobcxdev/cq
 downloads=$homepage/releases/download/$tag
-jq -e --arg tag "$tag" '.tag_name == $tag and (.draft | type == "boolean") and (.assets | type == "array")' \
-  "$release" >/dev/null
+release_api=https://api.github.com/repos/jacobcxdev/cq/releases
+asset_downloads=$(jq -er --arg tag "$tag" --arg homepage "$homepage" --arg api "$release_api" '
+  select(.tag_name == $tag and (.draft | type == "boolean") and (.assets | type == "array"))
+  | select(.id | type == "number" and . > 0 and . == floor)
+  | ($api + "/" + (.id | tostring)) as $release_url
+  | select(.url == $release_url and .assets_url == ($release_url + "/assets"))
+  | ($homepage + "/releases/tag/") as $tag_prefix
+  | if .draft then
+      .html_url | select(startswith($tag_prefix)) | ltrimstr($tag_prefix)
+      | select(test("\\Auntagged-[a-f0-9]+\\z"))
+    else
+      select(.html_url == ($tag_prefix + $tag)) | $tag
+    end
+  | $homepage + "/releases/download/" + .
+' "$release") || { echo 'invalid GitHub release identity' >&2; exit 1; }
 
 asset_hash() {
-  jq -er --arg name "$1" --arg url "$downloads/$1" '
+  jq -er --arg name "$1" --arg url "$asset_downloads/$1" '
     [.assets[] | select(.name == $name)]
     | select(length == 1) | .[0]
     | select(.state == "uploaded" and .browser_download_url == $url)
