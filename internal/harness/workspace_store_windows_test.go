@@ -18,7 +18,7 @@ func TestWindowsPortableWorkspaceNativeUpdate(t *testing.T) {
 	if err := os.Mkdir(project, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	setWindowsPortableWorkspaceACL(t, project, false)
+	setWindowsHarnessACL(t, project, false)
 
 	path := filepath.Join(project, ".cq", "harness.json")
 	fsys := fsutil.OSFileSystem{}
@@ -58,7 +58,7 @@ func TestWindowsPortableWorkspaceRejectsUnsafeProject(t *testing.T) {
 		if err := os.Mkdir(project, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		setWindowsPortableWorkspaceACL(t, project, true)
+		setWindowsHarnessACL(t, project, true)
 		path := filepath.Join(project, ".cq", "harness.json")
 		if _, err := UpdateWorkspace(fsutil.OSFileSystem{}, path, func(*WorkspacePolicy) error { return nil }); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
 			t.Fatalf("broad project error = %v", err)
@@ -84,7 +84,7 @@ func TestWindowsPortableWorkspaceRejectsUnsafeProject(t *testing.T) {
 	})
 }
 
-func setWindowsPortableWorkspaceACL(t *testing.T, project string, broad bool) {
+func setWindowsHarnessACL(t *testing.T, project string, broad bool) {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -99,11 +99,15 @@ func setWindowsPortableWorkspaceACL(t *testing.T, project string, broad bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
 	dacl, _, err := descriptor.DACL()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := windows.SetNamedSecurityInfo(project, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+	if err := windows.SetNamedSecurityInfo(project, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, owner, nil, dacl, nil); err != nil {
 		t.Fatal(err)
 	}
 }
