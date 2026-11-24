@@ -83,14 +83,15 @@ try {
     $env:SCOOP_CACHE = Join-Path $root 'scoop-cache'
     $env:XDG_CONFIG_HOME = Join-Path $root 'config'
     $core = Join-Path $env:SCOOP 'apps/scoop/current'
-    git clone --quiet --depth 1 --branch v0.6.0 https://github.com/ScoopInstaller/Scoop.git $core
+    git -c advice.detachedHead=false clone --quiet --depth 1 --branch v0.6.0 https://github.com/ScoopInstaller/Scoop.git $core
     if ($LASTEXITCODE -ne 0) { throw 'Could not clone Scoop v0.6.0.' }
     if ((git -C $core rev-parse HEAD) -ne 'e6aa3b366bdee8ed138c1e0f7b85192ebdd35d0f') {
         throw 'Scoop source did not match the v0.6.0 pin.'
     }
     $scoop = Join-Path $core 'bin/scoop.ps1'
-    $shim = Join-Path $env:SCOOP 'shims/cq.exe'
-    New-Item -ItemType Directory -Path (Join-Path $env:SCOOP 'buckets') | Out-Null
+    $shimDir = Join-Path $env:SCOOP 'shims'
+    $shim = Join-Path $shimDir 'cq.exe'
+    New-Item -ItemType Directory -Path $shimDir, (Join-Path $env:SCOOP 'buckets') | Out-Null
     # Keep Scoop's automatic self-update from replacing the pinned core.
     Invoke-Scoop config last_update ([DateTime]::Now.ToString('o'))
     Invoke-Scoop bucket add jacobcxdev https://github.com/jacobcxdev/homebrew-tap
