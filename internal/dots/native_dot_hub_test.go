@@ -1,11 +1,64 @@
 package dots
 
 import (
+	"context"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+type dotHubTestEvaluator func(string) ([]any, error)
+
+func (evaluate dotHubTestEvaluator) EvaluateAll(_ context.Context, expression string) ([]any, error) {
+	return evaluate(expression)
+}
+
+func TestNativeDotHubPinsAndTeamModes(t *testing.T) {
+	const windowsHash = "7b5175d7932e26f8fca91fb0b25bc85e424304ce368c8ce21a68b1be2c174b28"
+	base := Settings{
+		IntegrationMode: "native",
+		Dots: map[string]Dot{
+			"one": {ProfileID: "profile-one"},
+			"two": {ProfileID: "profile-two"},
+		},
+		NativeBindings: &NativeBindings{Rspack: &NativeRspackBindings{}},
+		AppVersion:     "26.1120.5083.0", AppBuild: "5083", ModuleAsset: "348410.477a16d4d9.js", ASARSHA256: windowsHash,
+	}
+	for _, test := range []struct {
+		name            string
+		edit            func(*Settings)
+		supported, team bool
+	}{
+		{"qualified Windows", func(*Settings) {}, runtime.GOOS == "windows", true},
+		{"unqualified Windows hash", func(s *Settings) { s.ASARSHA256 = strings.Repeat("0", 64) }, false, false},
+		{"unqualified Windows build", func(s *Settings) { s.AppBuild = "5084" }, false, false},
+		{"unqualified Windows version", func(s *Settings) { s.AppVersion = "26.1121.5083.0" }, false, false},
+		{"unqualified Windows asset", func(s *Settings) { s.ModuleAsset = "348410.abcdef0123.js" }, false, false},
+		{"no native bindings", func(s *Settings) { s.NativeBindings = nil }, false, false},
+		{"isolated mode", func(s *Settings) { s.IntegrationMode = "isolated" }, false, false},
+		{"single Dot", func(s *Settings) { s.Dots = map[string]Dot{"one": {ProfileID: "profile-one"}} }, false, false},
+		{"legacy Mac", func(s *Settings) { s.AppBuild, s.ASARSHA256 = "29803", dotHubArchive29803 }, true, false},
+		{"Team Hub Mac", func(s *Settings) { s.AppBuild, s.ASARSHA256 = "30607", dotHubArchive30607 }, true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := base
+			test.edit(&cfg)
+			calls := 0
+			evaluator := dotHubTestEvaluator(func(expression string) ([]any, error) {
+				calls++
+				if !strings.Contains(expression, "const teamHub = "+strconv.FormatBool(test.team)+";") {
+					t.Fatalf("wrong Team Hub mode for %s", test.name)
+				}
+				return []any{map[string]any{"enabled": true}}, nil
+			})
+			if got := enableNativeDotHub(t.Context(), &cfg, evaluator); got != test.supported || (calls == 1) != test.supported {
+				t.Fatalf("enable=%t, evaluations=%d, want support %t", got, calls, test.supported)
+			}
+		})
+	}
+}
 
 func TestNativeDotHubRendererOverride(t *testing.T) {
 	node, err := exec.LookPath("node")

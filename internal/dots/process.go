@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -51,7 +52,7 @@ func runtimeExecutableMatches(arguments []string, executable string) bool {
 		return false
 	}
 	name := filepath.Base(arguments[0])
-	if name != "cq-dots-runtime" && name != "ChatGPT" {
+	if name != "cq-dots-runtime" && name != "ChatGPT" && name != "cq-dots-runtime.exe" && name != "ChatGPT.exe" {
 		return true
 	}
 	// The staged pathname can be replaced while the old mapped inode is alive.
@@ -65,8 +66,15 @@ func runtimeExecutableMatches(arguments []string, executable string) bool {
 	return err == nil && expected == actual
 }
 
+func dotsSamePath(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+	}
+	return left == right
+}
+
 func normalAppArguments(s *Settings, uid int, args []string) bool {
-	if uid != os.Getuid() || len(args) == 0 || args[0] != filepath.Join(s.AppPath, "Contents", "MacOS", "ChatGPT") {
+	if uid != os.Getuid() || len(args) == 0 || !dotsSamePath(args[0], nativeAppExecutable(s)) {
 		return false
 	}
 	for _, arg := range args[1:] {
@@ -124,7 +132,7 @@ func runtimeRole(s *Settings, pid, uid int, args []string, cwd string, python ma
 		return ""
 	}
 	root := s.RuntimeRoot
-	if args[0] == filepath.Join(s.AppPath, "Contents", "MacOS", "ChatGPT") {
+	if dotsSamePath(args[0], nativeAppExecutable(s)) {
 		if s.IntegrationMode == "native" {
 			data, err := readPrivate(filepath.Join(root, "native-debug.json"), root, true)
 			var state struct {
@@ -142,7 +150,7 @@ func runtimeRole(s *Settings, pid, uid int, args []string, cwd string, python ma
 					debugFlags = append(debugFlags, arg)
 				}
 			}
-			if slices.Equal(runtimeFlags, []string{"--cq-dots-runtime=" + root}) && slices.Equal(debugFlags, []string{"--remote-debugging-pipe"}) {
+			if slices.Equal(runtimeFlags, []string{"--cq-dots-runtime=" + root}) && nativeDebugFlagsMatch(debugFlags) {
 				return "app"
 			}
 			return ""
@@ -158,10 +166,10 @@ func runtimeRole(s *Settings, pid, uid int, args []string, cwd string, python ma
 		}
 		return ""
 	}
-	if cwd != root {
+	if runtime.GOOS != "windows" && cwd != root {
 		return ""
 	}
-	if args[0] == filepath.Join(root, "cq-dots-runtime") && len(args) >= 4 && args[1] == "__dots" && helperRole(args[2]) && args[2] != "desktop-recover" && args[3] == filepath.Dir(root) {
+	if dotsSamePath(args[0], helperExecutable(s)) && len(args) >= 4 && args[1] == "__dots" && helperRole(args[2]) && args[2] != "desktop-recover" && args[3] == filepath.Dir(root) {
 		return args[2]
 	}
 	if !python[args[0]] {
@@ -204,7 +212,7 @@ func runtimeProcesses(ctx context.Context, s *Settings, ops processOperations) (
 	}
 	python := pythonExecutables(s)
 	rows := make([]RuntimeProcess, 0)
-	app := filepath.Join(s.AppPath, "Contents", "MacOS", "ChatGPT")
+	app := nativeAppExecutable(s)
 	for _, pid := range pids {
 		uid, args, err := ops.arguments(ctx, pid)
 		if ctx.Err() != nil {
@@ -213,11 +221,11 @@ func runtimeProcesses(ctx context.Context, s *Settings, ops processOperations) (
 		if err != nil || uid != os.Getuid() || len(args) == 0 {
 			continue
 		}
-		if args[0] != app && args[0] != filepath.Join(s.RuntimeRoot, "cq-dots-runtime") && !python[args[0]] {
+		if !dotsSamePath(args[0], app) && !dotsSamePath(args[0], helperExecutable(s)) && !python[args[0]] {
 			continue
 		}
 		cwd := ""
-		if args[0] != app {
+		if !dotsSamePath(args[0], app) && runtime.GOOS != "windows" {
 			cwd, err = ops.cwd(ctx, pid)
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -236,7 +244,9 @@ func runtimeProcesses(ctx context.Context, s *Settings, ops processOperations) (
 
 // StopRuntime refuses to interrupt any ordinary app and never escalates beyond SIGTERM.
 func StopRuntime(ctx context.Context, s *Settings, preserveWatcher bool) error {
-	return stopRuntime(ctx, s, preserveWatcher, defaultProcessOperations())
+	ops := defaultProcessOperations()
+	ops.signal = func(pid int) error { return dotsTerminateForSettings(s, pid) }
+	return stopRuntime(ctx, s, preserveWatcher, ops)
 }
 
 func stopRuntime(ctx context.Context, s *Settings, preserveWatcher bool, ops processOperations) error {
@@ -313,8 +323,8 @@ func StageExecutable(source, runtimeRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fs := fsutil.OSFileSystem{}
-	input, err := fs.OpenNoFollow(resolved)
+	inputFS := fsutil.OSFileSystem{}
+	input, err := inputFS.OpenNoFollow(resolved)
 	if err != nil {
 		return "", err
 	}
@@ -323,8 +333,16 @@ func StageExecutable(source, runtimeRoot string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if !before.Mode().IsRegular() || before.Mode().Perm()&0o111 == 0 || before.Mode().Perm()&0o022 != 0 {
+	if runtime.GOOS == "windows" {
+		if filepath.Ext(resolved) != ".exe" || fsutil.ValidateExternalCacheFile(inputFS, before) != nil {
+			return "", errors.New("Dots executable source must be an owner-controlled regular executable")
+		}
+	} else if !before.Mode().IsRegular() || before.Mode().Perm()&0o111 == 0 || before.Mode().Perm()&0o022 != 0 {
 		return "", errors.New("Dots executable source must be a regular executable without shared writes")
+	}
+	fs, err := dotsFileSystem(filepath.Join(runtimeRoot, "cq-dots-runtime"))
+	if err != nil {
+		return "", err
 	}
 	directory, err := fs.OpenSecureDirectory(runtimeRoot)
 	if err != nil {
@@ -336,9 +354,16 @@ func StageExecutable(source, runtimeRoot string) (string, error) {
 		return "", err
 	}
 	name := "cq-dots-runtime"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
 	destination := filepath.Join(runtimeRoot, name)
 	if existing, err := os.Lstat(destination); err == nil {
-		if !existing.Mode().IsRegular() || !owned(existing) || existing.Mode().Perm() != 0o700 {
+		if runtime.GOOS == "windows" {
+			if err := windowsValidatePrivateFile(destination); err != nil {
+				return "", errors.New("Staged Dots executable must be an owned private regular file")
+			}
+		} else if !existing.Mode().IsRegular() || !owned(existing) || existing.Mode().Perm() != 0o700 {
 			return "", errors.New("Staged Dots executable must be owned and mode 0700")
 		}
 	} else if !os.IsNotExist(err) {
@@ -384,9 +409,18 @@ func StageExecutable(source, runtimeRoot string) (string, error) {
 	if err = output.Close(); err != nil {
 		return "", err
 	}
-	current, err := os.Lstat(runtimeRoot)
-	if err != nil || !os.SameFile(parent, current) {
-		return "", errors.New("Dots runtime directory changed during staging")
+	if runtime.GOOS == "windows" {
+		current, err := fs.Lstat(runtimeRoot)
+		parentIdentity, parentOK := fs.FileIdentity(parent)
+		currentIdentity, currentOK := fs.FileIdentity(current)
+		if err != nil || !parentOK || !currentOK || parentIdentity != currentIdentity {
+			return "", errors.New("Dots runtime directory changed during staging")
+		}
+	} else {
+		current, err := os.Lstat(runtimeRoot)
+		if err != nil || !os.SameFile(parent, current) {
+			return "", errors.New("Dots runtime directory changed during staging")
+		}
 	}
 	if err = directory.(fsutil.IdentityBoundRenamer).RenameChecked(temporary, name, identity); err != nil {
 		return "", err

@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -67,6 +69,7 @@ func (e *CloudStdioExitError) Error() string {
 type cloudLocal struct {
 	input  io.WriteCloser
 	output io.ReadCloser
+	pid    int
 	wait   func() error
 	stop   func()
 }
@@ -80,6 +83,7 @@ type cloudSocket interface {
 
 type cloudStdioDependencies struct {
 	gatewayListener          net.Listener
+	gatewayListenerForPID    func(int) (net.Listener, error)
 	localExecutable          string
 	environment              []string
 	launch                   func(context.Context, string, []string, []string, io.Writer) (*cloudLocal, error)
@@ -120,7 +124,7 @@ func startCloudCommand(command *exec.Cmd, environment []string, stderr io.Writer
 		_ = output.Close()
 		return nil, errors.New("stock Codex CLI launch failed")
 	}
-	return &cloudLocal{input: input, output: output, wait: command.Wait, stop: func() {
+	return &cloudLocal{input: input, output: output, pid: command.Process.Pid, wait: command.Wait, stop: func() {
 		_ = input.Close()
 		_ = command.Process.Kill()
 		_ = output.Close()
@@ -195,18 +199,55 @@ func RunCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 }
 
 func cloudInvocation(cfg *Settings, arguments, environment []string) (string, []string, []string, bool, error) {
-	path := filepath.Join(cfg.AppPath, "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex")
+	path := cloudStockExecutable(cfg)
 	environment = setEnvironment(environment, "CODEX_CLI_PATH", path)
 	appServer, appSession := false, false
 	for _, argument := range arguments {
 		appServer = appServer || argument == "app-server"
 		appSession = appSession || argument == cloudAppMarker+"true" || argument == cloudAppMarker+"false"
 	}
+	if runtime.GOOS == "windows" {
+		environment = setEnvironment(environment, "CODEX_APP_RUNTIME_CLI_PATH", path)
+		environment = slices.DeleteFunc(environment, func(entry string) bool {
+			return matchesEnvironmentKey(entry, WindowsCloudRootEnv)
+		})
+		appSession = windowsCloudAppSession(arguments)
+	}
 	var err error
 	if appServer {
 		arguments, err = nativeCloudArguments(arguments, environment)
 	}
 	return path, arguments, environment, appServer && appSession, err
+}
+
+func cloudStockExecutable(cfg *Settings) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(cfg.AppPath, "app", "resources", "codex.exe")
+	}
+	return filepath.Join(cfg.AppPath, "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex")
+}
+
+func windowsCloudAppSession(arguments []string) bool {
+	for len(arguments) >= 2 && (arguments[0] == "-c" || arguments[0] == "--config") {
+		arguments = arguments[2:]
+	}
+	if len(arguments) == 0 || arguments[0] != "app-server" {
+		return false
+	}
+	for index, argument := range arguments[1:] {
+		switch argument {
+		case "--print-startup-config", "--help", "-h", "help", "generate-ts", "generate-json-schema", "proxy":
+			return false
+		case "--listen":
+			if index+2 >= len(arguments) || arguments[index+2] != "stdio://" {
+				return false
+			}
+		}
+		if value, ok := strings.CutPrefix(argument, "--listen="); ok && value != "stdio://" {
+			return false
+		}
+	}
+	return true
 }
 
 type cloudPending struct {
@@ -308,6 +349,14 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 	b.local, err = deps.launch(ctx, path, arguments, environment, stderr)
 	if err != nil {
 		return err
+	}
+	if deps.gatewayListenerForPID != nil {
+		deps.gatewayListener, err = deps.gatewayListenerForPID(b.local.pid)
+		if err != nil {
+			b.local.stop()
+			_ = b.local.wait()
+			return err
+		}
 	}
 	b.harness = newCloudHarness(b)
 	if deps.gatewayListener != nil {

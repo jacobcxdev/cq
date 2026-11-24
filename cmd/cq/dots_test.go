@@ -178,6 +178,8 @@ func TestDotsCommandParsing(t *testing.T) {
 		want string
 	}{
 		{[]string{"codex", "dots", "install"}, "codex dots install"},
+		{[]string{"codex", "dots", "launch"}, "codex dots launch"},
+		{[]string{"codex", "dots", "launch", "--root", "/private/dots"}, "codex dots launch"},
 		{[]string{"--json", "codex", "dots", "--root", "/private/dots", "status"}, "codex dots status"},
 		{[]string{"codex", "dots", "prime", "Secondary"}, "codex dots prime <dot>"},
 		{[]string{"codex", "dots", "prime", "--all"}, "codex dots prime"},

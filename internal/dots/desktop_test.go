@@ -85,6 +85,26 @@ func TestDesktopLaunchOrdersDetachedRecoveryBeforeBoundedStartAndNativeOpen(t *t
 	}
 }
 
+func TestDesktopLaunchUsesRefreshedAppPathAfterStart(t *testing.T) {
+	s, c, deps, _ := desktopFixture(t)
+	current := filepath.Join(filepath.Dir(s.AppPath), "Updated.app")
+	deps.appPath = func(settings *Settings) (string, error) {
+		if settings != s {
+			t.Fatal("refreshed the wrong Dots installation")
+		}
+		return current, nil
+	}
+	deps.open = func(_ context.Context, app string) error {
+		if app != current {
+			t.Fatalf("launched stale Desktop path %q", app)
+		}
+		return nil
+	}
+	if err := runDesktopLaunch(context.Background(), s, c, deps); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestDesktopStartupCancellationUsesIndependentRecoveryAndKeepsFailedWatchdog(t *testing.T) {
 	for _, recoveryFails := range []bool{false, true} {
 		t.Run(map[bool]string{false: "recovered", true: "watchdog-survives"}[recoveryFails], func(t *testing.T) {

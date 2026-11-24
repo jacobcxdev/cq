@@ -1,6 +1,6 @@
 # cq
 
-`cq` checks AI subscription quota, manages accounts and routes compatible local clients through Claude, Codex, Z.ai and Grok. Gemini quota comes from Antigravity. On macOS, CQ can also help you access Dots before regional rollout through a US WireGuard profile, or bring existing Dots from multiple accounts into one ChatGPT sidebar.
+`cq` checks AI subscription quota, manages accounts and routes compatible local clients through Claude, Codex, Z.ai and Grok. Gemini quota comes from Antigravity. On macOS and Windows, CQ can bring Dots from multiple accounts into one ChatGPT sidebar. On macOS, CQ Network can also route native ChatGPT traffic through a US WireGuard profile.
 
 **For users and installation agents:** start with the [agent setup and feature guide](docs/agent-installation.md). **Agents: read that guide before installing or changing configuration.** Explain the relevant capabilities, help the user choose, then configure and verify their chosen setup. Users can send their agent this repository link; the guide covers desktop apps and CLIs, account routing, optional features and native ChatGPT integrations.
 
@@ -187,10 +187,10 @@ guide](docs/agent-installation.md#5-verify-the-requested-outcome) for the checks
 | Routing | Pins/defaults, account allowlists, pools/session bindings, system-account preservation and reserve, priming, leases and rescue. |
 | Automation | Explicitly accepted reset schedules, periodic credential refresh, model registry refresh and publication. |
 | Models | Anthropic/Codex/Z.ai/Grok catalogues, overlays, CQ-owned registry cache and Claude Code publication; compatible Codex clients fetch CQ's model-discovery routes. |
-| Native ChatGPT | Optional macOS Dots adapter, scoped harness capability profiles, and signed native network/usage handling. Each integration has separate prerequisites. |
+| Native ChatGPT | Optional Dots adapter on macOS and Windows, scoped harness capability profiles, and signed native network and usage handling on macOS. |
 | Operations | Default private [cache profiles](docs/cache-profiling.md), privacy-aware trace JSONL, opt-in payload diagnostics, Stop-hook receipts, canary, isolated candidate validation, durable recovery and legacy endpoint maintenance. |
 
-Official packages target macOS, Windows and Linux on the architectures in each release. Core macOS support includes macOS 12; the signed native network companion requires macOS 13 or later. Dots uses macOS-specific native app contracts. Linux background services require a functional systemd user manager. Windows uses current-user scheduled tasks. Platform support for an external client is separate from CQ's own build support.
+Official packages target macOS, Windows and Linux on the architectures in each release. Core macOS support includes macOS 12. The signed native network companion requires macOS 13 or later. Windows Dots requires the registered official ChatGPT package. Linux background services require a functional systemd user manager. Windows uses current-user scheduled tasks. Platform support for an external client is separate from CQ's own build support.
 
 ## Complete command index
 
@@ -221,6 +221,7 @@ cq codex credits status
 cq codex dots board
 cq codex dots broadcast
 cq codex dots install
+cq codex dots launch
 cq codex dots list
 cq codex dots order
 cq codex dots prime

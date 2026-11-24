@@ -291,6 +291,13 @@ func cliKongOptions() []kong.Option {
 }
 
 func main() {
+	if handled, err := runWindowsDotsCloudEntry(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); handled {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: %v\n", err)
+			os.Exit(dotsExitCode(err))
+		}
+		return
+	}
 	if handled, err := runWindowsHarnessStdioEntry(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); handled {
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "cq: %v\n", err)

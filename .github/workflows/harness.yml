@@ -120,7 +120,13 @@ jobs:
         run: |
           go test -race -count=1 -timeout 2m ./internal/harness
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go test -race -count=1 -timeout 2m ./cmd/cq -run '^(TestCodexHarness|TestHarnessDisableBypasses|TestHarnessSkillInstallUnderWindowsCodexHome|TestOfficialWindowsCodexPackage|TestWindowsHarnessChildEnv)'
+          go test -race -count=1 -timeout 2m ./cmd/cq -run '^(TestCodexHarness|TestHarnessDisableBypasses|TestHarnessSkillInstallUnderWindowsCodexHome|TestOfficialWindowsCodexPackage|TestWindowsHarnessChildEnv|TestWindowsDots)'
+      - name: Qualify Windows Dots and proxy runtime contracts
+        if: matrix.architecture == 'x64'
+        run: |
+          go test -race -count=1 -timeout 3m ./internal/dots -run '^TestWindows'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -race -count=1 -timeout 2m ./internal/proxy -run '^TestWindowsRuntimeEgress'
       - name: Fetch the official Windows Codex CLI baseline
         run: |
           $root = Join-Path $env:RUNNER_TEMP 'cq-pinned-codex'
@@ -499,6 +505,14 @@ jobs:
           $env:ALL_PROXY = $null
           go test -race -count=1 -timeout 3m -run '^TestHarnessWindowsNativeProfileContract$' ./internal/dots
           if ($LASTEXITCODE -ne 0) { throw 'Isolated native profile contract failed' }
+      - name: Verify the registered Desktop renderer over the private Dots pipe
+        if: steps.preflight.outputs.interactive == 'true' && matrix.goarch == 'amd64'
+        run: |
+          $installed = Get-AppxPackage -Name OpenAI.Codex -ErrorAction Stop
+          $env:CQ_DOTS_WINDOWS_PACKAGE = (Resolve-Path -LiteralPath $installed.InstallLocation).Path
+          $env:CQ_DOTS_WINDOWS_PIPE_ACCEPTANCE = '1'
+          go test -race -count=1 -timeout 2m -v -run '^TestWindowsNativePipeInstalledApp$' ./internal/dots
+          if ($LASTEXITCODE -ne 0) { throw 'Registered Desktop private renderer pipe qualification failed' }
       - name: Remove downloaded package
         if: always() && steps.preflight.outputs.interactive == 'true'
         run: |

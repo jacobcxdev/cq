@@ -98,20 +98,9 @@ func (p *nativePipe) call(ctx context.Context, method string, params map[string]
 	if err != nil || len(data)+1 > nativeMaxRequest {
 		return nil, errors.New("native debugger command too large")
 	}
-	deadline, ok := ctx.Deadline()
-	if !ok {
-		deadline = time.Now().Add(nativeTimeout)
-	}
-	if err = p.write.SetWriteDeadline(deadline); err != nil {
-		return nil, errors.New("native debugger pipe unavailable")
-	}
 	data = append(data, 0)
-	for len(data) > 0 {
-		n, e := p.write.Write(data)
-		if e != nil {
-			return nil, errors.New("native debugger pipe unavailable")
-		}
-		data = data[n:]
+	if err := nativePipeWrite(ctx, p.write, data); err != nil {
+		return nil, errors.New("native debugger pipe unavailable")
 	}
 	select {
 	case response := <-reply:

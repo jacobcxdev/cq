@@ -23,6 +23,7 @@ import (
 type CodexDotsCmd struct {
 	Root      string                `help:"Private Dots installation directory (default ~/.local/share/cq/dots)" placeholder:"ABS_PATH"`
 	Install   CodexDotsInstallCmd   `cmd:"" help:"Install multi-account Dots for the normal native app"`
+	Launch    CodexDotsActionCmd    `cmd:"" help:"Launch ChatGPT through the installed Dots adapter"`
 	Start     CodexDotsActionCmd    `cmd:"" help:"Start Dots in the configured native app"`
 	Stop      CodexDotsActionCmd    `cmd:"" help:"Stop the Dots adapter after quitting the app"`
 	Status    CodexDotsActionCmd    `cmd:"" help:"Show Dots status"`
@@ -36,7 +37,7 @@ type CodexDotsCmd struct {
 
 type CodexDotsInstallCmd struct {
 	Mode          string `help:"Use normal native profile or isolated research profile" default:"native" enum:"native,isolated"`
-	App           string `help:"Native app bundle" default:"/Applications/ChatGPT.app" placeholder:"ABS_PATH"`
+	App           string `help:"Native app bundle (Windows: registered official package)" placeholder:"ABS_PATH"`
 	SystemAuth    string `help:"Read-only native Codex authentication path" placeholder:"ABS_PATH"`
 	CQAccounts    string `help:"Read-only CQ Codex accounts directory" placeholder:"ABS_PATH"`
 	AccountSource string `help:"Optional read-only CodexBar account directory" placeholder:"ABS_PATH"`
@@ -71,6 +72,8 @@ type dotsRunner struct {
 	home       func() (string, error)
 	executable func() (string, error)
 	baseURL    func() (string, error)
+	app        func() (dots.Settings, string, error)
+	launch     func(context.Context, string, io.Writer, io.Writer) error
 	run        func(context.Context, dots.Controller, dots.Request) (map[string]any, error)
 }
 
@@ -86,6 +89,10 @@ func defaultDotsRunner() dotsRunner {
 				return "", fmt.Errorf("CQ proxy configuration unavailable: %w", err)
 			}
 			return "http://127.0.0.1:" + strconv.Itoa(cfg.Port), nil
+		},
+		app: resolveDotsInstallApp,
+		launch: func(ctx context.Context, root string, stdout, stderr io.Writer) error {
+			return dots.RunHelper(ctx, "desktop-launch", root, nil, os.Stdin, stdout, stderr)
 		},
 		run: func(ctx context.Context, controller dots.Controller, request dots.Request) (map[string]any, error) {
 			return controller.Execute(ctx, request)
@@ -186,7 +193,10 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 	}
 	root := options.Root
 	if root == "" {
-		root = filepath.Join(home, ".local", "share", "cq", "dots")
+		root, err = dotsDefaultRoot(home)
+		if err != nil {
+			return err
+		}
 	}
 	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 		return fmt.Errorf("Dots root must be a clean absolute path")
@@ -194,9 +204,9 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 	if dotsContains(canonicalDotsPath(root), canonicalDotsPath(home)) {
 		return fmt.Errorf("Dots root must not contain the home directory")
 	}
-	protectedState := []string{filepath.Join(home, ".codex"), "/Applications/ChatGPT.app"}
-	for _, name := range []string{"Codex", "ChatGPT", "com.openai.codex", "com.openai.chat", "OpenAI"} {
-		protectedState = append(protectedState, filepath.Join(home, "Library", "Application Support", name))
+	protectedState, err := dots.ProtectedAppRoots(home)
+	if err != nil {
+		return err
 	}
 	for _, path := range protectedState {
 		if overlapsDotsRoot(root, path) {
@@ -209,6 +219,12 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 		return fmt.Errorf("missing Dots command")
 	}
 	op := operation[0]
+	if op == "launch" {
+		if runner.launch == nil {
+			return errors.New("Dots launcher unavailable")
+		}
+		return runner.launch(ctx, root, stdout, stderr)
+	}
 	if op == "prime" && (options.Prime.All == (options.Prime.Dot != "")) {
 		return fmt.Errorf("choose a stable Dot handle, an unambiguous name, or --all")
 	}
@@ -226,6 +242,9 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 	request := dots.Request{Operation: op}
 	if op == "install" {
 		install := options.Install
+		if err := dotsInstallApp(&install, runner.app); err != nil {
+			return err
+		}
 		if install.Mode == "" {
 			install.Mode = "native"
 		}
@@ -247,8 +266,8 @@ func (runner dotsRunner) execute(ctx context.Context, options *CodexDotsCmd, com
 				return fmt.Errorf("Dots install paths must be clean and absolute")
 			}
 		}
-		protected := append(inputs, filepath.Join(home, ".codex"), filepath.Dir(install.SystemAuth))
-		protected = append(protected, filepath.Join(home, "Library", "Application Support", "Codex"), filepath.Join(home, "Library", "Application Support", "ChatGPT"))
+		protected := append(inputs, filepath.Dir(install.SystemAuth))
+		protected = append(protected, protectedState...)
 		for _, path := range protected {
 			if overlapsDotsRoot(root, path) {
 				return fmt.Errorf("Dots root overlaps an app or credential path")

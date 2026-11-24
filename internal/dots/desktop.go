@@ -4,8 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
-	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -24,6 +23,7 @@ type desktopDependencies struct {
 	open    func(context.Context, string) error
 	recover func(context.Context, *Settings) error
 	wait    func(context.Context, time.Duration) error
+	appPath func(*Settings) (string, error)
 }
 
 func desktopDefaults() desktopDependencies {
@@ -48,20 +48,25 @@ func desktopDefaults() desktopDependencies {
 		open: func(ctx context.Context, app string) error {
 			query, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
-			if err := exec.CommandContext(query, "/usr/bin/open", "-a", app).Run(); err != nil {
+			if err := openDesktopApp(query, app); err != nil {
 				return errors.New("Native app activation failed")
 			}
 			return nil
 		},
 		recover: RecoverApp,
 		wait:    waitContext,
+		appPath: currentDesktopAppPath,
 	}
 }
 
 func ensureDesktopExecutable(s *Settings, source string) (string, error) {
-	path := filepath.Join(s.RuntimeRoot, "cq-dots-runtime")
+	path := helperExecutable(s)
 	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() || !owned(info) || info.Mode().Perm() != 0o700 {
+		if runtime.GOOS == "windows" {
+			if err := windowsValidatePrivateFile(path); err != nil {
+				return "", errors.New("Staged Dots executable must be an owned private regular file")
+			}
+		} else if !info.Mode().IsRegular() || !owned(info) || info.Mode().Perm() != 0o700 {
 			return "", errors.New("Staged Dots executable must be owned and mode 0700")
 		}
 		return path, nil
@@ -82,11 +87,22 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 		return errors.New("Spotlight launcher requires a native Dots installation")
 	}
 	const failure = "CQ could not start Dots. Run cq codex dots status for details."
+	openCurrent := func() error {
+		app := s.AppPath
+		if deps.appPath != nil {
+			var err error
+			app, err = deps.appPath(s)
+			if err != nil {
+				return err
+			}
+		}
+		return deps.open(ctx, app)
+	}
 	activateRepaired := func() error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err := deps.open(ctx, s.AppPath); err != nil {
+		if err := openCurrent(); err != nil {
 			return errors.New("Dots recovered, but native app activation failed")
 		}
 		return nil
@@ -149,7 +165,7 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 		stopWatchdog = recoverNow()
 		return errors.New("No active Dots are available. Run cq codex dots status for details.")
 	}
-	if err := deps.open(ctx, s.AppPath); err != nil {
+	if err := openCurrent(); err != nil {
 		stopWatchdog = recoverNow()
 		return errors.New(failure)
 	}

@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -35,6 +36,11 @@ func (cloudUnavailableHTTP) Do(*http.Request) (*http.Response, error) {
 }
 
 func cloudPublicTLS() (*tls.Config, error) {
+	if runtime.GOOS == "windows" {
+		// A nil RootCAs uses Windows' native verifier. It does not read the
+		// application-specific CA file supplied to the spawned Codex CLI.
+		return &tls.Config{MinVersion: tls.VersionTLS12}, nil
+	}
 	// CQ's child environment may point SSL_CERT_FILE at its interception CA.
 	// Owner sessions always use the system's public bundle directly.
 	for _, path := range []string{"/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt", "/etc/pki/tls/certs/ca-bundle.crt"} {
@@ -117,8 +123,7 @@ func cloudStdioDefaults(cfg *Settings) cloudStdioDependencies {
 			return cloudRuntimeHarnessPolicy(fsutil.OSFileSystem{}, filepath.Join(roots.Config, "harness.json"), cwd)
 		},
 		nativeHarnessInventory: func(ctx context.Context, cwd string) (harness.Inventory, error) {
-			path := filepath.Join(cfg.AppPath, "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex")
-			return (harness.NativeInventory{Executable: path}).Snapshot(ctx, cwd)
+			return (harness.NativeInventory{Executable: cloudStockExecutable(cfg)}).Snapshot(ctx, cwd)
 		},
 		readHarnessPolicy: func() (harness.Policy, error) {
 			roots, err := userdirs.Default()

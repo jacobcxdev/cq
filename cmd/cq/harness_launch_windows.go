@@ -9,21 +9,16 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"syscall"
 	"unsafe"
 
+	"github.com/jacobcxdev/cq/internal/winpackage"
 	"golang.org/x/sys/windows"
 )
 
-const windowsCodexPackageFamily = "OpenAI.Codex_2p2nqsd0c76g0"
-
 var (
-	windowsPackageAPI            = windows.NewLazySystemDLL("kernel32.dll")
-	windowsPackagesByFamily      = windowsPackageAPI.NewProc("GetPackagesByPackageFamily")
-	windowsPackagePathByFullName = windowsPackageAPI.NewProc("GetPackagePathByFullName")
-	windowsShellExecuteEx        = windows.NewLazySystemDLL("shell32.dll").NewProc("ShellExecuteExW")
+	windowsShellExecuteEx = windows.NewLazySystemDLL("shell32.dll").NewProc("ShellExecuteExW")
 )
 
 // shellExecuteInfo mirrors SHELLEXECUTEINFOW from <shellapi.h>.
@@ -102,26 +97,7 @@ func activateWindowsDesktop(app *uint16) error {
 }
 
 func officialWindowsCodexPackage(full string) bool {
-	parts := strings.Split(full, "_")
-	if len(parts) != 5 || parts[0] != "OpenAI.Codex" || parts[3] != "" || parts[4] != "2p2nqsd0c76g0" {
-		return false
-	}
-	if parts[2] != "x64" && parts[2] != "arm64" {
-		return false
-	}
-	version := strings.Split(parts[1], ".")
-	if len(version) != 4 {
-		return false
-	}
-	for _, component := range version {
-		if component == "" {
-			return false
-		}
-		if _, err := strconv.ParseUint(component, 10, 16); err != nil {
-			return false
-		}
-	}
-	return true
+	return winpackage.OfficialCodexPackage(full)
 }
 
 func withWindowsHarnessEnvironment(self, stock string, start func() error) error {
@@ -151,29 +127,9 @@ func registeredHarnessExecutable() string {
 }
 
 func resolveWindowsHarnessDesktop() (desktop, stock string, err error) {
-	packages, err := windowsRegisteredCodexPackages()
+	root, err := winpackage.RegisteredCodexRoot()
 	if err != nil {
 		return "", "", err
-	}
-	var selected string
-	for _, full := range packages {
-		if !officialWindowsCodexPackage(full) {
-			continue
-		}
-		if selected != "" {
-			return "", "", errors.New("multiple official Codex Desktop packages are registered")
-		}
-		selected = full
-	}
-	if selected == "" {
-		return "", "", errors.New("official Codex Desktop package is not registered for this user")
-	}
-	root, err := windowsCodexPackagePath(selected)
-	if err != nil {
-		return "", "", err
-	}
-	if !filepath.IsAbs(root) || filepath.Clean(root) != root || !strings.EqualFold(filepath.Base(root), selected) {
-		return "", "", errors.New("Codex Desktop package path is invalid")
 	}
 	desktop = filepath.Join(root, "app", "ChatGPT.exe")
 	stock = filepath.Join(root, "app", "resources", "codex.exe")
@@ -186,90 +142,8 @@ func resolveWindowsHarnessDesktop() (desktop, stock string, err error) {
 	return desktop, stock, nil
 }
 
-func windowsRegisteredCodexPackages() ([]string, error) {
-	family, err := windows.UTF16PtrFromString(windowsCodexPackageFamily)
-	if err != nil {
-		return nil, err
-	}
-	var count, length uint32
-	status, _, _ := windowsPackagesByFamily.Call(uintptr(unsafe.Pointer(family)), uintptr(unsafe.Pointer(&count)), 0, uintptr(unsafe.Pointer(&length)), 0)
-	if status == uintptr(windows.APPMODEL_ERROR_NO_PACKAGE) {
-		return nil, errors.New("official Codex Desktop package is not registered for this user")
-	}
-	if status != uintptr(windows.ERROR_INSUFFICIENT_BUFFER) || count == 0 || count > 16 || length == 0 || length > 65536 {
-		return nil, fmt.Errorf("query Codex Desktop registration: %w", syscall.Errno(status))
-	}
-	names := make([]*uint16, count)
-	buffer := make([]uint16, length)
-	status, _, _ = windowsPackagesByFamily.Call(uintptr(unsafe.Pointer(family)), uintptr(unsafe.Pointer(&count)), uintptr(unsafe.Pointer(&names[0])), uintptr(unsafe.Pointer(&length)), uintptr(unsafe.Pointer(&buffer[0])))
-	if status != 0 {
-		return nil, fmt.Errorf("read Codex Desktop registration: %w", syscall.Errno(status))
-	}
-	if count == 0 || int(count) > len(names) {
-		return nil, errors.New("Codex Desktop registration count changed")
-	}
-	packages := make([]string, 0, count)
-	for _, name := range names[:count] {
-		if name == nil {
-			return nil, errors.New("Codex Desktop registration contains an empty package")
-		}
-		packages = append(packages, windows.UTF16PtrToString(name))
-	}
-	return packages, nil
-}
-
-func windowsCodexPackagePath(full string) (string, error) {
-	name, err := windows.UTF16PtrFromString(full)
-	if err != nil {
-		return "", err
-	}
-	var length uint32
-	status, _, _ := windowsPackagePathByFullName.Call(uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(&length)), 0)
-	if status != uintptr(windows.ERROR_INSUFFICIENT_BUFFER) || length == 0 || length > 32768 {
-		return "", fmt.Errorf("query Codex Desktop package path: %w", syscall.Errno(status))
-	}
-	buffer := make([]uint16, length)
-	status, _, _ = windowsPackagePathByFullName.Call(uintptr(unsafe.Pointer(name)), uintptr(unsafe.Pointer(&length)), uintptr(unsafe.Pointer(&buffer[0])))
-	if status != 0 {
-		return "", fmt.Errorf("read Codex Desktop package path: %w", syscall.Errno(status))
-	}
-	if length == 0 || int(length) > len(buffer) {
-		return "", errors.New("Codex Desktop package path length changed")
-	}
-	return windows.UTF16ToString(buffer), nil
-}
-
 func checkWindowsPackagePath(path string) error {
-	volume := filepath.VolumeName(path)
-	if len(volume) != 2 || volume[1] != ':' || !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return errors.New("invalid package executable path")
-	}
-	current := volume + `\`
-	rest := strings.TrimPrefix(path, current)
-	parts := strings.Split(rest, `\`)
-	for i, part := range append([]string{""}, parts...) {
-		if part != "" {
-			current = filepath.Join(current, part)
-		}
-		wide, err := windows.UTF16PtrFromString(current)
-		if err != nil {
-			return err
-		}
-		attributes, err := windows.GetFileAttributes(wide)
-		if err != nil {
-			return err
-		}
-		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-			return errors.New("package executable path contains a reparse point")
-		}
-		if i < len(parts) && attributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
-			return errors.New("package executable ancestor is not a directory")
-		}
-		if i == len(parts) && attributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 {
-			return errors.New("package executable is not a file")
-		}
-	}
-	return nil
+	return winpackage.CheckPath(path)
 }
 
 func windowsHarnessDesktopRunning(desktop string) (bool, error) {

@@ -68,7 +68,7 @@ func RunHelper(ctx context.Context, role, root string, args []string, stdin io.R
 	// after a termination signal. Other workers use normal graceful cancellation.
 	if role == "native-broker" {
 		if settings.IntegrationMode == "native" {
-			return LaunchNativeBroker(ctx, settings, filepath.Join(settings.AppPath, "Contents", "MacOS", "ChatGPT"), args, os.Environ())
+			return LaunchNativeBroker(ctx, settings, nativeAppExecutable(settings), args, os.Environ())
 		}
 		return LaunchIsolatedApp(ctx, settings, args, os.Environ())
 	}

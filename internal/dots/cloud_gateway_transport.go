@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -189,7 +190,7 @@ func cloudGatewayPeerPID(remoteAddress string, data []byte) (int, bool) {
 }
 
 func cloudGatewayNativeProcess(cfg *Settings, uid int, arguments []string) bool {
-	if cfg == nil || uid != os.Getuid() || len(arguments) == 0 || arguments[0] != filepath.Join(cfg.AppPath, "Contents", "Resources", "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex") {
+	if cfg == nil || uid != os.Getuid() || len(arguments) == 0 || arguments[0] != cloudStockExecutable(cfg) {
 		return false
 	}
 	appServer, appSession := false, false
@@ -201,6 +202,9 @@ func cloudGatewayNativeProcess(cfg *Settings, uid int, arguments []string) bool 
 }
 
 func (p *Probe) nativeCloudGateway(w http.ResponseWriter, r *http.Request) bool {
+	if runtime.GOOS == "windows" {
+		return windowsNativeCloudGateway(p, w, r)
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
 	defer cancel()
 	pid, ok := nativeCloudGatewayPeer(ctx, &p.settings, r.RemoteAddr)

@@ -939,7 +939,10 @@ OpenCode Console.
 
 ## Multi-account Dots
 
-[The Dots guide](dots.md) covers install/start/stop/sync/list/status, one-time setup, explicit `prime`, one-shot `broadcast` and shared `board` binding. Installation and initial discovery can send a setup message; `prime`, `broadcast` and a new board binding also send messages. Read the delivery and uncertain-outcome rules before running them. Dots and native network handling are optional macOS integrations, with separate readiness checks.
+[The Dots guide](dots.md) covers setup, launch, account discovery and shared
+board binding on macOS and Windows. Installation and initial discovery can
+send a setup message. `prime`, `broadcast` and a new board binding also send
+messages. Read the delivery and uncertain-outcome rules before running them.
 
 ## Command and operation reference
 
