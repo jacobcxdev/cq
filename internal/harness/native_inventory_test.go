@@ -264,7 +264,7 @@ func TestNativeInventoryDetailReadQueueWasBoundedAndSkippedUninstalled(t *testin
 		plugins = append(plugins, map[string]any{"id": "plugin-" + strconv.Itoa(index) + "@market", "name": "plugin-" + strconv.Itoa(index), "installed": true, "enabled": index%2 == 0})
 	}
 	plugins = append(plugins, map[string]any{"id": "uninstalled@market", "name": "uninstalled", "installed": false, "enabled": false})
-	raw, _ := json.Marshal(map[string]any{"marketplaces": []any{map[string]any{"name": "market", "path": "/private/market.json", "plugins": plugins}}})
+	raw, _ := json.Marshal(map[string]any{"marketplaces": []any{map[string]any{"name": "market", "path": testAbsPath("/private/market.json"), "plugins": plugins}}})
 	requests := nativePluginDetailRequests(raw)
 	if len(requests) != 124 {
 		t.Fatalf("native detail read bound changed: %d", len(requests))
@@ -303,7 +303,7 @@ func TestNativeInventoryIncludedDisabledMetadataAndPortableIDs(t *testing.T) {
 		t.Fatal("native availability was misrepresented")
 	}
 	owned := byID["skill:plugin:one@market:owned"]
-	if owned.Path != "/cache/42/owned/SKILL.md" || owned.NativeID != "owned" || owned.PluginID != "one@market" || !slices.Equal(owned.Dependencies, []string{"mcp:active", "plugin:one@market"}) {
+	if owned.Path != testAbsPath("/cache/42/owned/SKILL.md") || owned.NativeID != "owned" || owned.PluginID != "one@market" || !slices.Equal(owned.Dependencies, []string{"mcp:active", "plugin:one@market"}) {
 		t.Fatalf("owned skill = %+v", owned)
 	}
 	if byID["plugin:one@market"].Description != "Native plugin description" {

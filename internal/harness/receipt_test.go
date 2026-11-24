@@ -28,7 +28,7 @@ func TestReceiptGoalHoldRetainedBoundedRecoveryIdentity(t *testing.T) {
 	receipt := receiptFixture()
 	receipt.Mode = "full"
 	receipt.GoalHold = &GoalHold{Fingerprint: strings.Repeat("a", 64), UpdatedAt: 123}
-	store := Receipts{FS: fsutil.NewMemFS(), Dir: "/state/receipts"}
+	store := Receipts{FS: newHarnessMemFS(), Dir: testAbsPath("/state/receipts")}
 	if err := store.Save(receipt); err != nil {
 		t.Fatal(err)
 	}
@@ -51,14 +51,14 @@ func TestReceiptGoalHoldRetainedBoundedRecoveryIdentity(t *testing.T) {
 
 func TestReceiptAttemptedContextWasBoundedAndSeparate(t *testing.T) {
 	receipt := receiptFixture()
-	receipt.Mode, receipt.State, receipt.Model, receipt.Cwd = "full", "failed", "observed", "/observed"
-	receipt.AttemptedContext = &ApplicationContext{Model: "attempted", Cwd: "/attempted"}
-	store := Receipts{FS: fsutil.NewMemFS(), Dir: "/state/receipts"}
+	receipt.Mode, receipt.State, receipt.Model, receipt.Cwd = "full", "failed", "observed", testAbsPath("/observed")
+	receipt.AttemptedContext = &ApplicationContext{Model: "attempted", Cwd: testAbsPath("/attempted")}
+	store := Receipts{FS: newHarnessMemFS(), Dir: testAbsPath("/state/receipts")}
 	if err := store.Save(receipt); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.Load(testChat)
-	if err != nil || got.Model != "observed" || got.Cwd != "/observed" || got.RetryContext() != *receipt.AttemptedContext {
+	if err != nil || got.Model != "observed" || got.Cwd != testAbsPath("/observed") || got.RetryContext() != *receipt.AttemptedContext {
 		t.Fatalf("lost context distinction: %#v %v", got, err)
 	}
 	for name, alter := range map[string]func(*Receipt){
@@ -84,8 +84,8 @@ func TestReceiptAttemptedContextWasBoundedAndSeparate(t *testing.T) {
 }
 
 func TestReceiptMissingDoesNotCreateState(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	receipts := Receipts{FS: fsys, Dir: "/state/receipts"}
+	fsys := newHarnessMemFS()
+	receipts := Receipts{FS: fsys, Dir: testAbsPath("/state/receipts")}
 	if _, err := receipts.Load(testChat); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing receipt error = %v, want not exist", err)
 	}
@@ -95,8 +95,8 @@ func TestReceiptMissingDoesNotCreateState(t *testing.T) {
 }
 
 func TestReceiptSavesPrivateBaselineWhileLeaseHeld(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	receipts := Receipts{FS: fsys, Dir: "/state/receipts"}
+	fsys := newHarnessMemFS()
+	receipts := Receipts{FS: fsys, Dir: testAbsPath("/state/receipts")}
 	lease, err := receipts.Acquire(testChat)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +131,7 @@ func TestReceiptSavesPrivateBaselineWhileLeaseHeld(t *testing.T) {
 }
 
 func TestReceiptAcceptsLifecycleStatesAndFullMode(t *testing.T) {
-	receipts := Receipts{FS: fsutil.NewMemFS(), Dir: "/state/receipts"}
+	receipts := Receipts{FS: newHarnessMemFS(), Dir: testAbsPath("/state/receipts")}
 	for _, state := range []string{"prepared", "applied", "pending", "failed", "diverged", "restored"} {
 		receipt := receiptFixture()
 		receipt.Mode, receipt.Profile, receipt.State = "full", Full, state
@@ -157,7 +157,7 @@ func TestReceiptRejectedUnclassifiedFailureData(t *testing.T) {
 			receipt.State = "failed"
 			receipt.Failure = &ApplicationFailure{Stage: "resume", Reason: "rpc_rejected", Rollback: "restored"}
 			alter(receipt.Failure)
-			if err := (Receipts{FS: fsutil.NewMemFS(), Dir: "/state/receipts"}).Save(receipt); err == nil {
+			if err := (Receipts{FS: newHarnessMemFS(), Dir: testAbsPath("/state/receipts")}).Save(receipt); err == nil {
 				t.Fatal("unclassified failure detail accepted")
 			}
 		})
@@ -182,8 +182,8 @@ func TestReceiptRejectsInvalidValuesBeforeCreatingState(t *testing.T) {
 		"duplicate pending":     func(receipt *Receipt) { receipt.PendingPlugins = []string{"drive", "drive"} },
 	} {
 		t.Run(name, func(t *testing.T) {
-			fsys := fsutil.NewMemFS()
-			receipts := Receipts{FS: fsys, Dir: "/state/receipts"}
+			fsys := newHarnessMemFS()
+			receipts := Receipts{FS: fsys, Dir: testAbsPath("/state/receipts")}
 			receipt := receiptFixture()
 			alter(&receipt)
 			if err := receipts.Save(receipt); err == nil {
@@ -195,7 +195,7 @@ func TestReceiptRejectsInvalidValuesBeforeCreatingState(t *testing.T) {
 		})
 	}
 	for _, dir := range []string{"", "relative", "/state/../receipts", "/state/receipts\x00"} {
-		receipts := Receipts{FS: fsutil.NewMemFS(), Dir: dir}
+		receipts := Receipts{FS: newHarnessMemFS(), Dir: dir}
 		if err := receipts.Save(receiptFixture()); err == nil {
 			t.Errorf("save accepted directory %q", dir)
 		}
@@ -222,8 +222,8 @@ func TestReceiptLoadRejectsInvalidStoredState(t *testing.T) {
 		"oversized":      string(valid) + strings.Repeat(" ", 1<<20),
 	} {
 		t.Run(name, func(t *testing.T) {
-			fsys := fsutil.NewMemFS()
-			receipts := Receipts{FS: fsys, Dir: "/state/receipts"}
+			fsys := newHarnessMemFS()
+			receipts := Receipts{FS: fsys, Dir: testAbsPath("/state/receipts")}
 			if err := fsys.MkdirAll(receipts.Dir, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -238,8 +238,8 @@ func TestReceiptLoadRejectsInvalidStoredState(t *testing.T) {
 }
 
 func TestReceiptFailedWriteLeavesBaselineIntact(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	receipts := Receipts{FS: fsys, Dir: "/state/receipts"}
+	fsys := newHarnessMemFS()
+	receipts := Receipts{FS: fsys, Dir: testAbsPath("/state/receipts")}
 	if err := receipts.Save(receiptFixture()); err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestReceiptFailedWriteLeavesBaselineIntact(t *testing.T) {
 }
 
 func TestReceiptLeaseIsPerChatAndReusableAfterClose(t *testing.T) {
-	receipts := Receipts{FS: fsutil.NewMemFS(), Dir: "/state/receipts"}
+	receipts := Receipts{FS: newHarnessMemFS(), Dir: testAbsPath("/state/receipts")}
 	first, err := receipts.Acquire(testChat)
 	if err != nil {
 		t.Fatal(err)

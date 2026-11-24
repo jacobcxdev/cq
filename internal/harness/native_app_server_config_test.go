@@ -15,6 +15,7 @@ func TestNativeAppManagedConfigWarningRequiresOnlyKnownField(t *testing.T) {
 		{"other", "Codex is ignoring 1 unrecognized configuration setting.\n  user (config.toml): `bogus` is ignored.", true},
 		{"both", "Codex is ignoring 2 unrecognized configuration settings.\n  user (config.toml): `bogus` is ignored.\n  user (config.toml): `computer_use.windows.always_allowed_app_ids` is ignored.", true},
 		{"missing", "", true},
+		{"config fallback", "Codex is ignoring 1 unrecognized configuration setting.\n  user (config.toml): `computer_use.windows.always_allowed_app_ids` is ignored.\nInvalid configuration; using defaults.", true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			output := &nativeConfigOutput{}

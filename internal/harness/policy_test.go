@@ -8,15 +8,15 @@ import (
 const testChat = "019c6e27-e55b-73d1-87d8-4e01f1f75043"
 
 func TestResolveKeepsOtherModelsAndDisabledPolicyUnmanaged(t *testing.T) {
-	policy := Policy{Enabled: true, Projects: map[string]Profile{"/work": Minimal}, Chats: map[string]Profile{testChat: Minimal}}
+	policy := Policy{Enabled: true, Projects: map[string]Profile{testAbsPath("/work"): Minimal}, Chats: map[string]Profile{testChat: Minimal}}
 	for _, model := range []string{"gpt-6", "claude-sonnet", "prefix-glm-5", "glm", ""} {
-		got := policy.Resolve(model, "/work/project", testChat)
+		got := policy.Resolve(model, testAbsPath("/work/project"), testChat)
 		if got.Managed || got.Profile != Full || got.Source != "model" {
 			t.Errorf("model %q selection = %#v, want unmanaged full", model, got)
 		}
 	}
 	policy.Enabled = false
-	if got := policy.Resolve("GLM-5", "/work/project", testChat); got.Managed || got.Profile != Full || got.Source != "disabled" {
+	if got := policy.Resolve("GLM-5", testAbsPath("/work/project"), testChat); got.Managed || got.Profile != Full || got.Source != "disabled" {
 		t.Fatalf("disabled selection = %#v, want unmanaged full", got)
 	}
 }
@@ -24,7 +24,7 @@ func TestResolveKeepsOtherModelsAndDisabledPolicyUnmanaged(t *testing.T) {
 func TestResolveUsesChatThenDeepestProjectThenMinimal(t *testing.T) {
 	policy := Policy{
 		Enabled:  true,
-		Projects: map[string]Profile{"/": Full, "/work": Full, "/work/project": Minimal},
+		Projects: map[string]Profile{testAbsPath("/"): Full, testAbsPath("/work"): Full, testAbsPath("/work/project"): Minimal},
 		Chats:    map[string]Profile{testChat: Full},
 	}
 	tests := []struct {
@@ -32,12 +32,12 @@ func TestResolveUsesChatThenDeepestProjectThenMinimal(t *testing.T) {
 		profile         Profile
 		source, scope   string
 	}{
-		{"chat takes precedence", "/work/project/nested", testChat, Full, "chat", testChat},
-		{"deepest ancestor", "/work/project/nested", "", Minimal, "project", "/work/project"},
-		{"exact project", "/work/project", "", Minimal, "project", "/work/project"},
-		{"parent project", "/work/other", "", Full, "project", "/work"},
-		{"sibling prefix excluded", "/work/project-other", "", Full, "project", "/work"},
-		{"root ancestor", "/other", "", Full, "project", "/"},
+		{"chat takes precedence", testAbsPath("/work/project/nested"), testChat, Full, "chat", testChat},
+		{"deepest ancestor", testAbsPath("/work/project/nested"), "", Minimal, "project", testAbsPath("/work/project")},
+		{"exact project", testAbsPath("/work/project"), "", Minimal, "project", testAbsPath("/work/project")},
+		{"parent project", testAbsPath("/work/other"), "", Full, "project", testAbsPath("/work")},
+		{"sibling prefix excluded", testAbsPath("/work/project-other"), "", Full, "project", testAbsPath("/work")},
+		{"root ancestor", testAbsPath("/other"), "", Full, "project", testAbsPath("/")},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -48,14 +48,14 @@ func TestResolveUsesChatThenDeepestProjectThenMinimal(t *testing.T) {
 			}
 		})
 	}
-	delete(policy.Projects, "/")
-	for _, cwd := range []string{"/elsewhere", "relative/project", ""} {
+	delete(policy.Projects, testAbsPath("/"))
+	for _, cwd := range []string{testAbsPath("/elsewhere"), "relative/project", ""} {
 		want := Selection{Managed: true, Profile: Minimal, Source: "default"}
 		if got := policy.Resolve("glm-5", cwd, ""); got != want {
 			t.Errorf("cwd %q selection = %#v, want %#v", cwd, got, want)
 		}
 	}
-	if got := policy.Resolve("glm-5", filepath.Join("/work", "project", "..", "other"), ""); got.Profile != Full || got.Scope != "/work" {
+	if got := policy.Resolve("glm-5", filepath.Join(testAbsPath("/work"), "project", "..", "other"), ""); got.Profile != Full || got.Scope != testAbsPath("/work") {
 		t.Fatalf("cleaned cwd selection = %#v", got)
 	}
 }

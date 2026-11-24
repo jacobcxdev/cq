@@ -35,6 +35,9 @@ func nativeAppServerCommand(ctx context.Context, executable, cwd string) (*exec.
 	if !allowAppManaged {
 		return command, func() error { return nil }, nil
 	}
+	// Select structured diagnostics on this child so the validation below does
+	// not depend on the parent's logging format or verbosity.
+	command.Env = append(command.Environ(), "LOG_FORMAT=json", "RUST_LOG=warn")
 	warnings := &nativeConfigOutput{}
 	command.Stderr = warnings
 	return command, warnings.validateAppManagedWarning, nil
@@ -90,6 +93,9 @@ func (output *nativeConfigOutput) validateAppManagedWarning() error {
 	const expected = "Codex is ignoring 1 unrecognized configuration setting."
 	seen := false
 	for _, line := range bytes.Split(output.Bytes(), []byte{'\n'}) {
+		if bytes.Contains(line, []byte("Invalid configuration; using defaults.")) {
+			return fmt.Errorf("native app-server fell back to default configuration")
+		}
 		if !bytes.Contains(line, []byte("unrecognized configuration setting")) {
 			continue
 		}
@@ -98,10 +104,19 @@ func (output *nativeConfigOutput) validateAppManagedWarning() error {
 				Message string `json:"message"`
 			} `json:"fields"`
 		}
-		if json.Unmarshal(line, &entry) != nil || seen ||
-			!strings.HasPrefix(entry.Fields.Message, expected) ||
-			strings.Count(entry.Fields.Message, " is ignored.") != 1 ||
-			!strings.Contains(entry.Fields.Message, "`"+windowsAppManagedConfigField+"` is ignored.") {
+		if json.Unmarshal(line, &entry) != nil {
+			return fmt.Errorf("native app-server configuration warning is not structured JSON")
+		}
+		if seen {
+			return fmt.Errorf("native app-server emitted multiple configuration warnings")
+		}
+		if !strings.HasPrefix(entry.Fields.Message, expected) {
+			return fmt.Errorf("native app-server configuration warning header changed")
+		}
+		if strings.Count(entry.Fields.Message, " is ignored.") != 1 {
+			return fmt.Errorf("native app-server ignored multiple configuration fields")
+		}
+		if !strings.Contains(entry.Fields.Message, "`"+windowsAppManagedConfigField+"` is ignored.") {
 			return fmt.Errorf("native app-server ignored unrelated configuration")
 		}
 		seen = true

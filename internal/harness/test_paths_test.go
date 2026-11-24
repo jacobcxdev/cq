@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -23,11 +24,15 @@ func testJSONFixturePaths(data string) string {
 	if runtime.GOOS != "windows" {
 		return data
 	}
-	for _, root := range []string{"/work", "/home", "/cache", "/system"} {
-		encoded, _ := json.Marshal(testAbsPath(root))
-		data = strings.ReplaceAll(data, root, string(encoded[1:len(encoded)-1]))
-	}
-	return data
+	pattern := regexp.MustCompile(`"/(?:work|home|cache|system)(?:\\.|[^"\\])*"`)
+	return pattern.ReplaceAllStringFunc(data, func(raw string) string {
+		var path string
+		if json.Unmarshal([]byte(raw), &path) != nil {
+			return raw
+		}
+		encoded, _ := json.Marshal(testAbsPath(path))
+		return string(encoded)
+	})
 }
 
 func newHarnessMemFS() *fsutil.MemFS {

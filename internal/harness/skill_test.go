@@ -12,9 +12,9 @@ import (
 )
 
 func TestCurationSkillInstallIsPrivateExactAndIdempotent(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	const directory = "/codex/skills/curate-harness"
-	const skillPath = directory + "/SKILL.md"
+	fsys := newHarnessMemFS()
+	directory := testAbsPath("/codex/skills/curate-harness")
+	skillPath := filepath.Join(directory, "SKILL.md")
 	if len(curationSkill) == 0 || !bytes.Contains(curationSkill, []byte(curationSkillMarker)) {
 		t.Fatal("embedded asset must exist and carry its CQ ownership marker")
 	}
@@ -27,7 +27,7 @@ func TestCurationSkillInstallIsPrivateExactAndIdempotent(t *testing.T) {
 		t.Fatalf("installed content differs from embedded asset: %v", err)
 	}
 	for path, mode := range map[string]os.FileMode{
-		"/codex": 0o700, "/codex/skills": 0o700, directory: 0o700,
+		testAbsPath("/codex"): 0o700, testAbsPath("/codex/skills"): 0o700, directory: 0o700,
 		skillPath: 0o600, directory + "/cq-install.lock": 0o600,
 	} {
 		info, err := fsys.Stat(path)
@@ -60,8 +60,8 @@ func TestCurationSkillUpdatesOnlyCQOwnedContent(t *testing.T) {
 		"unrelated skill":      []byte("---\nname: curate-harness\n---\nMy own skill.\n"),
 	} {
 		t.Run(name, func(t *testing.T) {
-			fsys := fsutil.NewMemFS()
-			const directory = "/codex/skills/curate-harness"
+			fsys := newHarnessMemFS()
+			directory := testAbsPath("/codex/skills/curate-harness")
 			if err := fsys.MkdirAll(directory, 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -94,8 +94,8 @@ func TestCurationSkillUpdatesOnlyCQOwnedContent(t *testing.T) {
 }
 
 func TestCurationSkillInstallRejectsHeldLease(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	const directory = "/codex/skills/curate-harness"
+	fsys := newHarnessMemFS()
+	directory := testAbsPath("/codex/skills/curate-harness")
 	if err := fsutil.EnsureSecureDirectory(fsys, directory); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestCurationSkillInstallRejectsHeldLease(t *testing.T) {
 
 func TestCurationSkillRejectsInvalidTargetsBeforeCreatingState(t *testing.T) {
 	for _, path := range []string{"", "relative/curate-harness", "/codex/skills/other", "/codex/skills/curate-harness/", "/codex/skills/../curate-harness", "/codex/skills/curate-harness/child"} {
-		fsys := fsutil.NewMemFS()
+		fsys := newHarnessMemFS()
 		if result, err := InstallCurationSkill(fsys, path); err == nil || result.Changed {
 			t.Errorf("accepted target %q: %#v, %v", path, result, err)
 		}
@@ -184,8 +184,8 @@ func TestCurationSkillSymlinksNeverOverwriteExternalContent(t *testing.T) {
 }
 
 func TestCurationSkillPathUsesCodexHomeAndUserFallback(t *testing.T) {
-	t.Setenv("CODEX_HOME", "/configured/codex")
-	if got, err := CurationSkillPath(); err != nil || got != "/configured/codex/skills/curate-harness" {
+	t.Setenv("CODEX_HOME", testAbsPath("/configured/codex"))
+	if got, err := CurationSkillPath(); err != nil || got != testAbsPath("/configured/codex/skills/curate-harness") {
 		t.Fatalf("configured path = %q, %v", got, err)
 	}
 	t.Setenv("CODEX_HOME", "")

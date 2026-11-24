@@ -16,6 +16,8 @@ import (
 )
 
 func TestNativeInventoryWindowsAppManagedConfig(t *testing.T) {
+	t.Setenv("LOG_FORMAT", "")
+	t.Setenv("RUST_LOG", "")
 	executable := os.Getenv("CQ_TEST_NATIVE_INVENTORY_CLI")
 	if executable == "" {
 		t.Skip("set CQ_TEST_NATIVE_INVENTORY_CLI to an installed Codex CLI")
@@ -42,6 +44,8 @@ func TestNativeInventoryWindowsAppManagedConfig(t *testing.T) {
 }
 
 func TestNativePluginInventoryWindowsAppManagedConfig(t *testing.T) {
+	t.Setenv("LOG_FORMAT", "")
+	t.Setenv("RUST_LOG", "")
 	executable := os.Getenv("CQ_TEST_NATIVE_INVENTORY_CLI")
 	if executable == "" {
 		t.Skip("set CQ_TEST_NATIVE_INVENTORY_CLI to an installed Codex CLI")
@@ -100,6 +104,8 @@ func TestNativeInventoryWindowsRejectsMalformedConfig(t *testing.T) {
 
 func privateWindowsNativeTestHome(t *testing.T) string {
 	t.Helper()
+	t.Setenv("LOG_FORMAT", "")
+	t.Setenv("RUST_LOG", "")
 	home := t.TempDir()
 	setWindowsHarnessACL(t, home, false)
 	return home
@@ -133,6 +139,11 @@ func nativeWindowsRunFailureCategory(err error) string {
 	}
 	for _, category := range []string{
 		"native app-server Windows configuration warning unavailable",
+		"native app-server configuration warning is not structured JSON",
+		"native app-server emitted multiple configuration warnings",
+		"native app-server configuration warning header changed",
+		"native app-server ignored multiple configuration fields",
+		"native app-server fell back to default configuration",
 		"native app-server ignored unrelated configuration",
 		"native app-server strict configuration unavailable",
 		"native inventory request rejected",

@@ -15,7 +15,7 @@ import (
 func cachedPluginFixture(t *testing.T) (map[string]json.RawMessage, nativeSkillMetadata) {
 	t.Helper()
 	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(nativeCurationFixture), &envelope); err != nil {
+	if err := json.Unmarshal([]byte(testJSONFixturePaths(nativeCurationFixture)), &envelope); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "plugins", "cache", "local-tools", "work-kit", "1.2.3", "instructions", "analyse", "SKILL.md")
@@ -39,7 +39,7 @@ func cachedPluginFixture(t *testing.T) (map[string]json.RawMessage, nativeSkillM
 
 func cachedPluginDiscovery(t *testing.T, envelope map[string]json.RawMessage) *nativeCachedPluginRecovery {
 	t.Helper()
-	recovery, err := discoverNativeCachedPlugins(envelope["plugins"], envelope["skills"], envelope["config"], "/work")
+	recovery, err := discoverNativeCachedPlugins(envelope["plugins"], envelope["skills"], envelope["config"], testAbsPath("/work"))
 	if err != nil {
 		if runtime.GOOS == "windows" && strings.Contains(err.Error(), "prepare native cached plugin catalogue") {
 			t.Skip("Windows fixture requires local symbolic-link permission")
@@ -69,7 +69,7 @@ func TestNativeCachedPluginsRecoveredExplicitOwnersPrivately(t *testing.T) {
 		t.Fatal("cached owner discovery lost its independent native request")
 	}
 	cwds := recovery.requests[0].params.(map[string]any)["cwds"].([]string)
-	if len(cwds) != 1 || cwds[0] == "/work" {
+	if len(cwds) != 1 || cwds[0] == testAbsPath("/work") {
 		t.Fatal("cached marketplace discovery must use its sole private project")
 	}
 	root := cwds[0]
@@ -106,7 +106,7 @@ func TestNativeCachedPluginsRecoveredExplicitOwnersPrivately(t *testing.T) {
 	details[skill.PluginID] = json.RawMessage(`{"plugin":{"summary":{"id":"work-kit@local-tools","name":"work-kit"},"mcpServers":[],"apps":[]}}`)
 	envelope["pluginDetails"], _ = json.Marshal(details)
 	encoded, _ := json.Marshal(envelope)
-	inventory, err := decodeNativeInventory(encoded, "/work")
+	inventory, err := decodeNativeInventory(encoded, testAbsPath("/work"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestNativeCachedPluginsRejectedInvalidOriginalEnabledFlags(t *testing.T) {
 		t.Run(string(flag), func(t *testing.T) {
 			envelope, _ := cachedPluginFixture(t)
 			envelope["config"] = json.RawMessage(`{"config":{"plugins":{"work-kit@local-tools":{"enabled":` + string(flag) + `}}}}`)
-			recovery, err := discoverNativeCachedPlugins(envelope["plugins"], envelope["skills"], envelope["config"], "/work")
+			recovery, err := discoverNativeCachedPlugins(envelope["plugins"], envelope["skills"], envelope["config"], testAbsPath("/work"))
 			if recovery != nil {
 				defer recovery.close()
 			}
@@ -320,7 +320,7 @@ func TestNativeCachedPluginsRequiredUnambiguousExplicitCacheOwnership(t *testing
 			skills = append(skills, skill)
 			entry["skills"] = skills
 			envelope["skills"], _ = json.Marshal(rows)
-			recovery, err := discoverNativeCachedPlugins(envelope["plugins"], envelope["skills"], envelope["config"], "/work")
+			recovery, err := discoverNativeCachedPlugins(envelope["plugins"], envelope["skills"], envelope["config"], testAbsPath("/work"))
 			if recovery != nil {
 				defer recovery.close()
 			}
@@ -342,7 +342,7 @@ func TestNativeCachedPluginsKeptMarketplaceDiscoverySeparate(t *testing.T) {
 	if err := os.WriteFile(second.Path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	envelope["skills"], _ = json.Marshal(map[string]any{"data": []any{map[string]any{"cwd": "/work", "errors": []any{}, "skills": []nativeSkillMetadata{skill, second}}}})
+	envelope["skills"], _ = json.Marshal(map[string]any{"data": []any{map[string]any{"cwd": testAbsPath("/work"), "errors": []any{}, "skills": []nativeSkillMetadata{skill, second}}}})
 	recovery := cachedPluginDiscovery(t, envelope)
 	if len(recovery.requests) != 2 || len(recovery.roots) != 2 {
 		t.Fatal("independent cached marketplaces shared discovery context")
@@ -375,8 +375,8 @@ func TestNativeCachedPluginsBoundedOwnerDiscovery(t *testing.T) {
 		}
 		skills = append(skills, nativeSkillMetadata{Name: name + ":work", PluginID: name + "@market", Path: path})
 	}
-	data, _ := json.Marshal(map[string]any{"data": []any{map[string]any{"cwd": "/work", "errors": []any{}, "skills": skills}}})
-	recovery, err := discoverNativeCachedPlugins(json.RawMessage(`{"marketplaces":[],"marketplaceLoadErrors":[]}`), data, json.RawMessage(`{"config":{}}`), "/work")
+	data, _ := json.Marshal(map[string]any{"data": []any{map[string]any{"cwd": testAbsPath("/work"), "errors": []any{}, "skills": skills}}})
+	recovery, err := discoverNativeCachedPlugins(json.RawMessage(`{"marketplaces":[],"marketplaceLoadErrors":[]}`), data, json.RawMessage(`{"config":{}}`), testAbsPath("/work"))
 	if recovery != nil {
 		defer recovery.close()
 	}

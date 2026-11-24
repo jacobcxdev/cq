@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 const controllerOtherChat = "019c7714-3b77-74d1-9866-e1f484aae2ab"
@@ -102,14 +101,14 @@ func controllerFixture() (*Controller, *controllerDesktop, *controllerInventory,
 	effort := "high"
 	snapshot := Snapshot{
 		ChatID: testChat, OwnerID: desktopTestOwner, Model: "glm-5.3", ModelProvider: "cq",
-		Cwd: "/work/project", DisabledPluginIDs: []string{"user-disabled"}, PluginBaselineKnown: true,
+		Cwd: testAbsPath("/work/project"), DisabledPluginIDs: []string{"user-disabled"}, PluginBaselineKnown: true,
 		ReasoningEffort: &effort, ReasoningEffortKnown: true, ActiveTurnID: "existing-turn", Active: true,
 	}
 	other := snapshot
 	other.ChatID, other.DisabledPluginIDs = controllerOtherChat, []string{"other-chat-setting"}
 	desktop := &controllerDesktop{snapshots: map[string]Snapshot{testChat: snapshot, controllerOtherChat: other}, applied: true}
 	inventory := &controllerInventory{ids: []string{"z-plugin", "user-disabled", "a-plugin", "a-plugin"}}
-	receipts := Receipts{FS: fsutil.NewMemFS(), Dir: "/state/controller-receipts"}
+	receipts := Receipts{FS: newHarnessMemFS(), Dir: testAbsPath("/state/controller-receipts")}
 	return NewController(func() (Policy, error) { return controllerPolicy(), nil }, desktop, receipts, inventory), desktop, inventory, receipts
 }
 
@@ -130,7 +129,7 @@ func TestControllerMinimalUnionRetainsDurableOriginalBaseline(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"a-plugin", "user-disabled", "z-plugin"}
-	if len(desktop.updates) != 1 || !slices.Equal(desktop.updates[0].plugins, want) || !slices.Equal(inventory.cwds, []string{"/work/project"}) {
+	if len(desktop.updates) != 1 || !slices.Equal(desktop.updates[0].plugins, want) || !slices.Equal(inventory.cwds, []string{testAbsPath("/work/project")}) {
 		t.Fatalf("minimal update = %#v; inventory cwd = %v", desktop.updates, inventory.cwds)
 	}
 	current := desktop.snapshots[testChat]
@@ -163,7 +162,7 @@ func TestControllerRestoresOriginalPluginsForUnmanagedAndFullSelections(t *testi
 		{"non GLM", func(_ *Policy, snapshot *Snapshot) { snapshot.Model = "gpt-6.1" }, "model"},
 		{"disabled", func(policy *Policy, _ *Snapshot) { policy.Enabled = false }, "disabled"},
 		{"chat full", func(policy *Policy, _ *Snapshot) { policy.Chats[testChat] = Full }, "chat"},
-		{"project full", func(policy *Policy, _ *Snapshot) { policy.Projects["/work"] = Full }, "project"},
+		{"project full", func(policy *Policy, _ *Snapshot) { policy.Projects[testAbsPath("/work")] = Full }, "project"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			controller, desktop, inventory, receipts := controllerFixture()
@@ -194,7 +193,7 @@ func TestControllerRestoresOriginalPluginsForUnmanagedAndFullSelections(t *testi
 func TestControllerChatOverrideTakesPrecedenceOverProject(t *testing.T) {
 	controller, desktop, _, receipts := controllerFixture()
 	policy := controllerPolicy()
-	policy.Projects["/work"] = Full
+	policy.Projects[testAbsPath("/work")] = Full
 	policy.Chats[testChat] = Minimal
 	if _, err := controller.Reconcile(context.Background(), testChat, policy); err != nil {
 		t.Fatal(err)

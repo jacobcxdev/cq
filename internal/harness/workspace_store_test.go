@@ -36,7 +36,7 @@ func TestPortableRejectsInvalidAndWritableFiles(t *testing.T) {
 		"oversized":              `{"version":2,"rules":{}}` + strings.Repeat(" ", 1<<20),
 	} {
 		t.Run(name, func(t *testing.T) {
-			fsys := fsutil.NewMemFS()
+			fsys := newHarnessMemFS()
 			path := filepath.Join(t.TempDir(), "work", ".cq", "harness.json")
 			if err := fsys.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatal(err)
@@ -50,7 +50,7 @@ func TestPortableRejectsInvalidAndWritableFiles(t *testing.T) {
 		})
 	}
 	for _, mode := range []os.FileMode{0o666, 0o664} {
-		fsys := fsutil.NewMemFS()
+		fsys := newHarnessMemFS()
 		path := filepath.Join(t.TempDir(), "work", ".cq", "harness.json")
 		writePortable(t, fsys, path, WorkspacePolicy{Version: 2})
 		if err := fsys.Chmod(path, mode); err != nil {
@@ -63,7 +63,7 @@ func TestPortableRejectsInvalidAndWritableFiles(t *testing.T) {
 }
 
 func TestPortableConcurrentUpdateDoesNotLoseRules(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newHarnessMemFS()
 	path := filepath.Join(t.TempDir(), "work", ".cq", "harness.json")
 	writePortable(t, fsys, path, WorkspacePolicy{Version: 2})
 	entered, release := make(chan struct{}), make(chan struct{})
@@ -95,7 +95,7 @@ func TestPortableConcurrentUpdateDoesNotLoseRules(t *testing.T) {
 }
 
 func TestPortableActualRenameFailurePreservesFile(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newHarnessMemFS()
 	path := filepath.Join(t.TempDir(), "work", ".cq", "harness.json")
 	writePortable(t, fsys, path, WorkspacePolicy{Version: 2, Rules: Scope{All: Binding{Profiles: []string{"full"}}}})
 	before, _ := fsys.ReadFile(path)
@@ -186,7 +186,7 @@ func TestPortableRefusesLinksAndUnsafeDirectories(t *testing.T) {
 }
 
 func TestPortableWorkspaceNamespacesAndPrecedence(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newHarnessMemFS()
 	root := t.TempDir()
 	userPath := filepath.Join(root, "config", "harness.json")
 	work := filepath.Join(root, "work")
@@ -224,7 +224,7 @@ func TestPortableWorkspaceNamespacesAndPrecedence(t *testing.T) {
 }
 
 func TestPortableWorkspaceMissingAndReferenceValidation(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newHarnessMemFS()
 	root := t.TempDir()
 	path := filepath.Join(root, "work", ".cq", "harness.json")
 	userPath := filepath.Join(root, "config", "harness.json")
@@ -251,7 +251,7 @@ func TestPortableWorkspaceMissingAndReferenceValidation(t *testing.T) {
 }
 
 func TestPortableUpdatePreservesRulesAndPrivateLock(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newHarnessMemFS()
 	path := filepath.Join(t.TempDir(), "work", ".cq", "harness.json")
 	writePortable(t, fsys, path, WorkspacePolicy{Version: 2, Rules: Scope{All: Binding{Profiles: []string{"minimal"}}}})
 	updated, err := UpdateWorkspace(fsys, path, func(policy *WorkspacePolicy) error {
@@ -281,7 +281,7 @@ func TestPortableUpdatePreservesRulesAndPrivateLock(t *testing.T) {
 }
 
 func TestPortableCreatesOnlyCQDirectoryInExistingProject(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newHarnessMemFS()
 	work := filepath.Join(t.TempDir(), "work")
 	path := filepath.Join(work, ".cq", "harness.json")
 	if err := fsys.MkdirAll(work, 0o755); err != nil {
