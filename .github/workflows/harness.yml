@@ -66,9 +66,21 @@ jobs:
         run: bash .github/scripts/validate-harness-installed.sh "$CQ_HARNESS_EXECUTABLE"
 
   windows-harness:
-    name: Native harness (Windows x64)
+    name: Native harness (Windows ${{ matrix.architecture }})
     if: github.event_name != 'workflow_dispatch' || !inputs.desktop_preflight
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            sha256: d5a5ab944b401727aba2983363f45e00702d0437a4cbf9036c7907e3a79cb1b9
+          - architecture: Arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            sha256: ac7d1dfc06cdab7fc95d41844decbfaeff2f92b7e79179e59ade3200600b3351
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     defaults:
       run:
@@ -81,6 +93,7 @@ jobs:
         with:
           go-version-file: go.mod
       - name: Test Windows harness policy and CLI
+        if: matrix.architecture == 'x64'
         run: |
           go test -race -count=1 -timeout 2m ./internal/harness
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -89,19 +102,59 @@ jobs:
         run: |
           $root = Join-Path $env:RUNNER_TEMP 'cq-pinned-codex'
           New-Item -ItemType Directory -Path $root | Out-Null
-          $asset = 'codex-x86_64-pc-windows-msvc.exe.tar.gz'
+          $executable = 'codex-${{ matrix.target }}.exe'
+          $asset = "$executable.tar.gz"
           $archive = Join-Path $root $asset
           curl.exe --fail --location --retry 3 --max-time 180 --output $archive "https://github.com/openai/codex/releases/download/rust-v0.171.0-alpha.13/$asset"
           if ($LASTEXITCODE -ne 0) { throw 'Codex download failed' }
-          if ((Get-FileHash -LiteralPath $archive).Hash -ne 'D5A5AB944B401727ABA2983363F45E00702D0437A4CBF9036C7907E3A79CB1B9') { throw 'Codex archive digest differs' }
+          if ((Get-FileHash -LiteralPath $archive).Hash -ne '${{ matrix.sha256 }}') { throw 'Codex archive digest differs' }
           tar.exe -xf $archive -C $root
           if ($LASTEXITCODE -ne 0) { throw 'Codex unpack failed' }
-          $cli = Join-Path $root 'codex-x86_64-pc-windows-msvc.exe'
+          $cli = Join-Path $root $executable
           $version = & $cli --version
           if ($LASTEXITCODE -ne 0 -or $version -ne 'codex-cli 0.171.0-alpha.13') { throw 'Codex CLI version differs' }
           "CQ_TEST_NATIVE_INVENTORY_CLI=$cli" >> $env:GITHUB_ENV
           "CQ_HARNESS_WINDOWS_CODEX=$cli" >> $env:GITHUB_ENV
+      - name: Exercise native CQ commands with a fresh Codex home
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'cq-pinned-codex'
+          $profile = Join-Path $root 'profile'
+          $homePath = Join-Path $profile '.codex'
+          $project = Join-Path $root 'project'
+          $cq = Join-Path $root 'cq.exe'
+          New-Item -ItemType Directory -Path $homePath, $project -Force | Out-Null
+          $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          $security = [Security.AccessControl.DirectorySecurity]::new()
+          $security.SetSecurityDescriptorSddlForm("O:${sid}D:P(A;OICI;FA;;;${sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+          Set-Acl -LiteralPath $homePath -AclObject $security
+          $config = Join-Path $homePath 'config.toml'
+          Set-Content -LiteralPath $config -Encoding utf8 -Value '[computer_use.windows]', 'always_allowed_app_ids = ["com.example.fixture"]'
+          $configHash = (Get-FileHash -LiteralPath $config).Hash
+          Copy-Item -LiteralPath $env:CQ_TEST_NATIVE_INVENTORY_CLI -Destination (Join-Path $root 'codex.exe')
+          go build -o $cq ./cmd/cq
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$root;$env:PATH"
+          $env:USERPROFILE = $profile
+          $env:CODEX_HOME = $null
+          foreach ($changed in @($true, $false)) {
+            $raw = & $cq codex harness skill install --json
+            if ($LASTEXITCODE -ne 0) { throw 'Native skill install failed' }
+            $result = $raw | ConvertFrom-Json
+            if ($result.changed -ne $changed -or $result.path -ne (Join-Path $homePath 'skills\curate-harness\SKILL.md')) {
+              throw 'Native skill install returned an unexpected result'
+            }
+          }
+          $env:CODEX_HOME = $homePath
+          $raw = & $cq codex harness inventory --project $project --json
+          if ($LASTEXITCODE -ne 0) { throw 'Native harness inventory failed' }
+          $inventory = $raw | ConvertFrom-Json
+          if (@($inventory.capabilities | Where-Object name -eq 'curate-harness').Count -ne 1 -or
+              (Get-FileHash -LiteralPath $config).Hash -ne $configHash) {
+            throw 'Native inventory did not find the installed skill or changed Codex configuration'
+          }
+          Write-Output 'Verified native inventory, preserved config, and first and repeat skill installation.'
       - name: Qualify isolated native harness contracts
+        if: matrix.architecture == 'x64'
         env:
           CQ_HARNESS_WINDOWS_NATIVE_ACCEPTANCE: '1'
         run: |
@@ -262,7 +315,7 @@ jobs:
           if ((& $owned).Count -ne 0) { throw 'Registered Desktop package processes remain before isolated launch' }
           $env:CODEX_HOME = Join-Path $root 'codex-home'
           $env:CODEX_ELECTRON_USER_DATA_PATH = Join-Path $root 'electron-user-data'
-          $env:CODEX_APP_RUNTIME_CLI_PATH = $adapter
+          $env:CODEX_CLI_PATH = $adapter
           $env:CQ_DESKTOP_WITNESS = $witness
           $env:HTTP_PROXY = $null
           $env:HTTPS_PROXY = $null

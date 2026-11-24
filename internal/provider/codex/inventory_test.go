@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -14,31 +16,47 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
+func inventoryFixturePath(path string) string {
+	if runtime.GOOS != "windows" {
+		return path
+	}
+	root := filepath.VolumeName(os.TempDir()) + string(filepath.Separator)
+	return filepath.Join(root, filepath.FromSlash(strings.TrimPrefix(path, "/")))
+}
+
+func newInventoryFakeFS() *fakeFS {
+	fsys := newFakeFS()
+	fsys.homeDir = inventoryFixturePath("/fake/home")
+	return fsys
+}
+
 func TestAuthoritativeInventoryRejectsHighFileIDChange(t *testing.T) {
 	mem := fsutil.NewMemFS()
-	if err := mem.MkdirAll("/codex", 0o755); err != nil {
+	path := inventoryFixturePath("/codex/auth.json")
+	if err := mem.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := mem.WriteFile("/codex/auth.json", []byte(`{"tokens":{"access_token":"token"}}`), 0o600); err != nil {
+	if err := mem.WriteFile(path, []byte(`{"tokens":{"access_token":"token"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	fsys := &changingFileIDFS{MemFS: mem}
-	if _, _, err := readAuthoritativeCredentialFile(fsys, "/codex/auth.json"); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
+	if _, _, err := readAuthoritativeCredentialFile(fsys, path); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
 		t.Fatalf("changed high file ID error = %v, want unsafe", err)
 	}
 }
 
 func TestAuthoritativeInventoryAcceptsPrincipalInspectionWithoutUID(t *testing.T) {
 	mem := fsutil.NewMemFS()
-	if err := mem.MkdirAll("/codex", 0o755); err != nil {
+	path := inventoryFixturePath("/codex/auth.json")
+	if err := mem.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := mem.WriteFile("/codex/auth.json", []byte(`{"tokens":{"access_token":"token"}}`), 0o600); err != nil {
+	if err := mem.WriteFile(path, []byte(`{"tokens":{"access_token":"token"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	principal := fsutil.SecurePrincipal{Kind: fsutil.SecurePrincipalSID, SIDLength: 4, SID: [68]byte{1, 2, 3, 4}}
 	fsys := &principalOnlyInventoryFS{MemFS: mem, principal: principal}
-	data, found, err := readAuthoritativeCredentialFile(fsys, "/codex/auth.json")
+	data, found, err := readAuthoritativeCredentialFile(fsys, path)
 	if err != nil || !found || len(data) == 0 {
 		t.Fatalf("principal-only credential read = (%q, %v, %v)", data, found, err)
 	}
@@ -156,7 +174,7 @@ func TestInventoryRejectsExternalCandidateSourceMismatch(t *testing.T) {
 			Identity: AccountIdentity{AccountID: "account-1", UserID: "user-1"}, Routable: true,
 		}},
 	}
-	inventory := DiscoverInventoryWithSources(context.Background(), newFakeFS(), source)
+	inventory := DiscoverInventoryWithSources(context.Background(), newInventoryFakeFS(), source)
 	if len(inventory.Accounts) != 0 {
 		t.Fatalf("mismatched external source entered inventory: %+v", inventory.Accounts)
 	}
@@ -169,7 +187,7 @@ func TestInventoryExternalSourcePanicsFailClosedPrivately(t *testing.T) {
 	for _, operation := range []string{"name", "list", "list_error"} {
 		t.Run(operation, func(t *testing.T) {
 			inventory := DiscoverInventoryWithSources(
-				context.Background(), newFakeFS(), panickingExternalCredentialSource{operation: operation},
+				context.Background(), newInventoryFakeFS(), panickingExternalCredentialSource{operation: operation},
 			)
 			if len(inventory.Accounts) != 0 || len(inventory.ExternalSources) != 1 || inventory.ExternalSources[0].ErrorCode != "invalid" {
 				t.Fatalf("inventory after %s panic = %+v", operation, inventory)
@@ -216,7 +234,7 @@ func TestInventoryRejectsMalformedExternalCandidateSet(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			source := &fakeExternalCredentialSource{candidates: test.candidates}
-			inventory := DiscoverInventoryWithSources(context.Background(), newFakeFS(), source)
+			inventory := DiscoverInventoryWithSources(context.Background(), newInventoryFakeFS(), source)
 			if len(inventory.Accounts) != 0 {
 				t.Fatalf("malformed external source entered inventory: %+v", inventory.Accounts)
 			}
@@ -240,13 +258,13 @@ func inventoryAuth(accessToken, accountID, idToken string, expiresAt int64) []by
 }
 
 func TestInventoryRetainsLiveAndManagedCandidatesAndChoosesFreshest(t *testing.T) {
-	fs := newFakeFS()
+	fs := newInventoryFakeFS()
 	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
 	now := time.Now()
-	fs.files["/fake/home/.codex/auth.json"] = inventoryAuth("system", "acct-1", jwt, now.Add(time.Hour).UnixMilli())
-	fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"] = inventoryAuth("managed", "acct-1", jwt, now.Add(2*time.Hour).UnixMilli())
+	fs.files[inventoryFixturePath("/fake/home/.codex/auth.json")] = inventoryAuth("system", "acct-1", jwt, now.Add(time.Hour).UnixMilli())
+	fs.files[inventoryFixturePath("/fake/home/.codex/accounts/user-1::acct-1.auth.json")] = inventoryAuth("managed", "acct-1", jwt, now.Add(2*time.Hour).UnixMilli())
 	fs.dirEntries = map[string][]fakeDirEntry{
-		"/fake/home/.codex/accounts": {{name: "user-1::acct-1.auth.json"}},
+		inventoryFixturePath("/fake/home/.codex/accounts"): {{name: "user-1::acct-1.auth.json"}},
 	}
 
 	inventory := DiscoverInventory(fs)
@@ -268,13 +286,13 @@ func TestInventoryRetainsLiveAndManagedCandidatesAndChoosesFreshest(t *testing.T
 }
 
 func TestInventoryChoosesFreshLiveOverStaleManaged(t *testing.T) {
-	fs := newFakeFS()
+	fs := newInventoryFakeFS()
 	jwt := fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
 	now := time.Now()
-	fs.files["/fake/home/.codex/auth.json"] = inventoryAuth("system", "acct-1", jwt, now.Add(2*time.Hour).UnixMilli())
-	fs.files["/fake/home/.codex/accounts/user-1::acct-1.auth.json"] = inventoryAuth("managed", "acct-1", jwt, now.Add(time.Hour).UnixMilli())
+	fs.files[inventoryFixturePath("/fake/home/.codex/auth.json")] = inventoryAuth("system", "acct-1", jwt, now.Add(2*time.Hour).UnixMilli())
+	fs.files[inventoryFixturePath("/fake/home/.codex/accounts/user-1::acct-1.auth.json")] = inventoryAuth("managed", "acct-1", jwt, now.Add(time.Hour).UnixMilli())
 	fs.dirEntries = map[string][]fakeDirEntry{
-		"/fake/home/.codex/accounts": {{name: "user-1::acct-1.auth.json"}},
+		inventoryFixturePath("/fake/home/.codex/accounts"): {{name: "user-1::acct-1.auth.json"}},
 	}
 
 	ordered := ResolveCandidate(DiscoverInventory(fs).Accounts[0], "", now)
@@ -284,12 +302,12 @@ func TestInventoryChoosesFreshLiveOverStaleManaged(t *testing.T) {
 }
 
 func TestInventoryMergesPartialAccountIDIntoRicherIdentity(t *testing.T) {
-	fs := newFakeFS()
+	fs := newInventoryFakeFS()
 	partialJWT := fakeCodexJWT("", "", "", "")
 	richJWT := fakeCodexJWT("user@test.com", "acct-1", "user-1", "pro")
-	fs.files["/fake/home/.codex/auth.json"] = inventoryAuth("partial", "acct-1", partialJWT, 0)
-	fs.files["/fake/home/.codex/accounts/rich.auth.json"] = inventoryAuth("rich", "acct-1", richJWT, 0)
-	fs.dirEntries = map[string][]fakeDirEntry{"/fake/home/.codex/accounts": {{name: "rich.auth.json"}}}
+	fs.files[inventoryFixturePath("/fake/home/.codex/auth.json")] = inventoryAuth("partial", "acct-1", partialJWT, 0)
+	fs.files[inventoryFixturePath("/fake/home/.codex/accounts/rich.auth.json")] = inventoryAuth("rich", "acct-1", richJWT, 0)
+	fs.dirEntries = map[string][]fakeDirEntry{inventoryFixturePath("/fake/home/.codex/accounts"): {{name: "rich.auth.json"}}}
 
 	inventory := DiscoverInventory(fs)
 	if len(inventory.Accounts) != 1 {
@@ -310,12 +328,12 @@ func TestInventoryMergesPartialAccountIDIntoRicherIdentity(t *testing.T) {
 }
 
 func TestInventoryNeverMergesConflictingStrongClaims(t *testing.T) {
-	fs := newFakeFS()
+	fs := newInventoryFakeFS()
 	jwt1 := fakeCodexJWT("one@test.com", "acct-1", "user-1", "plus")
 	jwt2 := fakeCodexJWT("two@test.com", "acct-1", "user-2", "plus")
-	fs.files["/fake/home/.codex/accounts/one.auth.json"] = inventoryAuth("one", "acct-1", jwt1, 0)
-	fs.files["/fake/home/.codex/accounts/two.auth.json"] = inventoryAuth("two", "acct-1", jwt2, 0)
-	fs.dirEntries = map[string][]fakeDirEntry{"/fake/home/.codex/accounts": {{name: "two.auth.json"}, {name: "one.auth.json"}}}
+	fs.files[inventoryFixturePath("/fake/home/.codex/accounts/one.auth.json")] = inventoryAuth("one", "acct-1", jwt1, 0)
+	fs.files[inventoryFixturePath("/fake/home/.codex/accounts/two.auth.json")] = inventoryAuth("two", "acct-1", jwt2, 0)
+	fs.dirEntries = map[string][]fakeDirEntry{inventoryFixturePath("/fake/home/.codex/accounts"): {{name: "two.auth.json"}, {name: "one.auth.json"}}}
 
 	inventory := DiscoverInventory(fs)
 	if len(inventory.Accounts) != 2 {
@@ -327,11 +345,11 @@ func TestInventoryNeverMergesConflictingStrongClaims(t *testing.T) {
 }
 
 func TestInventoryKeepsWeakOnlyEmailCandidatesSeparateAndUnroutable(t *testing.T) {
-	fs := newFakeFS()
+	fs := newInventoryFakeFS()
 	jwt := fakeCodexJWT("same@test.com", "", "", "")
-	fs.files["/fake/home/.codex/accounts/one.auth.json"] = inventoryAuth("one", "", jwt, 0)
-	fs.files["/fake/home/.codex/accounts/two.auth.json"] = inventoryAuth("two", "", jwt, 0)
-	fs.dirEntries = map[string][]fakeDirEntry{"/fake/home/.codex/accounts": {{name: "one.auth.json"}, {name: "two.auth.json"}}}
+	fs.files[inventoryFixturePath("/fake/home/.codex/accounts/one.auth.json")] = inventoryAuth("one", "", jwt, 0)
+	fs.files[inventoryFixturePath("/fake/home/.codex/accounts/two.auth.json")] = inventoryAuth("two", "", jwt, 0)
+	fs.dirEntries = map[string][]fakeDirEntry{inventoryFixturePath("/fake/home/.codex/accounts"): {{name: "one.auth.json"}, {name: "two.auth.json"}}}
 
 	inventory := DiscoverInventory(fs)
 	if len(inventory.Accounts) != 2 {
@@ -346,12 +364,12 @@ func TestInventoryKeepsWeakOnlyEmailCandidatesSeparateAndUnroutable(t *testing.T
 
 func TestInventoryOrderingIgnoresReadDirOrder(t *testing.T) {
 	makeInventory := func(order []fakeDirEntry) Inventory {
-		fs := newFakeFS()
+		fs := newInventoryFakeFS()
 		jwt1 := fakeCodexJWT("one@test.com", "acct-1", "user-1", "plus")
 		jwt2 := fakeCodexJWT("two@test.com", "acct-2", "user-2", "pro")
-		fs.files["/fake/home/.codex/accounts/z.auth.json"] = inventoryAuth("one", "acct-1", jwt1, 0)
-		fs.files["/fake/home/.codex/accounts/a.auth.json"] = inventoryAuth("two", "acct-2", jwt2, 0)
-		fs.dirEntries = map[string][]fakeDirEntry{"/fake/home/.codex/accounts": order}
+		fs.files[inventoryFixturePath("/fake/home/.codex/accounts/z.auth.json")] = inventoryAuth("one", "acct-1", jwt1, 0)
+		fs.files[inventoryFixturePath("/fake/home/.codex/accounts/a.auth.json")] = inventoryAuth("two", "acct-2", jwt2, 0)
+		fs.dirEntries = map[string][]fakeDirEntry{inventoryFixturePath("/fake/home/.codex/accounts"): order}
 		return DiscoverInventory(fs)
 	}
 	forward := makeInventory([]fakeDirEntry{{name: "z.auth.json"}, {name: "a.auth.json"}})
@@ -363,6 +381,7 @@ func TestInventoryOrderingIgnoresReadDirOrder(t *testing.T) {
 
 func TestInventoryRestoresPersistedOpaqueAccountAndCandidateKeys(t *testing.T) {
 	fs := newDurableFakeFS()
+	fs.homeDir = inventoryFixturePath("/fake/home")
 	store := testManagedStore(t, fs)
 	credential := testLoginCredential()
 	credential.Tokens.IDToken = fakeCodexJWT("user@test.com", "acct-1", "user-1", "plus")
@@ -371,7 +390,7 @@ func TestInventoryRestoresPersistedOpaqueAccountAndCandidateKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	fs.dirEntries = map[string][]fakeDirEntry{
-		"/fake/home/.codex/accounts": {{name: string(record.Metadata.CandidateID) + ".auth.json"}},
+		inventoryFixturePath("/fake/home/.codex/accounts"): {{name: string(record.Metadata.CandidateID) + ".auth.json"}},
 	}
 	first := DiscoverInventory(fs)
 	second := DiscoverInventory(fs)
@@ -477,12 +496,12 @@ func TestCandidateAvailabilityAtClassifiesDirectAndRefreshOnlyCredentials(t *tes
 }
 
 func TestInventoryFederatesFreshExternalCandidateIntoLogicalAccount(t *testing.T) {
-	fs := newFakeFS()
+	fs := newInventoryFakeFS()
 	now := time.Now()
 	jwt := fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus")
-	fs.files["/fake/home/.codex/accounts/stale.auth.json"] = inventoryAuth("stale-managed", "acct-1", jwt, now.Add(-time.Hour).UnixMilli())
+	fs.files[inventoryFixturePath("/fake/home/.codex/accounts/stale.auth.json")] = inventoryAuth("stale-managed", "acct-1", jwt, now.Add(-time.Hour).UnixMilli())
 	fs.dirEntries = map[string][]fakeDirEntry{
-		"/fake/home/.codex/accounts": {{name: "stale.auth.json"}},
+		inventoryFixturePath("/fake/home/.codex/accounts"): {{name: "stale.auth.json"}},
 	}
 	source := &fakeExternalCredentialSource{candidates: []ExternalCandidate{{
 		Ref: ExternalCandidateRef{Source: "external-test", RecordID: "record-1", Revision: "fresh-revision"},
@@ -531,7 +550,7 @@ func TestInventoryKeepsCompleteExternalIdentityConflictsRoutable(t *testing.T) {
 		},
 	}}
 
-	inventory := DiscoverInventoryWithSources(context.Background(), newFakeFS(), source)
+	inventory := DiscoverInventoryWithSources(context.Background(), newInventoryFakeFS(), source)
 	if len(inventory.Accounts) != 2 {
 		t.Fatalf("len(accounts) = %d, want two strong identities", len(inventory.Accounts))
 	}
@@ -560,7 +579,7 @@ func TestInventoryKeepsWeakExternalAmbiguityUnroutable(t *testing.T) {
 		},
 	}}
 
-	inventory := DiscoverInventoryWithSources(context.Background(), newFakeFS(), source)
+	inventory := DiscoverInventoryWithSources(context.Background(), newInventoryFakeFS(), source)
 	if len(inventory.Accounts) != 2 {
 		t.Fatalf("len(accounts) = %d, want separate weak candidates", len(inventory.Accounts))
 	}
@@ -591,8 +610,8 @@ func TestInventoryExternalSourceOrderDoesNotChangeIdentity(t *testing.T) {
 		}},
 	}
 
-	forward := DiscoverInventoryWithSources(context.Background(), newFakeFS(), sourceA, sourceB)
-	reverse := DiscoverInventoryWithSources(context.Background(), newFakeFS(), sourceB, sourceA)
+	forward := DiscoverInventoryWithSources(context.Background(), newInventoryFakeFS(), sourceA, sourceB)
+	reverse := DiscoverInventoryWithSources(context.Background(), newInventoryFakeFS(), sourceB, sourceA)
 	if !reflect.DeepEqual(forward, reverse) {
 		t.Fatalf("inventory changed with external source order:\nforward=%+v\nreverse=%+v", forward, reverse)
 	}
