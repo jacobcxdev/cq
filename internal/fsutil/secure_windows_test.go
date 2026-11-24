@@ -135,6 +135,12 @@ func TestWindowsSecureDirectoryBootstrapsFromBoundaryAnchor(t *testing.T) {
 	if err := ValidateSecureDirectory(fsys, target); err != nil {
 		t.Fatalf("ValidateSecureDirectory() error = %v", err)
 	}
+	if _, err := fsys.OpenDurableDirectory(anchor); !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("CQ private opener accepted its AppData anchor: %v", err)
+	}
+	if err := EnsureSecureDirectory(fsys, filepath.Dir(target)); err != nil {
+		t.Fatalf("reseal existing CQ root: %v", err)
+	}
 }
 
 func TestWindowsPrivateDestinationUsesOwnerControlledAnchor(t *testing.T) {
