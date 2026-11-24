@@ -12,7 +12,10 @@ arm64=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 printf '%s  cq_0.48.0_windows_amd64.zip\n%s  cq_0.48.0_windows_arm64.zip\n' "$amd64" "$arm64" >"$root/checksums.txt"
 checksum=$(openssl dgst -sha256 -r "$root/checksums.txt" | cut -d ' ' -f 1)
 jq -n --arg amd64 "$amd64" --arg arm64 "$arm64" --arg checksum "$checksum" '
-  {tag_name:"v0.48.0", draft:true, assets:([
+  {id:123, url:"https://api.github.com/repos/jacobcxdev/cq/releases/123",
+    assets_url:"https://api.github.com/repos/jacobcxdev/cq/releases/123/assets",
+    html_url:"https://github.com/jacobcxdev/cq/releases/tag/v0.48.0",
+    tag_name:"v0.48.0", draft:false, assets:([
     {name:"cq_0.48.0_windows_amd64.zip",hash:$amd64},
     {name:"cq_0.48.0_windows_arm64.zip",hash:$arm64},
     {name:"checksums.txt",hash:$checksum}] | map({
@@ -25,10 +28,22 @@ jq -e --arg amd64 "$amd64" --arg arm64 "$arm64" '
   and .architecture["64bit"].hash == $amd64 and .architecture.arm64.hash == $arm64
   and (.architecture["64bit"].url | endswith("_amd64.zip")) and (.architecture.arm64.url | endswith("_arm64.zip"))
 ' "$root/cq.json" >/dev/null
+draft_slug=untagged-cc22319b1b64249aae99
+jq --arg slug "$draft_slug" '
+  .draft = true
+  | .html_url |= sub("v0\\.48\\.0$"; $slug)
+  | .assets[].browser_download_url |= sub("/v0\\.48\\.0/"; "/" + $slug + "/")
+' "$root/release.json" >"$root/draft.json"
+bash "$generator" v0.48.0 "$root/draft.json" "$root/checksums.txt" >"$root/draft-cq.json"
+cmp "$root/cq.json" "$root/draft-cq.json"
 for invalid in '.assets[1].digest="sha256:bad"' '.assets[1].digest=.assets[0].digest' \
   'del(.assets[1])' '.assets[1].browser_download_url=.assets[0].browser_download_url' \
-  '.assets += [.assets[1]]'; do
-  jq "$invalid" "$root/release.json" >"$root/invalid.json"
+  '.assets += [.assets[1]]' '.draft=false' '.id=124' '.assets_url += "/extra"' \
+  '.html_url |= sub("github.com"; "example.com")' '.html_url += "?extra"' \
+  '.html_url |= sub("untagged-.*"; "untagged-z")' \
+  '.assets[0].browser_download_url |= sub("github.com"; "example.com")' \
+  '.assets[0].browser_download_url |= sub("untagged-[a-f0-9]+"; "untagged-deadbeef")'; do
+  jq "$invalid" "$root/draft.json" >"$root/invalid.json"
   if bash "$generator" v0.48.0 "$root/invalid.json" "$root/checksums.txt" >"$root/output" 2>"$root/error"; then exit 1; fi
   [[ ! -s "$root/output" ]]
 done
