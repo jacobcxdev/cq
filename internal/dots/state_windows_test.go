@@ -252,13 +252,12 @@ func TestWindowsDotsShortcutFirstRepeatAndForeignPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	windowsDotsTestACL(t, executable, false)
-	app := filepath.Join(anchor, "package")
-	if err := os.MkdirAll(filepath.Join(app, "app"), 0o700); err != nil {
+	app := windowsAppFixture(t)
+	assets := filepath.Join(app, "assets")
+	if err := os.Mkdir(assets, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(app, "app", "ChatGPT.exe"), []byte("fixture"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	logo := writeLauncherIconPNG(t, filepath.Join(assets, "Square44x44Logo.png"), 44)
 	root := filepath.Join(anchor, "dots")
 	if err := PrivateDirectory(root); err != nil {
 		t.Fatal(err)
@@ -280,9 +279,14 @@ func TestWindowsDotsShortcutFirstRepeatAndForeignPreserved(t *testing.T) {
 	}
 	privateLink.Close()
 	retained.Close()
-	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 1 || entries[0].Name() != windowsDotsIconName {
 		t.Fatalf("shortcut staging left files: %d entries, %v", len(entries), err)
 	}
+	icon, err := ReadOwned(filepath.Join(root, windowsDotsIconName), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkLauncherIcon(t, icon, []byte{44}, [][]byte{logo})
 	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)

@@ -37,7 +37,7 @@ func windowsRegisteredAppBoundary(path string, canonicalErr error) (string, erro
 }
 
 type windowsAppIdentity struct {
-	version, build, executable, archive string
+	version, build, executable, archive, logo string
 }
 
 // windowsAppIdentityAt validates the package layout supplied by Windows package
@@ -64,9 +64,12 @@ func windowsAppIdentityAt(root string) (windowsAppIdentity, error) {
 			Publisher    string `xml:"Publisher,attr"`
 		} `xml:"Identity"`
 		Applications []struct {
-			ID         string `xml:"Id,attr"`
-			Executable string `xml:"Executable,attr"`
-			EntryPoint string `xml:"EntryPoint,attr"`
+			ID             string `xml:"Id,attr"`
+			Executable     string `xml:"Executable,attr"`
+			EntryPoint     string `xml:"EntryPoint,attr"`
+			VisualElements struct {
+				Logo string `xml:"Square44x44Logo,attr"`
+			} `xml:"VisualElements"`
 		} `xml:"Applications>Application"`
 	}
 	if xml.Unmarshal(data, &manifest) != nil || manifest.Identity.Name != "OpenAI.Codex" || manifest.Identity.Publisher != windowsDotsPublisher || !windowsDotsVersion.MatchString(manifest.Identity.Version) {
@@ -81,12 +84,14 @@ func windowsAppIdentityAt(root string) (windowsAppIdentity, error) {
 		return windowsAppIdentity{}, errors.New("Windows Dots package name does not match its manifest")
 	}
 	var appCount int
+	var logo string
 	for _, app := range manifest.Applications {
 		if app.ID == "App" {
 			appCount++
 			if app.Executable != "app/ChatGPT.exe" || app.EntryPoint != "Windows.FullTrustApplication" {
 				return windowsAppIdentity{}, errors.New("Windows Dots desktop entry point changed")
 			}
+			logo = app.VisualElements.Logo
 		}
 	}
 	if appCount != 1 {
@@ -101,7 +106,7 @@ func windowsAppIdentityAt(root string) (windowsAppIdentity, error) {
 		}
 	}
 	parts := strings.Split(manifest.Identity.Version, ".")
-	return windowsAppIdentity{manifest.Identity.Version, parts[2], executable, archive}, nil
+	return windowsAppIdentity{version: manifest.Identity.Version, build: parts[2], executable: executable, archive: archive, logo: logo}, nil
 }
 
 // QualifyWindowsApp pins the installed MSIX renderer by digest and discovers

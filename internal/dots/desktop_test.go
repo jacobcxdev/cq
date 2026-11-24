@@ -143,6 +143,12 @@ func TestDesktopStartupCancellationUsesIndependentRecoveryAndKeepsFailedWatchdog
 }
 
 func TestDesktopLaunchFailuresRecoverWithoutExposingBackendDetails(t *testing.T) {
+	want := map[string]string{
+		"stage": "prepare the Dots helper executable",
+		"spawn": "start the Dots recovery helper",
+		"start": "start the Dots adapter",
+		"open":  "activate the ChatGPT window",
+	}
 	for _, variant := range []string{"stage", "spawn", "start", "restart", "no-dots", "open"} {
 		t.Run(variant, func(t *testing.T) {
 			s, c, deps, watchdog := desktopFixture(t)
@@ -176,6 +182,9 @@ func TestDesktopLaunchFailuresRecoverWithoutExposingBackendDetails(t *testing.T)
 			err := runDesktopLaunch(context.Background(), s, c, deps)
 			if err == nil || strings.Contains(err.Error(), "private material") {
 				t.Fatalf("unsafe startup result %v", err)
+			}
+			if phase := want[variant]; phase != "" && !strings.Contains(err.Error(), phase) {
+				t.Fatalf("startup failure did not identify %q: %v", phase, err)
 			}
 			if recovered != 1 {
 				t.Fatalf("recovery calls %d", recovered)

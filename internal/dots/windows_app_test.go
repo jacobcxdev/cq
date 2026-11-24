@@ -16,7 +16,7 @@ func windowsAppFixture(t *testing.T) string {
 	if err := os.MkdirAll(resources, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	manifest := `<Package><Identity Name="OpenAI.Codex" ProcessorArchitecture="x64" Version="26.1120.5083.0" Publisher="CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B"/><Applications><Application Id="App" Executable="app/ChatGPT.exe" EntryPoint="Windows.FullTrustApplication"/></Applications></Package>`
+	manifest := `<Package xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"><Identity Name="OpenAI.Codex" ProcessorArchitecture="x64" Version="26.1120.5083.0" Publisher="CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B"/><Applications><Application Id="App" Executable="app/ChatGPT.exe" EntryPoint="Windows.FullTrustApplication"><uap:VisualElements Square44x44Logo="assets/Square44x44Logo.png"/></Application></Applications></Package>`
 	if err := os.WriteFile(filepath.Join(root, "AppxManifest.xml"), []byte(manifest), 0o600); err != nil {
 		t.Fatal(err)
 	}

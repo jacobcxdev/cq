@@ -198,6 +198,32 @@ func TestStopRuntimeRechecksNewNormalAppBeforeHelperSignal(t *testing.T) {
 	}
 }
 
+func TestStageExecutableReusesIdenticalStagedFile(t *testing.T) {
+	s := processSettings(t)
+	source := filepath.Join(t.TempDir(), "cq")
+	if err := os.WriteFile(source, []byte("current executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path, err := StageExecutable(source, s.RuntimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StageExecutable(source, s.RuntimeRoot); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("identical staged executable was replaced")
+	}
+}
+
 func TestStageExecutablePreservesPreviouslyOpenedInode(t *testing.T) {
 	s := processSettings(t)
 	source := filepath.Join(t.TempDir(), "cq")
@@ -213,7 +239,7 @@ func TestStageExecutablePreservesPreviouslyOpenedInode(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer old.Close()
-	if err := os.WriteFile(source, []byte("second executable"), 0o700); err != nil {
+	if err := os.WriteFile(source, []byte("other executable"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := StageExecutable(source, s.RuntimeRoot); err != nil {
@@ -221,7 +247,7 @@ func TestStageExecutablePreservesPreviouslyOpenedInode(t *testing.T) {
 	}
 	oldData, _ := httputil.ReadBody(old)
 	data, err := os.ReadFile(path)
-	if err != nil || string(oldData) != "first executable" || string(data) != "second executable" {
+	if err != nil || string(oldData) != "first executable" || string(data) != "other executable" {
 		t.Fatalf("old %q, new %q, error %v", oldData, data, err)
 	}
 	info, err := os.Stat(path)
