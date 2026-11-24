@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -42,10 +43,21 @@ func fakeAppCodexLogin(tokens auth.CodexTokenResponse, claims auth.CodexClaims) 
 	}
 }
 
+func codexLoginFixture(t *testing.T) (*fsutil.MemFS, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	fs := fsutil.NewMemFSWithHome(home)
+	if err := fs.MkdirAll(filepath.VolumeName(root)+string(filepath.Separator), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return fs, home, filepath.Join(root, "cq", "state")
+}
+
 func TestRunCodexLoginWithoutActivatePreservesSystemAndActiveProjection(t *testing.T) {
-	fs := fsutil.NewMemFS()
-	systemPath := "/home/test/.codex/auth.json"
-	registryPath := "/home/test/.codex/accounts/registry.json"
+	fs, home, stateDir := codexLoginFixture(t)
+	systemPath := filepath.Join(home, ".codex", "auth.json")
+	registryPath := filepath.Join(home, ".codex", "accounts", "registry.json")
 	systemBefore := []byte(`{"system":"untouched"}`)
 	registryBefore := []byte(`{"schema_version":3,"active_account_key":"existing::active","accounts":[]}`)
 	_ = fs.WriteFile(systemPath, systemBefore, 0o600)
@@ -54,7 +66,7 @@ func TestRunCodexLoginWithoutActivatePreservesSystemAndActiveProjection(t *testi
 	tokens := auth.CodexTokenResponse{IDToken: appCodexJWT(claims.Email, claims.AccountID, claims.UserID), AccessToken: "new-access", RefreshToken: "new-refresh"}
 
 	var output bytes.Buffer
-	err := runCodexLogin(context.Background(), nil, false, fs, "/cq/state", fakeAppCodexLogin(tokens, claims), func() time.Time { return time.Unix(100, 0) }, &output)
+	err := runCodexLogin(context.Background(), nil, false, fs, stateDir, fakeAppCodexLogin(tokens, claims), func() time.Time { return time.Unix(100, 0) }, &output)
 	if err != nil {
 		t.Fatalf("runCodexLogin: %v", err)
 	}
@@ -70,19 +82,19 @@ func TestRunCodexLoginWithoutActivatePreservesSystemAndActiveProjection(t *testi
 }
 
 func TestRunCodexLoginActivateUsesExactSavedCandidate(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs, home, stateDir := codexLoginFixture(t)
 	otherJWT := appCodexJWT("same@test.com", "acct-other", "user-other")
 	other := []byte(`{"auth_mode":"chatgpt","tokens":{"access_token":"wrong","id_token":"` + otherJWT + `","account_id":"acct-other"}}`)
-	_ = fs.WriteFile("/home/test/.codex/accounts/user-other::acct-other.auth.json", other, 0o600)
+	_ = fs.WriteFile(filepath.Join(home, ".codex", "accounts", "user-other::acct-other.auth.json"), other, 0o600)
 	claims := auth.CodexClaims{Email: "same@test.com", AccountID: "acct-new", UserID: "user-new", PlanType: "plus"}
 	tokens := auth.CodexTokenResponse{IDToken: appCodexJWT(claims.Email, claims.AccountID, claims.UserID), AccessToken: "exact", RefreshToken: "new-refresh"}
 
 	var output bytes.Buffer
-	err := runCodexLogin(context.Background(), nil, true, fs, "/cq/state", fakeAppCodexLogin(tokens, claims), func() time.Time { return time.Unix(100, 0) }, &output)
+	err := runCodexLogin(context.Background(), nil, true, fs, stateDir, fakeAppCodexLogin(tokens, claims), func() time.Time { return time.Unix(100, 0) }, &output)
 	if err != nil {
 		t.Fatalf("runCodexLogin: %v", err)
 	}
-	data, _ := fs.ReadFile("/home/test/.codex/auth.json")
+	data, _ := fs.ReadFile(filepath.Join(home, ".codex", "auth.json"))
 	var system map[string]any
 	_ = json.Unmarshal(data, &system)
 	if got := system["tokens"].(map[string]any)["access_token"]; got != "exact" {

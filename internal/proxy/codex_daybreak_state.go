@@ -48,7 +48,11 @@ func (state *codexSQLiteDaybreakState) Current(ctx context.Context, session stri
 }
 
 func (state *codexSQLiteDaybreakState) readFlag(ctx context.Context, file, query, session string) (bool, error) {
-	uri := url.URL{Scheme: "file", Path: filepath.Join(state.home, file)}
+	path := filepath.Join(state.home, file)
+	if filepath.VolumeName(path) != "" {
+		path = "/" + filepath.ToSlash(path)
+	}
+	uri := url.URL{Scheme: "file", Path: path}
 	parameters := uri.Query()
 	parameters.Set("mode", "ro")
 	uri.RawQuery = parameters.Encode()

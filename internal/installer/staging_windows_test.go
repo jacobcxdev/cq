@@ -72,3 +72,12 @@ func newWindowsInstallerTestRoot(t *testing.T) string {
 	})
 	return root
 }
+
+func secureInstallerTestRoot(t *testing.T) string {
+	t.Helper()
+	root := newWindowsInstallerTestRoot(t)
+	if err := fsutil.EnsureSecureDirectory(fsutil.OSFileSystem{}, root); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}

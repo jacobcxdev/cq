@@ -31,30 +31,32 @@ func TestPortableRejectsInvalidAndWritableFiles(t *testing.T) {
 		"trailing data":          `{"version":2,"rules":{}} {}`,
 		"old version":            `{"version":1,"rules":{}}`,
 		"invalid decision":       `{"version":2,"rules":{"all":{"changes":{"default":"auto"}}}}`,
-		"absolute skill":         `{"version":2,"rules":{"all":{"changes":{"skills":{"/Users/me/skill":"enabled"}}}}}`,
+		"absolute skill":         `{"version":2,"rules":{"all":{"changes":{"skills":{"` + filepath.ToSlash(filepath.Join(t.TempDir(), "skill")) + `":"enabled"}}}}}`,
 		"windows absolute skill": `{"version":2,"profiles":{"custom":{"changes":{"skills":{"C:\\skills\\item":"enabled"}}}},"rules":{}}`,
 		"oversized":              `{"version":2,"rules":{}}` + strings.Repeat(" ", 1<<20),
 	} {
 		t.Run(name, func(t *testing.T) {
 			fsys := fsutil.NewMemFS()
-			if err := fsys.MkdirAll("/work/.cq", 0o755); err != nil {
+			path := filepath.Join(t.TempDir(), "work", ".cq", "harness.json")
+			if err := fsys.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := fsys.WriteFile("/work/.cq/harness.json", []byte(raw), 0o644); err != nil {
+			if err := fsys.WriteFile(path, []byte(raw), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := LoadWorkspace(fsys, "/work/.cq/harness.json"); err == nil {
+			if _, err := LoadWorkspace(fsys, path); err == nil {
 				t.Fatal("accepted invalid portable policy")
 			}
 		})
 	}
 	for _, mode := range []os.FileMode{0o666, 0o664} {
 		fsys := fsutil.NewMemFS()
-		writePortable(t, fsys, "/work/.cq/harness.json", WorkspacePolicy{Version: 2})
-		if err := fsys.Chmod("/work/.cq/harness.json", mode); err != nil {
+		path := filepath.Join(t.TempDir(), "work", ".cq", "harness.json")
+		writePortable(t, fsys, path, WorkspacePolicy{Version: 2})
+		if err := fsys.Chmod(path, mode); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadWorkspace(fsys, "/work/.cq/harness.json"); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
+		if _, err := LoadWorkspace(fsys, path); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
 			t.Fatalf("writable file mode %o error = %v", mode, err)
 		}
 	}
@@ -62,11 +64,12 @@ func TestPortableRejectsInvalidAndWritableFiles(t *testing.T) {
 
 func TestPortableConcurrentUpdateDoesNotLoseRules(t *testing.T) {
 	fsys := fsutil.NewMemFS()
-	writePortable(t, fsys, "/work/.cq/harness.json", WorkspacePolicy{Version: 2})
+	path := filepath.Join(t.TempDir(), "work", ".cq", "harness.json")
+	writePortable(t, fsys, path, WorkspacePolicy{Version: 2})
 	entered, release := make(chan struct{}), make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		_, err := UpdateWorkspace(fsys, "/work/.cq/harness.json", func(policy *WorkspacePolicy) error {
+		_, err := UpdateWorkspace(fsys, path, func(policy *WorkspacePolicy) error {
 			close(entered)
 			<-release
 			policy.Profiles["first"] = Definition{Changes: Changes{Default: Disabled}}
@@ -74,14 +77,18 @@ func TestPortableConcurrentUpdateDoesNotLoseRules(t *testing.T) {
 		})
 		done <- err
 	}()
-	<-entered
-	_, err := UpdateWorkspace(fsys, "/work/.cq/harness.json", func(policy *WorkspacePolicy) error { policy.Profiles["second"] = Definition{}; return nil })
+	select {
+	case <-entered:
+	case err := <-done:
+		t.Fatalf("first update did not reach callback: %v", err)
+	}
+	_, err := UpdateWorkspace(fsys, path, func(policy *WorkspacePolicy) error { policy.Profiles["second"] = Definition{}; return nil })
 	close(release)
 	firstErr := <-done
 	if !errors.Is(err, fsutil.ErrExclusiveLockHeld) || firstErr != nil {
 		t.Fatalf("concurrent update = %v, first = %v", err, firstErr)
 	}
-	policy, err := UpdateWorkspace(fsys, "/work/.cq/harness.json", func(policy *WorkspacePolicy) error { policy.Profiles["second"] = Definition{}; return nil })
+	policy, err := UpdateWorkspace(fsys, path, func(policy *WorkspacePolicy) error { policy.Profiles["second"] = Definition{}; return nil })
 	if err != nil || len(policy.Profiles) != 2 {
 		t.Fatalf("retry lost rules: %#v,%v", policy, err)
 	}
@@ -89,17 +96,18 @@ func TestPortableConcurrentUpdateDoesNotLoseRules(t *testing.T) {
 
 func TestPortableActualRenameFailurePreservesFile(t *testing.T) {
 	fsys := fsutil.NewMemFS()
-	writePortable(t, fsys, "/work/.cq/harness.json", WorkspacePolicy{Version: 2, Rules: Scope{All: Binding{Profiles: []string{"full"}}}})
-	before, _ := fsys.ReadFile("/work/.cq/harness.json")
-	_, err := UpdateWorkspace(workspaceFailureFS{fsys}, "/work/.cq/harness.json", func(policy *WorkspacePolicy) error { policy.Rules.All.Profiles = []string{"minimal"}; return nil })
+	path := filepath.Join(t.TempDir(), "work", ".cq", "harness.json")
+	writePortable(t, fsys, path, WorkspacePolicy{Version: 2, Rules: Scope{All: Binding{Profiles: []string{"full"}}}})
+	before, _ := fsys.ReadFile(path)
+	_, err := UpdateWorkspace(workspaceFailureFS{fsys}, path, func(policy *WorkspacePolicy) error { policy.Rules.All.Profiles = []string{"minimal"}; return nil })
 	if !errors.Is(err, errTestRename) || !errors.Is(err, fsutil.ErrCommitNotCommitted) {
 		t.Fatalf("rename failure = %v", err)
 	}
-	after, _ := fsys.ReadFile("/work/.cq/harness.json")
+	after, _ := fsys.ReadFile(path)
 	if string(before) != string(after) {
 		t.Fatal("failed rename altered previous file")
 	}
-	entries, err := fsys.ReadDir("/work/.cq")
+	entries, err := fsys.ReadDir(filepath.Dir(path))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,59 +187,74 @@ func TestPortableRefusesLinksAndUnsafeDirectories(t *testing.T) {
 
 func TestPortableWorkspaceNamespacesAndPrecedence(t *testing.T) {
 	fsys := fsutil.NewMemFS()
-	user := Policy{Version: 2, Enabled: true, Profiles: map[string]Definition{"research": {Changes: Changes{Plugins: map[string]Decision{"drive": Enabled}}}}, Global: Scope{All: Binding{Profiles: []string{"minimal", "research"}}}, Tasks: map[string]Scope{testChat: {All: Binding{Profiles: []string{"research"}}}}}
-	if err := Save(fsys, "/config/harness.json", user); err != nil {
+	root := t.TempDir()
+	userPath := filepath.Join(root, "config", "harness.json")
+	work := filepath.Join(root, "work")
+	parentPath := filepath.Join(work, ".cq", "harness.json")
+	project := filepath.Join(work, "project")
+	if err := fsys.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writePortable(t, fsys, "/work/.cq/harness.json", WorkspacePolicy{Version: 2, Profiles: map[string]Definition{"research": {Changes: Changes{Plugins: map[string]Decision{"drive": Disabled}}}}, Rules: Scope{All: Binding{Profiles: []string{"research"}}}})
-	policy, err := LoadForContext(fsys, "/config/harness.json", "/work/project")
+	user := Policy{Version: 2, Enabled: true, Profiles: map[string]Definition{"research": {Changes: Changes{Plugins: map[string]Decision{"drive": Enabled}}}}, Global: Scope{All: Binding{Profiles: []string{"minimal", "research"}}}, Tasks: map[string]Scope{testChat: {All: Binding{Profiles: []string{"research"}}}}}
+	if err := Save(fsys, userPath, user); err != nil {
+		t.Fatal(err)
+	}
+	writePortable(t, fsys, parentPath, WorkspacePolicy{Version: 2, Profiles: map[string]Definition{"research": {Changes: Changes{Plugins: map[string]Decision{"drive": Disabled}}}}, Rules: Scope{All: Binding{Profiles: []string{"research"}}}})
+	policy, err := LoadForContext(fsys, userPath, project)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := policy.ResolveEffective("gpt-6", "/work/project", ""); got.Choose(PluginKind, "drive", true) || got.Selection.Source != "workspace" {
+	if got := policy.ResolveEffective("gpt-6", project, ""); got.Choose(PluginKind, "drive", true) || got.Selection.Source != "workspace" {
 		t.Fatalf("portable override = %#v", got)
 	}
-	if got := policy.ResolveEffective("gpt-6", "/work/project", testChat); !got.Choose(PluginKind, "drive", false) {
+	if got := policy.ResolveEffective("gpt-6", project, testChat); !got.Choose(PluginKind, "drive", false) {
 		t.Fatalf("task did not use user namespace: %#v", got)
 	}
 	if policy.Definitions()["research"].Changes.Plugins["drive"] != Disabled {
 		t.Fatal("discovery did not expose local definition")
 	}
-	writePortable(t, fsys, "/work/project/.cq/harness.json", WorkspacePolicy{Version: 2, Rules: Scope{All: Binding{Profiles: []string{"research"}}}})
-	policy, err = LoadForContext(fsys, "/config/harness.json", "/work/project")
+	writePortable(t, fsys, filepath.Join(project, ".cq", "harness.json"), WorkspacePolicy{Version: 2, Rules: Scope{All: Binding{Profiles: []string{"research"}}}})
+	policy, err = LoadForContext(fsys, userPath, project)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := policy.ResolveEffective("gpt-6", "/work/project", ""); !got.Choose(PluginKind, "drive", false) {
+	if got := policy.ResolveEffective("gpt-6", project, ""); !got.Choose(PluginKind, "drive", false) {
 		t.Fatalf("child fallback incorrectly inherited parent namespace: %#v", got)
 	}
 }
 
 func TestPortableWorkspaceMissingAndReferenceValidation(t *testing.T) {
 	fsys := fsutil.NewMemFS()
-	if _, err := LoadWorkspace(fsys, "/work/.cq/harness.json"); !errors.Is(err, os.ErrNotExist) {
+	root := t.TempDir()
+	path := filepath.Join(root, "work", ".cq", "harness.json")
+	userPath := filepath.Join(root, "config", "harness.json")
+	if _, err := LoadWorkspace(fsys, path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing = %v", err)
 	}
 	user := Policy{Version: 2, Enabled: true}
-	if err := Save(fsys, "/config/harness.json", user); err != nil {
+	if err := fsys.MkdirAll(filepath.Dir(userPath), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	writePortable(t, fsys, "/work/.cq/harness.json", WorkspacePolicy{Version: 2, Rules: Scope{All: Binding{Profiles: []string{"missing"}}}})
-	if _, err := LoadWorkspace(fsys, "/work/.cq/harness.json"); err != nil {
+	if err := Save(fsys, userPath, user); err != nil {
+		t.Fatal(err)
+	}
+	writePortable(t, fsys, path, WorkspacePolicy{Version: 2, Rules: Scope{All: Binding{Profiles: []string{"missing"}}}})
+	if _, err := LoadWorkspace(fsys, path); err != nil {
 		t.Fatalf("standalone rejected external reference: %v", err)
 	}
-	if _, err := LoadForContext(fsys, "/config/harness.json", "/work"); err == nil {
+	if _, err := LoadForContext(fsys, userPath, filepath.Dir(filepath.Dir(path))); err == nil {
 		t.Fatal("context accepted unresolved reference")
 	}
-	if _, err := LoadForContext(fsys, "/config/harness.json", "/other"); err != nil {
+	if _, err := LoadForContext(fsys, userPath, filepath.Join(root, "other")); err != nil {
 		t.Fatalf("sibling file affected context: %v", err)
 	}
 }
 
 func TestPortableUpdatePreservesRulesAndPrivateLock(t *testing.T) {
 	fsys := fsutil.NewMemFS()
-	writePortable(t, fsys, "/work/.cq/harness.json", WorkspacePolicy{Version: 2, Rules: Scope{All: Binding{Profiles: []string{"minimal"}}}})
-	updated, err := UpdateWorkspace(fsys, "/work/.cq/harness.json", func(policy *WorkspacePolicy) error {
+	path := filepath.Join(t.TempDir(), "work", ".cq", "harness.json")
+	writePortable(t, fsys, path, WorkspacePolicy{Version: 2, Rules: Scope{All: Binding{Profiles: []string{"minimal"}}}})
+	updated, err := UpdateWorkspace(fsys, path, func(policy *WorkspacePolicy) error {
 		policy.Profiles["research"] = Definition{Changes: Changes{Plugins: map[string]Decision{"drive": Enabled}}}
 		return nil
 	})
@@ -241,17 +264,17 @@ func TestPortableUpdatePreservesRulesAndPrivateLock(t *testing.T) {
 	if len(updated.Rules.All.Profiles) != 1 || updated.Rules.All.Profiles[0] != "minimal" {
 		t.Fatalf("lost rules: %#v", updated)
 	}
-	if _, err := LoadWorkspace(fsys, "/work/.cq/harness.json"); err != nil {
+	if _, err := LoadWorkspace(fsys, path); err != nil {
 		t.Fatal(err)
 	}
-	if info, err := fsys.Stat("/work/.cq/harness.json.lock"); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := fsys.Stat(path + ".lock"); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("lock mode = %v,%v", info, err)
 	}
-	before, _ := fsys.ReadFile("/work/.cq/harness.json")
-	if _, err := UpdateWorkspace(fsys, "/work/.cq/harness.json", func(policy *WorkspacePolicy) error { policy.Version = 1; return nil }); err == nil {
+	before, _ := fsys.ReadFile(path)
+	if _, err := UpdateWorkspace(fsys, path, func(policy *WorkspacePolicy) error { policy.Version = 1; return nil }); err == nil {
 		t.Fatal("invalid update succeeded")
 	}
-	after, _ := fsys.ReadFile("/work/.cq/harness.json")
+	after, _ := fsys.ReadFile(path)
 	if string(before) != string(after) {
 		t.Fatal("failed update changed original")
 	}
@@ -259,20 +282,22 @@ func TestPortableUpdatePreservesRulesAndPrivateLock(t *testing.T) {
 
 func TestPortableCreatesOnlyCQDirectoryInExistingProject(t *testing.T) {
 	fsys := fsutil.NewMemFS()
-	if err := fsys.MkdirAll("/work", 0o755); err != nil {
+	work := filepath.Join(t.TempDir(), "work")
+	path := filepath.Join(work, ".cq", "harness.json")
+	if err := fsys.MkdirAll(work, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := UpdateWorkspace(fsys, "/work/.cq/harness.json", func(policy *WorkspacePolicy) error {
+	if _, err := UpdateWorkspace(fsys, path, func(policy *WorkspacePolicy) error {
 		policy.Rules = Scope{All: Binding{Profiles: []string{"minimal"}}}
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	policy, err := LoadWorkspace(fsys, "/work/.cq/harness.json")
+	policy, err := LoadWorkspace(fsys, path)
 	if err != nil || len(policy.Rules.All.Profiles) != 1 {
 		t.Fatalf("created policy = %#v,%v", policy, err)
 	}
-	if info, err := fsys.Stat("/work"); err != nil || info.Mode().Perm() != 0o755 {
+	if info, err := fsys.Stat(work); err != nil || info.Mode().Perm() != 0o755 {
 		t.Fatalf("project permissions changed: %v,%v", info, err)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -236,7 +237,7 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		}
 		return
 	}
-	binary := filepath.Join(t.TempDir(), "cq")
+	binary := filepath.Join(t.TempDir(), "cq.exe")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, output)
@@ -313,11 +314,15 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		{args: []string{"codex", "validate", "capture", "--input"}, exitCode: 1},
 		{args: []string{"codex", "canary", "unknown"}, exitCode: 1},
 	} {
+		if tt.helper && runtime.GOOS == "windows" {
+			// The default CQ config root is registry-bound on Windows.
+			continue
+		}
 		command := exec.Command(binary, tt.args...)
 		if tt.helper {
 			command = exec.Command(os.Args[0], "-test.run=^TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState$")
 		}
-		command.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+xdg)
+		command.Env = append(os.Environ(), "HOME="+home, "USERPROFILE="+home, "XDG_CONFIG_HOME="+xdg)
 		if tt.helper {
 			command.Env = append(command.Env, "CQ_TEST_BARE_PROXY_STATUS=1")
 		}
@@ -466,7 +471,7 @@ func TestReconciledProxyStatusStrictControlsVerdictExit(t *testing.T) {
 }
 
 func TestGlobalHelpAndVersionPreserveAbsentHomeAndXDGEnvironment(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "cq")
+	binary := filepath.Join(t.TempDir(), "cq.exe")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, output)
@@ -474,10 +479,11 @@ func TestGlobalHelpAndVersionPreserveAbsentHomeAndXDGEnvironment(t *testing.T) {
 	workingDirectory := t.TempDir()
 	environment := make([]string, 0, len(os.Environ()))
 	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "HOME=") && !strings.HasPrefix(entry, "XDG_CONFIG_HOME=") {
+		if !strings.HasPrefix(entry, "HOME=") && !strings.HasPrefix(entry, "USERPROFILE=") && !strings.HasPrefix(entry, "XDG_CONFIG_HOME=") {
 			environment = append(environment, entry)
 		}
 	}
+	environment = append(environment, "USERPROFILE="+filepath.Join(workingDirectory, "absent-home"))
 	for _, fixture := range []struct {
 		args     []string
 		exitCode int

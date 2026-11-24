@@ -66,8 +66,8 @@ func TestOpenSessionStoreDiscoveryNeverCreatedState(t *testing.T) {
 }
 
 func TestOpenSessionStoreCreatedPrivateKeyAndReusedItAfterRestart(t *testing.T) {
-	dir := filepath.Join(t.TempDir(), "cq")
-	fsys := fsutil.OSFileSystem{}
+	fsys, root := newZCodeStoreTestFS(t)
+	dir := filepath.Join(root, "config")
 	store, err := OpenSessionStore(fsys, dir, true)
 	if err != nil {
 		t.Fatal(err)
@@ -90,6 +90,13 @@ func TestOpenSessionStoreCreatedPrivateKeyAndReusedItAfterRestart(t *testing.T) 
 		if err != nil || info.Mode().Perm() != 0o700 {
 			t.Fatal("encryption-key directory was not private")
 		}
+	} else {
+		if err := fsutil.ValidateSecureRegularFile(fsys, keyPath); err != nil {
+			t.Fatalf("encryption key ACL was not private: %v", err)
+		}
+		if err := fsutil.ValidateSecureDirectory(fsys, dir); err != nil {
+			t.Fatalf("encryption-key directory ACL was not private: %v", err)
+		}
 	}
 	if _, err := store.Save(locationFixture(), "fixture", false); err != nil {
 		t.Fatal(err)
@@ -110,6 +117,17 @@ func TestOpenSessionStoreCreatedPrivateKeyAndReusedItAfterRestart(t *testing.T) 
 		if err != nil || len(accounts) != 1 || accounts[0].ZCodeJWT != "zcode-fixture" {
 			t.Fatal("restart could not read prior account")
 		}
+	}
+}
+
+func TestOpenSessionStoreCreatedPrivateDirectoryFromPrivateRoot(t *testing.T) {
+	fsys, root := newZCodeStoreTestFS(t)
+	dir := filepath.Join(root, "new-config")
+	if _, err := OpenSessionStore(fsys, dir, true); err != nil {
+		t.Fatalf("create ZCode store in private root: %v", err)
+	}
+	if err := fsutil.ValidateSecureDirectory(fsys, dir); err != nil {
+		t.Fatalf("created ZCode directory was not private: %v", err)
 	}
 }
 

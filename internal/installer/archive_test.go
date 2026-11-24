@@ -8,7 +8,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 type archiveTestEntry struct {
@@ -31,7 +34,7 @@ func TestExtractReleaseArchiveZIPAndTarGzip(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			staged, err := extractReleaseArchive(test.archive(t, []archiveTestEntry{{name: test.executable, body: []byte("cq"), mode: 0o755}}), test.assetName, t.TempDir(), test.executable)
+			staged, err := extractReleaseArchive(test.archive(t, []archiveTestEntry{{name: test.executable, body: []byte("cq"), mode: 0o755}}), test.assetName, secureInstallerTestRoot(t), test.executable)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -42,7 +45,11 @@ func TestExtractReleaseArchiveZIPAndTarGzip(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if info.Mode().Perm()&0o700 != 0o700 {
+			if runtime.GOOS == "windows" {
+				if err := fsutil.ValidateSecureRegularFile(fsutil.OSFileSystem{}, staged.Path); err != nil {
+					t.Fatalf("staged file is not private: %v", err)
+				}
+			} else if info.Mode().Perm()&0o700 != 0o700 {
 				t.Fatalf("staged mode = %o", info.Mode().Perm())
 			}
 		})
@@ -64,7 +71,7 @@ func TestExtractReleaseArchiveRejectsUnsafeZIPEntries(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			destination := t.TempDir()
+			destination := secureInstallerTestRoot(t)
 			if _, err := extractReleaseArchive(makeZIPArchive(t, test.entries), "cq.zip", destination, "cq.exe"); err == nil {
 				t.Fatal("unsafe ZIP accepted")
 			}
@@ -90,7 +97,7 @@ func TestExtractReleaseArchiveRejectsUnsafeTarEntries(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			destination := t.TempDir()
+			destination := secureInstallerTestRoot(t)
 			if _, err := extractReleaseArchive(makeTarGzipArchive(t, test.entries), "cq.tar.gz", destination, "cq"); err == nil {
 				t.Fatal("unsafe tar.gz accepted")
 			}
@@ -102,7 +109,7 @@ func TestExtractReleaseArchiveRejectsUnsafeTarEntries(t *testing.T) {
 }
 
 func TestExtractReleaseArchiveRejectsOversizedTarEntry(t *testing.T) {
-	destination := t.TempDir()
+	destination := secureInstallerTestRoot(t)
 	archive := makeOversizedTarGzipArchive(t, "cq", maxExtractedExecutableBytes+1)
 	if _, err := extractReleaseArchive(archive, "cq.tar.gz", destination, "cq"); err == nil {
 		t.Fatal("oversized tar entry accepted")
@@ -113,10 +120,10 @@ func TestExtractReleaseArchiveRejectsOversizedTarEntry(t *testing.T) {
 }
 
 func TestExtractReleaseArchiveRejectsUnknownFormatAndInvalidDestination(t *testing.T) {
-	if _, err := extractReleaseArchive([]byte("cq"), "cq.exe", t.TempDir(), "cq"); err == nil {
+	if _, err := extractReleaseArchive([]byte("cq"), "cq.exe", secureInstallerTestRoot(t), "cq"); err == nil {
 		t.Fatal("unknown archive format accepted")
 	}
-	notDirectory := filepath.Join(t.TempDir(), "file")
+	notDirectory := filepath.Join(secureInstallerTestRoot(t), "file")
 	if err := os.WriteFile(notDirectory, []byte("cq"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +135,7 @@ func TestExtractReleaseArchiveRejectsUnknownFormatAndInvalidDestination(t *testi
 func TestExtractReleaseArchiveRejectsCorruptGzipAndCleansStagedFile(t *testing.T) {
 	archive := makeTarGzipArchive(t, []archiveTestEntry{{name: "cq", body: []byte("cq"), mode: 0o700}})
 	archive[len(archive)-1] ^= 0xff
-	destination := t.TempDir()
+	destination := secureInstallerTestRoot(t)
 	if _, err := extractReleaseArchive(archive, "cq.tar.gz", destination, "cq"); err == nil {
 		t.Fatal("corrupt gzip accepted")
 	}

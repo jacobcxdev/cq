@@ -784,6 +784,10 @@ func TestNativeInventoryPeerHelper(t *testing.T) {
 	if scenario == "" {
 		return
 	}
+	if slices.Equal(os.Args[len(os.Args)-3:], []string{"app-server", "--print-startup-config", "--strict-config"}) {
+		_, _ = io.WriteString(os.Stdout, "{}\n")
+		return
+	}
 	if !slices.Equal(os.Args[len(os.Args)-3:], []string{"app-server", "--stdio", "--strict-config"}) {
 		os.Exit(80)
 	}

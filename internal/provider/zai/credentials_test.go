@@ -26,7 +26,7 @@ func TestReadAPIKey(t *testing.T) {
 		{name: "file header injection", file: `{"api_key":"private-key\nsecret"}`, wantErr: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			fsys := fsutil.NewMemFS()
+			fsys := newZaiTestFS()
 			if tt.file != "" {
 				if err := fsys.WriteFile("/config/zai.json", []byte(tt.file), 0o600); err != nil {
 					t.Fatal(err)
@@ -53,7 +53,7 @@ type readErrorFS struct{ fsutil.FileSystem }
 func (readErrorFS) ReadFile(string) ([]byte, error) { return nil, os.ErrPermission }
 
 func TestReadAPIKeyReadError(t *testing.T) {
-	_, err := ReadAPIKey(readErrorFS{fsutil.NewMemFS()}, func(string) string { return "" }, "/config")
+	_, err := ReadAPIKey(readErrorFS{newZaiTestFS()}, func(string) string { return "" }, "/config")
 	if err == nil {
 		t.Fatal("expected read error")
 	}
@@ -62,7 +62,7 @@ func TestReadAPIKeyReadError(t *testing.T) {
 func noEnvironment(string) string { return "" }
 
 func TestAccountsPreserveLegacyAndPreferredKey(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	if err := fsys.WriteFile("/config/zai.json", []byte(`{"api_key":"old-private-key"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestAccountsPreserveLegacyAndPreferredKey(t *testing.T) {
 }
 
 func TestAccountsDeduplicateActivateAndRemove(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	first, err := StoreAccount(fsys, "/config", "first-key", "First", false)
 	if err != nil {
 		t.Fatal(err)
@@ -148,7 +148,7 @@ func TestAccountsDeduplicateActivateAndRemove(t *testing.T) {
 }
 
 func TestAccountsEnvironmentOverridesStoredAccounts(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	if _, err := StoreAccount(fsys, "/config", "file-key", "File", false); err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestAccountsRejectInvalidCredentialsWithoutChangingFile(t *testing.T) {
 		{"invalid label", "private-key", "Label\nprivate"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fsys := fsutil.NewMemFS()
+			fsys := newZaiTestFS()
 			original := []byte(`{"api_key":"existing-key"}`)
 			if err := fsys.WriteFile("/config/zai.json", original, 0o600); err != nil {
 				t.Fatal(err)
@@ -183,7 +183,7 @@ func TestAccountsRejectInvalidCredentialsWithoutChangingFile(t *testing.T) {
 }
 
 func TestAccountsMissingAndAmbiguousReferencesPreserveFile(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	for _, key := range []string{"one-key", "two-key"} {
 		if _, err := StoreAccount(fsys, "/config", key, "Shared", false); err != nil {
 			t.Fatal(err)
@@ -215,7 +215,7 @@ func TestAccountsRejectMalformedFilesWithoutOverwrite(t *testing.T) {
 		`{"accounts":[{"api_key":"private-key","id":"wrong"}]}`,
 		`{"api_key":"private-key",`,
 	} {
-		fsys := fsutil.NewMemFS()
+		fsys := newZaiTestFS()
 		if err := fsys.WriteFile("/config/zai.json", []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -233,7 +233,7 @@ func TestAccountsRejectMalformedFilesWithoutOverwrite(t *testing.T) {
 }
 
 func TestAccountsAtomicWriteFailurePreservesExisting(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	if err := fsys.WriteFile("/config/zai.json", []byte(`{"api_key":"old-key"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -57,7 +57,7 @@ func assertBackfillEdgeUnchanged(t *testing.T, fs *fsutil.MemFS, before map[stri
 func TestRefreshAccountsWrongSecretsAndLabelsDidNotProveOwnership(t *testing.T) {
 	for _, key := range []string{"key-id.wrong-secret", "different-prefix.secret"} {
 		t.Run(key, func(t *testing.T) {
-			fs := fsutil.NewMemFS()
+			fs := newZaiTestFS()
 			session := oauthAccountFixture("one", "initial")
 			session.BusinessJWT = "business-one"
 			session.Email = "same@example.com"
@@ -77,7 +77,7 @@ func TestRefreshAccountsWrongSecretsAndLabelsDidNotProveOwnership(t *testing.T) 
 }
 
 func TestRefreshAccountsIdenticalLabelsBoundOnlyProvedOwner(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	first := oauthAccountFixture("one", "first")
 	first.BusinessJWT = "business-one"
 	first.Email = "same@example.com"
@@ -121,7 +121,7 @@ func (backfillEdgeReadError) Close() error { return nil }
 func TestRefreshAccountsReadAndAuthFailuresPreservedOwnedState(t *testing.T) {
 	for _, failure := range []string{"transport", "read", "unauthorised"} {
 		t.Run(failure, func(t *testing.T) {
-			fs := fsutil.NewMemFS()
+			fs := newZaiTestFS()
 			session := oauthAccountFixture("one", "initial")
 			session.BusinessJWT = "business-one"
 			owner, err := StoreZCodeAccount(fs, "/config", session, "Owner", true)
@@ -150,7 +150,7 @@ func TestRefreshAccountsReadAndAuthFailuresPreservedOwnedState(t *testing.T) {
 }
 
 func TestRefreshAccountsCancelledBeforeDiscoveryMadeNoRequestsOrWrites(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	session := oauthAccountFixture("one", "initial")
 	session.BusinessJWT = "business-one"
 	if _, err := StoreZCodeAccount(fs, "/config", session, "Owner", true); err != nil {
@@ -169,7 +169,7 @@ func TestRefreshAccountsCancelledBeforeDiscoveryMadeNoRequestsOrWrites(t *testin
 }
 
 func TestRefreshAccountsExpiredBusinessRefreshedOnlyInMemory(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	session := oauthAccountFixture("one", "initial")
 	session.BusinessJWT = "business-old"
 	session.BusinessExpiresAt = 1
@@ -201,7 +201,7 @@ func TestRefreshAccountsExpiredBusinessRefreshedOnlyInMemory(t *testing.T) {
 }
 
 func TestRefreshAccountsPreservedPreferenceAndRouteChangedDuringProof(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	session := oauthAccountFixture("one", "initial")
 	session.BusinessJWT = "business-one"
 	owner, err := StoreZCodeAccount(fs, "/config", session, "Owner", true)
@@ -235,7 +235,7 @@ func TestRefreshAccountsPreservedPreferenceAndRouteChangedDuringProof(t *testing
 }
 
 func TestRefreshAccountsRemovedOwnerDuringProofWasNotResurrected(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	session := oauthAccountFixture("one", "initial")
 	session.BusinessJWT = "business-one"
 	owner, err := StoreZCodeAccount(fs, "/config", session, "Owner", true)
@@ -263,7 +263,7 @@ func TestRefreshAccountsRemovedOwnerDuringProofWasNotResurrected(t *testing.T) {
 }
 
 func TestRefreshAccountsLegacyDuplicateKeptEarliestLogicalPreferenceAndStoredKey(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	legacy, err := StoreAccount(fs, "/config", "key-id.secret", "Preferred legacy", true)
 	if err != nil {
 		t.Fatal(err)
@@ -320,7 +320,7 @@ func backfillEdgeStartWithProvedAlias(t *testing.T, fs *fsutil.MemFS, key string
 func TestRefreshAccountsSameOwnerStartDidNotReplacePreferredPaidPool(t *testing.T) {
 	for _, route := range []string{"", "zcode"} {
 		t.Run("paid_route_"+route, func(t *testing.T) {
-			fs := fsutil.NewMemFS()
+			fs := newZaiTestFS()
 			paid, err := StoreAccount(fs, "/config", "key-id.secret", "Preferred paid pool", true)
 			if err != nil {
 				t.Fatal(err)
@@ -355,7 +355,7 @@ func TestRefreshAccountsSameOwnerStartDidNotReplacePreferredPaidPool(t *testing.
 }
 
 func TestReadAccountsProvedEnvironmentKeyDidNotChooseStartPool(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	backfillEdgeStartWithProvedAlias(t, fs, "key-id.secret")
 	path := backfillEdgeSource(t, fs, "key-id.secret")
 	before := backfillEdgeBytes(t, fs, path, "/config/zai.json", "/config/zcode-accounts.json", "/config/zcode-accounts.key")
@@ -372,7 +372,7 @@ func TestReadAccountsProvedEnvironmentKeyDidNotChooseStartPool(t *testing.T) {
 }
 
 func TestStoreAccountProvedKeyAddedPaidPoolInsteadOfReturningStart(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	start := backfillEdgeStartWithProvedAlias(t, fs, "key-id.secret")
 	path := backfillEdgeSource(t, fs, "key-id.secret")
 	before := backfillEdgeBytes(t, fs, path, "/config/zcode-accounts.json", "/config/zcode-accounts.key")
@@ -390,7 +390,7 @@ func TestStoreAccountProvedKeyAddedPaidPoolInsteadOfReturningStart(t *testing.T)
 func TestStoreVerifiedZCodeAccountRenewedStartWithoutRemovingPaidPool(t *testing.T) {
 	for _, route := range []string{"", "zcode"} {
 		t.Run("paid_route_"+route, func(t *testing.T) {
-			fs := fsutil.NewMemFS()
+			fs := newZaiTestFS()
 			paid, err := StoreAccount(fs, "/config", "key-id.secret", "Preferred paid", true)
 			if err != nil {
 				t.Fatal(err)

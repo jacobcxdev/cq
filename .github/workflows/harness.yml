@@ -58,3 +58,43 @@ jobs:
           echo "CQ_HARNESS_EXECUTABLE=$client" >> "$GITHUB_ENV"
       - name: Qualify isolated native harness contracts
         run: bash .github/scripts/validate-harness-installed.sh "$CQ_HARNESS_EXECUTABLE"
+
+  windows-harness:
+    name: Native harness (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version-file: go.mod
+      - name: Fetch the official Windows Codex CLI baseline
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'cq-pinned-codex'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          $asset = 'codex-x86_64-pc-windows-msvc.exe.tar.gz'
+          $archive = Join-Path $root $asset
+          curl.exe --fail --location --retry 3 --max-time 180 --output $archive "https://github.com/openai/codex/releases/download/rust-v0.171.0-alpha.13/$asset"
+          if ($LASTEXITCODE -ne 0) { throw 'Codex download failed' }
+          if ((Get-FileHash -LiteralPath $archive).Hash -ne 'D5A5AB944B401727ABA2983363F45E00702D0437A4CBF9036C7907E3A79CB1B9') { throw 'Codex archive digest differs' }
+          tar.exe -xf $archive -C $root
+          if ($LASTEXITCODE -ne 0) { throw 'Codex unpack failed' }
+          $cli = Join-Path $root 'codex-x86_64-pc-windows-msvc.exe'
+          $version = & $cli --version
+          if ($LASTEXITCODE -ne 0 -or $version -ne 'codex-cli 0.171.0-alpha.13') { throw 'Codex CLI version differs' }
+          "CQ_TEST_NATIVE_INVENTORY_CLI=$cli" >> $env:GITHUB_ENV
+          "CQ_HARNESS_WINDOWS_CODEX=$cli" >> $env:GITHUB_ENV
+      - name: Qualify isolated native harness contracts
+        env:
+          CQ_HARNESS_WINDOWS_NATIVE_ACCEPTANCE: '1'
+        run: |
+          go test -race -count=1 ./internal/harness -run '^(TestNativeAppManagedConfigWarningRequiresOnlyKnownField|TestNativeInventoryWindows.*|TestNativePluginInventoryWindowsAppManagedConfig|TestWindowsPortableWorkspace.*)$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -race -count=1 ./internal/dots -run '^TestHarnessWindowsNativeProfileContract$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -race -count=1 ./cmd/cq -run '^TestHarnessSkillInstallUnderWindowsCodexHome$'

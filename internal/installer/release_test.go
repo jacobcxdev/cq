@@ -97,7 +97,7 @@ func TestReleaseDownloadVerifiesAndExtractsArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	staged, err := release.Download(context.Background(), t.TempDir())
+	staged, err := release.Download(context.Background(), secureInstallerTestRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestReleaseDownloadRejectsHTTPFailuresAndOversizedBodies(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := release.Download(context.Background(), t.TempDir()); err == nil {
+			if _, err := release.Download(context.Background(), secureInstallerTestRoot(t)); err == nil {
 				t.Fatal("Download succeeded")
 			}
 		})
@@ -158,7 +158,7 @@ func TestReleaseDownloadRejectsChecksumMismatchAndMalformedManifest(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := release.Download(context.Background(), t.TempDir()); err == nil {
+		if _, err := release.Download(context.Background(), secureInstallerTestRoot(t)); err == nil {
 			t.Fatalf("Download accepted checksums %q", checksums)
 		}
 	}

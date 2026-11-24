@@ -24,7 +24,7 @@ func OpenSessionStore(fsys fsutil.FileSystem, configDir string, create bool) (Se
 		}
 	}
 	if create {
-		if err := fsys.MkdirAll(configDir, 0o700); err != nil {
+		if err := fsutil.EnsureSecureDirectory(fsys, configDir); err != nil {
 			return SessionStore{}, errors.New("create ZCode account directory")
 		}
 		lock, err := fsutil.AcquireExclusiveLock(fsys, filepath.Join(configDir, "zcode-accounts-key.lock"))

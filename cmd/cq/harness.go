@@ -22,8 +22,8 @@ import (
 type CodexHarnessCmd struct {
 	Inventory CodexHarnessInventoryCmd `cmd:"" help:"List installed capabilities by stable ID"`
 	Profile   CodexHarnessProfilesCmd  `cmd:"" help:"List, inspect and save reusable harness profiles"`
-	Bind      CodexHarnessBindCmd      `cmd:"" help:"Bind profiles and apply them to a known chat"`
-	Unbind    CodexHarnessUnbindCmd    `cmd:"" help:"Remove a binding and restore inherited decisions"`
+	Bind      CodexHarnessBindCmd      `cmd:"" help:"Bind profiles and request application where supported"`
+	Unbind    CodexHarnessUnbindCmd    `cmd:"" help:"Remove a binding and request restoration where supported"`
 	Explain   CodexHarnessExplainCmd   `cmd:"" help:"Explain effective decisions, layers and last application"`
 	Retry     CodexHarnessExplainCmd   `cmd:"" help:"Request one idle-boundary retry of a matching failed full-mode application"`
 	Export    CodexHarnessExportCmd    `cmd:"" help:"Export a portable named profile as JSON"`
@@ -48,7 +48,7 @@ type CodexHarnessStatusCmd struct {
 	Chat    string `help:"Chat UUID or codex://threads/ link for preview"`
 }
 
-const harnessApplicationNote = "CQ automatically detects profile support. With the CQ launcher, profiles control plugins, standalone MCP servers and local skills. With a standard ChatGPT launch, profiles control plugins only; standalone MCP servers and local skills stay unchanged. For standard launches, legacy GLM policy applies at the next eligible turn after CQ observes a GLM request; other model bindings apply after CQ observes that model's request. First-turn application is not guaranteed for standard launches."
+const harnessApplicationNote = "CQ automatically detects profile support. With the CQ launcher on macOS, profiles control plugins, standalone MCP servers and local skills. With a standard ChatGPT launch on macOS, profiles control plugins only; standalone MCP servers and local skills stay unchanged. For standard launches on macOS, legacy GLM policy applies at the next eligible turn after CQ observes a GLM request; other model bindings apply after CQ observes that model's request. First-turn application is not guaranteed for standard launches on macOS. This CQ version cannot apply profiles to a standard Windows ChatGPT launch; saving a binding does not change that Desktop's capabilities."
 
 func (CodexHarnessCmd) Help() string       { return harnessApplicationNote }
 func (CodexHarnessStatusCmd) Help() string { return harnessApplicationNote }

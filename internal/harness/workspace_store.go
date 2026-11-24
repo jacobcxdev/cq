@@ -87,7 +87,15 @@ func UpdateWorkspace(fsys fsutil.FileSystem, path string, update func(*Workspace
 		if err := validateWorkspaceLocation(fsys, filepath.Dir(dir)); err != nil {
 			return WorkspacePolicy{}, err
 		}
-		if err := fsutil.EnsureSecureDirectory(fsys, dir); err != nil {
+		creationFS := fsys
+		if osFS, ok := fsys.(fsutil.OSFileSystem); ok {
+			privateFS, err := osFS.WithPrivateDestination(dir)
+			if err != nil {
+				return WorkspacePolicy{}, err
+			}
+			creationFS = privateFS
+		}
+		if err := fsutil.EnsureSecureDirectory(creationFS, dir); err != nil {
 			return WorkspacePolicy{}, err
 		}
 	} else if err != nil {
@@ -114,12 +122,21 @@ func UpdateWorkspace(fsys fsutil.FileSystem, path string, update func(*Workspace
 	if info.Mode().Perm() != 0o600 {
 		return WorkspacePolicy{}, fsutil.ErrUnsafeSecurePath
 	}
-	_, namedIdentity, err := readWorkspaceFile(inspector, directory, name+".lock")
+	named, err := directory.OpenNoFollow(name + ".lock")
 	if err != nil {
 		return WorkspacePolicy{}, err
 	}
-	heldIdentity, ok := inspector.FileIdentity(info)
-	if !ok || !fsutil.SameSecureObject(heldIdentity, namedIdentity) {
+	namedInfo, statErr := named.Stat()
+	closeErr := named.Close()
+	if err := errors.Join(statErr, closeErr); err != nil {
+		return WorkspacePolicy{}, err
+	}
+	if err := fsutil.ValidateRetainedExternalImportFile(inspector, namedInfo); err != nil {
+		return WorkspacePolicy{}, err
+	}
+	namedIdentity, namedOK := inspector.FileIdentity(namedInfo)
+	heldIdentity, heldOK := inspector.FileIdentity(info)
+	if !namedOK || !heldOK || !fsutil.SameSecureObject(heldIdentity, namedIdentity) {
 		return WorkspacePolicy{}, fsutil.ErrUnsafeSecurePath
 	}
 	before, previous, readErr := readWorkspaceFile(inspector, directory, name)

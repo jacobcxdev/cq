@@ -251,6 +251,10 @@ func TestPluginCLIHelperProcess(t *testing.T) {
 	if scenario == "" {
 		return
 	}
+	if slices.Equal(os.Args[len(os.Args)-3:], []string{"app-server", "--print-startup-config", "--strict-config"}) {
+		_, _ = io.WriteString(os.Stdout, "{}\n")
+		return
+	}
 	if scenario == "hold-stdout" {
 		time.Sleep(3 * time.Second)
 		os.Exit(0)

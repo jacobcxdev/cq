@@ -56,7 +56,7 @@ func TestCodexHarnessHelpUsesPureInspection(t *testing.T) {
 		}
 		if operation == "" || operation == "status" {
 			rendered := strings.Join(strings.Fields(output.String()), " ")
-			for _, detail := range []string{"automatically", "CQ launcher", "standard ChatGPT launch", "standalone MCP", "local skills", "For standard launches", "not guaranteed", "observes a GLM request"} {
+			for _, detail := range []string{"automatically", "CQ launcher", "standard ChatGPT launch", "standalone MCP", "local skills", "For standard launches", "not guaranteed", "observes a GLM request", "standard Windows ChatGPT launch"} {
 				if !strings.Contains(rendered, detail) {
 					t.Fatalf("help %v omitted %q: %s", args, detail, &output)
 				}

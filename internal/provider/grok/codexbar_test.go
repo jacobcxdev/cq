@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -26,12 +28,22 @@ type codexBarDoer func(*http.Request) (*http.Response, error)
 
 func (f codexBarDoer) Do(r *http.Request) (*http.Response, error) { return f(r) }
 
+func codexBarFixture() (*fsutil.MemFS, string, string) {
+	home := "/home"
+	if runtime.GOOS == "windows" {
+		home = `C:\home`
+	}
+	fs := fsutil.NewMemFSWithHome(home)
+	path := filepath.Join(home, ".codexbar", "config.json")
+	_ = fs.MkdirAll(filepath.Dir(path), 0o700)
+	return fs, home, path
+}
+
 func TestBrokenCodexBarPreservesOwnedGrokAvailability(t *testing.T) {
-	fs := fsutil.NewMemFS()
-	_ = fs.MkdirAll("/home/.codexbar", 0o700)
-	_ = fs.WriteFile("/home/.codexbar/config.json", []byte(`{broken`), 0o600)
+	fs, home, path := codexBarFixture()
+	_ = fs.WriteFile(path, []byte(`{broken`), 0o600)
 	owned := Account{ID: "owned", UserID: "user", Active: true}
-	a := WithCodexBar(codexBarOwned{accounts: []Account{owned}}, fs, func(string) string { return "" }, "/home", nil)
+	a := WithCodexBar(codexBarOwned{accounts: []Account{owned}}, fs, func(string) string { return "" }, home, nil)
 	accounts, err := a.Accounts(context.Background())
 	if err != nil || len(accounts) != 1 || accounts[0] != owned {
 		t.Fatalf("unverified source counted or healthy account lost: %d accounts, %v", len(accounts), err)
@@ -39,17 +51,16 @@ func TestBrokenCodexBarPreservesOwnedGrokAvailability(t *testing.T) {
 }
 
 func TestCodexBarDiscoveryVerifiesIdentityAndNeverAdopts(t *testing.T) {
-	fs := fsutil.NewMemFS()
-	_ = fs.MkdirAll("/home/.codexbar", 0o700)
+	fs, home, path := codexBarFixture()
 	data := []byte(`{"version":1,"providers":[{"id":"grok","tokenAccounts":{"version":1,"activeIndex":0,"accounts":[{"id":"external","label":"Borrowed","token":"Bearer borrowed-token"}]}}]}`)
-	_ = fs.WriteFile("/home/.codexbar/config.json", data, 0o600)
+	_ = fs.WriteFile(path, data, 0o600)
 	client := codexBarDoer(func(r *http.Request) (*http.Response, error) {
 		if r.URL.String() != BaseURL+"/user?include=subscription" || r.Header.Get("Authorization") != "Bearer borrowed-token" {
 			t.Fatal("wrong identity request")
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"userId":"user-one","email":"one@example.test","subscriptionTier":"SuperGrok"}`))}, nil
 	})
-	a := WithCodexBar(codexBarOwned{}, fs, func(string) string { return "" }, "/home", client)
+	a := WithCodexBar(codexBarOwned{}, fs, func(string) string { return "" }, home, client)
 	accounts, err := a.Accounts(context.Background())
 	if err != nil || len(accounts) != 1 || accounts[0].UserID != "user-one" || accounts[0].Source != "codexbar" || accounts[0].ReportingOnly {
 		t.Fatalf("count=%d err=%v", len(accounts), err)
@@ -58,28 +69,27 @@ func TestCodexBarDiscoveryVerifiesIdentityAndNeverAdopts(t *testing.T) {
 	owned.ID = "legacy-owned-id"
 	owned.Source = ""
 	owned.Active = true
-	a = WithCodexBar(codexBarOwned{accounts: []Account{owned}}, fs, func(string) string { return "" }, "/home", client)
+	a = WithCodexBar(codexBarOwned{accounts: []Account{owned}}, fs, func(string) string { return "" }, home, client)
 	accounts, err = a.Accounts(context.Background())
 	if err != nil || len(accounts) != 1 || accounts[0] != owned {
 		t.Fatal("verified duplicate not suppressed")
 	}
-	after, _ := fs.ReadFile("/home/.codexbar/config.json")
+	after, _ := fs.ReadFile(path)
 	if string(after) != string(data) {
 		t.Fatal("borrowed file mutated")
 	}
 }
 
 func TestCodexBarCookieAndUnverifiedAccountsCannotDispatch(t *testing.T) {
-	fs := fsutil.NewMemFS()
-	_ = fs.MkdirAll("/home/.codexbar", 0o700)
-	_ = fs.WriteFile("/home/.codexbar/config.json", []byte(`{"version":1,"providers":[{"id":"grok","tokenAccounts":{"version":1,"activeIndex":0,"accounts":[{"id":"cookie","token":"sso=private"},{"id":"key","token":"xai-private"},{"id":"expired","token":"expired-token"}]}}]}`), 0o600)
+	fs, home, path := codexBarFixture()
+	_ = fs.WriteFile(path, []byte(`{"version":1,"providers":[{"id":"grok","tokenAccounts":{"version":1,"activeIndex":0,"accounts":[{"id":"cookie","token":"sso=private"},{"id":"key","token":"xai-private"},{"id":"expired","token":"expired-token"}]}}]}`), 0o600)
 	client := codexBarDoer(func(r *http.Request) (*http.Response, error) {
 		if r.Header.Get("Cookie") != "" || r.URL.String() != BaseURL+"/user?include=subscription" {
 			t.Fatal("unverified credential reached a non-identity endpoint")
 		}
 		return &http.Response{StatusCode: 401, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 	})
-	a := WithCodexBar(codexBarOwned{}, fs, func(string) string { return "" }, "/home", client)
+	a := WithCodexBar(codexBarOwned{}, fs, func(string) string { return "" }, home, client)
 	accounts, err := a.Accounts(context.Background())
 	if err != nil || len(accounts) != 0 {
 		t.Fatalf("count=%d err=%v", len(accounts), err)
@@ -113,9 +123,7 @@ func TestCodexBarGrokDeduplicatesVerifiedIdentityWithoutMergingSeats(t *testing.
 		{"different team", "user-one", "Team", "seat-one", "team-two", 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			fs := fsutil.NewMemFS()
-			_ = fs.MkdirAll("/home/.codexbar", 0o700)
-			path := "/home/.codexbar/config.json"
+			fs, home, path := codexBarFixture()
 			data := []byte(`{"version":1,"providers":[{"id":"grok","tokenAccounts":{"version":1,"activeIndex":0,"accounts":[{"id":"external","label":"same-label","token":"borrowed-token"}]}}]}`)
 			_ = fs.WriteFile(path, data, 0o600)
 			owned := []Account{{ID: "legacy-owned-id", UserID: "user-one", PrincipalType: "Team", PrincipalID: "seat-one", TeamID: "team-one", Email: "same@example.test", Label: "same-label", Plan: "SuperGrok", Active: true}}
@@ -124,7 +132,7 @@ func TestCodexBarGrokDeduplicatesVerifiedIdentityWithoutMergingSeats(t *testing.
 				body := `{"userId":"` + test.user + `","principalType":"` + test.principalType + `","principalId":"` + test.principal + `","teamId":"` + test.team + `","email":"same@example.test","subscriptionTier":"SuperGrok"}`
 				return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body))}, nil
 			})
-			a := WithCodexBar(codexBarOwned{accounts: owned}, fs, func(string) string { return "" }, "/home", client)
+			a := WithCodexBar(codexBarOwned{accounts: owned}, fs, func(string) string { return "" }, home, client)
 			accounts, err := a.Accounts(context.Background())
 			if err != nil || len(accounts) != test.want || accounts[0] != before[0] || !reflect.DeepEqual(owned, before) {
 				t.Fatalf("identity/seat distinction or owned preference lost: count=%d err=%v", len(accounts), err)
@@ -143,13 +151,12 @@ func TestCodexBarGrokDeduplicatesVerifiedIdentityWithoutMergingSeats(t *testing.
 func TestCodexBarGrokUnverifiedSourcesStaySilent(t *testing.T) {
 	for _, scenario := range []string{"source read", "unknown identity", "auth expired", "profile read", "no subscription"} {
 		t.Run(scenario, func(t *testing.T) {
-			fs := fsutil.NewMemFS()
-			_ = fs.MkdirAll("/home/.codexbar", 0o700)
+			fs, home, path := codexBarFixture()
 			data := []byte(`{"version":1,"providers":[{"id":"grok","tokenAccounts":{"version":1,"activeIndex":0,"accounts":[{"id":"external","label":"private-label","token":"private-token"}]}}]}`)
 			if scenario == "source read" {
 				data = []byte(`{private-source-error`)
 			}
-			_ = fs.WriteFile("/home/.codexbar/config.json", data, 0o600)
+			_ = fs.WriteFile(path, data, 0o600)
 			client := codexBarDoer(func(*http.Request) (*http.Response, error) {
 				status, body := 200, `{"subscriptionTier":"SuperGrok"}`
 				switch scenario {
@@ -162,7 +169,7 @@ func TestCodexBarGrokUnverifiedSourcesStaySilent(t *testing.T) {
 				}
 				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
 			})
-			a := WithCodexBar(codexBarOwned{}, fs, func(string) string { return "" }, "/home", client)
+			a := WithCodexBar(codexBarOwned{}, fs, func(string) string { return "" }, home, client)
 			capture, err := os.CreateTemp(t.TempDir(), "diagnostic")
 			if err != nil {
 				t.Fatal(err)
@@ -190,9 +197,7 @@ func TestCodexBarGrokUnverifiedSourcesStaySilent(t *testing.T) {
 }
 
 func TestCodexBarDispatchPreservesBodyAndRereadsIdentity(t *testing.T) {
-	fs := fsutil.NewMemFS()
-	_ = fs.MkdirAll("/home/.codexbar", 0o700)
-	path := "/home/.codexbar/config.json"
+	fs, home, path := codexBarFixture()
 	_ = fs.WriteFile(path, []byte(`{"version":1,"providers":[{"id":"grok","tokenAccounts":{"version":1,"activeIndex":0,"accounts":[{"id":"one","token":"borrowed-token"}]}}]}`), 0o600)
 	user := "user-one"
 	dispatches := 0
@@ -207,7 +212,7 @@ func TestCodexBarDispatchPreservesBodyAndRereadsIdentity(t *testing.T) {
 		}
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{}`))}, nil
 	})
-	a := WithCodexBar(codexBarOwned{}, fs, func(string) string { return "" }, "/home", client)
+	a := WithCodexBar(codexBarOwned{}, fs, func(string) string { return "" }, home, client)
 	accounts, err := a.Accounts(context.Background())
 	if err != nil || len(accounts) != 1 {
 		t.Fatal(err)
