@@ -131,7 +131,10 @@ func cloudStock(ctx context.Context, path string, arguments, environment []strin
 	if handled, err := cloudStockExec(path, arguments, environment, stdin, stdout, stderr); handled {
 		return err
 	}
-	command := exec.CommandContext(ctx, path, arguments...)
+	return runCloudStockCommand(exec.CommandContext(ctx, path, arguments...), environment, stdin, stdout, stderr)
+}
+
+func runCloudStockCommand(command *exec.Cmd, environment []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	command.Env, command.Stdin, command.Stdout, command.Stderr = environment, stdin, stdout, stderr
 	if err := command.Run(); err != nil {
 		var exited *exec.ExitError

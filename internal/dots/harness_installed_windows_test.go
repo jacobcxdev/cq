@@ -134,6 +134,28 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 	} {
 		command.Env = append(command.Env, key+"="+value)
 	}
+	t.Run("startup-config", func(t *testing.T) {
+		for _, signOut := range []bool{false, true} {
+			args := []string{"-c", "features.code_mode_host=true", "app-server", "--analytics-default-enabled",
+				"--print-startup-config", "--startup-client-info", `{"name":"codex_desktop","title":"Codex Desktop","version":"0.0.0"}`}
+			if signOut {
+				args = append(args, "--startup-sign-out")
+			}
+			var output bytes.Buffer
+			if err := RunWindowsHarnessStdio(ctx, executable, args, command.Env, bytes.NewReader(nil), &output, io.Discard); err != nil {
+				t.Fatalf("Windows Desktop startup config (signed out = %t): %v", signOut, err)
+			}
+			var probe struct {
+				AppServerVersion   string `json:"appServerVersion"`
+				ConfigRequirements struct {
+					Requirements json.RawMessage `json:"requirements"`
+				} `json:"configRequirements"`
+			}
+			if json.Unmarshal(output.Bytes(), &probe) != nil || probe.AppServerVersion == "" || probe.ConfigRequirements.Requirements == nil {
+				t.Fatalf("Windows Desktop startup probe lost its JSON after stdin closed (signed out = %t)", signOut)
+			}
+		}
+	})
 	t.Run("cq-bridge", func(t *testing.T) {
 		bridgeCtx, bridgeCancel := context.WithTimeout(t.Context(), 90*time.Second)
 		defer bridgeCancel()
