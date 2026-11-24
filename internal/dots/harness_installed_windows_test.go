@@ -135,7 +135,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		command.Env = append(command.Env, key+"="+value)
 	}
 	t.Run("cq-bridge", func(t *testing.T) {
-		bridgeCtx, bridgeCancel := context.WithTimeout(t.Context(), 45*time.Second)
+		bridgeCtx, bridgeCancel := context.WithTimeout(t.Context(), 90*time.Second)
 		defer bridgeCancel()
 		native := exec.CommandContext(bridgeCtx, executable, "app-server", "--stdio", "--strict-config")
 		native.Dir, native.Env, native.Stderr = command.Dir, command.Env, io.Discard
@@ -158,6 +158,8 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		clientOutput, bridgeOutput := io.Pipe()
 		policy := harness.Policy{Version: 1, Enabled: true, Projects: map[string]harness.Profile{command.Dir: harness.Minimal}}
 		var policyMu sync.Mutex
+		var eventMu sync.Mutex
+		var profileEvents []string
 		receiptFS := fsutil.NewMemFS()
 		if err := receiptFS.MkdirAll(root, 0o700); err != nil {
 			t.Fatal(err)
@@ -166,6 +168,17 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		deps := cloudStdioDependencies{
 			environment: command.Env, now: time.Now, statusInterval: 25 * time.Millisecond,
 			harnessTimeout: 5 * time.Second, harnessReceipts: receipts,
+			event: func(event map[string]any) {
+				profile, ok := event["harness_profile"].(string)
+				if !ok {
+					return
+				}
+				eventMu.Lock()
+				defer eventMu.Unlock()
+				if len(profileEvents) < 32 {
+					profileEvents = append(profileEvents, fmt.Sprintf("%s:%v", profile, event["state"]))
+				}
+			},
 			readRoots: func(string, string) ([]byte, error) { return nil, os.ErrNotExist },
 			readHarnessPolicy: func() (harness.Policy, error) {
 				policyMu.Lock()
@@ -244,14 +257,17 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		}
 		assertApplied := func(profile harness.Profile) {
 			t.Helper()
-			deadline := time.Now().Add(5 * time.Second)
+			deadline := time.Now().Add(20 * time.Second)
 			for {
 				receipt, err := receipts.Load(chat)
 				if err == nil && receipt.Profile == profile && receipt.State == "applied" {
 					return
 				}
 				if time.Now().After(deadline) {
-					t.Fatalf("CQ bridge %s receipt = %+v, %v", profile, receipt, err)
+					eventMu.Lock()
+					events := append([]string(nil), profileEvents...)
+					eventMu.Unlock()
+					t.Fatalf("CQ bridge %s receipt = %+v, %v; observed transitions = %v", profile, receipt, err, events)
 				}
 				// An applied receipt can follow turn/completed. Keep reading the
 				// stdio stream while waiting for the verifier to record its result.

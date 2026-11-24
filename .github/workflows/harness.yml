@@ -250,7 +250,9 @@ jobs:
           $registeredProcesses = @(& $owned | Where-Object { $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) })
           if ($registeredProcesses.Count -ne 0) {
             $names = ($registeredProcesses | ForEach-Object { [IO.Path]::GetFileName($_.ExecutablePath) } | Sort-Object -Unique) -join ', '
-            "Registration started $($registeredProcesses.Count) package process(es) in session $session ($names); stopping those PIDs before launch." >> $env:GITHUB_STEP_SUMMARY
+            $registrationOutcome = "Registration started $($registeredProcesses.Count) package process(es) in session $session ($names); stopping those PIDs before launch."
+            Write-Output $registrationOutcome
+            $registrationOutcome >> $env:GITHUB_STEP_SUMMARY
           }
           for ($attempt = 0; $attempt -lt 20 -and $registeredProcesses.Count -ne 0; $attempt++) {
             foreach ($process in $registeredProcesses) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
@@ -262,16 +264,34 @@ jobs:
           $env:CODEX_ELECTRON_USER_DATA_PATH = Join-Path $root 'electron-user-data'
           $env:CODEX_APP_RUNTIME_CLI_PATH = $adapter
           $env:CQ_DESKTOP_WITNESS = $witness
-          $env:HTTP_PROXY = 'http://127.0.0.1:9'
-          $env:HTTPS_PROXY = 'http://127.0.0.1:9'
-          $env:ALL_PROXY = 'http://127.0.0.1:9'
+          $env:HTTP_PROXY = $null
+          $env:HTTPS_PROXY = $null
+          $env:ALL_PROXY = $null
           New-Item -ItemType Directory -Path $env:CODEX_HOME, $env:CODEX_ELECTRON_USER_DATA_PATH -ErrorAction Stop | Out-Null
           $launched = $null
+          $stockCodex = [Collections.Generic.HashSet[int]]::new()
+          $stockAppServer = [Collections.Generic.HashSet[int]]::new()
+          $scanStock = {
+            Get-CimInstance Win32_Process | Where-Object {
+              $_.SessionId -eq $session -and $_.ExecutablePath -and
+              $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase)
+            } | ForEach-Object {
+              if ([IO.Path]::GetFileName($_.ExecutablePath) -eq 'codex.exe') {
+                [void]$stockCodex.Add([int]$_.ProcessId)
+              }
+              if ($_.CommandLine -match '(^|\s)app-server(\s|$)') {
+                [void]$stockAppServer.Add([int]$_.ProcessId)
+              }
+            }
+          }
           try {
             $launched = Start-Process -FilePath $desktop -PassThru -WindowStyle Hidden -ErrorAction Stop
-            for ($attempt = 0; $attempt -lt 60 -and -not (Test-Path -LiteralPath "$witness.app-server"); $attempt++) {
+            $deadline = [DateTime]::UtcNow.AddSeconds(30)
+            while ([DateTime]::UtcNow -lt $deadline -and -not (Test-Path -LiteralPath "$witness.app-server")) {
+              & $scanStock
               Start-Sleep -Milliseconds 500
             }
+            & $scanStock
             if (-not (Test-Path -LiteralPath "$witness.app-server")) {
               if (Test-Path -LiteralPath "$witness.version") {
                 'Desktop selected the isolated CLI adapter for --version only.' >> $env:GITHUB_STEP_SUMMARY
@@ -288,7 +308,9 @@ jobs:
             }
             $versionWitness = Test-Path -LiteralPath "$witness.version"
             $appServerWitness = Test-Path -LiteralPath "$witness.app-server"
-            "Desktop startup: PID=$launchPID; exit=$exitCode; version=$versionWitness; app-server=$appServerWitness." >> $env:GITHUB_STEP_SUMMARY
+            $outcome = "Desktop startup: PID=$launchPID; exit=$exitCode; version=$versionWitness; app-server=$appServerWitness; stock-codex=$($stockCodex.Count); stock-app-server=$($stockAppServer.Count)."
+            Write-Output $outcome
+            $outcome >> $env:GITHUB_STEP_SUMMARY
             if ($null -ne $launched -and -not $launched.HasExited) {
               Stop-Process -Id $launched.Id -Force -ErrorAction SilentlyContinue
             }
