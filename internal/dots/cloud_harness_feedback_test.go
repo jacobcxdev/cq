@@ -3,6 +3,7 @@ package dots
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -125,6 +126,60 @@ func TestCloudHarnessSourceFeedbackRetriedLegacyRuntime(t *testing.T) {
 	_ = h.reconcile("chat", "", "")
 	if *writes == 0 {
 		t.Fatal("legacy minimal fast path prevented a retained-runtime retry")
+	}
+}
+
+func TestCloudHarnessLegacyFullReloadsChangedWorkspaceOnce(t *testing.T) {
+	h, store, id, _ := cloudHarnessFailureFixture(t)
+	root := t.TempDir()
+	store.Dir = filepath.Join(root, "receipts")
+	if err := store.FS.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.b.deps.harnessReceipts = store
+	h.b.deps.readHarnessPolicy = func() (harness.Policy, error) {
+		return harness.Policy{Version: 1, Enabled: true, Chats: map[string]harness.Profile{id: harness.Full}}, nil
+	}
+	thread := h.threads[id]
+	thread.cwd = filepath.Join(root, "current")
+	thread.fullConfigCwd = filepath.Join(root, "previous")
+	thread.fullConfig = cloudMessage{"features.plugins": cloudHarnessRaw(true)}
+	thread.minimal = true
+	var resumes []cloudMessage
+	base := h.b.local.input
+	h.b.local.input = cloudTestWriter{write: func(raw []byte) (int, error) {
+		request := cloudHarnessObject(raw)
+		var result any
+		switch request.method() {
+		case "config/read":
+			result = map[string]any{"config": map[string]any{"features": map[string]bool{"plugins": false}}, "layers": []any{}}
+		case "thread/resume":
+			resumes = append(resumes, cloudHarnessObject(request["params"]))
+		case "experimentalFeature/list":
+			result = map[string]any{"data": []any{
+				map[string]any{"name": "plugins", "enabled": false},
+				map[string]any{"name": "apps", "enabled": len(resumes) > 0},
+			}, "nextCursor": nil}
+		}
+		if result != nil {
+			h.calls[string(request["id"])] <- cloudMessage{"result": cloudHarnessRaw(result)}
+			return len(raw), nil
+		}
+		return base.Write(raw)
+	}}
+	for range 2 {
+		if err := h.reconcile(id, "", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(resumes) != 1 {
+		t.Fatalf("legacy Full reloaded %d times after the workspace changed", len(resumes))
+	}
+	if cloudHarnessBool(cloudHarnessObject(resumes[0]["config"]), "features.plugins", true) {
+		t.Fatal("legacy Full reused the previous workspace's enabled plugins")
+	}
+	if receipt, err := store.Load(id); err != nil || receipt.State != "applied" || receipt.Cwd != thread.cwd {
+		t.Fatalf("legacy Full left receipt %#v, %v", receipt, err)
 	}
 }
 
