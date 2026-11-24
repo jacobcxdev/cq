@@ -3,6 +3,11 @@ name: Harness compatibility
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      desktop_preflight:
+        description: Probe the official Windows Desktop package on an isolated runner
+        type: boolean
+        default: false
   schedule:
     - cron: '17 6 * * 1'
 
@@ -12,6 +17,7 @@ permissions:
 jobs:
   native-harness:
     name: Native harness (${{ matrix.client }})
+    if: github.event_name != 'workflow_dispatch' || !inputs.desktop_preflight
     runs-on: macos-15
     timeout-minutes: 20
     strategy:
@@ -61,6 +67,7 @@ jobs:
 
   windows-harness:
     name: Native harness (Windows x64)
+    if: github.event_name != 'workflow_dispatch' || !inputs.desktop_preflight
     runs-on: windows-latest
     timeout-minutes: 15
     defaults:
@@ -98,3 +105,93 @@ jobs:
           go test -race -count=1 ./internal/dots -run '^TestHarnessWindowsNativeProfileContract$'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test -race -count=1 ./cmd/cq -run '^TestHarnessSkillInstallUnderWindowsCodexHome$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  windows-desktop-preflight:
+    name: Official Desktop preflight (Windows Arm64)
+    if: github.event_name == 'workflow_dispatch' && inputs.desktop_preflight
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check interactive session and clean state
+        id: preflight
+        run: |
+          $session = (Get-Process -Id $PID).SessionId
+          $desktopShell = @(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $session)
+          if ($session -eq 0 -or -not [Environment]::UserInteractive -or $desktopShell.Count -eq 0) {
+            'interactive=false' >> $env:GITHUB_OUTPUT
+            'Desktop preflight skipped: the runner has no interactive user session.' >> $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          if (Get-AppxPackage -Name OpenAI.Codex) { throw 'OpenAI.Codex is already installed for the runner user' }
+          if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.codex')) { throw 'Runner user has existing Codex home state' }
+          $packageState = Join-Path $env:LOCALAPPDATA 'Packages'
+          if (Test-Path -LiteralPath $packageState) {
+            if (Get-ChildItem -LiteralPath $packageState -Directory -Filter 'OpenAI.Codex_*' -ErrorAction Stop) {
+              throw 'Runner user has existing Desktop package state'
+            }
+          }
+          foreach ($root in @($env:SystemDrive, [IO.Path]::GetPathRoot($env:RUNNER_TEMP)) | Sort-Object -Unique) {
+            $volume = Get-Volume -DriveLetter $root[0] -ErrorAction Stop
+            if ($volume.SizeRemaining -lt 7GB) { throw "Insufficient free space on $root for Desktop package preflight" }
+          }
+          'interactive=true' >> $env:GITHUB_OUTPUT
+      - name: Verify and register official Desktop package
+        if: steps.preflight.outputs.interactive == 'true'
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'cq-desktop-preflight'
+          New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+          $packagePath = Join-Path $root 'ChatGPT-arm64.msix'
+          $packageURL = 'https://persistent.oaistatic.com/codex-app-prod/ChatGPT-arm64.msix'
+          $metadata = Invoke-RestMethod -Uri 'https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json' -ErrorAction Stop
+          if ($metadata.schemaVersion -ne 1 -or $metadata.packageIdentity -ne 'OpenAI.Codex' -or $metadata.storeProductId -ne '9PLM9XGG6VKS') {
+            throw 'Official Desktop update metadata has an unexpected identity'
+          }
+          $head = Invoke-WebRequest -Uri $packageURL -Method Head -ErrorAction Stop
+          $length = [long]$head.Headers['Content-Length'][0]
+          if ($length -le 0 -or $length -gt 2GB) { throw 'Official Desktop package exceeds the preflight download limit' }
+          curl.exe --fail --location --retry 2 --max-time 600 --output $packagePath $packageURL
+          if ($LASTEXITCODE -ne 0) { throw 'Official Desktop package download failed' }
+          if ((Get-Item -LiteralPath $packagePath).Length -ne $length) { throw 'Official Desktop package length changed during download' }
+          $digest = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash
+          $archive = [IO.Compression.ZipFile]::OpenRead($packagePath)
+          try {
+            $entry = $archive.GetEntry('AppxManifest.xml')
+            if ($null -eq $entry) { throw 'Desktop package has no AppxManifest.xml' }
+            $reader = [IO.StreamReader]::new($entry.Open())
+            try { [xml]$manifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
+          } finally { $archive.Dispose() }
+          $identity = $manifest.SelectSingleNode('/*[local-name()="Package"]/*[local-name()="Identity"]')
+          if ($null -eq $identity -or
+              $identity.GetAttribute('Name') -ne 'OpenAI.Codex' -or
+              $identity.GetAttribute('Publisher') -ne 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B' -or
+              $identity.GetAttribute('ProcessorArchitecture') -ne 'arm64' -or
+              $identity.GetAttribute('Version') -ne $metadata.buildVersion) {
+            throw 'Downloaded Desktop package identity differs from official metadata'
+          }
+          Add-AppxPackage -Path $packagePath -ErrorAction Stop
+          $installed = Get-AppxPackage -Name OpenAI.Codex -ErrorAction Stop
+          if ($null -eq $installed -or
+              $installed.PackageFamilyName -ne 'OpenAI.Codex_2p2nqsd0c76g0' -or
+              $installed.Publisher -ne $identity.GetAttribute('Publisher') -or
+              $installed.Version.ToString() -ne $identity.GetAttribute('Version') -or
+              $installed.Architecture.ToString() -ne 'Arm64' -or
+              $installed.SignatureKind.ToString() -ne 'Store') {
+            throw 'Registered Desktop package lacks the expected signed identity'
+          }
+          "Official Desktop MSIX registered: $($installed.PackageFullName), SHA256 $digest" >> $env:GITHUB_STEP_SUMMARY
+          'Desktop process launch and profile application were not attempted.' >> $env:GITHUB_STEP_SUMMARY
+      - name: Remove downloaded package
+        if: always() && steps.preflight.outputs.interactive == 'true'
+        run: |
+          $registered = Get-AppxPackage -Name OpenAI.Codex
+          if ($registered) { Remove-AppxPackage -Package $registered.PackageFullName -ErrorAction Stop }
+          $expected = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'cq-desktop-preflight'))
+          if (Test-Path -LiteralPath $expected) {
+            $actual = (Resolve-Path -LiteralPath $expected).Path
+            if ($actual -ne $expected) { throw 'Unexpected Desktop preflight cleanup path' }
+            Remove-Item -LiteralPath $actual -Recurse -Force -ErrorAction Stop
+          }
