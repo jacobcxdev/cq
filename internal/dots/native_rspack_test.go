@@ -108,3 +108,55 @@ func TestNativeRspackModuleScanExcludedNestedMethods(t *testing.T) {
 		t.Fatal("nested method became module")
 	}
 }
+
+func TestNativeRspackModuleScanWrappedFactories(t *testing.T) {
+	const asset = "async/911644.abcdef0123.js"
+	chunk := `var e,t,n,u={ignored:(function(e,t){t.A={}}),actual:(function(e,t,n){n.d(t,{},{account:f(e.authenticatedAccountId)})}),plain(e,t,n){n.d(t,{},{account:f(e.authenticatedAccountId)})}};export{u as __webpack_require__};`
+	modules, err := rspackModules(map[string]string{asset: chunk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(modules) != 2 || modules["actual"].require != "n" || modules["actual"].exports != "t" || modules["plain"].id != "plain" {
+		t.Fatalf("unexpected modules: %+v", modules)
+	}
+	bad := strings.Replace(chunk, "})}),plain", "})},plain", 1)
+	if _, err := rspackModules(map[string]string{asset: bad}); err == nil {
+		t.Fatal("accepted an unclosed factory wrapper")
+	}
+}
+
+func TestNativeRspackDiscoveredSeparateAuthChunk(t *testing.T) {
+	assets := rspackFixture()
+	const core = "async/67890.abcdef0123.js"
+	const auth = "async/45678.abcdef0123.js"
+	source := assets[core]
+	start, end := strings.Index(source, " account("), strings.Index(source, " api(")
+	assets[auth] = "export const __rspack_esm_ids=[45678];export const __webpack_modules__={" + source[start:end] + "};"
+	assets[core] = source[:start] + source[end:]
+	assets["12345.abcdef0123.js"] = strings.Replace(assets["12345.abcdef0123.js"], "67890:", "45678:\"abcdef0123\",67890:", 1)
+	if _, bindings, err := resolveNativeRspack(assets); err != nil || bindings.Rspack.Account.Module != "account" {
+		t.Fatalf("separate account chunk: %v", err)
+	}
+	assets[auth] = strings.Replace(assets[auth], "[45678]", "[45679]", 1)
+	if _, _, err := resolveNativeRspack(assets); err == nil {
+		t.Fatal("accepted an auth chunk without the runtime-owned identity")
+	}
+}
+
+func TestNativeRspackDiscoveredExportedCacheFactory(t *testing.T) {
+	assets := rspackFixture()
+	const core = "async/67890.abcdef0123.js"
+	source := strings.NewReplacer(
+		"class C{readRoom(){}readHistory(){}read(e,t,n,r,i,a){return this.abort.signal}}function cache(e){", "var factory=n(\"roomCache\");n.d(t,{},{Cache:function(e){",
+		"new C(n,r,", "new factory.RoomCache(n,r,",
+		"return t.cache}n.d(t,{Cache:()=>cache})},", "return t.cache}})},\n roomCache(e,t,n){n.d(t,{},{RoomCache:class{readRoom(){}readHistory(){}read(e,t,n,r,i,a){return this.abort.signal}}})},",
+	).Replace(assets[core])
+	assets[core] = source
+	if _, bindings, err := resolveNativeRspack(assets); err != nil || bindings.Rspack.Cache != (NativeRspackExport{"cache", "Cache"}) {
+		t.Fatalf("exported cache factory: %v", err)
+	}
+	assets[core] = strings.Replace(source, "new factory.RoomCache(", "new factory.Unproven(", 1)
+	if _, _, err := resolveNativeRspack(assets); err == nil {
+		t.Fatal("accepted a cache constructor without a matching registered export")
+	}
+}

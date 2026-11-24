@@ -171,6 +171,9 @@ func (c Controller) finishStart(ctx context.Context, s *Settings, ready map[stri
 	if _, err = InstallNativeRoomCache(ctx, s, c.evaluator(s)); err != nil {
 		return nil, err
 	}
+	if nativeDotHubSupported(s) {
+		ready["native_dot_hub_ready"] = enableNativeDotHub(ctx, s, c.evaluator(s))
+	}
 	// The watcher's first sync reconciles optional setup after workers are
 	// live. Setup must never consume the desktop launcher's startup budget.
 	awareness, err := NewAwareness(s, c.client(s), c.evaluator(s)).Summary()

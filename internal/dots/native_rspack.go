@@ -39,13 +39,18 @@ func (b *NativeRspackBindings) validate() error {
 
 type rspackModule struct{ id, source, require, exports string }
 
+func rspackHasAuthFacade(source string) bool {
+	return strings.Contains(source, "chatGptAuthenticatedAccountId$:()=>") &&
+		strings.Contains(source, "chatGptAuthenticatedUserId$:()=>")
+}
+
 func rspackModules(assets map[string]string) (map[string]rspackModule, error) {
 	result := map[string]rspackModule{}
 	tablePattern := regexp.MustCompile(`(?:__webpack_modules__=|(?:^|;)var[^{}]{0,256},` + jsIdentifier + `=)\{`)
-	header := regexp.MustCompile(`^([A-Za-z0-9_$]+)\((?:(` + jsIdentifier + `)(?:,(` + jsIdentifier + `))?(?:,(` + jsIdentifier + `))?)?\)\{`)
+	header := regexp.MustCompile(`^([A-Za-z0-9_$]+)(:\(function)?\((?:(` + jsIdentifier + `)(?:,(` + jsIdentifier + `))?(?:,(` + jsIdentifier + `))?)?\)\{`)
 	for asset, source := range assets {
 		core := strings.Contains(source, ".cache?.accountId") && strings.Contains(source, "cloud-aeon-profiles-v1:") && strings.Contains(source, ".appServices?.tppLocalExecutor}")
-		if !core && !strings.Contains(source, "as __webpack_require__}") {
+		if !core && !rspackHasAuthFacade(source) && !strings.Contains(source, "as __webpack_require__}") {
 			continue
 		}
 		table := tablePattern.FindStringIndex(source)
@@ -69,22 +74,22 @@ func rspackModules(assets map[string]string) (map[string]rspackModule, error) {
 			if !ok {
 				return nil, errors.New("native Rspack module body invalid")
 			}
-			id := source[offset+match[2] : offset+match[3]]
-			if match[8] >= 0 {
-				module := rspackModule{id: id, source: source[offset:brace] + body, require: source[offset+match[8] : offset+match[9]], exports: source[offset+match[6] : offset+match[7]]}
-				if !rspackRelevant(module.source) {
-					offset = brace + len(body)
-					if offset < len(source) && source[offset] == ',' {
-						offset++
-					}
-					continue
+			end := brace + len(body)
+			if match[4] >= 0 {
+				if end >= len(source) || source[end] != ')' {
+					return nil, errors.New("native Rspack module factory wrapper invalid")
 				}
+				end++
+			}
+			id := source[offset+match[2] : offset+match[3]]
+			if match[10] >= 0 && rspackRelevant(source[offset:end]) {
+				module := rspackModule{id: id, source: source[offset:end], require: source[offset+match[10] : offset+match[11]], exports: source[offset+match[8] : offset+match[9]]}
 				if previous, exists := result[id]; exists && previous.source != module.source {
 					return nil, fmt.Errorf("native Rspack module identity ambiguous: %s", id)
 				}
 				result[id] = module
 			}
-			offset = brace + len(body)
+			offset = end
 			if offset < len(source) && source[offset] == ',' {
 				offset++
 			}
@@ -207,6 +212,15 @@ func resolveNativeRspack(assets map[string]string) (string, *NativeBindings, err
 	if cores != 1 {
 		return "", nil, errors.New("native Rspack core chunk missing or ambiguous")
 	}
+	for name, source := range assets {
+		if _, included := selected[name]; included || !rspackHasAuthFacade(source) {
+			continue
+		}
+		if err := rspackChunkReference(assets[runtime], name, source); err != nil {
+			return "", nil, err
+		}
+		selected[name] = source
+	}
 	modules, err := rspackModules(selected)
 	if err != nil {
 		return "", nil, err
@@ -265,17 +279,28 @@ func resolveNativeRspack(assets map[string]string) (string, *NativeBindings, err
 	if err != nil {
 		return fail("API export", err)
 	}
-	cache, v, err := rspackMatch(modules, `function (`+id+`)\((`+id+`)\)\{let (`+id+`)=(`+id+`)\.get\(`+id+`,void 0\),(`+id+`)=(`+id+`)\.get\((`+id+`)\.(`+id+`)\),(`+id+`)=(`+id+`)\.get\((`+id+`)\.(`+id+`)\);`, func(s string) bool { return strings.Contains(s, ".cache?.accountId") })
+	cache, v, err := rspackMatch(modules, `(?:function (`+id+`)|(?:[,{])(`+id+`):function)\((`+id+`)\)\{let (`+id+`)=(`+id+`)\.get\(`+id+`,void 0\),(`+id+`)=(`+id+`)\.get\((`+id+`)\.(`+id+`)\),(`+id+`)=(`+id+`)\.get\((`+id+`)\.(`+id+`)\);`, func(s string) bool { return strings.Contains(s, ".cache?.accountId") })
 	if err != nil {
 		return fail("cache", err)
 	}
+	factoryName, directExport := v[1], v[2]
+	if directExport != "" {
+		factoryName = directExport
+	}
+	v = v[1:]
 	if v[2] != v[4] || v[2] != v[6] || v[2] != v[10] || v[7] != v[11] {
 		return fail("cache identity", errors.New("cache scope changed"))
 	}
 	if err = validateRspackAccountDependency(modules, cache, v[7], v[8], v[12], b); err != nil {
 		return fail("cache identity", err)
 	}
-	factoryBody, err := rspackDeclarationBody(cache.source, `function `+regexp.QuoteMeta(v[1])+`\(`+regexp.QuoteMeta(v[2])+`\)\{`)
+	factoryPrefix := `function ` + regexp.QuoteMeta(factoryName)
+	factorySource := cache.source
+	if directExport != "" {
+		factoryPrefix = `(?:[,{])` + regexp.QuoteMeta(directExport) + `:function`
+		factorySource = strings.Join(rspackTables(cache), ";")
+	}
+	factoryBody, err := rspackDeclarationBody(factorySource, factoryPrefix+`\(`+regexp.QuoteMeta(v[2])+`\)\{`)
 	if err != nil {
 		return fail("cache factory", err)
 	}
@@ -284,17 +309,21 @@ func resolveNativeRspack(assets map[string]string) (string, *NativeBindings, err
 			return fail("cache ownership", errors.New("cache ownership changed"))
 		}
 	}
-	constructors := regexp.MustCompile(`new (`+id+`)\(`+regexp.QuoteMeta(v[5])+`,`+regexp.QuoteMeta(v[9])+`,`).FindAllStringSubmatch(factoryBody, -1)
+	constructors := regexp.MustCompile(`new (`+id+`)(?:\.(`+id+`))?\(`+regexp.QuoteMeta(v[5])+`,`+regexp.QuoteMeta(v[9])+`,`).FindAllStringSubmatch(factoryBody, -1)
 	if len(constructors) != 1 {
 		return fail("cache constructor", errors.New("cache constructor changed"))
 	}
-	cacheBody, err := rspackDeclarationBody(cache.source, `class `+regexp.QuoteMeta(constructors[0][1])+`\{`)
+	cacheBody, err := rspackCacheClass(modules, cache, constructors[0][1], constructors[0][2])
 	if err != nil || !strings.Contains(cacheBody, "readRoom(") || !strings.Contains(cacheBody, "readHistory(") || !strings.Contains(cacheBody, "this.abort.signal") || !regexp.MustCompile(`read\(`+id+`,`+id+`,`+id+`,`+id+`,`+id+`,`+id+`\)\{`).MatchString(cacheBody) {
 		return fail("cache reads", errors.New("owned six-argument cache read changed"))
 	}
-	b.Cache, err = rspackExport(cache, v[1])
-	if err != nil {
-		return fail("cache export", err)
+	if directExport == "" {
+		b.Cache, err = rspackExport(cache, factoryName)
+		if err != nil {
+			return fail("cache export", err)
+		}
+	} else {
+		b.Cache = NativeRspackExport{cache.id, directExport}
 	}
 	executor, v, err := rspackMatch(modules, `function (`+id+`)\(\)\{return `+id+`\.appServices\?\.tppLocalExecutor\}`, nil)
 	if err != nil {
@@ -430,7 +459,25 @@ func validateRspackAccountDependency(modules map[string]rspackModule, m rspackMo
 	return nil
 }
 
+func rspackCacheClass(modules map[string]rspackModule, factory rspackModule, name, export string) (string, error) {
+	if export == "" {
+		return rspackDeclarationBody(factory.source, `class `+regexp.QuoteMeta(name)+`\{`)
+	}
+	owner, err := rspackImport(factory, name)
+	if err != nil {
+		return "", err
+	}
+	module, ok := modules[owner]
+	if !ok {
+		return "", errors.New("native Rspack cache class owner unavailable")
+	}
+	return rspackDeclarationBody(strings.Join(rspackTables(module), ";"), `(?:[,{])`+regexp.QuoteMeta(export)+`:class\{`)
+}
+
 func rspackRelevant(source string) bool {
+	if strings.Contains(source, "readRoom(") && strings.Contains(source, "readHistory(") && strings.Contains(source, "this.abort.signal") {
+		return true
+	}
 	for _, needle := range []string{".authenticatedAccountId)", "chatGptAuthenticatedAccountId$:()=>", "Request:()=>", ".cache?.accountId", "cloud-aeon-profiles-v1:", "Persisted atom store accessed before initialization", `queryKey:["cloud-aeon",`} {
 		if strings.Contains(source, needle) {
 			return true
