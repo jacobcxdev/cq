@@ -24,6 +24,13 @@ func Load(fsys fsutil.FileSystem, path string) (Policy, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return emptyPolicy(), nil
 	}
+	if errors.Is(err, fsutil.ErrUnsafeSecurePath) {
+		if verifier, ok := fsys.(interface{ VerifyMissingOwnerControlledCQFile(string) error }); ok {
+			if missingErr := verifier.VerifyMissingOwnerControlledCQFile(path); missingErr == nil {
+				return emptyPolicy(), nil
+			}
+		}
+	}
 	if err != nil {
 		return Policy{}, fmt.Errorf("read harness policy: %w", err)
 	}
