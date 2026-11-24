@@ -323,7 +323,7 @@ func validateWorkspace(policy WorkspacePolicy) error {
 	}
 	check := func(changes Changes) error {
 		for id := range changes.Skills {
-			if filepath.IsAbs(id) || len(id) > 2 && id[1] == ':' && (id[2] == '/' || id[2] == '\\') {
+			if strings.HasPrefix(id, "/") || strings.HasPrefix(id, `\`) || len(id) > 2 && id[1] == ':' && (id[2] == '/' || id[2] == '\\') {
 				return fmt.Errorf("portable skill rules require stable IDs, not absolute paths")
 			}
 		}
