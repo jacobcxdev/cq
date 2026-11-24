@@ -37,7 +37,7 @@ func TestPluginCLIInstalledFiltersAndDeduplicatesExactIDs(t *testing.T) {
 		{"id":"z@market","installed":true,"enabled":true},
 		{"installed":false,"enabled":false}
 	]}]}`)
-	got, err := client.Installed(context.Background(), "/work/project")
+	got, err := client.Installed(context.Background(), testAbsPath("/work/project"))
 	if err != nil || !slices.Equal(got, []string{"a@market", "z@market"}) {
 		t.Fatalf("installed = %v, %v", got, err)
 	}
@@ -58,7 +58,7 @@ func TestPluginCLIRejectsInvalidEligibleIDs(t *testing.T) {
 		"too long":             `{"id":"` + strings.Repeat("a", 1025) + `","installed":true,"enabled":true}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := pluginCLIResponse(`{"marketplaceLoadErrors":[],"marketplaces":[{"plugins":[`+row+`]}]}`).Installed(context.Background(), "/work")
+			got, err := pluginCLIResponse(`{"marketplaceLoadErrors":[],"marketplaces":[{"plugins":[`+row+`]}]}`).Installed(context.Background(), testAbsPath("/work"))
 			if err == nil || got != nil {
 				t.Fatalf("invalid eligible plugin = %v, %v", got, err)
 			}
@@ -84,14 +84,14 @@ func TestPluginCLIRejectsMissingMalformedAndTrailingInventory(t *testing.T) {
 		"leading message": "warning\n" + emptyNativeInventory,
 	} {
 		t.Run(name, func(t *testing.T) {
-			got, err := pluginCLIResponse(data).Installed(context.Background(), "/work")
+			got, err := pluginCLIResponse(data).Installed(context.Background(), testAbsPath("/work"))
 			if err == nil || got != nil {
 				t.Fatalf("invalid inventory = %v, %v", got, err)
 			}
 		})
 	}
 	for _, data := range []string{emptyNativeInventory, "  " + emptyNativeInventory + "\n"} {
-		got, err := pluginCLIResponse(data).Installed(context.Background(), "/work")
+		got, err := pluginCLIResponse(data).Installed(context.Background(), testAbsPath("/work"))
 		if err != nil || got == nil || len(got) != 0 {
 			t.Fatalf("valid empty inventory = %v, %v", got, err)
 		}
@@ -122,7 +122,7 @@ func TestPluginCLICommandFailureDoesNotExposePrivateOutput(t *testing.T) {
 		_, _ = io.WriteString(output, emptyNativeInventory)
 		return errors.New(private)
 	}}
-	got, err := client.Installed(context.Background(), "/work")
+	got, err := client.Installed(context.Background(), testAbsPath("/work"))
 	if err == nil || got != nil || strings.Contains(err.Error(), private) {
 		t.Fatalf("command failure = %v, %v", got, err)
 	}
@@ -131,7 +131,7 @@ func TestPluginCLICommandFailureDoesNotExposePrivateOutput(t *testing.T) {
 func TestPluginCLIOutputLimitRejectsEvenIgnoredWriterError(t *testing.T) {
 	valid := emptyNativeInventory
 	exact := valid + strings.Repeat(" ", (1<<20)-len(valid))
-	if got, err := pluginCLIResponse(exact).Installed(context.Background(), "/work"); err != nil || len(got) != 0 {
+	if got, err := pluginCLIResponse(exact).Installed(context.Background(), testAbsPath("/work")); err != nil || len(got) != 0 {
 		t.Fatalf("exact bounded inventory = %v, %v", got, err)
 	}
 	for _, singleWrite := range []bool{false, true} {
@@ -150,7 +150,7 @@ func TestPluginCLIOutputLimitRejectsEvenIgnoredWriterError(t *testing.T) {
 			}
 			return nil // A runner cannot turn its ignored write failure into success.
 		}}
-		if got, err := client.Installed(context.Background(), "/work"); err == nil || got != nil {
+		if got, err := client.Installed(context.Background(), testAbsPath("/work")); err == nil || got != nil {
 			t.Fatalf("overflow inventory = %v, %v", got, err)
 		}
 	}
@@ -165,7 +165,7 @@ func TestPluginCLIOutputLimitAlsoBoundsReaderFromCopy(t *testing.T) {
 		_, _ = io.Copy(output, struct{ io.Reader }{strings.NewReader(oversized)})
 		return nil
 	}}
-	if got, err := client.Installed(context.Background(), "/work"); err == nil || got != nil {
+	if got, err := client.Installed(context.Background(), testAbsPath("/work")); err == nil || got != nil {
 		t.Fatalf("io.Copy bypassed output bound: %v, %v", got, err)
 	}
 }
@@ -251,13 +251,16 @@ func TestPluginCLIHelperProcess(t *testing.T) {
 	if scenario == "" {
 		return
 	}
-	if slices.Equal(os.Args[len(os.Args)-3:], []string{"app-server", "--print-startup-config", "--strict-config"}) {
-		_, _ = io.WriteString(os.Stdout, "{}\n")
-		return
-	}
 	if scenario == "hold-stdout" {
 		time.Sleep(3 * time.Second)
 		os.Exit(0)
+	}
+	if len(os.Args) < 3 {
+		os.Exit(70)
+	}
+	if slices.Equal(os.Args[len(os.Args)-3:], []string{"app-server", "--print-startup-config", "--strict-config"}) {
+		_, _ = io.WriteString(os.Stdout, "{}\n")
+		return
 	}
 	args := os.Args[len(os.Args)-3:]
 	if !slices.Equal(args, []string{"app-server", "--stdio", "--strict-config"}) {

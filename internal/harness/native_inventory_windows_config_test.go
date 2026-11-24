@@ -4,8 +4,13 @@ package harness
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,8 +28,13 @@ func TestNativeInventoryWindowsAppManagedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (NativeInventory{Executable: executable}).Snapshot(context.Background(), cwd); err != nil {
-		t.Fatalf("app-managed Windows setting blocked native inventory: %v (%s)", err, nativeWindowsPreflightCategory(executable, cwd))
+	var runErr error
+	client := NativeInventory{Executable: executable, Run: func(ctx context.Context, executable, cwd string, output io.Writer) error {
+		runErr = runNativeCurationInventory(ctx, executable, cwd, output)
+		return runErr
+	}}
+	if _, err := client.Snapshot(context.Background(), cwd); err != nil {
+		t.Fatalf("app-managed Windows setting blocked native inventory: %v (preflight: %s; runner: %s)", err, nativeWindowsPreflightCategory(executable, cwd), nativeWindowsRunFailureCategory(runErr))
 	}
 	if after, err := os.ReadFile(filepath.Join(home, "config.toml")); err != nil || string(after) != config {
 		t.Fatalf("native inventory changed Windows computer-use config: %v", err)
@@ -43,8 +53,13 @@ func TestNativePluginInventoryWindowsAppManagedConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (PluginCLI{Executable: executable}).Installed(context.Background(), cwd); err != nil {
-		t.Fatalf("app-managed Windows setting blocked native plugin inventory: %v (%s)", err, nativeWindowsPreflightCategory(executable, cwd))
+	var runErr error
+	client := PluginCLI{Executable: executable, Run: func(ctx context.Context, executable, cwd string, output io.Writer) error {
+		runErr = runNativePluginInventory(ctx, executable, cwd, output)
+		return runErr
+	}}
+	if _, err := client.Installed(context.Background(), cwd); err != nil {
+		t.Fatalf("app-managed Windows setting blocked native plugin inventory: %v (preflight: %s; runner: %s)", err, nativeWindowsPreflightCategory(executable, cwd), nativeWindowsRunFailureCategory(runErr))
 	}
 }
 
@@ -110,4 +125,31 @@ func nativeWindowsPreflightCategory(executable, cwd string) string {
 		return "known app-managed field accepted by preflight"
 	}
 	return "strict configuration accepted by preflight"
+}
+
+func nativeWindowsRunFailureCategory(err error) string {
+	if err == nil {
+		return "runner completed; response decoding failed"
+	}
+	for _, category := range []string{
+		"native app-server Windows configuration warning unavailable",
+		"native app-server ignored unrelated configuration",
+		"native app-server strict configuration unavailable",
+		"native inventory request rejected",
+		"invalid native inventory response",
+		"invalid native inventory protocol JSON",
+		"incomplete native inventory protocol",
+	} {
+		if strings.Contains(err.Error(), category) {
+			return category
+		}
+	}
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		return fmt.Sprintf("native process exited with status %d", exit.ExitCode())
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "native process timed out"
+	}
+	return fmt.Sprintf("other runner error type %T", err)
 }
