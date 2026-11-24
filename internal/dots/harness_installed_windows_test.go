@@ -5,6 +5,7 @@ package dots
 import (
 	"bytes"
 	"context"
+	"debug/pe"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -21,6 +23,8 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/harness"
 	"github.com/jacobcxdev/cq/internal/httputil"
+	"github.com/jacobcxdev/cq/internal/userdirs"
+	"golang.org/x/sys/windows"
 )
 
 // TestHarnessWindowsNativeProfileContract qualifies the installed Windows
@@ -46,7 +50,10 @@ func TestHarnessWindowsNativeProfileContract(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(skill, "SKILL.md"), []byte("---\nname: probe\ndescription: CQ_WINDOWS_SKILL_MARKER\n---\nSynthetic skill.\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	type observation struct{ skill, mcp bool }
+	type observation struct {
+		skillMarkers int
+		mcp          bool
+	}
 	observed := make(chan observation, 8)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/responses" {
@@ -73,7 +80,7 @@ func TestHarnessWindowsNativeProfileContract(t *testing.T) {
 			entry.mcp = entry.mcp || tool.Name == "mcp__probe"
 		}
 		for _, item := range request.Input {
-			entry.skill = entry.skill || bytes.Contains(item, []byte("CQ_WINDOWS_SKILL_MARKER"))
+			entry.skillMarkers += bytes.Count(item, []byte("CQ_WINDOWS_SKILL_MARKER"))
 		}
 		observed <- entry
 		item := map[string]any{"id": "probe_message", "type": "message", "role": "assistant", "status": "completed", "content": []map[string]any{{"type": "output_text", "text": "CQ_WINDOWS_REPLY", "annotations": []any{}}}}
@@ -133,6 +140,84 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		"NO_PROXY": "127.0.0.1,localhost", "CI": "1",
 	} {
 		command.Env = append(command.Env, key+"="+value)
+	}
+	exerciseBridge := func(t *testing.T, ctx context.Context, rpc *harnessInstalledRPC, setProfile func(string, harness.Profile), receipts harness.Receipts, trace func() []string) {
+		t.Helper()
+		rpc.call("initialize", map[string]any{"clientInfo": map[string]string{"name": "cq_windows_bridge_acceptance", "version": "0.0.0"}, "capabilities": map[string]any{"experimentalApi": true}})
+		if err := rpc.encoder.Encode(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
+			t.Fatal(err)
+		}
+		result := rpc.call("thread/start", map[string]any{"cwd": command.Dir, "model": "glm-5.3", "modelProvider": "fixture"})
+		var started struct{ Thread struct{ ID string } }
+		if json.Unmarshal(result, &started) != nil || started.Thread.ID == "" {
+			t.Fatal("bridge thread start returned no ID")
+		}
+		chat := started.Thread.ID
+		turn := func() observation {
+			t.Helper()
+			rpc.call("turn/start", map[string]any{"threadId": chat, "input": []map[string]string{{"type": "text", "text": "Synthetic bridge turn"}}})
+			for {
+				if message := rpc.next(); message.Method == "turn/completed" && cloudThreadID(message.Params) == chat {
+					break
+				}
+			}
+			select {
+			case entry := <-observed:
+				return entry
+			case <-ctx.Done():
+				t.Fatal("CQ bridge turn did not reach the synthetic provider")
+				return observation{}
+			}
+		}
+		assertApplied := func(profile harness.Profile) {
+			t.Helper()
+			deadline := time.Now().Add(20 * time.Second)
+			for {
+				receipt, err := receipts.Load(chat)
+				if err == nil && receipt.Profile == profile && receipt.State == "applied" {
+					return
+				}
+				if time.Now().After(deadline) {
+					var events []string
+					if trace != nil {
+						events = trace()
+					}
+					t.Fatalf("CQ bridge %s receipt = %+v, %v; observed transitions = %v", profile, receipt, err, events)
+				}
+				// The applied receipt can follow turn/completed.
+				rpc.call("thread/read", map[string]any{"threadId": chat})
+				time.Sleep(25 * time.Millisecond)
+			}
+		}
+		if reduced := turn(); reduced.skillMarkers != 0 || reduced.mcp {
+			t.Fatalf("CQ bridge did not apply fresh minimal profile: %+v", reduced)
+		}
+		t.Log("Initial Minimal turn omitted the skill and standalone MCP")
+		setProfile(chat, harness.Full)
+		restored := turn()
+		if restored.skillMarkers == 0 || !restored.mcp {
+			t.Fatalf("CQ bridge did not restore skill and MCP: %+v", restored)
+		}
+		assertApplied(harness.Full)
+		t.Log("Full restored the skill and standalone MCP and persisted an applied receipt")
+		setProfile(chat, harness.Minimal)
+		// Earlier skill instructions remain valid history. A larger count
+		// would mean the reduced turn attached the skill catalogue again.
+		if reduced := turn(); reduced.mcp || reduced.skillMarkers > restored.skillMarkers {
+			t.Fatalf("CQ bridge retained MCP or reattached the skill after minimal reload: %+v", reduced)
+		}
+		assertApplied(harness.Minimal)
+		t.Log("Final Minimal removed the standalone MCP, attached no new skill instructions, and persisted an applied receipt")
+	}
+	if cq := os.Getenv("CQ_HARNESS_WINDOWS_NATIVE_CQ"); cq != "" {
+		t.Run("native-cq", func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+			defer cancel()
+			rpc, setProfile, receipts, stop := startNativeWindowsARM64Harness(t, ctx, cq, executable, command.Dir, command.Env)
+			defer stop()
+			exerciseBridge(t, ctx, rpc, setProfile, receipts, nil)
+		})
+		return
 	}
 	t.Run("startup-config", func(t *testing.T) {
 		for _, signOut := range []bool{false, true} {
@@ -246,70 +331,17 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			_ = clientOutput.Close()
 		}()
 		rpc := &harnessInstalledRPC{t: t, encoder: json.NewEncoder(clientInput), decoder: json.NewDecoder(clientOutput)}
-		rpc.call("initialize", map[string]any{"clientInfo": map[string]string{"name": "cq_windows_bridge_acceptance", "version": "0.0.0"}, "capabilities": map[string]any{"experimentalApi": true}})
-		if err := rpc.encoder.Encode(map[string]any{"method": "initialized", "params": map[string]any{}}); err != nil {
-			t.Fatal(err)
-		}
-		result := rpc.call("thread/start", map[string]any{"cwd": command.Dir, "model": "glm-5.3", "modelProvider": "fixture"})
-		var started struct{ Thread struct{ ID string } }
-		if json.Unmarshal(result, &started) != nil || started.Thread.ID == "" {
-			t.Fatal("bridge thread start returned no ID")
-		}
-		chat := started.Thread.ID
-		turn := func() observation {
-			t.Helper()
-			rpc.call("turn/start", map[string]any{"threadId": chat, "input": []map[string]string{{"type": "text", "text": "Synthetic bridge turn"}}})
-			for {
-				if message := rpc.next(); message.Method == "turn/completed" && cloudThreadID(message.Params) == chat {
-					break
-				}
-			}
-			select {
-			case entry := <-observed:
-				return entry
-			case <-bridgeCtx.Done():
-				t.Fatal("CQ bridge turn did not reach the synthetic provider")
-				return observation{}
-			}
-		}
-		setProfile := func(profile harness.Profile) {
+		setProfile := func(chat string, profile harness.Profile) {
 			policyMu.Lock()
 			policy.Chats = map[string]harness.Profile{chat: profile}
 			policyMu.Unlock()
 		}
-		assertApplied := func(profile harness.Profile) {
-			t.Helper()
-			deadline := time.Now().Add(20 * time.Second)
-			for {
-				receipt, err := receipts.Load(chat)
-				if err == nil && receipt.Profile == profile && receipt.State == "applied" {
-					return
-				}
-				if time.Now().After(deadline) {
-					eventMu.Lock()
-					events := append([]string(nil), profileEvents...)
-					eventMu.Unlock()
-					t.Fatalf("CQ bridge %s receipt = %+v, %v; observed transitions = %v", profile, receipt, err, events)
-				}
-				// An applied receipt can follow turn/completed. Keep reading the
-				// stdio stream while waiting for the verifier to record its result.
-				rpc.call("thread/read", map[string]any{"threadId": chat})
-				time.Sleep(25 * time.Millisecond)
-			}
+		trace := func() []string {
+			eventMu.Lock()
+			defer eventMu.Unlock()
+			return slices.Clone(profileEvents)
 		}
-		if reduced := turn(); reduced.skill || reduced.mcp {
-			t.Fatalf("CQ bridge did not apply fresh minimal profile: %+v", reduced)
-		}
-		setProfile(harness.Full)
-		if restored := turn(); !restored.skill || !restored.mcp {
-			t.Fatalf("CQ bridge did not restore skill and MCP: %+v", restored)
-		}
-		assertApplied(harness.Full)
-		setProfile(harness.Minimal)
-		if reduced := turn(); reduced.mcp {
-			t.Fatalf("CQ bridge retained MCP after minimal reload: %+v", reduced)
-		}
-		assertApplied(harness.Minimal)
+		exerciseBridge(t, bridgeCtx, rpc, setProfile, receipts, trace)
 	})
 	input, err := command.StdinPipe()
 	if err != nil {
@@ -382,7 +414,7 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		}
 	}
 	chat := start(nil)
-	if first := turn(chat); !first.skill || !first.mcp {
+	if first := turn(chat); first.skillMarkers == 0 || !first.mcp {
 		t.Fatalf("native full baseline omitted fixture skill or MCP: %+v", first)
 	}
 	rpc.call("thread/settings/update", map[string]any{"threadId": chat, "disabledPluginIds": []string{"probe@fixture"}})
@@ -398,12 +430,12 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		t.Fatalf("native full reload omitted restored standalone MCP: %+v", restored)
 	}
 	fresh := start(minimal)
-	if reduced := turn(fresh); reduced.skill || reduced.mcp {
+	if reduced := turn(fresh); reduced.skillMarkers != 0 || reduced.mcp {
 		t.Fatalf("fresh minimal chat retained fixture skill or MCP: %+v", reduced)
 	}
 	rpc.call("thread/unsubscribe", map[string]string{"threadId": fresh})
 	resume(fresh, full, nil)
-	if restored := turn(fresh); !restored.skill || !restored.mcp {
+	if restored := turn(fresh); restored.skillMarkers == 0 || !restored.mcp {
 		t.Fatalf("native full reload did not restore fixture skill and MCP: %+v", restored)
 	}
 	if err := input.Close(); err != nil {
@@ -412,4 +444,73 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 	if _, err := io.Copy(io.Discard, output); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func startNativeWindowsARM64Harness(t *testing.T, ctx context.Context, cq, codex, cwd string, env []string) (*harnessInstalledRPC, func(string, harness.Profile), harness.Receipts, func()) {
+	t.Helper()
+	if os.Getenv("GITHUB_ACTIONS") != "true" || os.Getenv("RUNNER_ENVIRONMENT") != "github-hosted" {
+		t.Fatal("native CQ writes require a disposable GitHub-hosted runner")
+	}
+	var processMachine, nativeMachine uint16
+	if err := windows.IsWow64Process2(windows.CurrentProcess(), &processMachine, &nativeMachine); err != nil || nativeMachine != pe.IMAGE_FILE_MACHINE_ARM64 {
+		t.Fatalf("query native ARM64 Windows host: machine %#x, error %v", nativeMachine, err)
+	}
+	for _, executable := range []string{cq, codex} {
+		if !filepath.IsAbs(executable) {
+			t.Fatal("native qualification needs absolute executable paths")
+		}
+		image, err := pe.Open(executable)
+		if err != nil {
+			t.Fatalf("open native executable: %v", err)
+		}
+		machine := image.Machine
+		_ = image.Close()
+		if machine != pe.IMAGE_FILE_MACHINE_ARM64 {
+			t.Fatalf("%s has PE machine %#x, want ARM64", filepath.Base(executable), machine)
+		}
+	}
+	t.Log("Verified the ARM64 Windows host and ARM64 PE targets for CQ and Codex")
+	roots, err := userdirs.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{roots.Config, filepath.Dir(roots.State)} {
+		if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("expected empty CQ root on disposable runner: %s (%v)", dir, err)
+		}
+	}
+	runCQ := func(args ...string) {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, cq, append([]string{"codex", "harness"}, args...)...)
+		cmd.Dir, cmd.Env = cwd, env
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("native cq codex harness %s: %v\n%s", args[0], err, output)
+		}
+	}
+	runCQ("enable")
+	cmd := exec.CommandContext(ctx, cq, "-c", "features.code_mode_host=true", "app-server", "--stdio", "--strict-config")
+	cmd.Dir, cmd.Env = cwd, append(slices.Clone(env), "CQ_WINDOWS_HARNESS_STOCK_CLI="+codex)
+	cmd.Stderr = io.Discard
+	input, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	stop := func() {
+		_ = input.Close()
+		_, _ = io.Copy(io.Discard, output)
+		if err := cmd.Wait(); err != nil && ctx.Err() == nil {
+			t.Errorf("native CQ app-server exit: %v", err)
+		}
+	}
+	rpc := &harnessInstalledRPC{t: t, encoder: json.NewEncoder(input), decoder: json.NewDecoder(output)}
+	setProfile := func(chat string, profile harness.Profile) { runCQ("chat", chat, string(profile)) }
+	receipts := harness.Receipts{FS: fsutil.OSFileSystem{}, Dir: filepath.Join(roots.State, "harness")}
+	return rpc, setProfile, receipts, stop
 }

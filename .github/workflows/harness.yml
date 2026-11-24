@@ -65,9 +65,32 @@ jobs:
       - name: Qualify isolated native harness contracts
         run: bash .github/scripts/validate-harness-installed.sh "$CQ_HARNESS_EXECUTABLE"
 
+  windows-profile-driver:
+    name: Build race-instrumented Windows profile driver
+    if: github.event_name != 'workflow_dispatch' || !inputs.desktop_preflight
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version-file: go.mod
+      - name: Compile x64 driver for the ARM64 integration check
+        shell: pwsh
+        run: go test -race -c -o (Join-Path $env:RUNNER_TEMP 'cq-harness-driver.exe') ./internal/dots
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cq-windows-harness-driver
+          path: ${{ runner.temp }}/cq-harness-driver.exe
+          if-no-files-found: error
+          retention-days: 1
+
   windows-harness:
     name: Native harness (Windows ${{ matrix.architecture }})
     if: github.event_name != 'workflow_dispatch' || !inputs.desktop_preflight
+    needs: windows-profile-driver
     strategy:
       fail-fast: false
       matrix:
@@ -163,6 +186,22 @@ jobs:
           go test -race -count=1 ./internal/dots -run '^TestHarnessWindowsNativeProfileContract$'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test -race -count=1 ./cmd/cq -run '^TestHarnessSkillInstallUnderWindowsCodexHome$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/download-artifact@v8
+        if: matrix.architecture == 'Arm64'
+        with:
+          name: cq-windows-harness-driver
+          path: ${{ runner.temp }}/cq-pinned-codex
+      - name: Verify profile application and restoration with native ARM64 CQ and Codex
+        if: matrix.architecture == 'Arm64'
+        env:
+          CQ_HARNESS_WINDOWS_NATIVE_ACCEPTANCE: '1'
+        run: |
+          # Go's Windows race runtime runs as x64. Both product executables run as ARM64.
+          $root = Join-Path $env:RUNNER_TEMP 'cq-pinned-codex'
+          $env:CQ_HARNESS_WINDOWS_NATIVE_CQ = Join-Path $root 'cq.exe'
+          $env:CQ_HARNESS_WINDOWS_CODEX = Join-Path $root 'codex.exe'
+          & (Join-Path $root 'cq-harness-driver.exe') '-test.v' '-test.timeout=3m' '-test.run=^TestHarnessWindowsNativeProfileContract$/^native-cq$'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   windows-desktop-preflight:
