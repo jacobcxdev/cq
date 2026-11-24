@@ -154,7 +154,7 @@ func TestAdoptClassifiesMatchingInstallStateAsOwned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	store := installstate.Store{FS: fsutil.OSFileSystem{}, Roots: userdirs.Roots{State: filepath.Join(root, "state")}}
+	store := installstate.Store{FS: fsutil.OSFileSystem{}, Roots: userdirs.Roots{State: filepath.Join(secureInstallerTestRoot(t), "state")}}
 	if err := store.Save(installstate.Record{
 		SchemaVersion: installstate.CurrentSchemaVersion,
 		Owner:         installstate.OwnerGo,

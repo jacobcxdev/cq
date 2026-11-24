@@ -13,6 +13,8 @@ import (
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
+const windowsHarnessStockCLIEnv = "CQ_WINDOWS_HARNESS_STOCK_CLI"
+
 func startHarnessController(ctx context.Context, fsys fsutil.FileSystem, roots userdirs.Roots) (func(string, string), func()) {
 	if runtime.GOOS != "darwin" {
 		return nil, func() {}
@@ -49,12 +51,17 @@ func harnessNativeExecutable() string {
 	if runtime.GOOS == "darwin" {
 		return filepath.Join(nativeNetworkApplication, "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
 	}
-	path, _ := exec.LookPath("codex")
-	return path
+	if path, err := exec.LookPath("codex"); err == nil {
+		return path
+	}
+	return registeredHarnessExecutable()
 }
 
 func configureHarnessRunner(runner *codexHarnessRunner) {
 	runner.snapshot = (harness.NativeInventory{Executable: harnessNativeExecutable()}).Snapshot
+	if runtime.GOOS == "windows" {
+		return // The launched bridge reads bindings at native thread boundaries.
+	}
 	runner.readModel = (harness.DesktopIPC{}).ReadModel
 	runner.apply = func(ctx context.Context, chatID string) error {
 		if runtime.GOOS != "darwin" {

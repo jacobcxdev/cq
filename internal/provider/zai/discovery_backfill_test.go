@@ -6,12 +6,10 @@ import (
 	"net/http"
 	"path/filepath"
 	"testing"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 func TestRefreshAccountsBackfilledExactOwnershipWithoutAdoption(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	session := oauthAccountFixture("one", "initial")
 	session.BusinessJWT = "business-one"
 	oauth, err := StoreZCodeAccount(fs, "/config", session, "Preferred", true)

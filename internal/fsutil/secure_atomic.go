@@ -390,6 +390,10 @@ func secureExpectedReadLimit(expected []byte) int64 {
 	return int64(len(expected)) + 1
 }
 
+type secureDirectoryAncestorOpener interface {
+	openSecureDirectoryAncestor(target, ancestor string) (DurableDirectory, error)
+}
+
 func EnsureSecureDirectory(fsys FileSystem, path string) error {
 	if fsys == nil || path == "" {
 		return fmt.Errorf("%w: invalid directory", ErrUnsafeSecurePath)
@@ -417,9 +421,7 @@ func EnsureSecureDirectory(fsys FileSystem, path string) error {
 		return err
 	}
 	var parent DurableDirectory
-	if boundaryOpener, ok := fsys.(interface {
-		openSecureDirectoryAncestor(string, string) (DurableDirectory, error)
-	}); ok {
+	if boundaryOpener, ok := fsys.(secureDirectoryAncestorOpener); ok {
 		parent, err = boundaryOpener.openSecureDirectoryAncestor(clean, existing)
 		if err != nil {
 			return fmt.Errorf("open secure directory boundary ancestor: %w", err)
@@ -544,7 +546,12 @@ func sealExistingDirectoryEntry(inspector SecurePathInspector, opener DurableDir
 	if parentPathInfo.Mode()&os.ModeSymlink != 0 || !parentPathInfo.IsDir() {
 		return fmt.Errorf("%w: directory parent type", ErrUnsafeSecurePath)
 	}
-	parent, err := opener.OpenDurableDirectory(parentPath)
+	var parent DurableDirectory
+	if boundaryOpener, ok := opener.(secureDirectoryAncestorOpener); ok && secure {
+		parent, err = boundaryOpener.openSecureDirectoryAncestor(path, parentPath)
+	} else {
+		parent, err = opener.OpenDurableDirectory(parentPath)
+	}
 	if err != nil {
 		return err
 	}
@@ -1109,6 +1116,14 @@ func AcquireExclusiveLock(fsys FileSystem, path string) (ExclusiveLock, error) {
 // single-link entry.
 func AcquireExclusiveLockInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string) (ExclusiveLock, error) {
 	return acquireExclusiveLockInDirectory(inspector, directory, name, nil)
+}
+
+// AcquireExclusiveLockInOwnerControlledDirectory retains the same private lock
+// file guarantees while fencing an owner-controlled directory by path identity.
+func AcquireExclusiveLockInOwnerControlledDirectory(inspector SecurePathInspector, directory SecureDirectory, path, name string) (ExclusiveLock, error) {
+	return acquireExclusiveLockInDirectory(inspector, directory, name, func() error {
+		return ValidateOwnerControlledDirectoryHandle(inspector, directory, path)
+	})
 }
 
 // AcquireNewExclusiveLockInDirectory creates one new lifetime lock relative to

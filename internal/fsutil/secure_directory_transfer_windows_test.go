@@ -13,7 +13,7 @@ import (
 )
 
 func TestWindowsSecureDirectoryTransferRoundTrip(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	state := filepath.Join(root, "state")
 	fys := newWindowsTestFileSystem(t, root)
 	if err := EnsureSecureDirectory(fys, state); err != nil {
@@ -106,7 +106,7 @@ func TestWindowsSecureDirectoryTransferRejectsMalformedGrant(t *testing.T) {
 func TestWindowsSecureDirectoryTransferRejectsGrantAndDACLDrift(t *testing.T) {
 	for _, drift := range []string{"grant", "DACL"} {
 		t.Run(drift, func(t *testing.T) {
-			root := t.TempDir()
+			root := newWindowsOwnerControlledTestRoot(t)
 			state := filepath.Join(root, "state")
 			fys := newWindowsTestFileSystem(t, root)
 			if err := EnsureSecureDirectory(fys, state); err != nil {
@@ -140,7 +140,7 @@ func TestWindowsSecureDirectoryTransferRejectsGrantAndDACLDrift(t *testing.T) {
 }
 
 func TestWindowsSecureDirectoryTransferRejectsInheritableHandleAndWrongSource(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	state := filepath.Join(root, "state")
 	fys := newWindowsTestFileSystem(t, root)
 	if err := EnsureSecureDirectory(fys, state); err != nil {

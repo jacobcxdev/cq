@@ -30,6 +30,7 @@ type windowsRelativeOpenFunc func(windows.Handle, string, uint32, uint32, uint32
 type windowsSecureDirectory struct {
 	file            *os.File
 	childrenPrivate bool
+	ownerControlled bool
 	mutex           sync.Mutex
 	closed          bool
 	closeErr        error
@@ -400,6 +401,17 @@ func (directory *windowsSecureDirectory) Stat() (os.FileInfo, error) {
 	return inspectWindowsHandle(windows.Handle(directory.file.Fd()), directory.file.Name())
 }
 
+func (directory *windowsSecureDirectory) validateCommitDirectory() error {
+	info, err := directory.Stat()
+	if err != nil {
+		return err
+	}
+	if directory.ownerControlled {
+		return validateOwnerControlledDirectoryInfo(OSFileSystem{}, info)
+	}
+	return validateSecureDirectoryInfo(OSFileSystem{}, info)
+}
+
 func (directory *windowsSecureDirectory) ReadDir() ([]os.DirEntry, error) {
 	directory.mutex.Lock()
 	defer directory.mutex.Unlock()
@@ -682,7 +694,7 @@ func (directory *windowsSecureDirectory) remove(name string, expected SecureFile
 	if err := directory.Sync(); err != nil {
 		return fmt.Errorf("%w: sync removed Windows file: %v", ErrCommitIndeterminate, err)
 	}
-	if err := validateSecureDirectoryDescriptor(OSFileSystem{}, directory); err != nil {
+	if err := directory.validateCommitDirectory(); err != nil {
 		return fmt.Errorf("%w: revalidate Windows directory after remove: %v", ErrCommitIndeterminate, err)
 	}
 	return nil
@@ -716,7 +728,7 @@ func (directory *windowsSecureDirectory) cleanupCreated(file *os.File, cause err
 	if syncErr := directory.Sync(); syncErr != nil {
 		return fmt.Errorf("%w: sync cleaned Windows directory: %v", ErrCommitIndeterminate, errors.Join(cause, syncErr))
 	}
-	if validationErr := validateSecureDirectoryDescriptor(OSFileSystem{}, directory); validationErr != nil {
+	if validationErr := directory.validateCommitDirectory(); validationErr != nil {
 		return fmt.Errorf("%w: revalidate cleaned Windows directory: %v", ErrCommitIndeterminate, errors.Join(cause, validationErr))
 	}
 	return cause

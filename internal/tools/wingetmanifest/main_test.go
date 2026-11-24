@@ -85,6 +85,7 @@ ManifestVersion: 1.10.0
 		t.Fatalf("manifest count = %d", len(manifests))
 	}
 	for name, wantBody := range want {
+		wantBody = strings.ReplaceAll(wantBody, "\r\n", "\n")
 		if got := string(manifests[name]); got != wantBody {
 			t.Fatalf("%s differs\ngot:\n%s\nwant:\n%s", name, got, wantBody)
 		}

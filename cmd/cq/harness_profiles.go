@@ -434,7 +434,7 @@ func writeHarnessProfile(output io.Writer, document harnessProfileDocument, json
 
 func portableHarnessDefinition(definition harness.Definition) error {
 	for id := range definition.Changes.Skills {
-		if filepath.IsAbs(id) || strings.HasPrefix(id, `\`) || len(id) >= 3 && id[1] == ':' && (id[2] == '\\' || id[2] == '/') {
+		if strings.HasPrefix(id, "/") || strings.HasPrefix(id, `\`) || len(id) >= 3 && id[1] == ':' && (id[2] == '\\' || id[2] == '/') {
 			return fmt.Errorf("profile skill IDs must be stable inventory IDs, not absolute paths")
 		}
 	}

@@ -57,7 +57,7 @@ func TestControllerV2UsesWorkspacePolicyForAllModels(t *testing.T) {
 	policy := Policy{Version: 2, Enabled: true, Global: Scope{All: Binding{Changes: Changes{Plugins: map[string]Decision{"a-plugin": Disabled}}}}}
 	controller.Policy = func() (Policy, error) { return Policy{Version: 2, Enabled: true}, nil }
 	controller.ContextPolicy = func(cwd string) (Policy, error) {
-		if cwd != "/work/project" {
+		if cwd != testAbsPath("/work/project") {
 			t.Fatalf("policy cwd=%q", cwd)
 		}
 		return policy, nil

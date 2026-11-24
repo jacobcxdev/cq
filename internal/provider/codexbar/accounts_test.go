@@ -4,15 +4,24 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
+func codexBarTestFixture() (*fsutil.MemFS, string) {
+	home := "/home"
+	if runtime.GOOS == "windows" {
+		home = `C:\home`
+	}
+	return fsutil.NewMemFSWithHome(home), home
+}
+
 func TestReadAccountsProviderScopedAndReadOnly(t *testing.T) {
-	fs := fsutil.NewMemFS()
-	path := "/home/.codexbar/config.json"
+	fs, home := codexBarTestFixture()
+	path := filepath.Join(home, ".codexbar", "config.json")
 	if err := fs.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -20,7 +29,7 @@ func TestReadAccountsProviderScopedAndReadOnly(t *testing.T) {
 	if err := fs.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	accounts, err := ReadAccounts(fs, func(string) string { return "" }, "/home", "zai")
+	accounts, err := ReadAccounts(fs, func(string) string { return "" }, home, "zai")
 	if err != nil || len(accounts) != 2 || accounts[0].ID != "two" || !accounts[0].Active || accounts[1].Token != "private-one" {
 		t.Fatalf("accounts=%d err=%v", len(accounts), err)
 	}
@@ -35,26 +44,27 @@ func TestReadAccountsProviderScopedAndReadOnly(t *testing.T) {
 }
 
 func TestReadAccountsPrecedenceAndMalformed(t *testing.T) {
-	fs := fsutil.NewMemFS()
-	if err := fs.MkdirAll("/explicit", 0o700); err != nil {
+	fs, home := codexBarTestFixture()
+	explicit := filepath.Join(home, "explicit", "config.json")
+	if err := fs.MkdirAll(filepath.Dir(explicit), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := fs.WriteFile("/explicit/config.json", []byte(`{"version":2,"providers":[]}`), 0o600); err != nil {
+	if err := fs.WriteFile(explicit, []byte(`{"version":2,"providers":[]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	env := func(k string) string {
 		if k == "CODEXBAR_CONFIG" {
-			return "/explicit/config.json"
+			return explicit
 		}
 		return ""
 	}
-	if _, err := ReadAccounts(fs, env, "/home", "grok"); err == nil {
+	if _, err := ReadAccounts(fs, env, home, "grok"); err == nil {
 		t.Fatal("unsupported version accepted")
 	}
-	if err := fs.WriteFile("/explicit/config.json", []byte(`{"version":1,"providers":[{"id":"grok","tokenAccounts":{"version":1,"activeIndex":0,"accounts":[{"id":"one","token":"secret"},{"id":"one","token":"other"}]}}]}`), 0o600); err != nil {
+	if err := fs.WriteFile(explicit, []byte(`{"version":1,"providers":[{"id":"grok","tokenAccounts":{"version":1,"activeIndex":0,"accounts":[{"id":"one","token":"secret"},{"id":"one","token":"other"}]}}]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadAccounts(fs, env, "/home", "grok"); err == nil {
+	if _, err := ReadAccounts(fs, env, home, "grok"); err == nil {
 		t.Fatal("duplicate account accepted")
 	}
 }
@@ -62,10 +72,11 @@ func TestReadAccountsPrecedenceAndMalformed(t *testing.T) {
 func TestReadAccountsRejectsUnsafeSource(t *testing.T) {
 	for _, mode := range []os.FileMode{0o644, 0o666} {
 		t.Run(mode.String(), func(t *testing.T) {
-			fs := fsutil.NewMemFS()
-			_ = fs.MkdirAll("/home/.codexbar", 0o700)
-			_ = fs.WriteFile("/home/.codexbar/config.json", []byte(`{"version":1,"providers":[]}`), mode)
-			if _, err := ReadAccounts(fs, func(string) string { return "" }, "/home", "grok"); err == nil {
+			fs, home := codexBarTestFixture()
+			path := filepath.Join(home, ".codexbar", "config.json")
+			_ = fs.MkdirAll(filepath.Dir(path), 0o700)
+			_ = fs.WriteFile(path, []byte(`{"version":1,"providers":[]}`), mode)
+			if _, err := ReadAccounts(fs, func(string) string { return "" }, home, "grok"); err == nil {
 				t.Fatal("unsafe source accepted")
 			}
 		})
@@ -84,9 +95,9 @@ func TestReadAccountsRejectsUnsafeSource(t *testing.T) {
 }
 
 func TestReadAccountsCurrentAbsenceDoesNotResurrectLegacy(t *testing.T) {
-	fs := fsutil.NewMemFS()
-	current := "/home/.codexbar/config.json"
-	legacy := "/home/Library/Application Support/CodexBar/token-accounts.json"
+	fs, home := codexBarTestFixture()
+	current := filepath.Join(home, ".codexbar", "config.json")
+	legacy := filepath.Join(home, "Library", "Application Support", "CodexBar", "token-accounts.json")
 	for _, path := range []string{current, legacy} {
 		if err := fs.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
@@ -94,22 +105,22 @@ func TestReadAccountsCurrentAbsenceDoesNotResurrectLegacy(t *testing.T) {
 	}
 	_ = fs.WriteFile(legacy, []byte(`{"version":1,"providers":{"grok":{"version":1,"activeIndex":0,"accounts":[{"id":"old","token":"stale"}]}}}`), 0o600)
 	_ = fs.WriteFile(current, []byte(`{"version":1,"providers":[{"id":"grok"}]}`), 0o600)
-	accounts, err := ReadAccounts(fs, func(string) string { return "" }, "/home", "grok")
+	accounts, err := ReadAccounts(fs, func(string) string { return "" }, home, "grok")
 	if err != nil || len(accounts) != 0 {
 		t.Fatalf("stale accounts resurrected: count=%d err=%v", len(accounts), err)
 	}
 	if err := fs.Remove(current); err != nil {
 		t.Fatal(err)
 	}
-	accounts, err = ReadAccounts(fs, func(string) string { return "" }, "/home", "grok")
+	accounts, err = ReadAccounts(fs, func(string) string { return "" }, home, "grok")
 	if err != nil || len(accounts) != 1 || accounts[0].ID != "old" {
 		t.Fatal("legacy reader failed")
 	}
 }
 
 func TestReadAccountsXDGExpandsHomeAndOwnsPrecedence(t *testing.T) {
-	fs := fsutil.NewMemFS()
-	path := "/home/custom/codexbar/config.json"
+	fs, home := codexBarTestFixture()
+	path := filepath.Join(home, "custom", "codexbar", "config.json")
 	if err := fs.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +131,7 @@ func TestReadAccountsXDGExpandsHomeAndOwnsPrecedence(t *testing.T) {
 		}
 		return ""
 	}
-	accounts, err := ReadAccounts(fs, env, "/home", "grok")
+	accounts, err := ReadAccounts(fs, env, home, "grok")
 	if err != nil || len(accounts) != 1 || accounts[0].ID != "xdg" {
 		t.Fatalf("XDG selection failed count=%d err=%v", len(accounts), err)
 	}

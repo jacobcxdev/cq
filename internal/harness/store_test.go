@@ -11,30 +11,30 @@ import (
 )
 
 func TestLoadMissingPolicyIsDisabledWithoutCreatingState(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	policy, err := Load(fsys, "/state/harness.json")
+	fsys := newHarnessMemFS()
+	policy, err := Load(fsys, testAbsPath("/state/harness.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if policy.Version != 1 || policy.Enabled || policy.Projects == nil || policy.Chats == nil {
 		t.Fatalf("missing policy = %#v, want disabled version 1 with usable maps", policy)
 	}
-	if _, err := fsys.Stat("/state"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := fsys.Stat(testAbsPath("/state")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing load created state: %v", err)
 	}
 }
 
 func TestSaveAndLoadPrivatePolicy(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	want := Policy{Version: 1, Enabled: true, Projects: map[string]Profile{"/work/project": Full}, Chats: map[string]Profile{testChat: Minimal}}
-	if err := Save(fsys, "/state/harness.json", want); err != nil {
+	fsys := newHarnessMemFS()
+	want := Policy{Version: 1, Enabled: true, Projects: map[string]Profile{testAbsPath("/work/project"): Full}, Chats: map[string]Profile{testChat: Minimal}}
+	if err := Save(fsys, testAbsPath("/state/harness.json"), want); err != nil {
 		t.Fatal(err)
 	}
-	got, err := Load(fsys, "/state/harness.json")
+	got, err := Load(fsys, testAbsPath("/state/harness.json"))
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("loaded = %#v, %v; want %#v", got, err, want)
 	}
-	for path, mode := range map[string]os.FileMode{"/state": 0o700, "/state/harness.json": 0o600, "/state/harness.json.lock": 0o600} {
+	for path, mode := range map[string]os.FileMode{testAbsPath("/state"): 0o700, testAbsPath("/state/harness.json"): 0o600, testAbsPath("/state/harness.json.lock"): 0o600} {
 		info, err := fsys.Stat(path)
 		if err != nil || info.Mode().Perm() != mode {
 			t.Fatalf("private state %s = %v, %v; want %04o", path, info, err, mode)
@@ -67,14 +67,14 @@ func TestLoadRejectsInvalidPolicy(t *testing.T) {
 	}
 	for name, data := range tests {
 		t.Run(name, func(t *testing.T) {
-			fsys := fsutil.NewMemFS()
-			if err := fsys.MkdirAll("/state", 0o700); err != nil {
+			fsys := newHarnessMemFS()
+			if err := fsys.MkdirAll(testAbsPath("/state"), 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if err := fsys.WriteFile("/state/harness.json", []byte(data), 0o600); err != nil {
+			if err := fsys.WriteFile(testAbsPath("/state/harness.json"), []byte(data), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Load(fsys, "/state/harness.json"); err == nil {
+			if _, err := Load(fsys, testAbsPath("/state/harness.json")); err == nil {
 				t.Fatalf("accepted invalid policy %s", name)
 			}
 		})
@@ -82,20 +82,20 @@ func TestLoadRejectsInvalidPolicy(t *testing.T) {
 }
 
 func TestLoadRejectsNonPrivateState(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	if err := fsys.MkdirAll("/state", 0o700); err != nil {
+	fsys := newHarnessMemFS()
+	if err := fsys.MkdirAll(testAbsPath("/state"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := fsys.WriteFile("/state/harness.json", []byte(`{"version":1}`), 0o644); err != nil {
+	if err := fsys.WriteFile(testAbsPath("/state/harness.json"), []byte(`{"version":1}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(fsys, "/state/harness.json"); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
+	if _, err := Load(fsys, testAbsPath("/state/harness.json")); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
 		t.Fatalf("read broad policy error = %v, want unsafe path", err)
 	}
 }
 
 func TestInvalidDestinationAndUpdateDoNotCreateState(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newHarnessMemFS()
 	for _, path := range []string{"", "relative/harness.json", "/", "/state/../harness.json", "/state/harness.json\x00"} {
 		if _, err := Load(fsys, path); err == nil {
 			t.Errorf("load accepted destination %q", path)
@@ -104,109 +104,109 @@ func TestInvalidDestinationAndUpdateDoNotCreateState(t *testing.T) {
 			t.Errorf("update accepted destination %q", path)
 		}
 	}
-	if _, err := Update(fsys, "/state/harness.json", nil); err == nil {
+	if _, err := Update(fsys, testAbsPath("/state/harness.json"), nil); err == nil {
 		t.Fatal("accepted missing update callback")
 	}
-	if err := Save(fsys, "/state/harness.json", Policy{Version: 1, Chats: map[string]Profile{testChat: "auto"}}); err == nil {
+	if err := Save(fsys, testAbsPath("/state/harness.json"), Policy{Version: 1, Chats: map[string]Profile{testChat: "auto"}}); err == nil {
 		t.Fatal("persisted auto as a profile")
 	}
-	if _, err := fsys.Stat("/state"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := fsys.Stat(testAbsPath("/state")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("invalid input created state: %v", err)
 	}
 }
 
 func TestUpdatePreservesOverridesAndAutoRemovesThem(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	if _, err := Update(fsys, "/state/harness.json", func(policy *Policy) error {
+	fsys := newHarnessMemFS()
+	if _, err := Update(fsys, testAbsPath("/state/harness.json"), func(policy *Policy) error {
 		policy.Enabled = true
-		policy.Projects["/work"] = Full
+		policy.Projects[testAbsPath("/work")] = Full
 		policy.Chats[testChat] = Minimal
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Update(fsys, "/state/harness.json", func(policy *Policy) error {
+	if _, err := Update(fsys, testAbsPath("/state/harness.json"), func(policy *Policy) error {
 		policy.Enabled = false
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	policy, err := Update(fsys, "/state/harness.json", func(policy *Policy) error {
+	policy, err := Update(fsys, testAbsPath("/state/harness.json"), func(policy *Policy) error {
 		delete(policy.Chats, testChat)
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if policy.Enabled || policy.Projects["/work"] != Full || len(policy.Chats) != 0 {
+	if policy.Enabled || policy.Projects[testAbsPath("/work")] != Full || len(policy.Chats) != 0 {
 		t.Fatalf("updated policy = %#v", policy)
 	}
 	policy.Enabled = true
-	if got := policy.Resolve("glm-5", "/work/project", testChat); got.Profile != Full || got.Source != "project" {
+	if got := policy.Resolve("glm-5", testAbsPath("/work/project"), testChat); got.Profile != Full || got.Source != "project" {
 		t.Fatalf("deleted chat override did not inherit project: %#v", got)
 	}
 }
 
 func TestUpdateFailureLeavesOldPolicyIntact(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	if err := Save(fsys, "/state/harness.json", Policy{Version: 1, Enabled: true}); err != nil {
+	fsys := newHarnessMemFS()
+	if err := Save(fsys, testAbsPath("/state/harness.json"), Policy{Version: 1, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
-	original, err := fsys.ReadFile("/state/harness.json")
+	original, err := fsys.ReadFile(testAbsPath("/state/harness.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	failed := errors.New("test transaction failed")
 	for name, update := range map[string]func(*Policy) error{
 		"callback error": func(policy *Policy) error { policy.Enabled = false; return failed },
-		"invalid update": func(policy *Policy) error { policy.Projects["/work"] = "auto"; return nil },
+		"invalid update": func(policy *Policy) error { policy.Projects[testAbsPath("/work")] = "auto"; return nil },
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := Update(fsys, "/state/harness.json", update); err == nil {
+			if _, err := Update(fsys, testAbsPath("/state/harness.json"), update); err == nil {
 				t.Fatal("update succeeded")
 			}
-			got, err := fsys.ReadFile("/state/harness.json")
+			got, err := fsys.ReadFile(testAbsPath("/state/harness.json"))
 			if err != nil || string(got) != string(original) {
 				t.Fatalf("failed update altered policy: %s, %v", got, err)
 			}
 		})
 	}
-	if _, err := Update(renameFailureFS{fsys}, "/state/harness.json", func(policy *Policy) error {
+	if _, err := Update(renameFailureFS{fsys}, testAbsPath("/state/harness.json"), func(policy *Policy) error {
 		policy.Enabled = false
 		return nil
 	}); !errors.Is(err, errTestRename) {
 		t.Fatalf("update error = %v, want injected rename failure", err)
 	}
-	got, err := fsys.ReadFile("/state/harness.json")
+	got, err := fsys.ReadFile(testAbsPath("/state/harness.json"))
 	if err != nil || string(got) != string(original) {
 		t.Fatalf("failed rename altered policy: %s, %v", got, err)
 	}
 	// A failed transaction must also release the lock.
-	if _, err := Update(fsys, "/state/harness.json", func(policy *Policy) error { policy.Enabled = false; return nil }); err != nil {
+	if _, err := Update(fsys, testAbsPath("/state/harness.json"), func(policy *Policy) error { policy.Enabled = false; return nil }); err != nil {
 		t.Fatalf("failed transaction retained lock: %v", err)
 	}
 }
 
 func TestConcurrentUpdateRefusesStaleOverwrite(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	if err := Save(fsys, "/state/harness.json", Policy{Version: 1}); err != nil {
+	fsys := newHarnessMemFS()
+	if err := Save(fsys, testAbsPath("/state/harness.json"), Policy{Version: 1}); err != nil {
 		t.Fatal(err)
 	}
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		_, err := Update(fsys, "/state/harness.json", func(policy *Policy) error {
+		_, err := Update(fsys, testAbsPath("/state/harness.json"), func(policy *Policy) error {
 			close(entered)
 			<-release
-			policy.Projects["/work"] = Full
+			policy.Projects[testAbsPath("/work")] = Full
 			return nil
 		})
 		done <- err
 	}()
 	<-entered
 	callbackCalled := false
-	_, concurrentErr := Update(fsys, "/state/harness.json", func(policy *Policy) error {
+	_, concurrentErr := Update(fsys, testAbsPath("/state/harness.json"), func(policy *Policy) error {
 		callbackCalled = true
 		policy.Chats[testChat] = Minimal
 		return nil
@@ -216,11 +216,11 @@ func TestConcurrentUpdateRefusesStaleOverwrite(t *testing.T) {
 	if firstErr != nil || !errors.Is(concurrentErr, fsutil.ErrExclusiveLockHeld) || callbackCalled {
 		t.Fatalf("concurrent update = %v, first = %v, second callback = %v", concurrentErr, firstErr, callbackCalled)
 	}
-	policy, err := Update(fsys, "/state/harness.json", func(policy *Policy) error {
+	policy, err := Update(fsys, testAbsPath("/state/harness.json"), func(policy *Policy) error {
 		policy.Chats[testChat] = Minimal
 		return nil
 	})
-	if err != nil || policy.Projects["/work"] != Full || policy.Chats[testChat] != Minimal {
+	if err != nil || policy.Projects[testAbsPath("/work")] != Full || policy.Chats[testChat] != Minimal {
 		t.Fatalf("retry lost another update: %#v, %v", policy, err)
 	}
 }

@@ -85,10 +85,13 @@ leaf help for exact arguments before making changes.
 | **"Use different tool sets per project/model, and share them."** | Bind ordered profiles at chat/project/global scope, optionally by model/family; export/import stable definitions and portable project rules. A CQ curation skill helps an agent build profiles from inventory. | `cq codex harness skill install`, scoped `bind`, `export`, `import`; [scope/sharing](usage.md#harness-capability-profiles). Plugin bundles can own MCP dependencies; use inventory IDs rather than guessing. |
 | **"Try reducing request size where compression is compatible."** | Optional Headroom integration supports cache-oriented or token-oriented compression. It needs a separately compatible Python/Headroom installation; CQ does not install it. | [Existing compression integration](configuration.md#optional-request-compression). Advanced optional feature; verify compatibility/benefit rather than promising savings or fresh third-party qualification. |
 
-For harness profiles, distinguish enforcement paths. Normal ChatGPT launching
-can apply plugin exclusions after CQ observes a request; first-turn application
-is not guaranteed, and standalone MCP/skill catalogues remain available. The CQ
-launcher adds broader standalone MCP and fresh skill-catalogue controls. Another
+For harness profiles, distinguish enforcement paths. On macOS, normal ChatGPT
+launching can apply plugin exclusions after CQ observes a request; first-turn
+application is not guaranteed, and standalone MCP/skill catalogues remain
+available. The Windows and macOS CQ launchers add standalone MCP and fresh
+skill-catalogue controls. On Windows, quit Codex Desktop and run
+`cq codex harness launch` from PowerShell. Use the native Windows execution
+environment in Desktop. Another
 native subscriber can retain the previous configuration despite a successful
 reload. Retained or unverified changes, including restoration, remain `partial`;
 check the application receipt before claiming success. Core

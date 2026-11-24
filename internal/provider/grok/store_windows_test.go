@@ -4,12 +4,34 @@ package grok
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"golang.org/x/sys/windows"
 )
+
+func secureTestAnchor(t *testing.T, path string) {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sddl := fmt.Sprintf("D:P(A;OICI;FA;;;%s)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", user.User.Sid.String())
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, flags, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestWindowsStoreDiscoveryInheritedDirectoryWithoutAccounts(t *testing.T) {
 	root := t.TempDir()

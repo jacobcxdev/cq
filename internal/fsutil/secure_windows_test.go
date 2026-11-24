@@ -80,8 +80,19 @@ func newWindowsTestFileSystem(t *testing.T, anchor string) OSFileSystem {
 	return fsys
 }
 
-func TestWindowsSecureAtomicWriteStaysInRetainedDirectory(t *testing.T) {
+func newWindowsOwnerControlledTestRoot(t *testing.T) string {
+	t.Helper()
 	root := t.TempDir()
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestSecurity(t, root, fmt.Sprintf("O:%sD:P(A;OICI;FA;;;%s)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", user.String(), user.String()))
+	return root
+}
+
+func TestWindowsSecureAtomicWriteStaysInRetainedDirectory(t *testing.T) {
+	root := newWindowsOwnerControlledTestRoot(t)
 	canonical := filepath.Join(root, "state")
 	moved := filepath.Join(root, "state-opened")
 	fsys := newWindowsTestFileSystem(t, root)
@@ -112,7 +123,7 @@ func TestWindowsSecureAtomicWriteStaysInRetainedDirectory(t *testing.T) {
 }
 
 func TestWindowsSecureDirectoryBootstrapsFromBoundaryAnchor(t *testing.T) {
-	anchor := t.TempDir()
+	anchor := newWindowsOwnerControlledTestRoot(t)
 	initial := newWindowsTestFileSystem(t, anchor)
 	identity := initial.secureBoundaryResolver.(*fixedWindowsBoundaryResolver).anchorIdentity
 	fsys := OSFileSystem{secureBoundaryResolver: &cqRootWindowsBoundaryResolver{anchorPath: anchor, anchorIdentity: identity}}
@@ -124,10 +135,66 @@ func TestWindowsSecureDirectoryBootstrapsFromBoundaryAnchor(t *testing.T) {
 	if err := ValidateSecureDirectory(fsys, target); err != nil {
 		t.Fatalf("ValidateSecureDirectory() error = %v", err)
 	}
+	if _, err := fsys.OpenDurableDirectory(anchor); !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("CQ private opener accepted its AppData anchor: %v", err)
+	}
+	if err := EnsureSecureDirectory(fsys, filepath.Dir(target)); err != nil {
+		t.Fatalf("reseal existing CQ root: %v", err)
+	}
+}
+
+func TestWindowsPrivateDestinationUsesOwnerControlledAnchor(t *testing.T) {
+	root := t.TempDir()
+	skills := filepath.Join(root, "skills")
+	if err := os.Mkdir(skills, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestSecurity(t, skills, fmt.Sprintf("O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)(A;;GRGX;;;WD)", user.String(), user.String()))
+	target := filepath.Join(skills, "curate-harness")
+	fsys, err := NewPrivateDestinationFileSystem(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := EnsureSecureDirectory(fsys, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateSecureDirectory(fsys, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (OSFileSystem{}).OpenSecureDirectory(target); !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("zero-value filesystem unexpectedly accepted external target: %v", err)
+	}
+	if _, err := fsys.OpenSecureDirectory(filepath.Join(root, "outside")); !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("value-scoped filesystem accepted sibling: %v", err)
+	}
+}
+
+func TestWindowsPrivateDestinationRejectsWritableAnchor(t *testing.T) {
+	root := t.TempDir()
+	skills := filepath.Join(root, "skills")
+	if err := os.Mkdir(skills, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestSecurity(t, skills, fmt.Sprintf("O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)(A;;GW;;;WD)", user.String(), user.String()))
+	target := filepath.Join(skills, "curate-harness")
+	if _, err := NewPrivateDestinationFileSystem(target); !errors.Is(err, ErrUnsafeSecurePath) {
+		t.Fatalf("writable anchor error = %v, want ErrUnsafeSecurePath", err)
+	}
+	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unsafe anchor created target: %v", err)
+	}
 }
 
 func TestWindowsSecureAtomicCreateHasOneWinner(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	state := filepath.Join(root, "state")
 	fsys := newWindowsTestFileSystem(t, root)
 	if err := EnsureSecureDirectory(fsys, state); err != nil {
@@ -175,7 +242,7 @@ func TestWindowsSecureAtomicCreateHasOneWinner(t *testing.T) {
 }
 
 func TestWindowsSecureAtomicWriteRejectsDACLDrift(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	state := filepath.Join(root, "state")
 	canonical := filepath.Join(state, "value")
 	fys := newWindowsTestFileSystem(t, root)
@@ -210,7 +277,7 @@ func TestWindowsSecureAtomicRejectsTemporaryReplacement(t *testing.T) {
 			name = "create"
 		}
 		t.Run(name, func(t *testing.T) {
-			root := t.TempDir()
+			root := newWindowsOwnerControlledTestRoot(t)
 			state := filepath.Join(root, "state")
 			fys := newWindowsTestFileSystem(t, root)
 			if err := EnsureSecureDirectory(fys, state); err != nil {
@@ -328,7 +395,7 @@ func TestWindowsSecureEntryNameRejectsWindowsAliases(t *testing.T) {
 }
 
 func TestWindowsRetainedReadDirectoryDoesNotExposeMutation(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	nestedPath := filepath.Join(root, "provider")
 	if err := os.Mkdir(nestedPath, 0o755); err != nil {
 		t.Fatal(err)
@@ -399,7 +466,7 @@ func TestWindowsOpenNoFollowAcceptsExternalCredentialOutsideCQRoots(t *testing.T
 }
 
 func TestWindowsRetainedDirectoriesResetEnumerationAndCloseOnce(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	state := filepath.Join(root, "state")
 	fys := newWindowsTestFileSystem(t, root)
 	if err := EnsureSecureDirectory(fys, state); err != nil {
@@ -485,7 +552,7 @@ func typeImplements[Interface any](value any) bool {
 }
 
 func TestWindowsRetainedRegularFileReadOnlyDoesNotExposeMutation(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	path := filepath.Join(root, "provider.json")
 	if err := os.WriteFile(path, []byte("external"), 0o600); err != nil {
 		t.Fatal(err)
@@ -529,7 +596,7 @@ func assertWindowsRetainedRegularFileType(t *testing.T, file RetainedRegularFile
 }
 
 func TestWindowsRetainedExecutableDeniesReplacementUntilWait(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	bin := filepath.Join(root, "bin")
 	if err := os.Mkdir(bin, 0o700); err != nil {
 		t.Fatal(err)
@@ -606,7 +673,7 @@ func TestWindowsRetainedExecutableDeniesReplacementUntilWait(t *testing.T) {
 }
 
 func TestWindowsRetainedRegularFileSerialisesReadStatAndClose(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	path := filepath.Join(root, "provider.json")
 	if err := os.WriteFile(path, []byte("external"), 0o600); err != nil {
 		t.Fatal(err)
@@ -718,7 +785,7 @@ func TestWindowsExclusiveLockIsNonBlockingAndDescriptorBound(t *testing.T) {
 		}
 		os.Exit(4)
 	}
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	state := filepath.Join(root, "state")
 	fys := newWindowsTestFileSystem(t, root)
 	if err := EnsureSecureDirectory(fys, state); err != nil {
@@ -770,7 +837,7 @@ func TestWindowsExclusiveLockIsNonBlockingAndDescriptorBound(t *testing.T) {
 }
 
 func TestWindowsAcquireNewExclusiveLockNeverOpensExistingFile(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	state := filepath.Join(root, "state")
 	fys := newWindowsTestFileSystem(t, root)
 	if err := EnsureSecureDirectory(fys, state); err != nil {
@@ -798,7 +865,7 @@ func TestWindowsAcquireNewExclusiveLockNeverOpensExistingFile(t *testing.T) {
 }
 
 func TestWindowsAcquireNewExclusiveLockCreatesOnce(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	state := filepath.Join(root, "state")
 	fys := newWindowsTestFileSystem(t, root)
 	if err := EnsureSecureDirectory(fys, state); err != nil {
@@ -825,7 +892,7 @@ func TestWindowsAcquireNewExclusiveLockCreatesOnce(t *testing.T) {
 }
 
 func TestWindowsValidateExclusiveLockHeldRejectsUnlockedFile(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	state := filepath.Join(root, "state")
 	fys := newWindowsTestFileSystem(t, root)
 	if err := EnsureSecureDirectory(fys, state); err != nil {
@@ -867,7 +934,7 @@ func TestWindowsValidateExclusiveLockHeldRejectsUnlockedFile(t *testing.T) {
 }
 
 func TestWindowsLockRejectsBroadDACL(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	state := filepath.Join(root, "state")
 	fys := newWindowsTestFileSystem(t, root)
 	if err := EnsureSecureDirectory(fys, state); err != nil {
@@ -908,7 +975,7 @@ func TestWindowsRetainedExecutableHelperProcess(t *testing.T) {
 }
 
 func TestWindowsRetainedExecutableUsesFixedRightsAndShareReadOnly(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	bin := filepath.Join(root, "bin")
 	if err := os.Mkdir(bin, 0o700); err != nil {
 		t.Fatal(err)
@@ -972,7 +1039,7 @@ func TestWindowsRetainedExecutableUsesFixedRightsAndShareReadOnly(t *testing.T) 
 }
 
 func TestWindowsRetainedExecutableRejectsReparseAndPreexistingWriter(t *testing.T) {
-	root := t.TempDir()
+	root := newWindowsOwnerControlledTestRoot(t)
 	executable := filepath.Join(root, "helper.exe")
 	if err := os.WriteFile(executable, []byte("helper"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1144,7 +1211,6 @@ func TestWindowsSecureMetadataRejectsNonExactPrivateDACLs(t *testing.T) {
 	}{
 		"unprotected":            {fmt.Sprintf("D:(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)", userText), false},
 		"missing administrators": {fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;SY)", userText), true},
-		"duplicate system":       {fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;SY)(A;;FA;;;BA)", userText), true},
 		"everyone read":          {fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)(A;;GR;;;WD)", userText), true},
 		"authenticated full":     {fmt.Sprintf("D:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;AU)", userText), true},
 	}
@@ -1170,7 +1236,7 @@ func TestWindowsRetainedAncestorAcceptsTrustedACLWithInheritedRead(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	setWindowsTestSecurity(t, anchor, fmt.Sprintf("O:%sD:AI(A;OICI;FA;;;%s)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIOID;GRGX;;;WD)", user.String(), user.String()))
+	setWindowsTestSecurity(t, anchor, fmt.Sprintf("O:%sD:P(A;OICI;FA;;;%s)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIOID;GRGX;;;WD)", user.String(), user.String()))
 	fsys := newWindowsTestFileSystem(t, anchor)
 	info, err := fsys.Lstat(anchor)
 	if err != nil {
@@ -1313,7 +1379,7 @@ func TestWindowsOwnerControlledDirectoryOpensOutsideCQRoots(t *testing.T) {
 }
 
 func TestWindowsSecureOpenRejectsBroadIntermediateBelowAnchor(t *testing.T) {
-	anchor := t.TempDir()
+	anchor := newWindowsOwnerControlledTestRoot(t)
 	intermediate := filepath.Join(anchor, "intermediate")
 	target := filepath.Join(intermediate, "target")
 	if err := os.Mkdir(intermediate, 0o700); err != nil {
@@ -1387,7 +1453,7 @@ func TestWindowsExternalCredentialDirectoryAcceptsInheritedReadTraverse(t *testi
 		if err := os.Mkdir(path, 0o700); err != nil {
 			t.Fatal(err)
 		}
-		setWindowsTestSecurity(t, path, fmt.Sprintf("O:%sD:AI(A;OICI;FA;;;%s)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIOID;GRGX;;;WD)", user.String(), user.String()))
+		setWindowsTestSecurity(t, path, fmt.Sprintf("O:%sD:P(A;OICI;FA;;;%s)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICIIOID;GRGX;;;WD)", user.String(), user.String()))
 		fsys := newWindowsTestFileSystem(t, path)
 		if err := ValidateExternalCredentialDirectory(fsys, path); err != nil {
 			t.Fatalf("%s: %v", name, err)
@@ -1465,6 +1531,15 @@ func TestWindowsSecurityClassificationUsesNamedPolicies(t *testing.T) {
 			sddl: fmt.Sprintf("O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)", user.String(), user.String()),
 			want: windowsSecurityClassification{
 				PrivateDACL: true, AncestorSafe: true, ExternalCredentialDirectorySafe: true,
+				ExternalCredentialSafe: true, ExternalCacheSafe: true, ExternalImportFileSafe: true,
+			},
+			checkOwner: true,
+		},
+		{
+			name: "duplicate system ACE",
+			sddl: fmt.Sprintf("O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;SY)(A;;FA;;;BA)", user.String(), user.String()),
+			want: windowsSecurityClassification{
+				AncestorSafe: true, ExternalCredentialDirectorySafe: true,
 				ExternalCredentialSafe: true, ExternalCacheSafe: true, ExternalImportFileSafe: true,
 			},
 			checkOwner: true,

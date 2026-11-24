@@ -8,6 +8,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -15,17 +16,24 @@ import (
 	"time"
 )
 
-func privateTestDir(t *testing.T) string {
+func privateTestDir(t *testing.T) (string, fsutil.OSFileSystem) {
 	t.Helper()
-	dir := t.TempDir()
-	if err := os.Chmod(dir, 0o700); err != nil {
+	anchor := t.TempDir()
+	secureTestAnchor(t, anchor)
+	dir := filepath.Join(anchor, "private")
+	fsys, err := fsutil.NewPrivateDestinationFileSystem(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	return dir
+	if err := fsutil.EnsureSecureDirectory(fsys, dir); err != nil {
+		t.Fatal(err)
+	}
+	return dir, fsys
 }
 func testAuthority(t *testing.T, exchange RefreshExchange) *SessionAuthority {
 	t.Helper()
-	return NewAuthority(Store{FS: fsutil.OSFileSystem{}, ConfigDir: privateTestDir(t)}, nil, exchange)
+	dir, fsys := privateTestDir(t)
+	return NewAuthority(Store{FS: fsys, ConfigDir: dir}, nil, exchange)
 }
 func loginFixture(user string) Login {
 	return Login{Account: Account{UserID: user, Email: user + "@example.test", Plan: "SuperGrok"}, AccessToken: "access-private", RefreshToken: "refresh-private", ExpiresAt: time.Now().Add(time.Hour)}
@@ -150,7 +158,7 @@ func TestStoreDiscoveryStillRejectsUnsafePresentFile(t *testing.T) {
 }
 
 func TestStoreDiscoveryRejectsSymlinkFile(t *testing.T) {
-	root := privateTestDir(t)
+	root, fsys := privateTestDir(t)
 	target := filepath.Join(t.TempDir(), "target")
 	if err := os.WriteFile(target, []byte("untrusted"), 0o600); err != nil {
 		t.Fatal(err)
@@ -158,7 +166,7 @@ func TestStoreDiscoveryRejectsSymlinkFile(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(root, storeFilename)); err != nil {
 		t.Skipf("symlink creation unavailable: %v", err)
 	}
-	store := Store{FS: fsutil.OSFileSystem{}, ConfigDir: root}
+	store := Store{FS: fsys, ConfigDir: root}
 	if data, err := store.readFile(storeFilename, 1024); err == nil || len(data) != 0 {
 		t.Fatalf("symlinked credential file was read: %q, %v", data, err)
 	}
@@ -265,6 +273,10 @@ func TestStoreRetainedNamespaceRejectsReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Rename(a.Store.ConfigDir, a.Store.ConfigDir+"-moved"); err != nil {
+		if runtime.GOOS == "windows" && errors.Is(err, os.ErrPermission) {
+			// Windows prevents moving the directory while its lock file is open.
+			return
+		}
 		t.Fatal(err)
 	}
 	defer os.Rename(a.Store.ConfigDir+"-moved", a.Store.ConfigDir)
@@ -302,8 +314,10 @@ func (d *failRenameDirectory) Rename(old, new string) error {
 }
 func TestRefreshRetainsResultAfterPersistenceFailure(t *testing.T) {
 	fs := &failRenameFS{}
+	dir, fsys := privateTestDir(t)
+	fs.OSFileSystem = fsys
 	calls := 0
-	a := NewAuthority(Store{FS: fs, ConfigDir: privateTestDir(t)}, nil, func(context.Context, string) (TokenSet, error) {
+	a := NewAuthority(Store{FS: fs, ConfigDir: dir}, nil, func(context.Context, string) (TokenSet, error) {
 		calls++
 		fs.fail.Store(true)
 		return TokenSet{AccessToken: "new-access", RefreshToken: "new-refresh", ExpiresAt: time.Now().Add(time.Hour)}, nil
@@ -345,8 +359,10 @@ func (d *failRenameDirectory) RemoveChecked(name string, id fsutil.SecureFileIde
 
 func TestRefreshRetainsResultAfterCommitFailure(t *testing.T) {
 	fs := &failRenameFS{}
+	dir, fsys := privateTestDir(t)
+	fs.OSFileSystem = fsys
 	calls := 0
-	a := NewAuthority(Store{FS: fs, ConfigDir: privateTestDir(t)}, nil, func(context.Context, string) (TokenSet, error) {
+	a := NewAuthority(Store{FS: fs, ConfigDir: dir}, nil, func(context.Context, string) (TokenSet, error) {
 		calls++
 		fs.after.Store(2)
 		return TokenSet{AccessToken: "new-access", RefreshToken: "new-refresh", ExpiresAt: time.Now().Add(time.Hour)}, nil
@@ -373,13 +389,15 @@ func TestRefreshRetainsResultAfterCommitFailure(t *testing.T) {
 
 func TestRefreshRestartCommitsDurableResultWithoutExchange(t *testing.T) {
 	fs := &failRenameFS{}
+	dir, fsys := privateTestDir(t)
+	fs.OSFileSystem = fsys
 	calls := 0
 	exchange := func(context.Context, string) (TokenSet, error) {
 		calls++
 		fs.after.Store(2)
 		return TokenSet{AccessToken: "new-access", RefreshToken: "new-refresh", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}
-	a := NewAuthority(Store{FS: fs, ConfigDir: privateTestDir(t)}, nil, exchange)
+	a := NewAuthority(Store{FS: fs, ConfigDir: dir}, nil, exchange)
 	login := loginFixture("one")
 	login.ExpiresAt = time.Now().Add(-time.Minute)
 	if _, err := a.SaveLogin(context.Background(), login, "", true); err != nil {
@@ -403,6 +421,8 @@ func TestRefreshRestartCommitsDurableResultWithoutExchange(t *testing.T) {
 
 func TestFreshLoginGenerationWinsOverRetainedRefresh(t *testing.T) {
 	fs := &failRenameFS{}
+	dir, fsys := privateTestDir(t)
+	fs.OSFileSystem = fsys
 	calls := 0
 	exchange := func(context.Context, string) (TokenSet, error) {
 		calls++
@@ -411,7 +431,7 @@ func TestFreshLoginGenerationWinsOverRetainedRefresh(t *testing.T) {
 		}
 		return TokenSet{AccessToken: fmt.Sprintf("access-%d", calls), RefreshToken: "new-refresh", ExpiresAt: time.Now().Add(time.Hour)}, nil
 	}
-	a := NewAuthority(Store{FS: fs, ConfigDir: privateTestDir(t)}, nil, exchange)
+	a := NewAuthority(Store{FS: fs, ConfigDir: dir}, nil, exchange)
 	login := loginFixture("one")
 	login.ExpiresAt = time.Now().Add(-time.Minute)
 	if _, err := a.SaveLogin(context.Background(), login, "", true); err != nil {

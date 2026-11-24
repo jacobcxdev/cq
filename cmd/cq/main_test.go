@@ -121,6 +121,7 @@ func TestGetActiveCredentials(t *testing.T) {
 	t.Run("valid credentials file returns token and email", func(t *testing.T) {
 		dir := t.TempDir()
 		t.Setenv("HOME", dir)
+		t.Setenv("USERPROFILE", dir)
 		writeCredentials(t, dir, "mytoken123", "user@example.com")
 
 		tok, email := app.GetActiveCredentials()
@@ -135,6 +136,7 @@ func TestGetActiveCredentials(t *testing.T) {
 	t.Run("missing file returns empty strings", func(t *testing.T) {
 		dir := t.TempDir()
 		t.Setenv("HOME", dir)
+		t.Setenv("USERPROFILE", dir)
 
 		tok, email := app.GetActiveCredentials()
 		if tok != "" {
@@ -148,6 +150,7 @@ func TestGetActiveCredentials(t *testing.T) {
 	t.Run("invalid JSON returns empty strings", func(t *testing.T) {
 		dir := t.TempDir()
 		t.Setenv("HOME", dir)
+		t.Setenv("USERPROFILE", dir)
 		if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o700); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
@@ -209,6 +212,9 @@ func TestDispatchUnknownCommandReturnsError(t *testing.T) {
 }
 
 func TestDispatchCodexAccountsJSON(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows CQ account roots use User Shell Folders; this environment fixture cannot isolate default credential control")
+	}
 	t.Setenv("HOME", t.TempDir())
 	tempRoot := os.TempDir()
 	if runtime.GOOS == "darwin" {

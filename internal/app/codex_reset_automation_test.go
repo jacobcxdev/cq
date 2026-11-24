@@ -17,7 +17,8 @@ func automationFixture(t *testing.T) (*CodexResetApp, *recordingResetBackend, *r
 	t.Helper()
 	a, b, u, p := completeResetApp(time.Date(2026, 10, 27, 18, 0, 0, 0, time.UTC))
 	b.consume = codex.ConsumeResetResult{Outcome: codex.ConsumeReset, WindowsReset: 2}
-	a.Schedule = codex.NewResetAutomationStore(fsutil.OSFileSystem{}, filepath.Join(t.TempDir(), "state", "schedule.json"))
+	dir, fsys := resetAutomationTestDir(t)
+	a.Schedule = codex.NewResetAutomationStore(fsys, filepath.Join(dir, "state", "schedule.json"))
 	return a, b, u, p
 }
 func automationChange(t *testing.T, a *CodexResetApp, c CodexResetScheduleChange) codex.ResetAutomationState {
@@ -147,7 +148,7 @@ func TestResetAutomationExecutorLockExcludesAnotherStore(t *testing.T) {
 	at := a.now()
 	automationChange(t, a, CodexResetScheduleChange{Action: "add", Reference: "a@example.com", At: &at})
 	automationChange(t, a, CodexResetScheduleChange{Action: "enable"})
-	other := codex.NewResetAutomationStore(fsutil.OSFileSystem{}, a.Schedule.Path)
+	other := codex.NewResetAutomationStore(a.Schedule.FS, a.Schedule.Path)
 	lock, err := other.AcquireExecutor()
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +177,7 @@ func TestResetAutomationExecutorLockExcludesManualUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := codex.NewResetAutomationStore(fsutil.OSFileSystem{}, a.Schedule.Path)
+	other := codex.NewResetAutomationStore(a.Schedule.FS, a.Schedule.Path)
 	lock, err := other.AcquireExecutor()
 	if err != nil {
 		t.Fatal(err)
@@ -524,8 +525,8 @@ func TestResetAutomationRestartAfterResultSaveFailureReusesDurableRequest(t *tes
 	a, b, u, _ := automationFixture(t)
 	requests := &automationRequestBackend{recordingResetBackend: b}
 	a.Backend = requests
-	cacheRoot := filepath.Join(t.TempDir(), "cache")
-	attempts, err := codex.NewResetAttemptStore(fsutil.OSFileSystem{}, cacheRoot)
+	cacheRoot := filepath.Join(filepath.Dir(filepath.Dir(a.Schedule.Path)), "cache")
+	attempts, err := codex.NewResetAttemptStore(a.Schedule.FS, cacheRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,12 +540,12 @@ func TestResetAutomationRestartAfterResultSaveFailureReusesDurableRequest(t *tes
 	if err := a.StepSchedule(context.Background()); err == nil {
 		t.Fatal("result-save failure hidden")
 	}
-	a.Schedule = codex.NewResetAutomationStore(fsutil.OSFileSystem{}, originalPath)
+	a.Schedule = codex.NewResetAutomationStore(a.Schedule.FS, originalPath)
 	state, err := a.Schedule.Load()
 	if err != nil || state.Entries[0].State != codex.ResetAutomationRunning {
 		t.Fatalf("durable claim lost %+v %v", state, err)
 	}
-	a.Attempts, err = codex.NewResetAttemptStore(fsutil.OSFileSystem{}, cacheRoot)
+	a.Attempts, err = codex.NewResetAttemptStore(a.Schedule.FS, cacheRoot)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -9,7 +9,7 @@ import (
 )
 
 func TestRemoveAPIKeyAccountsKeptOAuthOrderAndSecretStore(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	if _, err := StoreAccount(fsys, "/config", "first-private", "first", false); err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestRemoveAPIKeyAccountsKeptOAuthOrderAndSecretStore(t *testing.T) {
 
 func TestRemoveAPIKeyAccountsRequiredUsableSavedBrowserLogin(t *testing.T) {
 	for _, corruptLogin := range []bool{false, true} {
-		fsys := fsutil.NewMemFS()
+		fsys := newZaiTestFS()
 		if _, err := StoreAccount(fsys, "/config", "retained-private", "native", true); err != nil {
 			t.Fatal(err)
 		}
@@ -75,7 +75,7 @@ func TestRemoveAPIKeyAccountsRequiredUsableSavedBrowserLogin(t *testing.T) {
 }
 
 func TestRemoveAPIKeyAccountsFailedAtomicReplacementPreservedBothKinds(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	if _, err := StoreAccount(fsys, "/config", "retained-private", "native", true); err != nil {
 		t.Fatal(err)
 	}

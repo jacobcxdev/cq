@@ -40,12 +40,27 @@ For legacy Cask hook failures and the first listener-preserving upgrade, see
 
 ### Windows — WinGet
 
+When CQ is listed in the WinGet community source, run the following command.
+
 ```powershell
 winget install jacobcxdev.cq
 ```
 
 WinGet installs CQ, its uninstaller, PATH and Add/Remove Programs metadata, and
 both scheduled tasks for the current Windows user without administrator access.
+The matching x64 or ARM64 MSI is also available from [GitHub Releases](https://github.com/jacobcxdev/cq/releases/latest).
+
+### Windows — Scoop
+
+```powershell
+scoop bucket add jacobcxdev https://github.com/jacobcxdev/homebrew-tap
+scoop install jacobcxdev/cq
+```
+
+Scoop installs the portable CQ CLI for x64 or ARM64. For managed scheduled
+tasks, install with WinGet or run the MSI from the GitHub release. Use
+`scoop update` followed by `scoop update cq` to upgrade, and
+`scoop uninstall cq` to uninstall.
 
 ### macOS, Windows, and Linux — Go installer runner
 
@@ -221,6 +236,7 @@ cq codex harness explain
 cq codex harness export
 cq codex harness import
 cq codex harness inventory
+cq codex harness launch
 cq codex harness profile copy
 cq codex harness profile list
 cq codex harness profile save

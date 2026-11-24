@@ -32,6 +32,7 @@ type fakeFS struct {
 	files      map[string][]byte
 	dirEntries map[string][]fakeDirEntry
 	readDirErr map[string]error
+	homeDir    string
 	homeDirErr error
 	writeErr   error
 	renameErr  error
@@ -60,6 +61,9 @@ type failSecondHomeDirFS struct {
 func (f *fakeFS) UserHomeDir() (string, error) {
 	if f.homeDirErr != nil {
 		return "", f.homeDirErr
+	}
+	if f.homeDir != "" {
+		return f.homeDir, nil
 	}
 	return "/fake/home", nil
 }
@@ -328,7 +332,8 @@ func TestFetchHappyPath(t *testing.T) {
 	defer srv.Close()
 
 	fs := newFakeFS()
-	fs.files["/fake/home/.codex/auth.json"] = validAuthJSON(
+	fs.homeDir = filepath.Join(t.TempDir(), "home")
+	fs.files[filepath.Join(fs.homeDir, ".codex", "auth.json")] = validAuthJSON(
 		"tok-abc",
 		"ref-abc",
 		fakeCodexJWT("user@example.test", "acct-1", "user-1", "plus"),

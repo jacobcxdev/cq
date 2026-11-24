@@ -15,6 +15,11 @@ import (
 
 const maxPolicyBytes = 1 << 20
 
+type ownerControlledPolicyFileSystem interface {
+	fsutil.SecurePathInspector
+	OpenOwnerControlledCQPolicyDirectory(string) (fsutil.SecureDirectory, error)
+}
+
 // Load reads private policy state; a missing file leaves the feature disabled.
 func Load(fsys fsutil.FileSystem, path string) (Policy, error) {
 	if err := validatePolicyPath(path); err != nil {
@@ -23,6 +28,23 @@ func Load(fsys fsutil.FileSystem, path string) (Policy, error) {
 	data, err := fsutil.ReadSecureFile(fsys, path, maxPolicyBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return emptyPolicy(), nil
+	}
+	if errors.Is(err, fsutil.ErrUnsafeSecurePath) {
+		if opener, ok := fsys.(ownerControlledPolicyFileSystem); ok {
+			if directory, openErr := opener.OpenOwnerControlledCQPolicyDirectory(path); openErr == nil {
+				data, _, readErr := fsutil.ReadOwnerControlledFileInDirectoryWithIdentity(opener, directory, filepath.Dir(path), filepath.Base(path), maxPolicyBytes)
+				if closeErr := directory.Close(); closeErr != nil {
+					return Policy{}, errors.Join(readErr, closeErr)
+				}
+				if errors.Is(readErr, os.ErrNotExist) {
+					return emptyPolicy(), nil
+				}
+				if readErr != nil {
+					return Policy{}, fmt.Errorf("read harness policy: %w", readErr)
+				}
+				return decodePolicy(data)
+			}
+		}
 	}
 	if err != nil {
 		return Policy{}, fmt.Errorf("read harness policy: %w", err)
@@ -61,26 +83,53 @@ func Update(fsys fsutil.FileSystem, path string, update func(*Policy) error) (po
 		return Policy{}, fsutil.ErrSecureCapabilityUnavailable
 	}
 	dir, name := filepath.Dir(path), filepath.Base(path)
-	if err := fsutil.EnsureSecureDirectory(fsys, dir); err != nil {
-		return Policy{}, fmt.Errorf("secure harness policy directory: %w", err)
-	}
-	directory, err := opener.OpenSecureDirectory(dir)
-	if err != nil {
-		return Policy{}, fmt.Errorf("open harness policy directory: %w", err)
+	var directory fsutil.SecureDirectory
+	ownerControlled := false
+	if ensureErr := fsutil.EnsureSecureDirectory(fsys, dir); ensureErr != nil {
+		if !errors.Is(ensureErr, fsutil.ErrUnsafeSecurePath) {
+			return Policy{}, fmt.Errorf("secure harness policy directory: %w", ensureErr)
+		}
+		ownerOpener, ok := fsys.(ownerControlledPolicyFileSystem)
+		if !ok {
+			return Policy{}, fmt.Errorf("secure harness policy directory: %w", ensureErr)
+		}
+		directory, err = ownerOpener.OpenOwnerControlledCQPolicyDirectory(path)
+		if err != nil {
+			return Policy{}, fmt.Errorf("open owner-controlled harness policy directory: %w", err)
+		}
+		ownerControlled = true
+	} else {
+		directory, err = opener.OpenSecureDirectory(dir)
+		if err != nil {
+			return Policy{}, fmt.Errorf("open harness policy directory: %w", err)
+		}
 	}
 	defer func() { err = errors.Join(err, directory.Close()) }()
 	validateDirectory := func() error {
+		if ownerControlled {
+			return fsutil.ValidateOwnerControlledDirectoryHandle(inspector, directory, dir)
+		}
 		return fsutil.ValidateSecureDirectoryHandle(inspector, directory, dir)
 	}
 	if err := validateDirectory(); err != nil {
 		return Policy{}, err
 	}
-	lock, err := fsutil.AcquireExclusiveLockInDirectory(inspector, directory, name+".lock")
+	var lock fsutil.ExclusiveLock
+	if ownerControlled {
+		lock, err = fsutil.AcquireExclusiveLockInOwnerControlledDirectory(inspector, directory, dir, name+".lock")
+	} else {
+		lock, err = fsutil.AcquireExclusiveLockInDirectory(inspector, directory, name+".lock")
+	}
 	if err != nil {
 		return Policy{}, fmt.Errorf("lock harness policy: %w", err)
 	}
 	defer func() { err = errors.Join(err, lock.Close()) }()
-	data, err := fsutil.ReadSecureFileInDirectory(inspector, directory, name, maxPolicyBytes)
+	var data []byte
+	if ownerControlled {
+		data, _, err = fsutil.ReadOwnerControlledFileInDirectoryWithIdentity(inspector, directory, dir, name, maxPolicyBytes)
+	} else {
+		data, err = fsutil.ReadSecureFileInDirectory(inspector, directory, name, maxPolicyBytes)
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		policy = emptyPolicy()
 	} else if err != nil {
@@ -102,7 +151,12 @@ func Update(fsys fsutil.FileSystem, path string, update func(*Policy) error) (po
 	if len(data) > maxPolicyBytes {
 		return Policy{}, fsutil.ErrSecureFileTooLarge
 	}
-	if err := fsutil.SecureAtomicWriteInDirectoryChecked(inspector, directory, name, data, validateDirectory); err != nil {
+	if ownerControlled {
+		err = fsutil.SecureAtomicWriteInOwnerControlledDirectoryChecked(inspector, directory, dir, name, data, validateDirectory)
+	} else {
+		err = fsutil.SecureAtomicWriteInDirectoryChecked(inspector, directory, name, data, validateDirectory)
+	}
+	if err != nil {
 		return Policy{}, fmt.Errorf("write harness policy: %w", err)
 	}
 	return policy, nil

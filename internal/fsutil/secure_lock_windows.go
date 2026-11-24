@@ -157,7 +157,7 @@ func (directory *windowsSecureDirectory) openExclusiveLock(name string, _ os.Fil
 			_ = windows.UnlockFileEx(windows.Handle(lock.file.Fd()), 0, 1, 0, &lock.overlapped)
 			return fail(err)
 		}
-		if err := validateSecureDirectoryDescriptor(OSFileSystem{}, directory); err != nil {
+		if err := directory.validateCommitDirectory(); err != nil {
 			_ = windows.UnlockFileEx(windows.Handle(lock.file.Fd()), 0, 1, 0, &lock.overlapped)
 			return fail(err)
 		}

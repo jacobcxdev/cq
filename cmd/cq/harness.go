@@ -20,10 +20,11 @@ import (
 
 // CodexHarnessCmd stores capability profiles independently of Codex configuration.
 type CodexHarnessCmd struct {
+	Launch    struct{}                 `cmd:"" help:"Start Windows Codex Desktop with CQ harness profiles"`
 	Inventory CodexHarnessInventoryCmd `cmd:"" help:"List installed capabilities by stable ID"`
 	Profile   CodexHarnessProfilesCmd  `cmd:"" help:"List, inspect and save reusable harness profiles"`
-	Bind      CodexHarnessBindCmd      `cmd:"" help:"Bind profiles and apply them to a known chat"`
-	Unbind    CodexHarnessUnbindCmd    `cmd:"" help:"Remove a binding and restore inherited decisions"`
+	Bind      CodexHarnessBindCmd      `cmd:"" help:"Bind profiles and request application where supported"`
+	Unbind    CodexHarnessUnbindCmd    `cmd:"" help:"Remove a binding and request restoration where supported"`
 	Explain   CodexHarnessExplainCmd   `cmd:"" help:"Explain effective decisions, layers and last application"`
 	Retry     CodexHarnessExplainCmd   `cmd:"" help:"Request one idle-boundary retry of a matching failed full-mode application"`
 	Export    CodexHarnessExportCmd    `cmd:"" help:"Export a portable named profile as JSON"`
@@ -48,7 +49,7 @@ type CodexHarnessStatusCmd struct {
 	Chat    string `help:"Chat UUID or codex://threads/ link for preview"`
 }
 
-const harnessApplicationNote = "CQ automatically detects profile support. With the CQ launcher, profiles control plugins, standalone MCP servers and local skills. With a standard ChatGPT launch, profiles control plugins only; standalone MCP servers and local skills stay unchanged. For standard launches, legacy GLM policy applies at the next eligible turn after CQ observes a GLM request; other model bindings apply after CQ observes that model's request. First-turn application is not guaranteed for standard launches."
+const harnessApplicationNote = "On Windows, close Codex Desktop and run cq codex harness launch in the native Windows execution environment. The Windows and macOS CQ launchers control plugins, standalone MCP servers and local skills. A standard ChatGPT launch on macOS can apply plugin exclusions on a later eligible turn after CQ observes a request for the selected model. Legacy policy starts after CQ observes a GLM request."
 
 func (CodexHarnessCmd) Help() string       { return harnessApplicationNote }
 func (CodexHarnessStatusCmd) Help() string { return harnessApplicationNote }
@@ -117,6 +118,15 @@ func (runner codexHarnessRunner) execute(operation string, cmd CodexHarnessCmd, 
 	var update func(*harness.Policy) error
 	var project, chat string
 	switch operation {
+	case "launch":
+		if err := launchHarnessDesktop(context.Background()); err != nil {
+			return err
+		}
+		if jsonOutput {
+			return json.NewEncoder(output).Encode(map[string]bool{"started": true})
+		}
+		_, err := fmt.Fprintln(output, "Started Windows Codex Desktop with CQ harness profiles.")
+		return err
 	case "status":
 		var err error
 		if cmd.Status.Project != "" {

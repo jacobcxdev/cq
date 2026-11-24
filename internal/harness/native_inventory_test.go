@@ -41,6 +41,7 @@ const nativeCurationFixture = `{
 }`
 
 func nativeCurationClient(data string) NativeInventory {
+	data = testJSONFixturePaths(data)
 	return NativeInventory{Executable: "/native/codex", Run: func(_ context.Context, _, _ string, output io.Writer) error {
 		_, err := io.WriteString(output, data)
 		return err
@@ -67,7 +68,7 @@ func TestNativeInventoryKeptPluginAppIDsIncludingDisabled(t *testing.T) {
 		details["one@market"].(map[string]any)["plugin"].(map[string]any)["apps"] = []any{map[string]any{"id": "asdk_app_second", "name": "Second", "description": "private-description"}, map[string]any{"id": "asdk_app_first"}}
 		details["disabled@market"].(map[string]any)["plugin"].(map[string]any)["apps"] = []any{map[string]any{"id": "asdk_app_dormant"}}
 	})
-	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestNativeInventoryAppOwnershipFailuresWereLocal(t *testing.T) {
 					plugin["apps"] = []any{map[string]any{"id": "_default"}}
 				}
 			})
-			inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+			inventory, err := nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work"))
 			if err != nil || !slices.Contains(inventory.Issues, InventoryIssue{Code: "plugin_app_ownership_unresolved", Kind: PluginKind, ID: "one@market"}) {
 				t.Fatalf("app metadata gap not localised: %v %v", inventory.Issues, err)
 			}
@@ -127,7 +128,7 @@ func TestNativeInventoryKeptPluginMCPNamesAtomicIncludingDisabled(t *testing.T) 
 		details["one@market"].(map[string]any)["plugin"].(map[string]any)["mcpServers"] = []string{"bundle-two", "bundle-one"}
 		details["disabled@market"].(map[string]any)["plugin"].(map[string]any)["mcpServers"] = []string{"dormant"}
 	})
-	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,7 +184,7 @@ func TestNativeInventoryPluginMCPFailuresWereLocalAndPrivate(t *testing.T) {
 					plugin["summary"].(map[string]any)["name"] = "different"
 				}
 			})
-			inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+			inventory, err := nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work"))
 			if err != nil || len(inventory.Capabilities) != 10 {
 				t.Fatalf("plugin detail failure discarded the usable inventory: %v", err)
 			}
@@ -232,7 +233,7 @@ func TestNativeInventoryResolvedSkillMCPToUniqueAtomicOwner(t *testing.T) {
 				skills := fixture["skills"].(map[string]any)["data"].([]any)[0].(map[string]any)["skills"].([]any)
 				skills[0].(map[string]any)["dependencies"] = map[string]any{"tools": []any{map[string]any{"type": "mcp", "value": dependency}}}
 			})
-			inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+			inventory, err := nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -263,7 +264,7 @@ func TestNativeInventoryDetailReadQueueWasBoundedAndSkippedUninstalled(t *testin
 		plugins = append(plugins, map[string]any{"id": "plugin-" + strconv.Itoa(index) + "@market", "name": "plugin-" + strconv.Itoa(index), "installed": true, "enabled": index%2 == 0})
 	}
 	plugins = append(plugins, map[string]any{"id": "uninstalled@market", "name": "uninstalled", "installed": false, "enabled": false})
-	raw, _ := json.Marshal(map[string]any{"marketplaces": []any{map[string]any{"name": "market", "path": "/private/market.json", "plugins": plugins}}})
+	raw, _ := json.Marshal(map[string]any{"marketplaces": []any{map[string]any{"name": "market", "path": testAbsPath("/private/market.json"), "plugins": plugins}}})
 	requests := nativePluginDetailRequests(raw)
 	if len(requests) != 124 {
 		t.Fatalf("native detail read bound changed: %d", len(requests))
@@ -278,7 +279,7 @@ func TestNativeInventoryDetailReadQueueWasBoundedAndSkippedUninstalled(t *testin
 }
 
 func TestNativeInventoryIncludedDisabledMetadataAndPortableIDs(t *testing.T) {
-	inventory, err := nativeCurationClient(nativeCurationFixture).Snapshot(context.Background(), "/work")
+	inventory, err := nativeCurationClient(nativeCurationFixture).Snapshot(context.Background(), testAbsPath("/work"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +303,7 @@ func TestNativeInventoryIncludedDisabledMetadataAndPortableIDs(t *testing.T) {
 		t.Fatal("native availability was misrepresented")
 	}
 	owned := byID["skill:plugin:one@market:owned"]
-	if owned.Path != "/cache/42/owned/SKILL.md" || owned.NativeID != "owned" || owned.PluginID != "one@market" || !slices.Equal(owned.Dependencies, []string{"mcp:active", "plugin:one@market"}) {
+	if owned.Path != testAbsPath("/cache/42/owned/SKILL.md") || owned.NativeID != "owned" || owned.PluginID != "one@market" || !slices.Equal(owned.Dependencies, []string{"mcp:active", "plugin:one@market"}) {
 		t.Fatalf("owned skill = %+v", owned)
 	}
 	if byID["plugin:one@market"].Description != "Native plugin description" {
@@ -339,7 +340,7 @@ func TestNativeInventoryRejectedCollisionsAndPartialSchemas(t *testing.T) {
 			data = strings.Replace(data, `"scope":"repo"`, `"scope":"user"`, 1)
 		}
 		t.Run(name, func(t *testing.T) {
-			if _, err := nativeCurationClient(data).Snapshot(context.Background(), "/work"); err == nil {
+			if _, err := nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work")); err == nil {
 				t.Fatal("invalid inventory accepted")
 			}
 		})
@@ -348,7 +349,7 @@ func TestNativeInventoryRejectedCollisionsAndPartialSchemas(t *testing.T) {
 
 func TestNativeInventoryKeptNativeLoadErrorsAsSafeIssues(t *testing.T) {
 	data := strings.Replace(nativeCurationFixture, `"marketplaceLoadErrors":[]`, `"marketplaceLoadErrors":[{"message":"private-secret","marketplacePath":"/private/config"}]`, 1)
-	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work"))
 	if err != nil || len(inventory.Capabilities) == 0 || !slices.ContainsFunc(inventory.Issues, func(issue InventoryIssue) bool { return issue.Code == "plugin_load_error" }) || !slices.ContainsFunc(inventory.Issues, func(issue InventoryIssue) bool {
 		return issue.Code == "inventory_incomplete" && issue.Kind == PluginKind
 	}) {
@@ -361,7 +362,7 @@ func TestNativeInventoryPreservedDistinctCollidingSkillsWithPortableQualifiers(t
 	data = strings.Replace(data, `"scope":"repo"`, `"scope":"user"`, 1)
 	data = strings.Replace(data, `/home/skills/plain/SKILL.md`, `/home/one/.agents/skills/plain/SKILL.md`, 1)
 	data = strings.Replace(data, `/work/.agents/skills/local/SKILL.md`, `/home/one/.agents/skills/plain/skills/plain/SKILL.md`, 1)
-	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +382,7 @@ func TestNativeInventoryRejectedStillAmbiguousVersionedSkillOrigins(t *testing.T
 	data = strings.Replace(data, `"scope":"repo"`, `"scope":"user"`, 1)
 	data = strings.Replace(data, `/home/skills/plain/SKILL.md`, `/home/one/.codex/plugins/cache/market/one/1.0.0/skills/plain/SKILL.md`, 1)
 	data = strings.Replace(data, `/work/.agents/skills/local/SKILL.md`, `/home/one/.codex/plugins/cache/market/one/2.0.0/skills/plain/SKILL.md`, 1)
-	if _, err := nativeCurationClient(data).Snapshot(context.Background(), "/work"); err == nil {
+	if _, err := nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work")); err == nil {
 		t.Fatal("version-only qualifier silently resolved a real collision")
 	}
 }
@@ -392,13 +393,13 @@ func TestNativeInventorySkillIDsSurvivedAddingAndRemovingDuplicateNames(t *testi
 	duplicate = strings.Replace(duplicate, `"scope":"repo"`, `"scope":"user"`, 1)
 	duplicate = strings.Replace(duplicate, `/work/.agents/skills/local/SKILL.md`, `/home/one/.codex/skills/plain/SKILL.md`, 1)
 	for _, data := range []string{base, duplicate, base} {
-		inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+		inventory, err := nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work"))
 		if err != nil {
 			t.Fatal(err)
 		}
 		found := false
 		for _, capability := range inventory.Capabilities {
-			if capability.Path == "/home/one/.agents/skills/plain/SKILL.md" {
+			if capability.Path == testAbsPath("/home/one/.agents/skills/plain/SKILL.md") {
 				found = true
 				if capability.ID != "user:plain@agents/plain" {
 					t.Fatalf("saved identity retargeted: %q", capability.ID)
@@ -416,7 +417,7 @@ func TestNativeInventorySkillIDsSurvivedAddingAndRemovingDuplicateNames(t *testi
 
 func TestNativeInventoryAvailabilityRespectedNativeEnableBoundaries(t *testing.T) {
 	data := strings.Replace(nativeCurationFixture, `"pluginId":"one@market"`, `"pluginId":"disabled@market"`, 1)
-	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), "/work")
+	inventory, err := nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +433,7 @@ func TestNativeInventoryAvailabilityRespectedNativeEnableBoundaries(t *testing.T
 		}
 	}
 	data = strings.Replace(nativeCurationFixture, `"scope":"user"`, `"scope":"admin"`, 1)
-	inventory, err = nativeCurationClient(data).Snapshot(context.Background(), "/work")
+	inventory, err = nativeCurationClient(data).Snapshot(context.Background(), testAbsPath("/work"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +452,7 @@ func TestNativeInventoryRecoveredEffectiveMCPFromActiveLayersAndOrigins(t *testi
 			config := fixture["config"].(map[string]any)
 			config["config"] = map[string]any{}
 			lowSource := map[string]any{"type": "user", "file": "/private/low-config"}
-			highSource := map[string]any{"type": "project", "dotCodexFolder": "/work/.codex"}
+			highSource := map[string]any{"type": "project", "dotCodexFolder": testAbsPath("/work/.codex")}
 			low := map[string]any{"name": lowSource, "version": "low", "config": map[string]any{"mcp_servers": map[string]any{"layered": map[string]any{"enabled": true, "command": "private-command"}}}}
 			high := map[string]any{"name": highSource, "version": "high", "config": map[string]any{"mcp_servers": map[string]any{"blocked": map[string]any{"enabled": true}}}, "disabledReason": "private-disabled-reason"}
 			config["origins"] = map[string]any{}
@@ -473,7 +474,7 @@ func TestNativeInventoryRecoveredEffectiveMCPFromActiveLayersAndOrigins(t *testi
 			}
 			config["layers"] = []any{high, low} // origins, not array position, choose conflicting flags.
 			encoded, _ := json.Marshal(fixture)
-			inventory, err := nativeCurationClient(string(encoded)).Snapshot(context.Background(), "/work")
+			inventory, err := nativeCurationClient(string(encoded)).Snapshot(context.Background(), testAbsPath("/work"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -497,19 +498,19 @@ func TestNativeInventoryRecoveredEffectiveMCPFromActiveLayersAndOrigins(t *testi
 func TestNativeInventoryBoundedRunAndRedactedFailure(t *testing.T) {
 	client := NativeInventory{Executable: "/native/codex", Run: func(ctx context.Context, executable, cwd string, output io.Writer) error {
 		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) > 20*time.Second || executable != "/native/codex" || cwd != "/work" {
+		if !ok || time.Until(deadline) > 20*time.Second || executable != "/native/codex" || cwd != testAbsPath("/work") {
 			t.Fatal("unbounded or incorrect native invocation")
 		}
 		return errors.New("private-secret")
 	}}
-	_, err := client.Snapshot(context.Background(), "/work")
+	_, err := client.Snapshot(context.Background(), testAbsPath("/work"))
 	if err == nil || strings.Contains(err.Error(), "private-secret") {
 		t.Fatalf("native failure = %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	client.Run = func(ctx context.Context, _, _ string, _ io.Writer) error { return ctx.Err() }
-	if _, err := client.Snapshot(ctx, "/work"); !errors.Is(err, context.Canceled) {
+	if _, err := client.Snapshot(ctx, testAbsPath("/work")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancel error = %v", err)
 	}
 }
@@ -525,7 +526,7 @@ func TestNativeInventoryRunCouldNotBypassOutputBound(t *testing.T) {
 			}
 			return nil
 		}}
-		if _, err := client.Snapshot(context.Background(), "/work"); err == nil {
+		if _, err := client.Snapshot(context.Background(), testAbsPath("/work")); err == nil {
 			t.Fatal("oversized injected output accepted")
 		}
 	}
@@ -782,6 +783,13 @@ func TestNativeInventoryDetailBudgetKeptCompletedMetadata(t *testing.T) {
 func TestNativeInventoryPeerHelper(t *testing.T) {
 	scenario := os.Getenv("CQ_TEST_NATIVE_INVENTORY_SCENARIO")
 	if scenario == "" {
+		return
+	}
+	if len(os.Args) < 3 {
+		os.Exit(80)
+	}
+	if slices.Equal(os.Args[len(os.Args)-3:], []string{"app-server", "--print-startup-config", "--strict-config"}) {
+		_, _ = io.WriteString(os.Stdout, "{}\n")
 		return
 	}
 	if !slices.Equal(os.Args[len(os.Args)-3:], []string{"app-server", "--stdio", "--strict-config"}) {

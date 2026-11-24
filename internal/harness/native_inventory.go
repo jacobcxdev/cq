@@ -766,8 +766,11 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
 		return fmt.Errorf("native inventory executable must be absolute and clean")
 	}
-	command := exec.CommandContext(ctx, executable, "app-server", "--stdio", "--strict-config")
-	command.Dir, command.Stderr, command.WaitDelay = cwd, io.Discard, time.Second
+	command, validateConfig, err := nativeAppServerCommand(ctx, executable, cwd)
+	if err != nil {
+		return err
+	}
+	command.WaitDelay = time.Second
 	var killed atomic.Bool
 	cancelProcess := command.Cancel
 	command.Cancel = func() error {
@@ -972,6 +975,9 @@ func runNativeCurationInventory(ctx context.Context, executable, cwd string, out
 		if !detailBudget || !killed.Load() || (!errors.As(err, &exitError) && !errors.Is(err, ctx.Err())) {
 			return err
 		}
+	}
+	if err := validateConfig(); err != nil {
+		return err
 	}
 	responses["pluginDetails"], err = json.Marshal(details)
 	if err != nil {

@@ -155,20 +155,20 @@ func TestOpenCodexLeaseStoreRejectsSymlinkJournal(t *testing.T) {
 
 func TestOpenCodexLeaseStoreBoundsJournalRead(t *testing.T) {
 	t.Parallel()
-	root := t.TempDir()
+	root, fsys := leaseJournalPrivateTestDir(t)
 	state := filepath.Join(root, "state")
-	if err := os.Mkdir(state, 0o700); err != nil {
+	if err := fsutil.EnsureSecureDirectory(fsys, state); err != nil {
 		t.Fatal(err)
 	}
 	keyPath := filepath.Join(state, "leases.key")
-	if err := os.WriteFile(keyPath, make([]byte, codexLeaseHMACKeyBytes), 0o600); err != nil {
+	if err := fsutil.SecureAtomicWrite(fsys, keyPath, make([]byte, codexLeaseHMACKeyBytes)); err != nil {
 		t.Fatal(err)
 	}
 	journalPath := filepath.Join(state, "leases.json")
-	if err := os.WriteFile(journalPath, make([]byte, (16<<20)+1), 0o600); err != nil {
+	if err := fsutil.SecureAtomicWrite(fsys, journalPath, make([]byte, (16<<20)+1)); err != nil {
 		t.Fatal(err)
 	}
-	store, err := OpenCodexLeaseStore(fsutil.OSFileSystem{}, journalPath, keyPath)
+	store, err := OpenCodexLeaseStore(fsys, journalPath, keyPath)
 	if store != nil || !errors.Is(err, fsutil.ErrSecureFileTooLarge) {
 		t.Fatalf("OpenCodexLeaseStore = %v, %v; want ErrSecureFileTooLarge", store, err)
 	}

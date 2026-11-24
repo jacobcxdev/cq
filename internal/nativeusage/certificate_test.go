@@ -25,9 +25,21 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
-func TestPrepareRequiresExplicitActivationAndPreservesCertificate(t *testing.T) {
+var usageTestRoot = filepath.Join(os.TempDir(), "cq-nativeusage", "usage")
+var replacementTestRoot = filepath.Join(os.TempDir(), "cq-nativeusage", "replacement")
+
+func newUsageMemFS(t *testing.T) *fsutil.MemFS {
+	t.Helper()
 	fsys := fsutil.NewMemFS()
-	root := "/usage"
+	if err := fsys.MkdirAll(filepath.Dir(usageTestRoot), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return fsys
+}
+
+func TestPrepareRequiresExplicitActivationAndPreservesCertificate(t *testing.T) {
+	fsys := newUsageMemFS(t)
+	root := usageTestRoot
 	before, err := LoadTLS(root, fsys)
 	if err != nil || before != nil {
 		t.Fatalf("unprepared config = %v, %v", before, err)
@@ -84,34 +96,34 @@ func TestPrepareRequiresExplicitActivationAndPreservesCertificate(t *testing.T) 
 }
 
 func TestInspectDoesNotCreateFilesOrReadPrivateKey(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	metadata, enabled, err := Inspect("/usage", fsys)
+	fsys := newUsageMemFS(t)
+	metadata, enabled, err := Inspect(usageTestRoot, fsys)
 	if err != nil || enabled || metadata.CertificatePath != "" {
 		t.Fatalf("absent status = %#v, %v, %v", metadata, enabled, err)
 	}
-	if _, err := fsys.Stat("/usage"); !os.IsNotExist(err) {
+	if _, err := fsys.Stat(usageTestRoot); !os.IsNotExist(err) {
 		t.Fatal("inspection created a directory")
 	}
-	prepared, err := Prepare("/usage", fsys)
+	prepared, err := Prepare(usageTestRoot, fsys)
 	if err != nil {
 		t.Fatal(err)
 	}
 	guarded := noKeyReadFS{fsys}
-	metadata, enabled, err = Inspect("/usage", guarded)
+	metadata, enabled, err = Inspect(usageTestRoot, guarded)
 	if err != nil || enabled || metadata.FingerprintSHA256 != prepared.FingerprintSHA256 {
 		t.Fatalf("prepared status = %#v, %v, %v", metadata, enabled, err)
 	}
-	if err := SetEnabled("/usage", fsys, true); err != nil {
+	if err := SetEnabled(usageTestRoot, fsys, true); err != nil {
 		t.Fatal(err)
 	}
-	metadata, enabled, err = Inspect("/usage", guarded)
+	metadata, enabled, err = Inspect(usageTestRoot, guarded)
 	if err != nil || !enabled || metadata.FingerprintSHA256 != prepared.FingerprintSHA256 {
 		t.Fatalf("enabled status = %#v, %v, %v", metadata, enabled, err)
 	}
-	if err := fsys.Remove("/usage/" + keyName); err != nil {
+	if err := fsys.Remove(filepath.Join(usageTestRoot, keyName)); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := Inspect("/usage", guarded); err == nil {
+	if _, _, err := Inspect(usageTestRoot, guarded); err == nil {
 		t.Fatal("partial configured state was reported as absent")
 	}
 }
@@ -136,14 +148,14 @@ func (directory noKeyReadDirectory) OpenNoFollow(name string) (fsutil.SecureRead
 }
 
 func TestCertificateServesOnlyDeclaredHostnames(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	if _, err := Prepare("/usage", fsys); err != nil {
+	fsys := newUsageMemFS(t)
+	if _, err := Prepare(usageTestRoot, fsys); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetEnabled("/usage", fsys, true); err != nil {
+	if err := SetEnabled(usageTestRoot, fsys, true); err != nil {
 		t.Fatal(err)
 	}
-	config, err := LoadTLS("/usage", fsys)
+	config, err := LoadTLS(usageTestRoot, fsys)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,14 +195,14 @@ func TestCertificateServesOnlyDeclaredHostnames(t *testing.T) {
 }
 
 func TestTrustedLeafCannotIssueAdditionalCertificates(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	if _, err := Prepare("/usage", fsys); err != nil {
+	fsys := newUsageMemFS(t)
+	if _, err := Prepare(usageTestRoot, fsys); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetEnabled("/usage", fsys, true); err != nil {
+	if err := SetEnabled(usageTestRoot, fsys, true); err != nil {
 		t.Fatal(err)
 	}
-	config, err := LoadTLS("/usage", fsys)
+	config, err := LoadTLS(usageTestRoot, fsys)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,26 +230,26 @@ func TestTrustedLeafCannotIssueAdditionalCertificates(t *testing.T) {
 func TestPrepareRejectsIncompletePairWithoutReplacingIt(t *testing.T) {
 	for _, missing := range []string{certificateName, keyName} {
 		t.Run(missing, func(t *testing.T) {
-			fsys := fsutil.NewMemFS()
-			if _, err := Prepare("/usage", fsys); err != nil {
+			fsys := newUsageMemFS(t)
+			if _, err := Prepare(usageTestRoot, fsys); err != nil {
 				t.Fatal(err)
 			}
 			other := keyName
 			if missing == keyName {
 				other = certificateName
 			}
-			previous, _ := fsys.ReadFile(filepath.Join("/usage", other))
-			if err := fsys.Remove(filepath.Join("/usage", missing)); err != nil {
+			previous, _ := fsys.ReadFile(filepath.Join(usageTestRoot, other))
+			if err := fsys.Remove(filepath.Join(usageTestRoot, missing)); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Prepare("/usage", fsys); err == nil {
+			if _, err := Prepare(usageTestRoot, fsys); err == nil {
 				t.Fatal("incomplete pair was accepted")
 			}
-			now, _ := fsys.ReadFile(filepath.Join("/usage", other))
+			now, _ := fsys.ReadFile(filepath.Join(usageTestRoot, other))
 			if !bytes.Equal(now, previous) {
 				t.Fatal("incomplete pair was silently replaced")
 			}
-			if _, err := fsys.Stat(filepath.Join("/usage", missing)); !os.IsNotExist(err) {
+			if _, err := fsys.Stat(filepath.Join(usageTestRoot, missing)); !os.IsNotExist(err) {
 				t.Fatal("missing half was regenerated")
 			}
 		})
@@ -245,34 +257,34 @@ func TestPrepareRejectsIncompletePairWithoutReplacingIt(t *testing.T) {
 }
 
 func TestLoadRejectsChangedCertificateAndInvalidMarker(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	first, err := Prepare("/usage", fsys)
+	fsys := newUsageMemFS(t)
+	first, err := Prepare(usageTestRoot, fsys)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := SetEnabled("/usage", fsys, true); err != nil {
+	if err := SetEnabled(usageTestRoot, fsys, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Prepare("/replacement", fsys); err != nil {
+	if _, err := Prepare(replacementTestRoot, fsys); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{certificateName, keyName} {
-		data, _ := fsys.ReadFile(filepath.Join("/replacement", name))
-		if err := fsys.WriteFile(filepath.Join("/usage", name), data, 0o600); err != nil {
+		data, _ := fsys.ReadFile(filepath.Join(replacementTestRoot, name))
+		if err := fsys.WriteFile(filepath.Join(usageTestRoot, name), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := LoadTLS("/usage", fsys); err == nil {
+	if _, err := LoadTLS(usageTestRoot, fsys); err == nil {
 		t.Fatal("marker accepted a replacement certificate")
 	}
 	for _, data := range []string{`{`, `null`, `{}`, `{"fingerprint_sha256":"` + first.FingerprintSHA256 + `","other":true}`, `{}` + `{}`, string(bytes.Repeat([]byte("x"), 1025))} {
-		if err := fsys.WriteFile("/usage/"+enabledName, []byte(data), 0o600); err != nil {
+		if err := fsys.WriteFile(filepath.Join(usageTestRoot, enabledName), []byte(data), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadTLS("/usage", fsys); err == nil {
+		if _, err := LoadTLS(usageTestRoot, fsys); err == nil {
 			t.Fatalf("invalid marker accepted: %.80s", data)
 		}
-		if _, _, err := Inspect("/usage", fsys); err == nil {
+		if _, _, err := Inspect(usageTestRoot, fsys); err == nil {
 			t.Fatalf("invalid marker accepted by inspection: %.80s", data)
 		}
 	}
@@ -282,11 +294,11 @@ func TestPrepareRejectsMalformedMaterialWithoutRotation(t *testing.T) {
 	for _, name := range []string{certificateName, keyName} {
 		for _, corrupt := range []string{"invalid PEM", "oversized", "multiple PEM blocks"} {
 			t.Run(name+"/"+corrupt, func(t *testing.T) {
-				fsys := fsutil.NewMemFS()
-				if _, err := Prepare("/usage", fsys); err != nil {
+				fsys := newUsageMemFS(t)
+				if _, err := Prepare(usageTestRoot, fsys); err != nil {
 					t.Fatal(err)
 				}
-				path := "/usage/" + name
+				path := filepath.Join(usageTestRoot, name)
 				original, _ := fsys.ReadFile(path)
 				var data []byte
 				switch corrupt {
@@ -300,7 +312,7 @@ func TestPrepareRejectsMalformedMaterialWithoutRotation(t *testing.T) {
 				if err := fsys.WriteFile(path, data, 0o600); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := Prepare("/usage", fsys); err == nil {
+				if _, err := Prepare(usageTestRoot, fsys); err == nil {
 					t.Fatal("malformed material accepted")
 				}
 				after, _ := fsys.ReadFile(path)
@@ -313,22 +325,22 @@ func TestPrepareRejectsMalformedMaterialWithoutRotation(t *testing.T) {
 }
 
 func TestPrepareDoesNotRegenerateEnabledMissingPair(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	if _, err := Prepare("/usage", fsys); err != nil {
+	fsys := newUsageMemFS(t)
+	if _, err := Prepare(usageTestRoot, fsys); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetEnabled("/usage", fsys, true); err != nil {
+	if err := SetEnabled(usageTestRoot, fsys, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{certificateName, keyName} {
-		if err := fsys.Remove("/usage/" + name); err != nil {
+		if err := fsys.Remove(filepath.Join(usageTestRoot, name)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := Prepare("/usage", fsys); err == nil {
+	if _, err := Prepare(usageTestRoot, fsys); err == nil {
 		t.Fatal("enabled missing certificate was regenerated")
 	}
-	if _, err := fsys.Stat("/usage/" + certificateName); !os.IsNotExist(err) {
+	if _, err := fsys.Stat(filepath.Join(usageTestRoot, certificateName)); !os.IsNotExist(err) {
 		t.Fatal("missing certificate was recreated")
 	}
 }
@@ -348,23 +360,23 @@ func TestPrepareAndLoadRejectInvalidCertificateMaterial(t *testing.T) {
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
-			fsys := fsutil.NewMemFS()
-			if err := fsys.MkdirAll("/usage", 0o700); err != nil {
+			fsys := newUsageMemFS(t)
+			if err := fsys.MkdirAll(usageTestRoot, 0o700); err != nil {
 				t.Fatal(err)
 			}
 			der := writeTestPair(t, fsys, mutate)
 			fingerprint := sha256.Sum256(der)
 			marker, _ := json.Marshal(enabledState{FingerprintSHA256: hex.EncodeToString(fingerprint[:])})
-			if err := fsys.WriteFile("/usage/"+enabledName, marker, 0o600); err != nil {
+			if err := fsys.WriteFile(filepath.Join(usageTestRoot, enabledName), marker, 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := Prepare("/usage", fsys); err == nil {
+			if _, err := Prepare(usageTestRoot, fsys); err == nil {
 				t.Fatal("invalid certificate accepted by preparation")
 			}
-			if _, err := LoadTLS("/usage", fsys); err == nil {
+			if _, err := LoadTLS(usageTestRoot, fsys); err == nil {
 				t.Fatal("invalid certificate accepted by loading")
 			}
-			if _, _, err := Inspect("/usage", fsys); err == nil {
+			if _, _, err := Inspect(usageTestRoot, fsys); err == nil {
 				t.Fatal("invalid certificate accepted by inspection")
 			}
 		})
@@ -374,37 +386,37 @@ func TestPrepareAndLoadRejectInvalidCertificateMaterial(t *testing.T) {
 func TestPrivateMaterialBoundaries(t *testing.T) {
 	for _, badFile := range []string{certificateName, keyName, enabledName} {
 		t.Run(badFile, func(t *testing.T) {
-			fsys := fsutil.NewMemFS()
-			if _, err := Prepare("/usage", fsys); err != nil {
+			fsys := newUsageMemFS(t)
+			if _, err := Prepare(usageTestRoot, fsys); err != nil {
 				t.Fatal(err)
 			}
-			if err := SetEnabled("/usage", fsys, true); err != nil {
+			if err := SetEnabled(usageTestRoot, fsys, true); err != nil {
 				t.Fatal(err)
 			}
-			if err := fsys.Chmod("/usage/"+badFile, 0o644); err != nil {
+			if err := fsys.Chmod(filepath.Join(usageTestRoot, badFile), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := LoadTLS("/usage", fsys); err == nil {
+			if _, err := LoadTLS(usageTestRoot, fsys); err == nil {
 				t.Fatal("publicly readable material accepted")
 			}
-			if _, _, err := Inspect("/usage", fsys); err == nil {
+			if _, _, err := Inspect(usageTestRoot, fsys); err == nil {
 				t.Fatal("publicly readable material accepted by inspection")
 			}
 		})
 	}
-	fsys := fsutil.NewMemFS()
-	if err := SetEnabled("/usage", fsys, false); err != nil {
+	fsys := newUsageMemFS(t)
+	if err := SetEnabled(usageTestRoot, fsys, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := SetEnabled("/usage", fsys, true); err == nil {
+	if err := SetEnabled(usageTestRoot, fsys, true); err == nil {
 		t.Fatal("unprepared directory was enabled")
 	}
-	for _, root := range []string{"", ".", "usage", "/", "/usage/../usage"} {
+	for _, root := range []string{"", ".", "usage", filepath.VolumeName(usageTestRoot) + string(filepath.Separator), usageTestRoot + string(filepath.Separator) + ".." + string(filepath.Separator) + filepath.Base(usageTestRoot)} {
 		if _, err := Prepare(root, fsys); err == nil {
 			t.Fatalf("invalid root accepted: %q", root)
 		}
 	}
-	if _, err := Prepare("/usage", nil); err == nil {
+	if _, err := Prepare(usageTestRoot, nil); err == nil {
 		t.Fatal("nil filesystem accepted")
 	}
 }
@@ -454,7 +466,7 @@ func writeTestPair(t *testing.T, fsys fsutil.FileSystem, mutate func(*x509.Certi
 		t.Fatal(err)
 	}
 	for name, block := range map[string]*pem.Block{certificateName: {Type: "CERTIFICATE", Bytes: der}, keyName: {Type: "PRIVATE KEY", Bytes: private}} {
-		if err := fsys.WriteFile("/usage/"+name, pem.EncodeToMemory(block), 0o600); err != nil {
+		if err := fsys.WriteFile(filepath.Join(usageTestRoot, name), pem.EncodeToMemory(block), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

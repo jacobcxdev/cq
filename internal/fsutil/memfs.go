@@ -18,6 +18,7 @@ type MemFS struct {
 	files     map[string]memFile
 	dirs      map[string]memFile
 	locks     map[uint64]uint64
+	home      string
 	euid      uint64
 	nextInode uint64
 	nextLock  uint64
@@ -64,10 +65,18 @@ func NewMemFS() *MemFS {
 		files:     make(map[string]memFile),
 		dirs:      map[string]memFile{"/": {mode: os.ModeDir | 0o755, owner: 1, inode: 1}},
 		locks:     make(map[uint64]uint64),
+		home:      "/home/test",
 		euid:      1,
 		nextInode: 2,
 		nextLock:  1,
 	}
+}
+
+// NewMemFSWithHome returns a test filesystem with a selected user home path.
+func NewMemFSWithHome(home string) *MemFS {
+	m := NewMemFS()
+	m.home = home
+	return m
 }
 
 func cleanMemPath(name string) string {
@@ -195,7 +204,7 @@ func (m *MemFS) MkdirAll(path string, mode os.FileMode) error {
 	return nil
 }
 
-func (m *MemFS) UserHomeDir() (string, error) { return "/home/test", nil }
+func (m *MemFS) UserHomeDir() (string, error) { return m.home, nil }
 
 func (m *MemFS) ReadDir(name string) ([]os.DirEntry, error) {
 	m.mu.Lock()

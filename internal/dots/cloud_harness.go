@@ -1262,6 +1262,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 	}
 	var native cloudMessage
 	var desiredPlan *cloudHarnessProfilePlan
+	var legacyFullConfig cloudMessage
 	compiledPlugins := bytes.Clone(snapshot.baseline["disabledPluginIds"])
 	if policy.Version == 2 && snapshot.profilePlan != nil && snapshot.profileFingerprint == selection.Fingerprint && !snapshot.profileRefresh && !contextChanged {
 		desiredPlan = snapshot.profilePlan
@@ -1282,22 +1283,33 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 		h.threads[id].fullConfig = baseline
 		h.threads[id].fullConfigCwd = cwd
 		h.mu.Unlock()
-	} else if minimal {
+	} else if minimal || contextChanged {
 		native, err = h.config(cwd)
 		if err != nil {
 			h.event(id, selection, "failed")
 			return err
 		}
 		if snapshot.fullConfig == nil || contextChanged {
-			snapshot.fullConfig, err = h.baselineConfig(native, snapshot.baseline["config"], id)
+			baselineThread := id
+			if !minimal {
+				// The old thread can still be running CQ's Minimal overrides.
+				baselineThread = ""
+			}
+			baseline, err := h.baselineConfig(native, snapshot.baseline["config"], baselineThread)
 			if err != nil {
 				return err
 			}
-			h.mu.Lock()
-			h.threads[id].fullConfig = snapshot.fullConfig
-			h.threads[id].fullConfigCwd = cwd
-			newBaseline = true
-			h.mu.Unlock()
+			if minimal {
+				snapshot.fullConfig = baseline
+				h.mu.Lock()
+				h.threads[id].fullConfig = baseline
+				h.threads[id].fullConfigCwd = cwd
+				newBaseline = true
+				h.mu.Unlock()
+			} else {
+				// Preserve the previous workspace baseline for rollback.
+				legacyFullConfig = baseline
+			}
 		}
 	}
 	if desiredPlan != nil {
@@ -1427,6 +1439,8 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 	}
 	if desiredPlan != nil {
 		desiredConfig = desiredPlan.config
+	} else if legacyFullConfig != nil {
+		desiredConfig = legacyFullConfig
 	} else if minimal {
 		desiredConfig = cloudHarnessMinimalConfig(native, cloudHarnessRaw(snapshot.fullConfig))
 	}
@@ -1465,9 +1479,7 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 		return h.reconcile(id, requestedModel, requestedCwd)
 	}
 	params := cloudHarnessResumeParams(snapshot, model, cwd)
-	if desiredPlan != nil {
-		params["config"] = cloudHarnessRaw(desiredPlan.config)
-	} else if minimal {
+	if desiredPlan != nil || legacyFullConfig != nil || minimal {
 		params["config"] = cloudHarnessRaw(desiredConfig)
 	}
 	attemptEpoch := snapshot.sourceEpoch
@@ -1601,6 +1613,10 @@ func (h *cloudHarness) reconcile(id, model, cwd string) (resultErr error) {
 		current.appliedPlugins = nil
 		current.runtimeIssues = runtimeIssues
 		current.lastAttemptEpoch = attemptEpoch
+		if legacyFullConfig != nil {
+			current.fullConfig = legacyFullConfig
+			current.fullConfigCwd = cwd
+		}
 		if len(runtimeIssues) == 0 {
 			current.runtimeConfig = cloudHarnessClone(desiredConfig)
 		}

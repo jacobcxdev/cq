@@ -3,12 +3,10 @@ package zai
 import (
 	"strings"
 	"testing"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 func TestAccountTransportSurvivesAccountChanges(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	first, err := StoreAccount(fsys, "/config", "first-key", "first", false)
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +49,7 @@ func TestAccountTransportSurvivesAccountChanges(t *testing.T) {
 }
 
 func TestReadAccountsRejectedUnknownTransport(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	_ = fsys.WriteFile("/config/zai.json", []byte(`{"accounts":[{"api_key":"private-key","transport":"other"}]}`), 0o600)
 	_, err := ReadAccounts(fsys, noEnvironment, "/config")
 	if err == nil || strings.Contains(err.Error(), "private-key") {

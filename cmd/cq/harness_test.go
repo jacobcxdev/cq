@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -22,6 +23,7 @@ func TestCodexHarnessCommandParsing(t *testing.T) {
 		want string
 	}{
 		{[]string{"codex", "harness"}, "codex harness status"},
+		{[]string{"codex", "harness", "launch"}, "codex harness launch"},
 		{[]string{"codex", "harness", "status", "--model", "glm-5.3", "--project", ".", "--chat", "01a198eb-f8e9-72a1-856c-0e986d10f6f7"}, "codex harness status"},
 		{[]string{"--json", "codex", "harness", "enable"}, "codex harness enable"},
 		{[]string{"codex", "harness", "disable", "--json"}, "codex harness disable"},
@@ -43,7 +45,7 @@ func TestCodexHarnessCommandParsing(t *testing.T) {
 }
 
 func TestCodexHarnessHelpUsesPureInspection(t *testing.T) {
-	for _, operation := range []string{"", "status", "enable", "disable", "project", "chat"} {
+	for _, operation := range []string{"", "status", "launch", "enable", "disable", "project", "chat"} {
 		args := []string{"codex", "harness"}
 		if operation != "" {
 			args = append(args, operation)
@@ -56,7 +58,7 @@ func TestCodexHarnessHelpUsesPureInspection(t *testing.T) {
 		}
 		if operation == "" || operation == "status" {
 			rendered := strings.Join(strings.Fields(output.String()), " ")
-			for _, detail := range []string{"automatically", "CQ launcher", "standard ChatGPT launch", "standalone MCP", "local skills", "For standard launches", "not guaranteed", "observes a GLM request"} {
+			for _, detail := range []string{"cq codex harness launch", "CQ launchers", "standard ChatGPT launch", "standalone MCP", "local skills", "later eligible turn", "observes a GLM request", "native Windows execution environment"} {
 				if !strings.Contains(rendered, detail) {
 					t.Fatalf("help %v omitted %q: %s", args, detail, &output)
 				}
@@ -65,9 +67,22 @@ func TestCodexHarnessHelpUsesPureInspection(t *testing.T) {
 	}
 }
 
-func harnessTestRunner() (codexHarnessRunner, *fsutil.MemFS) {
+func harnessFixturePath(path string) string {
+	if runtime.GOOS == "windows" {
+		return `C:` + filepath.FromSlash(path)
+	}
+	return path
+}
+
+func newHarnessFixtureFS() *fsutil.MemFS {
 	fsys := fsutil.NewMemFS()
-	return codexHarnessRunner{fs: fsys, path: func() (string, error) { return "/cq/harness.json", nil }}, fsys
+	_ = fsys.MkdirAll(harnessFixturePath("/"), 0o755)
+	return fsys
+}
+
+func harnessTestRunner() (codexHarnessRunner, *fsutil.MemFS) {
+	fsys := newHarnessFixtureFS()
+	return codexHarnessRunner{fs: fsys, path: func() (string, error) { return harnessFixturePath("/cq/harness.json"), nil }}, fsys
 }
 
 func runHarnessTestCLI(t *testing.T, runner codexHarnessRunner, output io.Writer, args ...string) error {
@@ -96,7 +111,7 @@ func TestCodexHarnessStatusMissingPolicyIsReadOnly(t *testing.T) {
 	if err := decoder.Decode(new(any)); err != io.EOF {
 		t.Fatalf("JSON contains extra output: %v", err)
 	}
-	if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("status created config directory: %v", err)
 	}
 }
@@ -111,7 +126,7 @@ func TestCodexHarnessSavedPreferencesAndInheritance(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	policy, err := harness.Load(fsys, "/cq/harness.json")
+	policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 	if err != nil || policy.Enabled || policy.Projects[project] != harness.Full || policy.Chats[chat] != harness.Minimal || policy.Chats[otherChat] != harness.Full {
 		t.Fatalf("saved overrides = %#v, %v", policy, err)
 	}
@@ -121,14 +136,14 @@ func TestCodexHarnessSavedPreferencesAndInheritance(t *testing.T) {
 	if err := runHarnessTestCLI(t, runner, io.Discard, "chat", chat, "auto"); err != nil {
 		t.Fatal(err)
 	}
-	policy, _ = harness.Load(fsys, "/cq/harness.json")
+	policy, _ = harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 	if _, exists := policy.Chats[chat]; exists || policy.Resolve("glm-5.3", project, chat).Profile != harness.Full {
 		t.Fatalf("chat auto did not inherit project: %#v", policy)
 	}
 	if err := runHarnessTestCLI(t, runner, io.Discard, "project", project, "auto"); err != nil {
 		t.Fatal(err)
 	}
-	policy, _ = harness.Load(fsys, "/cq/harness.json")
+	policy, _ = harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 	if len(policy.Projects) != 0 || policy.Resolve("glm-5.3", project, chat).Profile != harness.Minimal || policy.Chats[otherChat] != harness.Full {
 		t.Fatalf("project auto did not inherit GLM default: %#v", policy)
 	}
@@ -136,7 +151,7 @@ func TestCodexHarnessSavedPreferencesAndInheritance(t *testing.T) {
 		if err := runHarnessTestCLI(t, runner, io.Discard, operation); err != nil {
 			t.Fatal(err)
 		}
-		policy, _ = harness.Load(fsys, "/cq/harness.json")
+		policy, _ = harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 		if policy.Enabled != (operation == "enable") || policy.Chats[otherChat] != harness.Full {
 			t.Fatalf("%s discarded preferences: %#v", operation, policy)
 		}
@@ -155,7 +170,7 @@ func TestCodexHarnessStatusPreviewAndSavedJSON(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	before, _ := fsys.ReadFile("/cq/harness.json")
+	before, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 	for _, test := range []struct {
 		model string
 		want  harness.Selection
@@ -174,11 +189,11 @@ func TestCodexHarnessStatusPreviewAndSavedJSON(t *testing.T) {
 		if status.Selection == nil || *status.Selection != test.want || !status.Policy.Enabled || status.Policy.Projects[project] != harness.Full || status.Policy.Chats[chat] != harness.Minimal {
 			t.Fatalf("preview = %#v", status)
 		}
-		if !strings.Contains(status.Application, "automatically") || !strings.Contains(status.Application, "CQ launcher") || !strings.Contains(status.Application, "standard ChatGPT launch") || !strings.Contains(status.Application, "For standard launches") || !strings.Contains(status.Application, "not guaranteed") {
+		if !strings.Contains(status.Application, "cq codex harness launch") || !strings.Contains(status.Application, "standard ChatGPT launch") || !strings.Contains(status.Application, "later eligible turn") {
 			t.Fatalf("status omitted scope or application limits: %s", &output)
 		}
 	}
-	after, _ := fsys.ReadFile("/cq/harness.json")
+	after, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 	if !bytes.Equal(before, after) {
 		t.Fatal("preview changed saved policy")
 	}
@@ -205,7 +220,7 @@ func TestCodexHarnessInvalidInputDoesNotCreateConfig(t *testing.T) {
 			if output.Len() != 0 {
 				t.Fatalf("invalid input emitted success output: %s", &output)
 			}
-			if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+			if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("invalid input created config directory: %v", err)
 			}
 		})
@@ -217,13 +232,13 @@ func TestCodexHarnessFailedWritePreservesSavedPolicy(t *testing.T) {
 	if err := runHarnessTestCLI(t, runner, io.Discard, "enable"); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := fsys.ReadFile("/cq/harness.json")
+	before, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 	runner.fs = harnessRenameFailureFS{fsys}
 	var output bytes.Buffer
 	if err := runHarnessTestCLI(t, runner, &output, "disable"); err == nil || !strings.Contains(err.Error(), "test rename failed") {
 		t.Fatalf("failed write = %v", err)
 	}
-	after, _ := fsys.ReadFile("/cq/harness.json")
+	after, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 	if !bytes.Equal(before, after) || output.Len() != 0 {
 		t.Fatalf("failed write changed policy or emitted success: %s", &output)
 	}
@@ -252,11 +267,11 @@ func (harnessRenameFailureDirectory) RenameChecked(string, string, fsutil.Secure
 func TestCodexHarnessOnlyChangesPrivatePolicy(t *testing.T) {
 	runner, fsys := harnessTestRunner()
 	untouched := map[string][]byte{
-		"/codex/config.toml":      []byte("native configuration"),
-		"/codex/plugins.json":     []byte("global plugin preferences"),
-		"/codex/history.jsonl":    []byte("existing chat history"),
-		"/codex/auth.json":        []byte("source account credentials"),
-		"/cq/codex-accounts.json": []byte("CQ accounts"),
+		harnessFixturePath("/codex/config.toml"):      []byte("native configuration"),
+		harnessFixturePath("/codex/plugins.json"):     []byte("global plugin preferences"),
+		harnessFixturePath("/codex/history.jsonl"):    []byte("existing chat history"),
+		harnessFixturePath("/codex/auth.json"):        []byte("source account credentials"),
+		harnessFixturePath("/cq/codex-accounts.json"): []byte("CQ accounts"),
 	}
 	for path, data := range untouched {
 		if err := fsys.WriteFile(path, data, 0o600); err != nil {
@@ -268,7 +283,7 @@ func TestCodexHarnessOnlyChangesPrivatePolicy(t *testing.T) {
 		if err := runHarnessTestCLI(t, runner, &output, operation); err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(output.String(), "standalone MCP") || !strings.Contains(output.String(), "local skills") || !strings.Contains(output.String(), "next eligible turn") {
+		if !strings.Contains(output.String(), "standalone MCP") || !strings.Contains(output.String(), "local skills") || !strings.Contains(output.String(), "later eligible turn") {
 			t.Fatalf("%s scope or timing is unclear: %s", operation, &output)
 		}
 	}
@@ -278,13 +293,16 @@ func TestCodexHarnessOnlyChangesPrivatePolicy(t *testing.T) {
 			t.Fatalf("changed unrelated file %s: %v", path, err)
 		}
 	}
-	info, err := fsys.Stat("/cq/harness.json")
+	info, err := fsys.Stat(harnessFixturePath("/cq/harness.json"))
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("policy permissions = %v, %v", info, err)
 	}
 }
 
 func TestCodexHarnessMainStatusBypassesCompatibilityWrites(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("default CQ roots come from the Windows user registry, so this environment fixture cannot isolate them")
+	}
 	if os.Getenv("CQ_HARNESS_STATUS_HELPER") == "1" {
 		os.Args = []string{"cq", "--json", "codex", "harness", "status"}
 		main()
@@ -309,7 +327,7 @@ func TestCodexHarnessMainStatusBypassesCompatibilityWrites(t *testing.T) {
 
 func TestCodexHarnessHumanStatusSortsOverrides(t *testing.T) {
 	runner, _ := harnessTestRunner()
-	for _, args := range [][]string{{"project", "/z-project", "minimal"}, {"project", "/a-project", "full"}} {
+	for _, args := range [][]string{{"project", harnessFixturePath("/z-project"), "minimal"}, {"project", harnessFixturePath("/a-project"), "full"}} {
 		if err := runHarnessTestCLI(t, runner, io.Discard, args...); err != nil {
 			t.Fatal(err)
 		}
@@ -321,7 +339,7 @@ func TestCodexHarnessHumanStatusSortsOverrides(t *testing.T) {
 	if err := runHarnessTestCLI(t, runner, &second); err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(first.Bytes(), second.Bytes()) || strings.Index(first.String(), "/a-project") < 0 || strings.Index(first.String(), "/a-project") > strings.Index(first.String(), "/z-project") {
+	if !bytes.Equal(first.Bytes(), second.Bytes()) || strings.Index(first.String(), harnessFixturePath("/a-project")) < 0 || strings.Index(first.String(), harnessFixturePath("/a-project")) > strings.Index(first.String(), harnessFixturePath("/z-project")) {
 		t.Fatalf("unordered output: %s", &first)
 	}
 }
@@ -340,7 +358,7 @@ func TestCodexHarnessRunnerValidatesBeforeResolvingConfig(t *testing.T) {
 			if err := runner.execute(operation, cmd, true, io.Discard); err == nil {
 				t.Fatal("invalid operation or profile was accepted")
 			}
-			if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+			if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("invalid command wrote state: %v", err)
 			}
 		})
@@ -362,7 +380,7 @@ func TestCodexHarnessStatusPropagatesBoundaryErrors(t *testing.T) {
 			t.Fatal(err)
 		}
 		invalid := []byte(`{"version":999,"enabled":true}`)
-		if err := fsys.WriteFile("/cq/harness.json", invalid, 0o600); err != nil {
+		if err := fsys.WriteFile(harnessFixturePath("/cq/harness.json"), invalid, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		for _, operation := range []string{"status", "disable"} {
@@ -371,7 +389,7 @@ func TestCodexHarnessStatusPropagatesBoundaryErrors(t *testing.T) {
 				t.Fatalf("%s swallowed invalid policy or printed success: %v, %s", operation, err, &output)
 			}
 		}
-		after, _ := fsys.ReadFile("/cq/harness.json")
+		after, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 		if !bytes.Equal(after, invalid) {
 			t.Fatal("invalid saved policy was overwritten")
 		}
@@ -400,7 +418,7 @@ func TestCodexHarnessStatusSeparatesReceiptFromSelectionPreview(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			before, _ := fsys.ReadFile("/cq/harness.json")
+			before, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 			receipt := harness.Receipt{
 				Version: 1, ChatID: chat, Mode: mode, Profile: harness.Minimal, State: "applied", Source: "default",
 				BaselinePlugins: []string{"original-disabled"}, AppliedPlugins: []string{"original-disabled", "plugin"},
@@ -434,7 +452,7 @@ func TestCodexHarnessStatusSeparatesReceiptFromSelectionPreview(t *testing.T) {
 					t.Fatalf("human status omitted %q: %s", detail, &output)
 				}
 			}
-			after, _ := fsys.ReadFile("/cq/harness.json")
+			after, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 			if !bytes.Equal(before, after) || loads != 2 {
 				t.Fatalf("receipt inspection changed policy or performed extra lookups: %d", loads)
 			}
@@ -462,7 +480,7 @@ func TestCodexHarnessStatusMissingReceiptIsReadOnly(t *testing.T) {
 	if strings.Contains(output.String(), "last_application") {
 		t.Fatalf("missing receipt emitted a synthetic last application: %s", &output)
 	}
-	if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing receipt inspection created config: %v", err)
 	}
 }
@@ -482,7 +500,7 @@ func TestCodexHarnessStatusSurfacesReceiptErrorsAndOnlyReadsSelectedChat(t *test
 	if err := runHarnessTestCLI(t, runner, &output, "status", "--json", "--chat", "01a198eb-f8e9-72a1-856c-0e986d10f6f7"); !errors.Is(err, failure) || loads != 1 || output.Len() != 0 {
 		t.Fatalf("receipt failure = %v, loads=%d, output=%s", err, loads, &output)
 	}
-	if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed receipt inspection created config: %v", err)
 	}
 }

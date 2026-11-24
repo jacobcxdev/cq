@@ -228,6 +228,7 @@ func TestProxyHookCommandReachesHandler(t *testing.T) {
 
 func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 	if os.Getenv("CQ_TEST_BARE_PROXY_STATUS") == "1" {
+		useProxyStatusConfigFixture(t)
 		proxyStatusGet = func(string) (*http.Response, error) {
 			return &http.Response{Body: io.NopCloser(strings.NewReader(`{"status":"ok"}`))}, nil
 		}
@@ -236,7 +237,7 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		}
 		return
 	}
-	binary := filepath.Join(t.TempDir(), "cq")
+	binary := filepath.Join(t.TempDir(), "cq.exe")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, output)
@@ -317,7 +318,7 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		if tt.helper {
 			command = exec.Command(os.Args[0], "-test.run=^TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState$")
 		}
-		command.Env = append(os.Environ(), "HOME="+home, "XDG_CONFIG_HOME="+xdg)
+		command.Env = append(os.Environ(), "HOME="+home, "USERPROFILE="+home, "XDG_CONFIG_HOME="+xdg)
 		if tt.helper {
 			command.Env = append(command.Env, "CQ_TEST_BARE_PROXY_STATUS=1")
 		}
@@ -390,7 +391,17 @@ func TestProxyStatusPreDispatchBoundaryUsesOnlyInjectedCollectors(t *testing.T) 
 	}
 }
 
+func useProxyStatusConfigFixture(t *testing.T) {
+	t.Helper()
+	original := proxyStatusPaths
+	t.Cleanup(func() { proxyStatusPaths = original })
+	proxyStatusPaths = func() (proxy.DefaultPaths, error) {
+		return proxy.DefaultPaths{ConfigFile: filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "cq", "proxy.json")}, nil
+	}
+}
+
 func TestProxyStatusPreDispatchPreservesFrozenBareStatus(t *testing.T) {
+	useProxyStatusConfigFixture(t)
 	authority, err := ClassifyProxyCommand([]string{"proxy", "status"})
 	if err != nil || authority.Row != "proxy_status_frozen" {
 		t.Fatalf("bare status authority = %+v, %v", authority, err)
@@ -466,7 +477,7 @@ func TestReconciledProxyStatusStrictControlsVerdictExit(t *testing.T) {
 }
 
 func TestGlobalHelpAndVersionPreserveAbsentHomeAndXDGEnvironment(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "cq")
+	binary := filepath.Join(t.TempDir(), "cq.exe")
 	build := exec.Command("go", "build", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("go build: %v\n%s", err, output)
@@ -474,10 +485,11 @@ func TestGlobalHelpAndVersionPreserveAbsentHomeAndXDGEnvironment(t *testing.T) {
 	workingDirectory := t.TempDir()
 	environment := make([]string, 0, len(os.Environ()))
 	for _, entry := range os.Environ() {
-		if !strings.HasPrefix(entry, "HOME=") && !strings.HasPrefix(entry, "XDG_CONFIG_HOME=") {
+		if !strings.HasPrefix(entry, "HOME=") && !strings.HasPrefix(entry, "USERPROFILE=") && !strings.HasPrefix(entry, "XDG_CONFIG_HOME=") {
 			environment = append(environment, entry)
 		}
 	}
+	environment = append(environment, "USERPROFILE="+filepath.Join(workingDirectory, "absent-home"))
 	for _, fixture := range []struct {
 		args     []string
 		exitCode int

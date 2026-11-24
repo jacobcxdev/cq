@@ -51,14 +51,14 @@ const harnessProfilesChat = "01a198eb-f8e9-72a1-856c-0e986d10f6f7"
 func harnessProfilesFixture(t *testing.T) (codexHarnessRunner, *fsutil.MemFS) {
 	t.Helper()
 	runner, fsys := harnessTestRunner()
-	runner.getwd = func() (string, error) { return "/work/project", nil }
+	runner.getwd = func() (string, error) { return harnessFixturePath("/work/project"), nil }
 	runner.getenv = func(name string) string {
 		if name != "CODEX_THREAD_ID" {
 			t.Fatalf("current chat consulted unrelated environment %q", name)
 		}
 		return harnessProfilesChat
 	}
-	if err := fsys.MkdirAll("/work/project", 0o755); err != nil {
+	if err := fsys.MkdirAll(harnessFixturePath("/work/project"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return runner, fsys
@@ -86,20 +86,20 @@ func harnessReviewDefinition() harness.Definition {
 func TestCodexHarnessProfileSavesCopiesAndRequiresExplicitReplacement(t *testing.T) {
 	runner, fsys := harnessProfilesFixture(t)
 	definition := harnessReviewDefinition()
-	harnessProfileInput(t, fsys, "/work/profile.json", definition)
+	harnessProfileInput(t, fsys, harnessFixturePath("/work/profile.json"), definition)
 	runner.apply = func(context.Context, string) error { t.Fatal("definition write activated a chat"); return nil }
 	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", "../profile.json"); err != nil {
 		t.Fatal(err)
 	}
-	policy, err := harness.Load(fsys, "/cq/harness.json")
+	policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 	if err != nil || policy.Version != 2 || policy.Enabled || !reflect.DeepEqual(policy.Profiles["review"], definition) || len(policy.Tasks) != 0 {
 		t.Fatalf("definition save changed activation or data: %#v, %v", policy, err)
 	}
-	before, _ := fsys.ReadFile("/cq/harness.json")
-	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", "/work/profile.json"); err == nil || !strings.Contains(err.Error(), "--replace") {
+	before, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
+	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", harnessFixturePath("/work/profile.json")); err == nil || !strings.Contains(err.Error(), "--replace") {
 		t.Fatalf("existing profile replacement = %v", err)
 	}
-	after, _ := fsys.ReadFile("/cq/harness.json")
+	after, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 	if !bytes.Equal(before, after) {
 		t.Fatal("rejected replacement changed policy")
 	}
@@ -112,7 +112,7 @@ func TestCodexHarnessProfileSavesCopiesAndRequiresExplicitReplacement(t *testing
 	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "copy", "minimal", "review-copy", "--replace"); err != nil {
 		t.Fatal(err)
 	}
-	policy, _ = harness.Load(fsys, "/cq/harness.json")
+	policy, _ = harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 	if policy.Enabled || policy.Profiles["review-copy"].Changes.Default != harness.Disabled || !reflect.DeepEqual(policy.Profiles["review"], definition) {
 		t.Fatalf("copy changed source or activation: %#v", policy)
 	}
@@ -138,15 +138,15 @@ func TestCodexHarnessProfileSavesCopiesAndRequiresExplicitReplacement(t *testing
 func TestCodexHarnessProjectDefinitionsStayPortableAndInactive(t *testing.T) {
 	runner, fsys := harnessProfilesFixture(t)
 	definition := harnessReviewDefinition()
-	harnessProfileInput(t, fsys, "/work/profile.json", definition)
-	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", "/work/profile.json", "--project", "."); err != nil {
+	harnessProfileInput(t, fsys, harnessFixturePath("/work/profile.json"), definition)
+	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", harnessFixturePath("/work/profile.json"), "--project", "."); err != nil {
 		t.Fatal(err)
 	}
-	workspace, err := harness.LoadWorkspace(fsys, "/work/project/.cq/harness.json")
+	workspace, err := harness.LoadWorkspace(fsys, harnessFixturePath("/work/project/.cq/harness.json"))
 	if err != nil || workspace.Version != 2 || !reflect.DeepEqual(workspace.Profiles["review"], definition) || len(workspace.Rules.All.Profiles) != 0 || len(workspace.Rules.Models) != 0 {
 		t.Fatalf("portable project definition = %#v, %v", workspace, err)
 	}
-	policy, err := harness.Load(fsys, "/cq/harness.json")
+	policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 	if err != nil || policy.Version != 2 || policy.Enabled || len(policy.Profiles) != 0 {
 		t.Fatalf("project save activated or copied definitions into user state: %#v, %v", policy, err)
 	}
@@ -158,7 +158,7 @@ func TestCodexHarnessProjectDefinitionsStayPortableAndInactive(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &shown); err != nil || !reflect.DeepEqual(shown.Definition, definition) {
 		t.Fatalf("saved project profile is not visible: %s, %v", &output, err)
 	}
-	info, err := fsys.Stat("/work/project")
+	info, err := fsys.Stat(harnessFixturePath("/work/project"))
 	if err != nil || info.Mode().Perm() != 0o755 {
 		t.Fatalf("project save changed root permissions: %v, %v", info, err)
 	}
@@ -167,13 +167,13 @@ func TestCodexHarnessProjectDefinitionsStayPortableAndInactive(t *testing.T) {
 func TestCodexHarnessProjectProfileDiscoveryDoesNotPromoteFreshUserPolicy(t *testing.T) {
 	runner, fsys := harnessProfilesFixture(t)
 	definition := harnessReviewDefinition()
-	if _, err := harness.UpdateWorkspace(fsys, "/work/.cq/harness.json", func(workspace *harness.WorkspacePolicy) error {
+	if _, err := harness.UpdateWorkspace(fsys, harnessFixturePath("/work/.cq/harness.json"), func(workspace *harness.WorkspacePolicy) error {
 		workspace.Profiles["project-review"] = definition
 		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := fsys.ReadFile("/work/.cq/harness.json")
+	before, _ := fsys.ReadFile(harnessFixturePath("/work/.cq/harness.json"))
 	var output bytes.Buffer
 	if err := runHarnessTestCLI(t, runner, &output, "profile", "show", "project-review", "--json"); err != nil {
 		t.Fatal(err)
@@ -182,10 +182,10 @@ func TestCodexHarnessProjectProfileDiscoveryDoesNotPromoteFreshUserPolicy(t *tes
 	if err := json.Unmarshal(output.Bytes(), &shown); err != nil || !reflect.DeepEqual(shown.Definition, definition) {
 		t.Fatalf("fresh project discovery = %s, %v", &output, err)
 	}
-	if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("metadata discovery promoted or activated user policy: %v", err)
 	}
-	after, _ := fsys.ReadFile("/work/.cq/harness.json")
+	after, _ := fsys.ReadFile(harnessFixturePath("/work/.cq/harness.json"))
 	if !bytes.Equal(before, after) {
 		t.Fatal("metadata discovery changed portable policy")
 	}
@@ -194,8 +194,8 @@ func TestCodexHarnessProjectProfileDiscoveryDoesNotPromoteFreshUserPolicy(t *tes
 func TestCodexHarnessProfileExportImportRoundTripWithoutBinding(t *testing.T) {
 	runner, fsys := harnessProfilesFixture(t)
 	definition := harnessReviewDefinition()
-	harnessProfileInput(t, fsys, "/work/source.json", definition)
-	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", "/work/source.json"); err != nil {
+	harnessProfileInput(t, fsys, harnessFixturePath("/work/source.json"), definition)
+	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", harnessFixturePath("/work/source.json")); err != nil {
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
@@ -206,16 +206,16 @@ func TestCodexHarnessProfileExportImportRoundTripWithoutBinding(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &exported); err != nil || exported.Version != 1 || exported.Name != "review" || !reflect.DeepEqual(exported.Definition, definition) {
 		t.Fatalf("portable export = %s, %v", &output, err)
 	}
-	if err := fsys.WriteFile("/work/export.json", output.Bytes(), 0o644); err != nil {
+	if err := fsys.WriteFile(harnessFixturePath("/work/export.json"), output.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runHarnessTestCLI(t, runner, io.Discard, "import", "--file", "/work/export.json"); err == nil {
+	if err := runHarnessTestCLI(t, runner, io.Discard, "import", "--file", harnessFixturePath("/work/export.json")); err == nil {
 		t.Fatal("import replaced an existing name without --replace")
 	}
-	if err := runHarnessTestCLI(t, runner, io.Discard, "import", "--file", "/work/export.json", "--name", "imported"); err != nil {
+	if err := runHarnessTestCLI(t, runner, io.Discard, "import", "--file", harnessFixturePath("/work/export.json"), "--name", "imported"); err != nil {
 		t.Fatal(err)
 	}
-	policy, err := harness.Load(fsys, "/cq/harness.json")
+	policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 	if err != nil || policy.Enabled || len(policy.Tasks) != 0 || !reflect.DeepEqual(policy.Profiles["imported"], definition) {
 		t.Fatalf("import activated a profile or lost stable IDs: %#v, %v", policy, err)
 	}
@@ -224,8 +224,8 @@ func TestCodexHarnessProfileExportImportRoundTripWithoutBinding(t *testing.T) {
 func TestCodexHarnessProfileShowSaveRoundTripWithoutBinding(t *testing.T) {
 	runner, fsys := harnessProfilesFixture(t)
 	runner.apply = func(context.Context, string) error { t.Fatal("profile save activated a chat"); return nil }
-	harnessProfileInput(t, fsys, "/work/source.json", harnessReviewDefinition())
-	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", "/work/source.json"); err != nil {
+	harnessProfileInput(t, fsys, harnessFixturePath("/work/source.json"), harnessReviewDefinition())
+	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", harnessFixturePath("/work/source.json")); err != nil {
 		t.Fatal(err)
 	}
 	for _, source := range []string{"minimal", "full", "review"} {
@@ -234,26 +234,26 @@ func TestCodexHarnessProfileShowSaveRoundTripWithoutBinding(t *testing.T) {
 			if err := runHarnessTestCLI(t, runner, &shown, "profile", "show", source, "--json"); err != nil {
 				t.Fatal(err)
 			}
-			if err := fsys.WriteFile("/work/shown.json", shown.Bytes(), 0o644); err != nil {
+			if err := fsys.WriteFile(harnessFixturePath("/work/shown.json"), shown.Bytes(), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			name := source + "-copy"
-			if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", name, "--file", "/work/shown.json"); err != nil {
+			if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", name, "--file", harnessFixturePath("/work/shown.json")); err != nil {
 				t.Fatal(err)
 			}
 			var document harnessProfileDocument
 			if err := json.Unmarshal(shown.Bytes(), &document); err != nil {
 				t.Fatal(err)
 			}
-			policy, err := harness.Load(fsys, "/cq/harness.json")
+			policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 			if err != nil || policy.Enabled || len(policy.Tasks) != 0 || !reflect.DeepEqual(policy.Profiles[name], document.Definition) {
 				t.Fatalf("profile show/save changed definition or activation: %#v, %v", policy, err)
 			}
-			before, _ := fsys.ReadFile("/cq/harness.json")
-			if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", name, "--file", "/work/shown.json"); err == nil || !strings.Contains(err.Error(), "--replace") {
+			before, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
+			if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", name, "--file", harnessFixturePath("/work/shown.json")); err == nil || !strings.Contains(err.Error(), "--replace") {
 				t.Fatalf("document silently replaced a saved profile: %v", err)
 			}
-			after, _ := fsys.ReadFile("/cq/harness.json")
+			after, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 			if !bytes.Equal(before, after) {
 				t.Fatal("rejected document replacement changed policy")
 			}
@@ -284,7 +284,7 @@ func TestCodexHarnessProfileInvalidFilesDoNotCreateUserState(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner, fsys := harnessProfilesFixture(t)
-			if err := fsys.WriteFile("/work/input.json", []byte(test.json), 0o644); err != nil {
+			if err := fsys.WriteFile(harnessFixturePath("/work/input.json"), []byte(test.json), 0o644); err != nil {
 				t.Fatal(err)
 			}
 			name := "review"
@@ -294,14 +294,14 @@ func TestCodexHarnessProfileInvalidFilesDoNotCreateUserState(t *testing.T) {
 			if test.name == "reserved" {
 				name = "full"
 			}
-			args := []string{"profile", "save", name, "--file", "/work/input.json", "--replace"}
+			args := []string{"profile", "save", name, "--file", harnessFixturePath("/work/input.json"), "--replace"}
 			if test.importFile {
-				args = []string{"import", "--file", "/work/input.json"}
+				args = []string{"import", "--file", harnessFixturePath("/work/input.json")}
 			}
 			if err := runHarnessTestCLI(t, runner, io.Discard, args...); err == nil {
 				t.Fatal("invalid profile input was accepted")
 			}
-			if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+			if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("invalid profile created user state: %v", err)
 			}
 		})
@@ -310,14 +310,14 @@ func TestCodexHarnessProfileInvalidFilesDoNotCreateUserState(t *testing.T) {
 
 func TestCodexHarnessBindSavesBeforeApplyingCurrentChat(t *testing.T) {
 	runner, fsys := harnessProfilesFixture(t)
-	harnessProfileInput(t, fsys, "/work/profile.json", harnessReviewDefinition())
-	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", "/work/profile.json"); err != nil {
+	harnessProfileInput(t, fsys, harnessFixturePath("/work/profile.json"), harnessReviewDefinition())
+	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", harnessFixturePath("/work/profile.json")); err != nil {
 		t.Fatal(err)
 	}
 	applied := 0
 	runner.apply = func(_ context.Context, id string) error {
 		applied++
-		policy, err := harness.Load(fsys, "/cq/harness.json")
+		policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 		if err != nil || !policy.Enabled || id != harnessProfilesChat || !slices.Equal(policy.Tasks[id].All.Profiles, []string{"minimal", "review"}) {
 			t.Fatalf("apply ran before binding was saved: %#v, %v, %s", policy, err, id)
 		}
@@ -331,8 +331,8 @@ func TestCodexHarnessBindSavesBeforeApplyingCurrentChat(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil || !result.Saved || !result.Enabled || result.Application != "requested" || result.Chat != harnessProfilesChat || applied != 1 {
 		t.Fatalf("binding result = %s, %v; applied=%d", &output, err, applied)
 	}
-	policy, _ := harness.Load(fsys, "/cq/harness.json")
-	effective := policy.ResolveEffective("gpt-6.1", "/work/project", harnessProfilesChat)
+	policy, _ := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
+	effective := policy.ResolveEffective("gpt-6.1", harnessFixturePath("/work/project"), harnessProfilesChat)
 	if !effective.Selection.Managed || effective.Changes.Plugins["jira@market"] != harness.Disabled || effective.Changes.Skills["repo:review"] != harness.Enabled {
 		t.Fatalf("binding failed for non-GLM model: %#v", effective)
 	}
@@ -340,25 +340,25 @@ func TestCodexHarnessBindSavesBeforeApplyingCurrentChat(t *testing.T) {
 
 func TestCodexHarnessProjectModelBindingAndUnbindPreserveDefinitions(t *testing.T) {
 	runner, fsys := harnessProfilesFixture(t)
-	harnessProfileInput(t, fsys, "/work/profile.json", harnessReviewDefinition())
-	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", "/work/profile.json", "--project", "."); err != nil {
+	harnessProfileInput(t, fsys, harnessFixturePath("/work/profile.json"), harnessReviewDefinition())
+	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", harnessFixturePath("/work/profile.json"), "--project", "."); err != nil {
 		t.Fatal(err)
 	}
 	if err := runHarnessTestCLI(t, runner, io.Discard, "bind", "review", "--scope", "project", "--model", "gpt-*"); err != nil {
 		t.Fatal(err)
 	}
-	workspace, err := harness.LoadWorkspace(fsys, "/work/project/.cq/harness.json")
+	workspace, err := harness.LoadWorkspace(fsys, harnessFixturePath("/work/project/.cq/harness.json"))
 	if err != nil || !slices.Equal(workspace.Rules.Models["gpt-*"].Profiles, []string{"review"}) || len(workspace.Rules.All.Profiles) != 0 {
 		t.Fatalf("project model binding = %#v, %v", workspace, err)
 	}
-	policy, err := harness.Load(fsys, "/cq/harness.json")
+	policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 	if err != nil || !policy.Enabled || len(policy.Profiles) != 0 {
 		t.Fatalf("project binding activation = %#v, %v", policy, err)
 	}
 	if err := runHarnessTestCLI(t, runner, io.Discard, "unbind", "--scope", "project", "--model", "GPT-*"); err != nil {
 		t.Fatal(err)
 	}
-	workspace, err = harness.LoadWorkspace(fsys, "/work/project/.cq/harness.json")
+	workspace, err = harness.LoadWorkspace(fsys, harnessFixturePath("/work/project/.cq/harness.json"))
 	if err != nil || len(workspace.Rules.Models) != 0 || workspace.Profiles["review"].Description == "" {
 		t.Fatalf("unbind discarded definition or retained rule: %#v, %v", workspace, err)
 	}
@@ -377,7 +377,7 @@ func TestCodexHarnessBindingValidationPrecedesWrites(t *testing.T) {
 			if err := runHarnessTestCLI(t, runner, io.Discard, args...); err == nil {
 				t.Fatal("invalid binding was accepted")
 			}
-			if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+			if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("invalid binding wrote policy: %v", err)
 			}
 		})
@@ -396,7 +396,7 @@ func TestCodexHarnessApplyFailureReportsSavedPendingBinding(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil || !result.Saved || result.Application != "pending" {
 		t.Fatalf("pending result = %s, %v", &output, err)
 	}
-	policy, err := harness.Load(fsys, "/cq/harness.json")
+	policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 	if err != nil || !policy.Enabled || !slices.Equal(policy.Tasks[harnessProfilesChat].All.Profiles, []string{"minimal"}) {
 		t.Fatalf("application error lost saved binding: %#v, %v", policy, err)
 	}
@@ -405,12 +405,12 @@ func TestCodexHarnessApplyFailureReportsSavedPendingBinding(t *testing.T) {
 func TestCodexHarnessInventoryUsesStableIDsAndFiltersMetadata(t *testing.T) {
 	runner, fsys := harnessProfilesFixture(t)
 	runner.snapshot = func(_ context.Context, cwd string) (harness.Inventory, error) {
-		if cwd != "/work/project" {
+		if cwd != harnessFixturePath("/work/project") {
 			t.Fatalf("inventory cwd = %q", cwd)
 		}
 		return harness.Inventory{Capabilities: []harness.Capability{
 			{ID: "z@market", Kind: harness.PluginKind, Name: "Review plugin", Enabled: true, Available: true},
-			{ID: "repo:review", Kind: harness.SkillKind, Name: "Review", Description: "Review changes", Path: "/work/project/.agents/skills/review/SKILL.md", Enabled: false, Available: true},
+			{ID: "repo:review", Kind: harness.SkillKind, Name: "Review", Description: "Review changes", Path: harnessFixturePath("/work/project/.agents/skills/review/SKILL.md"), Enabled: false, Available: true},
 			{ID: "calendar", Kind: harness.MCPKind, Name: "Calendar", Enabled: true, Available: true},
 		}, Issues: []harness.InventoryIssue{{Code: "partial", Kind: harness.PluginKind}}}, nil
 	}
@@ -422,15 +422,15 @@ func TestCodexHarnessInventoryUsesStableIDsAndFiltersMetadata(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &inventory); err != nil || len(inventory.Capabilities) != 1 || inventory.Capabilities[0].ID != "repo:review" || inventory.Capabilities[0].Enabled || len(inventory.Issues) != 1 {
 		t.Fatalf("inventory = %s, %v", &output, err)
 	}
-	if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("inventory wrote policy: %v", err)
 	}
 }
 
 func TestCodexHarnessExplainUsesCurrentModelAndKeepsReceiptSeparate(t *testing.T) {
 	runner, fsys := harnessProfilesFixture(t)
-	harnessProfileInput(t, fsys, "/work/profile.json", harnessReviewDefinition())
-	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", "/work/profile.json"); err != nil {
+	harnessProfileInput(t, fsys, harnessFixturePath("/work/profile.json"), harnessReviewDefinition())
+	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", harnessFixturePath("/work/profile.json")); err != nil {
 		t.Fatal(err)
 	}
 	if err := runHarnessTestCLI(t, runner, io.Discard, "bind", "review", "--scope", "global"); err != nil {
@@ -448,16 +448,16 @@ func TestCodexHarnessExplainUsesCurrentModelAndKeepsReceiptSeparate(t *testing.T
 	runner.receipt = func(chat string) (harness.Receipt, error) {
 		return harness.Receipt{ChatID: chat, Mode: "plugins", State: "applied", Profile: harness.Minimal}, nil
 	}
-	before, _ := fsys.ReadFile("/cq/harness.json")
+	before, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 	var output bytes.Buffer
 	if err := runHarnessTestCLI(t, runner, &output, "explain", "--json"); err != nil {
 		t.Fatal(err)
 	}
 	var result harnessExplanation
-	if err := json.Unmarshal(output.Bytes(), &result); err != nil || result.Chat != harnessProfilesChat || result.Model != "gpt-6.1" || result.Project != "/work/project" || result.Effective.Selection.Profile != harness.Custom || len(result.Effective.Layers) == 0 || len(result.Capabilities) != 1 || result.Capabilities[0].Selected || result.LastApplication == nil || result.LastApplication.Profile != harness.Minimal {
+	if err := json.Unmarshal(output.Bytes(), &result); err != nil || result.Chat != harnessProfilesChat || result.Model != "gpt-6.1" || result.Project != harnessFixturePath("/work/project") || result.Effective.Selection.Profile != harness.Custom || len(result.Effective.Layers) == 0 || len(result.Capabilities) != 1 || result.Capabilities[0].Selected || result.LastApplication == nil || result.LastApplication.Profile != harness.Minimal {
 		t.Fatalf("explanation = %s, %v", &output, err)
 	}
-	after, _ := fsys.ReadFile("/cq/harness.json")
+	after, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 	if !bytes.Equal(before, after) {
 		t.Fatal("explain rewrote saved policy")
 	}
@@ -476,7 +476,7 @@ func TestCodexHarnessUnbindRemovesOnlySelectedUserRule(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			policy, err := harness.Load(fsys, "/cq/harness.json")
+			policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -493,7 +493,7 @@ func TestCodexHarnessUnbindRemovesOnlySelectedUserRule(t *testing.T) {
 			if err := runHarnessTestCLI(t, runner, io.Discard, "unbind", "--scope", scope); err != nil {
 				t.Fatal(err)
 			}
-			policy, _ = harness.Load(fsys, "/cq/harness.json")
+			policy, _ = harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 			selected = policy.Global
 			if scope == "chat" {
 				selected = policy.Tasks[harnessProfilesChat]
@@ -536,7 +536,7 @@ func TestCodexHarnessCurrentChatRejectsMissingAndInvalidContext(t *testing.T) {
 				if err := runHarnessTestCLI(t, runner, io.Discard, args...); err == nil {
 					t.Fatal("invalid current-chat context was accepted")
 				}
-				if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+				if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("invalid current context wrote user state: %v", err)
 				}
 			})
@@ -549,14 +549,14 @@ func TestCodexHarnessFailedBindingWriteDoesNotApply(t *testing.T) {
 	if err := runHarnessTestCLI(t, runner, io.Discard, "bind", "full", "--scope", "global"); err != nil {
 		t.Fatal(err)
 	}
-	before, _ := fsys.ReadFile("/cq/harness.json")
+	before, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 	runner.fs = harnessRenameFailureFS{fsys}
 	runner.apply = func(context.Context, string) error { t.Fatal("failed write applied runtime policy"); return nil }
 	var output bytes.Buffer
 	if err := runHarnessTestCLI(t, runner, &output, "bind", "minimal", "--json"); err == nil || output.Len() != 0 {
 		t.Fatalf("failed binding write emitted success: %v, %s", err, &output)
 	}
-	after, _ := fsys.ReadFile("/cq/harness.json")
+	after, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
 	if !bytes.Equal(before, after) {
 		t.Fatal("failed binding write changed prior policy")
 	}
@@ -564,9 +564,9 @@ func TestCodexHarnessFailedBindingWriteDoesNotApply(t *testing.T) {
 
 func TestCodexHarnessProfileFileBoundaries(t *testing.T) {
 	for _, test := range []struct{ name, path, data string }{
-		{"missing", "/work/missing.json", ""},
-		{"directory", "/work/project", ""},
-		{"oversized", "/work/oversized.json", strings.Repeat(" ", (1<<20)+1)},
+		{"missing", harnessFixturePath("/work/missing.json"), ""},
+		{"directory", harnessFixturePath("/work/project"), ""},
+		{"oversized", harnessFixturePath("/work/oversized.json"), strings.Repeat(" ", (1<<20)+1)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runner, fsys := harnessProfilesFixture(t)
@@ -578,7 +578,7 @@ func TestCodexHarnessProfileFileBoundaries(t *testing.T) {
 			if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "review", "--file", test.path); err == nil {
 				t.Fatal("invalid definition source was accepted")
 			}
-			if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+			if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("invalid definition source wrote state: %v", err)
 			}
 		})
@@ -590,20 +590,20 @@ func TestCodexHarnessLegacyOverridesRemainUsableAfterPromotion(t *testing.T) {
 	if err := runHarnessTestCLI(t, runner, io.Discard, "bind", "full", "--scope", "global"); err != nil {
 		t.Fatal(err)
 	}
-	for _, args := range [][]string{{"project", "/work/project", "minimal"}, {"chat", harnessProfilesChat, "full"}} {
+	for _, args := range [][]string{{"project", harnessFixturePath("/work/project"), "minimal"}, {"chat", harnessProfilesChat, "full"}} {
 		if err := runHarnessTestCLI(t, runner, io.Discard, args...); err != nil {
 			t.Fatal(err)
 		}
 	}
-	policy, err := harness.Load(fsys, "/cq/harness.json")
-	if err != nil || policy.Resolve("glm-5.3", "/work/project", harnessProfilesChat).Profile != harness.Full || policy.Resolve("glm-5.3", "/work/project", "").Profile != harness.Minimal || policy.Resolve("gpt-6.1", "/work/project", harnessProfilesChat).Profile != harness.Full {
+	policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
+	if err != nil || policy.Resolve("glm-5.3", harnessFixturePath("/work/project"), harnessProfilesChat).Profile != harness.Full || policy.Resolve("glm-5.3", harnessFixturePath("/work/project"), "").Profile != harness.Minimal || policy.Resolve("gpt-6.1", harnessFixturePath("/work/project"), harnessProfilesChat).Profile != harness.Full {
 		t.Fatalf("legacy v2 scope changed: %#v, %v", policy, err)
 	}
 	if err := runHarnessTestCLI(t, runner, io.Discard, "chat", harnessProfilesChat, "auto"); err != nil {
 		t.Fatal(err)
 	}
-	policy, _ = harness.Load(fsys, "/cq/harness.json")
-	if policy.Resolve("glm-5.3", "/work/project", harnessProfilesChat).Profile != harness.Minimal {
+	policy, _ = harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
+	if policy.Resolve("glm-5.3", harnessFixturePath("/work/project"), harnessProfilesChat).Profile != harness.Minimal {
 		t.Fatal("legacy auto no longer inherited project choice")
 	}
 }
@@ -611,8 +611,8 @@ func TestCodexHarnessLegacyOverridesRemainUsableAfterPromotion(t *testing.T) {
 func harnessExplainPlan(t *testing.T, definition harness.Definition, inventory harness.Inventory, receipt *harness.Receipt) harnessExplanation {
 	t.Helper()
 	runner, fsys := harnessProfilesFixture(t)
-	harnessProfileInput(t, fsys, "/work/plan.json", definition)
-	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "plan", "--file", "/work/plan.json"); err != nil {
+	harnessProfileInput(t, fsys, harnessFixturePath("/work/plan.json"), definition)
+	if err := runHarnessTestCLI(t, runner, io.Discard, "profile", "save", "plan", "--file", harnessFixturePath("/work/plan.json")); err != nil {
 		t.Fatal(err)
 	}
 	if err := runHarnessTestCLI(t, runner, io.Discard, "bind", "plan", "--scope", "global", "--model", "gpt-6.1"); err != nil {
@@ -726,8 +726,8 @@ func TestCodexHarnessExplainReportsSavedBindingAwaitingConfirmation(t *testing.T
 	runner.snapshot = func(context.Context, string) (harness.Inventory, error) {
 		return harness.Inventory{Capabilities: []harness.Capability{}}, nil
 	}
-	before, _ := fsys.ReadFile("/cq/harness.json")
-	entriesBefore, _ := fsys.ReadDir("/cq")
+	before, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
+	entriesBefore, _ := fsys.ReadDir(harnessFixturePath("/cq"))
 	var output bytes.Buffer
 	if err := runHarnessTestCLI(t, runner, &output, "explain", "--model", "gpt-6.1", "--json"); err != nil {
 		t.Fatal(err)
@@ -749,8 +749,8 @@ func TestCodexHarnessExplainReportsSavedBindingAwaitingConfirmation(t *testing.T
 	if !strings.Contains(output.String(), "Application: pending (not_confirmed)") {
 		t.Fatalf("human explanation hid pending state: %s", &output)
 	}
-	after, _ := fsys.ReadFile("/cq/harness.json")
-	entriesAfter, _ := fsys.ReadDir("/cq")
+	after, _ := fsys.ReadFile(harnessFixturePath("/cq/harness.json"))
+	entriesAfter, _ := fsys.ReadDir(harnessFixturePath("/cq"))
 	if !bytes.Equal(before, after) || len(entriesBefore) != len(entriesAfter) {
 		t.Fatal("application-status inspection changed policy or wrote a synthetic receipt")
 	}
@@ -768,18 +768,18 @@ func TestCodexHarnessLocalBindDoesNotReactivateStoredDisabledRules(t *testing.T)
 				case "global":
 					policy.Global = old
 				case "workspace":
-					policy.Workspaces["/other-project"] = old
+					policy.Workspaces[harnessFixturePath("/other-project")] = old
 				case "task":
 					policy.Tasks[other] = old
 				case "portable":
-					if _, err := harness.UpdateWorkspace(fsys, "/work/.cq/harness.json", func(workspace *harness.WorkspacePolicy) error {
+					if _, err := harness.UpdateWorkspace(fsys, harnessFixturePath("/work/.cq/harness.json"), func(workspace *harness.WorkspacePolicy) error {
 						workspace.Rules.All.Profiles = []string{"minimal"}
 						return nil
 					}); err != nil {
 						t.Fatal(err)
 					}
 				}
-				if err := harness.Save(fsys, "/cq/harness.json", policy); err != nil {
+				if err := harness.Save(fsys, harnessFixturePath("/cq/harness.json"), policy); err != nil {
 					t.Fatal(err)
 				}
 				runner.apply = func(context.Context, string) error { t.Fatal("local bind reactivated runtime application"); return nil }
@@ -795,8 +795,8 @@ func TestCodexHarnessLocalBindDoesNotReactivateStoredDisabledRules(t *testing.T)
 				if err := json.Unmarshal(output.Bytes(), &result); err != nil || result.Enabled || result.Application != "pending" || result.ApplicationReason != "policy_disabled" {
 					t.Fatalf("local bind silently reactivated stored rules: %s, %v", &output, err)
 				}
-				saved, err := harness.Load(fsys, "/cq/harness.json")
-				if err != nil || saved.Enabled || !reflect.DeepEqual(saved.Profiles, policy.Profiles) || saved.Resolve("glm-5.3", "/other-project", other).Managed {
+				saved, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
+				if err != nil || saved.Enabled || !reflect.DeepEqual(saved.Profiles, policy.Profiles) || saved.Resolve("glm-5.3", harnessFixturePath("/other-project"), other).Managed {
 					t.Fatalf("local bind altered disabled policy scope: %#v, %v", saved, err)
 				}
 				switch existing {
@@ -805,7 +805,7 @@ func TestCodexHarnessLocalBindDoesNotReactivateStoredDisabledRules(t *testing.T)
 						t.Fatal("global rules changed")
 					}
 				case "workspace":
-					if !reflect.DeepEqual(saved.Workspaces["/other-project"], old) {
+					if !reflect.DeepEqual(saved.Workspaces[harnessFixturePath("/other-project")], old) {
 						t.Fatal("other workspace rules changed")
 					}
 				case "task":
@@ -817,7 +817,7 @@ func TestCodexHarnessLocalBindDoesNotReactivateStoredDisabledRules(t *testing.T)
 					t.Fatal("new chat binding was not saved")
 				}
 				if scope == "project" {
-					workspace, err := harness.LoadWorkspace(fsys, "/work/project/.cq/harness.json")
+					workspace, err := harness.LoadWorkspace(fsys, harnessFixturePath("/work/project/.cq/harness.json"))
 					if err != nil || !slices.Equal(workspace.Rules.All.Profiles, []string{"minimal"}) {
 						t.Fatalf("new project binding not saved: %#v, %v", workspace, err)
 					}
@@ -831,7 +831,7 @@ func TestCodexHarnessExplicitGlobalBindMayEnableStoredDisabledRules(t *testing.T
 	runner, fsys := harnessProfilesFixture(t)
 	other := "019c7714-3b77-74d1-9866-e1f484aae2ab"
 	old := harness.Scope{All: harness.Binding{Profiles: []string{"minimal"}}}
-	if err := harness.Save(fsys, "/cq/harness.json", harness.Policy{Version: 2, Tasks: map[string]harness.Scope{other: old}}); err != nil {
+	if err := harness.Save(fsys, harnessFixturePath("/cq/harness.json"), harness.Policy{Version: 2, Tasks: map[string]harness.Scope{other: old}}); err != nil {
 		t.Fatal(err)
 	}
 	applied := 0
@@ -839,7 +839,7 @@ func TestCodexHarnessExplicitGlobalBindMayEnableStoredDisabledRules(t *testing.T
 	if err := runHarnessTestCLI(t, runner, io.Discard, "bind", "full", "--scope", "global"); err != nil {
 		t.Fatal(err)
 	}
-	policy, err := harness.Load(fsys, "/cq/harness.json")
+	policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
 	if err != nil || !policy.Enabled || !reflect.DeepEqual(policy.Tasks[other], old) || applied != 1 {
 		t.Fatalf("explicit global bind did not retain and enable stored rules: %#v, %v, applied=%d", policy, err, applied)
 	}
@@ -855,7 +855,7 @@ func TestCodexHarnessExplainDistinguishesMatchingAndOutdatedReceipts(t *testing.
 	}
 	for _, state := range []string{"prepared", "applied", "pending", "failed", "diverged", "restored"} {
 		t.Run(state, func(t *testing.T) {
-			receipt := &harness.Receipt{Version: 1, ChatID: harnessProfilesChat, Mode: "plugins", Profile: harness.Minimal, State: state, Source: "global", Model: "gpt-6.1", Cwd: "/work/project", Fingerprint: fingerprint, UpdatedAt: time.Date(2026, 11, 5, 11, 0, 0, 0, time.UTC)}
+			receipt := &harness.Receipt{Version: 1, ChatID: harnessProfilesChat, Mode: "plugins", Profile: harness.Minimal, State: state, Source: "global", Model: "gpt-6.1", Cwd: harnessFixturePath("/work/project"), Fingerprint: fingerprint, UpdatedAt: time.Date(2026, 11, 5, 11, 0, 0, 0, time.UTC)}
 			matched := harnessExplainPlan(t, definition, inventory, receipt)
 			if matched.ApplicationStatus.State != state || matched.ApplicationStatus.Reason != "receipt_matches" || matched.LastApplication == nil || !reflect.DeepEqual(*matched.LastApplication, *receipt) {
 				t.Fatalf("matching receipt was not reported as its actual state: %#v", matched)
@@ -881,7 +881,7 @@ func TestCodexHarnessExplainReportsCurrentApplicationMode(t *testing.T) {
 	fingerprint := harnessExplainPlan(t, definition, inventory, nil).Effective.Selection.Fingerprint
 	for _, mode := range []string{"plugins", "full"} {
 		t.Run(mode, func(t *testing.T) {
-			receipt := &harness.Receipt{Version: 1, ChatID: harnessProfilesChat, Mode: mode, Profile: harness.Minimal, State: "partial", Source: "global", Model: "gpt-6.1", Cwd: "/work/project", Fingerprint: fingerprint, UpdatedAt: time.Now().UTC()}
+			receipt := &harness.Receipt{Version: 1, ChatID: harnessProfilesChat, Mode: mode, Profile: harness.Minimal, State: "partial", Source: "global", Model: "gpt-6.1", Cwd: harnessFixturePath("/work/project"), Fingerprint: fingerprint, UpdatedAt: time.Now().UTC()}
 			result := harnessExplainPlan(t, definition, inventory, receipt)
 			raw, _ := json.Marshal(result.ApplicationStatus)
 			var status map[string]string
@@ -906,14 +906,14 @@ func TestCodexHarnessExplainDoesNotReuseModeAcrossContexts(t *testing.T) {
 	fingerprint := harnessExplainPlan(t, definition, inventory, nil).Effective.Selection.Fingerprint
 	for _, context := range []string{"chat", "model", "project", "unknown"} {
 		t.Run(context, func(t *testing.T) {
-			receipt := &harness.Receipt{Version: 1, ChatID: harnessProfilesChat, Mode: "full", Profile: harness.Minimal, State: "applied", Source: "global", Model: "gpt-6.1", Cwd: "/work/project", Fingerprint: fingerprint, UpdatedAt: time.Now().UTC()}
+			receipt := &harness.Receipt{Version: 1, ChatID: harnessProfilesChat, Mode: "full", Profile: harness.Minimal, State: "applied", Source: "global", Model: "gpt-6.1", Cwd: harnessFixturePath("/work/project"), Fingerprint: fingerprint, UpdatedAt: time.Now().UTC()}
 			switch context {
 			case "chat":
 				receipt.ChatID = "019c7714-3b77-74d1-9866-e1f484aae2ab"
 			case "model":
 				receipt.Model = "glm-5.3"
 			case "project":
-				receipt.Cwd = "/different"
+				receipt.Cwd = harnessFixturePath("/different")
 			case "unknown":
 				receipt.Model, receipt.Cwd = "", ""
 			}
@@ -930,7 +930,7 @@ func TestCodexHarnessExplainClassifiesUnmanagedAndFullWithoutReceipt(t *testing.
 		t.Run(map[bool]string{false: "disabled", true: "unbound"}[enabled], func(t *testing.T) {
 			runner, fsys := harnessProfilesFixture(t)
 			if enabled {
-				if err := harness.Save(fsys, "/cq/harness.json", harness.Policy{Version: 2, Enabled: true}); err != nil {
+				if err := harness.Save(fsys, harnessFixturePath("/cq/harness.json"), harness.Policy{Version: 2, Enabled: true}); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -954,7 +954,7 @@ func TestCodexHarnessExplainClassifiesUnmanagedAndFullWithoutReceipt(t *testing.
 				t.Fatalf("unmanaged plan was reported pending or applied: %#v", result)
 			}
 			if !enabled {
-				if _, err := fsys.Stat("/cq"); !errors.Is(err, os.ErrNotExist) {
+				if _, err := fsys.Stat(harnessFixturePath("/cq")); !errors.Is(err, os.ErrNotExist) {
 					t.Fatalf("unmanaged inspection created state: %v", err)
 				}
 			}
@@ -969,23 +969,23 @@ func TestCodexHarnessExplainClassifiesUnmanagedAndFullWithoutReceipt(t *testing.
 func TestCodexHarnessLocalBindPreservesDisabledLegacyRules(t *testing.T) {
 	runner, fsys := harnessProfilesFixture(t)
 	other := "019c7714-3b77-74d1-9866-e1f484aae2ab"
-	legacy := harness.Policy{Version: 1, Chats: map[string]harness.Profile{other: harness.Minimal}, Projects: map[string]harness.Profile{"/other-project": harness.Minimal}}
-	if err := harness.Save(fsys, "/cq/harness.json", legacy); err != nil {
+	legacy := harness.Policy{Version: 1, Chats: map[string]harness.Profile{other: harness.Minimal}, Projects: map[string]harness.Profile{harnessFixturePath("/other-project"): harness.Minimal}}
+	if err := harness.Save(fsys, harnessFixturePath("/cq/harness.json"), legacy); err != nil {
 		t.Fatal(err)
 	}
 	runner.apply = func(context.Context, string) error { t.Fatal("legacy disabled rules reactivated"); return nil }
 	if err := runHarnessTestCLI(t, runner, io.Discard, "bind", "minimal"); err != nil {
 		t.Fatal(err)
 	}
-	policy, err := harness.Load(fsys, "/cq/harness.json")
-	if err != nil || policy.Version != 2 || policy.Enabled || !slices.Equal(policy.Tasks[other].Models["glm-*"].Profiles, []string{"minimal"}) || !slices.Equal(policy.Workspaces["/other-project"].Models["glm-*"].Profiles, []string{"minimal"}) {
+	policy, err := harness.Load(fsys, harnessFixturePath("/cq/harness.json"))
+	if err != nil || policy.Version != 2 || policy.Enabled || !slices.Equal(policy.Tasks[other].Models["glm-*"].Profiles, []string{"minimal"}) || !slices.Equal(policy.Workspaces[harnessFixturePath("/other-project")].Models["glm-*"].Profiles, []string{"minimal"}) {
 		t.Fatalf("binding changed legacy disabled scope during promotion: %#v, %v", policy, err)
 	}
 }
 
 func TestCodexHarnessExplainDoesNotMatchDifferentLegacyProfilesWithEmptyFingerprints(t *testing.T) {
 	runner, fsys := harnessProfilesFixture(t)
-	if err := harness.Save(fsys, "/cq/harness.json", harness.Policy{Version: 1, Enabled: true}); err != nil {
+	if err := harness.Save(fsys, harnessFixturePath("/cq/harness.json"), harness.Policy{Version: 1, Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	runner.receipt = func(string) (harness.Receipt, error) {

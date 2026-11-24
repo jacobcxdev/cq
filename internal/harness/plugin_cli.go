@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os/exec"
 	"sort"
 	"time"
 )
@@ -77,8 +76,11 @@ func (client PluginCLI) Installed(ctx context.Context, cwd string) ([]string, er
 // catalogue-facing plugin CLI command or creating any thread. Child output is
 // never forwarded until the correlated response and clean teardown are proven.
 func runNativePluginInventory(ctx context.Context, executable, cwd string, output io.Writer) error {
-	command := exec.CommandContext(ctx, executable, "app-server", "--stdio", "--strict-config")
-	command.Dir, command.Stderr, command.WaitDelay = cwd, io.Discard, time.Second
+	command, validateConfig, err := nativeAppServerCommand(ctx, executable, cwd)
+	if err != nil {
+		return err
+	}
+	command.WaitDelay = time.Second
 	stdin, err := command.StdinPipe()
 	if err != nil {
 		return err
@@ -170,6 +172,9 @@ func runNativePluginInventory(ctx context.Context, executable, cwd string, outpu
 	err = command.Wait()
 	waited = true
 	if err != nil {
+		return err
+	}
+	if err := validateConfig(); err != nil {
 		return err
 	}
 	_, err = output.Write(inventory)

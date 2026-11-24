@@ -88,8 +88,8 @@ func TestSessionStoreRejectedAmbiguousOrMalformedStateWithoutOverwrite(t *testin
 }
 
 func TestSessionStoreUsedPrivateAtomicFile(t *testing.T) {
-	fsys := fsutil.OSFileSystem{}
-	path := t.TempDir() + "/private/zcode.json"
+	fsys, root := newZCodeStoreTestFS(t)
+	path := filepath.Join(root, "private", "zcode.json")
 	store := SessionStore{FS: fsys, Path: path, CipherSecret: "local-key"}
 	if _, err := store.Save(storeTestSession("first", "one"), "", false); err != nil {
 		t.Fatal(err)
@@ -98,9 +98,19 @@ func TestSessionStoreUsedPrivateAtomicFile(t *testing.T) {
 	if err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatal("session file not private")
 	}
+	if runtime.GOOS == "windows" {
+		if err := fsutil.ValidateSecureRegularFile(fsys, path); err != nil {
+			t.Fatalf("session file ACL was not private: %v", err)
+		}
+	}
 	parent, err := os.Stat(filepath.Dir(path))
 	if err != nil || runtime.GOOS != "windows" && parent.Mode().Perm() != 0o700 {
 		t.Fatal("session directory not private")
+	}
+	if runtime.GOOS == "windows" {
+		if err := fsutil.ValidateSecureDirectory(fsys, filepath.Dir(path)); err != nil {
+			t.Fatalf("session directory ACL was not private: %v", err)
+		}
 	}
 }
 

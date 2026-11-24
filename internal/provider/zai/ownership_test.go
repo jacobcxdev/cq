@@ -47,7 +47,7 @@ func ownershipFixture(t *testing.T, secret string) ownershipDoer {
 }
 
 func TestVerifiedOwnershipUpgradeRemovedOnlyMatchingOwnedKeyAndSuppressedExternal(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	session := oauthAccountFixture("one", "one")
 	session.BusinessJWT = "business-one"
 	owned, err := StoreAccount(fs, "/config", "key-id.secret", "same", false)
@@ -124,7 +124,7 @@ func TestOwnershipRejectedResponsesNeverProducedProof(t *testing.T) {
 }
 
 func TestOwnershipRequiresExactSecretAndMatchingUser(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	session := oauthAccountFixture("one", "one")
 	session.BusinessJWT = "business-one"
 	owned, err := StoreAccount(fs, "/config", "key-id.secret", "same label", false)
@@ -161,7 +161,7 @@ func TestOwnershipSkippedOpaqueKeysWithoutHTTP(t *testing.T) {
 func TestVerifiedOAuthUpgradePreservedPreferredIdentityWithoutActivation(t *testing.T) {
 	for _, existingOAuth := range []bool{false, true} {
 		t.Run(fmt.Sprint(existingOAuth), func(t *testing.T) {
-			fs := fsutil.NewMemFS()
+			fs := newZaiTestFS()
 			session := oauthAccountFixture("one", "one")
 			session.BusinessJWT = "business-one"
 			key, err := StoreAccount(fs, "/config", "key-id.secret", "preferred", false)
@@ -194,7 +194,7 @@ func TestVerifiedOAuthUpgradePreservedPreferredIdentityWithoutActivation(t *test
 }
 
 func TestEnvironmentKnownAliasPreferredOAuthWithoutOtherDiscovery(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	session := oauthAccountFixture("one", "one")
 	key := newAccount("key-id.secret", "")
 	oauth, err := StoreVerifiedZCodeAccount(fs, "/config", session, "OAuth", true, VerifiedAPIKeyOwnership{userID: session.UserID, keyIDs: []string{key.ID}})
@@ -237,7 +237,7 @@ func TestEnvironmentKnownAliasPreferredOAuthWithoutOtherDiscovery(t *testing.T) 
 
 func TestEnvironmentKeySurvivedUnavailableOwnedStore(t *testing.T) {
 	for _, broken := range []string{`invalid`, `{"accounts":[{"zcode_account_id":"missing","transport":"zcode"}]}`} {
-		fs := fsutil.NewMemFS()
+		fs := newZaiTestFS()
 		_ = fs.MkdirAll("/config", 0o700)
 		_ = fs.WriteFile("/config/zai.json", []byte(broken), 0o600)
 		accounts, err := ReadAccounts(fs, func(name string) string {

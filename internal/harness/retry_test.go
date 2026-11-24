@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,8 +13,8 @@ import (
 )
 
 func TestRetryRequestPreservedOwnerAndPrivateBinding(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	store := Receipts{FS: fsys, Dir: "/state/receipts"}
+	fsys := newHarnessMemFS()
+	store := Receipts{FS: fsys, Dir: testAbsPath("/state/receipts")}
 	lease, err := store.Acquire(testChat)
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +22,7 @@ func TestRetryRequestPreservedOwnerAndPrivateBinding(t *testing.T) {
 	defer lease.Close()
 	receipt := receiptFixture()
 	receipt.Mode, receipt.State, receipt.Profile, receipt.RetrySupported = "full", "failed", Custom, true
-	receipt.Fingerprint, receipt.Model, receipt.Cwd = strings.Repeat("a", 64), "fixture", "/fixture"
+	receipt.Fingerprint, receipt.Model, receipt.Cwd = strings.Repeat("a", 64), "fixture", testAbsPath("/fixture")
 	if err := store.Save(receipt); err != nil {
 		t.Fatal(err)
 	}
@@ -29,7 +30,7 @@ func TestRetryRequestPreservedOwnerAndPrivateBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	before, _ := fsys.ReadFile("/state/receipts/" + testChat + ".json")
+	before, _ := fsys.ReadFile(filepath.Join(store.Dir, testChat+".json"))
 	request := RetryRequest{Fingerprint: receipt.Fingerprint, Model: receipt.Model, Cwd: receipt.Cwd, FailedAt: receipt.UpdatedAt}
 	first, err := store.RequestRetry(testChat, request)
 	if err != nil {
@@ -42,7 +43,7 @@ func TestRetryRequestPreservedOwnerAndPrivateBinding(t *testing.T) {
 	if first.Nonce == "" || first.Nonce != second.Nonce || !first.Matches(receipt) {
 		t.Fatal("duplicate intent was not coalesced")
 	}
-	after, _ := fsys.ReadFile("/state/receipts/" + testChat + ".json")
+	after, _ := fsys.ReadFile(filepath.Join(store.Dir, testChat+".json"))
 	if !bytes.Equal(before, after) {
 		t.Fatal("retry changed owner's receipt")
 	}
@@ -52,14 +53,14 @@ func TestRetryRequestPreservedOwnerAndPrivateBinding(t *testing.T) {
 		}
 		t.Fatal("retry released native owner's lease")
 	}
-	path := "/state/receipts/" + testChat + ".retry.json"
+	path := filepath.Join(store.Dir, testChat+".retry.json")
 	info, err := fsys.Stat(path)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatal("retry intent was not private")
 	}
 	data, _ := fsys.ReadFile(path)
 	other := "00000000-0000-0000-0000-000000000002"
-	if err := fsys.WriteFile("/state/receipts/"+other+".retry.json", data, 0o600); err != nil {
+	if err := fsys.WriteFile(filepath.Join(store.Dir, other+".retry.json"), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.LoadRetry(other); err == nil {
@@ -68,18 +69,18 @@ func TestRetryRequestPreservedOwnerAndPrivateBinding(t *testing.T) {
 }
 
 func TestRetryMissingReadCreatedNothing(t *testing.T) {
-	fsys := fsutil.NewMemFS()
-	store := Receipts{FS: fsys, Dir: "/state/receipts"}
+	fsys := newHarnessMemFS()
+	store := Receipts{FS: fsys, Dir: testAbsPath("/state/receipts")}
 	if _, err := store.LoadRetry(testChat); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal(err)
 	}
-	if _, err := fsys.Stat("/state"); !errors.Is(err, os.ErrNotExist) {
+	if _, err := fsys.Stat(testAbsPath("/state")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("read created retry state")
 	}
 }
 
 func TestRetryRequestRejectedInvalidAuthority(t *testing.T) {
-	valid := RetryRequest{ChatID: testChat, Nonce: "request-one", Fingerprint: strings.Repeat("a", 64), Model: "fixture", Cwd: "/fixture", FailedAt: time.Now().UTC()}
+	valid := RetryRequest{ChatID: testChat, Nonce: "request-one", Fingerprint: strings.Repeat("a", 64), Model: "fixture", Cwd: testAbsPath("/fixture"), FailedAt: time.Now().UTC()}
 	for name, alter := range map[string]func(*RetryRequest){
 		"nonce":       func(request *RetryRequest) { request.Nonce = "private secret" },
 		"fingerprint": func(request *RetryRequest) { request.Fingerprint = strings.Repeat("A", 64) },

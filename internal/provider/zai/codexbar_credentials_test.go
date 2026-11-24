@@ -5,12 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 func TestBrokenCodexBarPreservesOwnedZAIAvailability(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	home, _ := fs.UserHomeDir()
 	path := filepath.Join(home, ".codexbar", "config.json")
 	_ = fs.MkdirAll(filepath.Dir(path), 0o700)
@@ -26,7 +24,7 @@ func TestBrokenCodexBarPreservesOwnedZAIAvailability(t *testing.T) {
 
 func TestInvalidCodexBarRecordPreservesOwnedZAIAvailability(t *testing.T) {
 	for _, record := range []map[string]string{{"id": "bad", "token": "bad\nkey"}, {"id": "bad", "token": "valid-key", "label": strings.Repeat("x", 129)}} {
-		fs := fsutil.NewMemFS()
+		fs := newZaiTestFS()
 		home, _ := fs.UserHomeDir()
 		path := filepath.Join(home, ".codexbar", "config.json")
 		_ = fs.MkdirAll(filepath.Dir(path), 0o700)
@@ -43,7 +41,7 @@ func TestInvalidCodexBarRecordPreservesOwnedZAIAvailability(t *testing.T) {
 }
 
 func TestReadAccountsExcludedUnverifiedCodexBarWithoutAdoption(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	home, err := fs.UserHomeDir()
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +89,7 @@ func TestReadAccountsExcludedUnverifiedCodexBarWithoutAdoption(t *testing.T) {
 }
 
 func TestReadAccountsCodexBarOverrideAndDedup(t *testing.T) {
-	fs := fsutil.NewMemFS()
+	fs := newZaiTestFS()
 	home, _ := fs.UserHomeDir()
 	path := filepath.Join(home, ".codexbar", "config.json")
 	_ = fs.MkdirAll(filepath.Dir(path), 0o700)

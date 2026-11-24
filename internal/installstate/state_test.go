@@ -1,10 +1,13 @@
 package installstate
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -30,7 +33,11 @@ func TestStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat() error = %v", err)
 	}
-	if got := info.Mode().Perm(); got != 0o600 {
+	if runtime.GOOS == "windows" {
+		if err := fsutil.ValidateSecureRegularFile(store.FS, store.Path()); err != nil {
+			t.Fatalf("install state is not private: %v", err)
+		}
+	} else if got := info.Mode().Perm(); got != 0o600 {
 		t.Fatalf("install state mode = %o, want 600", got)
 	}
 }
@@ -177,7 +184,38 @@ func executableName() string {
 
 func newStateRoot(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(t.TempDir(), "state")
+	if runtime.GOOS != "windows" {
+		return filepath.Join(t.TempDir(), "state")
+	}
+	roots, err := userdirs.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Dir(roots.State)
+	_, statErr := os.Stat(base)
+	baseExisted := statErr == nil
+	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatal(statErr)
+	}
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(base, "installstate-test-"+hex.EncodeToString(random))
+	if err := fsutil.EnsureSecureDirectory(fsutil.OSFileSystem{}, root); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("remove install state test root: %v", err)
+		}
+		if !baseExisted {
+			if err := os.Remove(base); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("remove empty CQ test root: %v", err)
+			}
+		}
+	})
+	return filepath.Join(root, "state")
 }
 
 func writeInstallState(t *testing.T, store Store, data string) {

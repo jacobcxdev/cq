@@ -3,7 +3,6 @@ package grok
 import (
 	"bytes"
 	"context"
-	"github.com/jacobcxdev/cq/internal/fsutil"
 	"io"
 	"net/http"
 	"strings"
@@ -66,7 +65,8 @@ func TestAuthorityRejectsRedirectAndScopesResetRead(t *testing.T) {
 		calls++
 		return &http.Response{StatusCode: 302, Header: http.Header{"Location": []string{"https://attacker.test/"}}, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
 	})}
-	a := NewAuthority(Store{FS: fsutil.OSFileSystem{}, ConfigDir: privateTestDir(t)}, client, nil)
+	dir, fsys := privateTestDir(t)
+	a := NewAuthority(Store{FS: fsys, ConfigDir: dir}, client, nil)
 	account, err := a.SaveLogin(context.Background(), loginFixture("one"), "", true)
 	if err != nil {
 		t.Fatal(err)

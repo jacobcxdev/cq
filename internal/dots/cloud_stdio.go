@@ -80,6 +80,7 @@ type cloudSocket interface {
 
 type cloudStdioDependencies struct {
 	gatewayListener          net.Listener
+	localExecutable          string
 	environment              []string
 	launch                   func(context.Context, string, []string, []string, io.Writer) (*cloudLocal, error)
 	stock                    func(context.Context, string, []string, []string, io.Reader, io.Writer, io.Writer) error
@@ -100,6 +101,10 @@ type cloudStdioDependencies struct {
 
 func startCloudLocal(ctx context.Context, path string, arguments, environment []string, stderr io.Writer) (*cloudLocal, error) {
 	command := exec.CommandContext(ctx, path, arguments...)
+	return startCloudCommand(command, environment, stderr)
+}
+
+func startCloudCommand(command *exec.Cmd, environment []string, stderr io.Writer) (*cloudLocal, error) {
 	command.Env, command.Stderr = environment, stderr
 	input, err := command.StdinPipe()
 	if err != nil {
@@ -126,7 +131,10 @@ func cloudStock(ctx context.Context, path string, arguments, environment []strin
 	if handled, err := cloudStockExec(path, arguments, environment, stdin, stdout, stderr); handled {
 		return err
 	}
-	command := exec.CommandContext(ctx, path, arguments...)
+	return runCloudStockCommand(exec.CommandContext(ctx, path, arguments...), environment, stdin, stdout, stderr)
+}
+
+func runCloudStockCommand(command *exec.Cmd, environment []string, stdin io.Reader, stdout, stderr io.Writer) error {
 	command.Env, command.Stdin, command.Stdout, command.Stderr = environment, stdin, stdout, stderr
 	if err := command.Run(); err != nil {
 		var exited *exec.ExitError
@@ -260,12 +268,18 @@ type cloudBridge struct {
 }
 
 func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, arguments []string, stdin io.Reader, stdout, stderr io.Writer, deps cloudStdioDependencies) error {
-	path, arguments, environment, appSession, err := cloudInvocation(cfg, arguments, deps.environment)
-	if err != nil {
-		return err
-	}
-	if !appSession {
-		return deps.stock(ctx, path, arguments, environment, stdin, stdout, stderr)
+	localOnly := deps.localExecutable != ""
+	path, environment := deps.localExecutable, deps.environment
+	var err error
+	if !localOnly {
+		var appSession bool
+		path, arguments, environment, appSession, err = cloudInvocation(cfg, arguments, environment)
+		if err != nil {
+			return err
+		}
+		if !appSession {
+			return deps.stock(ctx, path, arguments, environment, stdin, stdout, stderr)
+		}
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	b := &cloudBridge{ctx: ctx, cancel: cancel, cfg: cfg, deps: deps, output: stdout,
@@ -273,7 +287,7 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 		sessions: make(map[string]*cloudSession), queues: make(map[string]chan cloudWork),
 		statusWatches: make(map[string]bool), statusSeen: make(map[string]json.RawMessage),
 		accountReads: make(map[string]cloudLocalAccountRequest)}
-	if cfg.IntegrationMode == "native" && environmentValue(environment, "CODEX_API_BASE_URL") == "https://chatgpt.com/backend-api" {
+	if !localOnly && cfg.IntegrationMode == "native" && environmentValue(environment, "CODEX_API_BASE_URL") == "https://chatgpt.com/backend-api" {
 		if port, err := realtimePort(filepath.Join(cfg.RuntimeRoot, "port"), cfg.RuntimeRoot, false); err == nil {
 			origin := "https://localhost:" + strconv.Itoa(port)
 			if environmentValue(environment, "CODEX_APP_SERVER_CHATGPT_BASE_URL") == origin+"/backend-api" {
@@ -283,10 +297,12 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 	}
 	defer cancel()
 	b.event(map[string]any{"app_stdio_adapter_started": true, "read_only": false, "app_session": true, "integration_mode": "native"})
-	b.loadOwners(accounts)
-	for _, dot := range cfg.Dots {
-		if dot.RootThreadID != "" {
-			b.roots[dot.RootThreadID] = dot.OwnerAlias
+	if !localOnly {
+		b.loadOwners(accounts)
+		for _, dot := range cfg.Dots {
+			if dot.RootThreadID != "" {
+				b.roots[dot.RootThreadID] = dot.OwnerAlias
+			}
 		}
 	}
 	b.local, err = deps.launch(ctx, path, arguments, environment, stderr)
@@ -360,7 +376,10 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 			raw, readErr := reader.ReadBytes('\n')
 			if len(raw) != 0 {
 				if !b.harness.observe(raw) {
-					b.emitRaw(b.localAccountResponse(raw))
+					if !localOnly {
+						raw = b.localAccountResponse(raw)
+					}
+					b.emitRaw(raw)
 				}
 			}
 			if readErr != nil {
@@ -436,8 +455,11 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 			if method == "initialized" {
 				initialized = true
 			}
-			resource := cloudThreadID(request["params"])
-			alias := b.threadOwner(resource)
+			var alias, resource string
+			if !localOnly {
+				resource = cloudThreadID(request["params"])
+				alias = b.threadOwner(resource)
+			}
 			if cloudReadMethods[method] && alias != "" {
 				if !initialized || initialization == nil {
 					b.fail(request, "Owner cloud routing verification unavailable")
@@ -468,7 +490,9 @@ func runCloudStdio(ctx context.Context, cfg *Settings, accounts []Account, argum
 					b.fail(request, prepareErr.Error())
 					continue
 				}
-				b.trackLocalAccountRequest(request)
+				if !localOnly {
+					b.trackLocalAccountRequest(request)
+				}
 				b.localWrite.Lock()
 				_, err := b.local.input.Write(forward)
 				b.localWrite.Unlock()

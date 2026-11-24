@@ -27,7 +27,11 @@ func runHarnessSkillCommand(operation string, cmd CodexHarnessCmd, jsonOutput bo
 			return err
 		}
 	}
-	result, err := harness.InstallCurationSkill(fsutil.OSFileSystem{}, path)
+	fsys, err := fsutil.NewPrivateDestinationFileSystem(path)
+	if err != nil {
+		return err
+	}
+	result, err := harness.InstallCurationSkill(fsys, path)
 	if err != nil {
 		return err
 	}

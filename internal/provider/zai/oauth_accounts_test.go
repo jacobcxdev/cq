@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/provider/zai/zcode"
 )
 
@@ -17,7 +16,7 @@ func oauthAccountFixture(userID, generation string) zcode.LoginSession {
 }
 
 func TestOAuthAccountsKeptStableIdentityAndSecretReferences(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	if err := fsys.MkdirAll("/config", 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +73,7 @@ func TestOAuthAccountsKeptStableIdentityAndSecretReferences(t *testing.T) {
 }
 
 func TestOAuthAccountsSurvivedNativeAccountOperations(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	native, err := StoreAccount(fsys, "/config", "native-key", "native", false)
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +112,7 @@ func TestOAuthAccountsSurvivedNativeAccountOperations(t *testing.T) {
 }
 
 func TestOAuthAccountRoutesStayedWithinCredentialKind(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	native, _ := StoreAccount(fsys, "/config", "native-key", "native", false)
 	oauth, err := StoreZCodeAccount(fsys, "/config", oauthAccountFixture("user-one", "one"), "oauth", false)
 	if err != nil {
@@ -147,7 +146,7 @@ func TestOAuthAccountRoutesStayedWithinCredentialKind(t *testing.T) {
 }
 
 func TestOAuthAccountsPreservedEnvironmentOverrideWithoutDiscovery(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	if err := fsys.MkdirAll("/config", 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +172,7 @@ func TestOAuthAccountsPreservedEnvironmentOverrideWithoutDiscovery(t *testing.T)
 }
 
 func TestOAuthReferencesRejectedMissingOrMixedIdentity(t *testing.T) {
-	fsys := fsutil.NewMemFS()
+	fsys := newZaiTestFS()
 	if _, err := StoreAccount(fsys, "/config", "native-key", "native", false); err != nil {
 		t.Fatal(err)
 	}

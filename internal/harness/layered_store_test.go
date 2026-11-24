@@ -1,22 +1,21 @@
 package harness
 
 import (
-	"github.com/jacobcxdev/cq/internal/fsutil"
 	"testing"
 )
 
 func TestV2PolicyStorageValidation(t *testing.T) {
 	valid := `{"version":2,"enabled":true,"profiles":{"research":{"changes":{"plugins":{"drive":"enabled"}}}},"global":{"all":{"profiles":["minimal","research"]}},"workspaces":{"/work":{"models":{"gpt-*":{"changes":{"skills":{"user:swift":"disabled"}}}}}},"tasks":{"019c6e27-e55b-73d1-87d8-4e01f1f75043":{"all":{"profiles":["full"]}}}}`
-	policy, err := decodePolicy([]byte(valid))
+	policy, err := decodePolicy([]byte(testJSONFixturePaths(valid)))
 	if err != nil {
 		t.Fatalf("valid v2: %v", err)
 	}
-	fsys := fsutil.NewMemFS()
-	if err := Save(fsys, "/state/harness.json", policy); err != nil {
+	fsys := newHarnessMemFS()
+	if err := Save(fsys, testAbsPath("/state/harness.json"), policy); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := Load(fsys, "/state/harness.json")
-	if err != nil || !loaded.ResolveEffective("gpt-6", "/work", "").Choose(PluginKind, "drive", false) {
+	loaded, err := Load(fsys, testAbsPath("/state/harness.json"))
+	if err != nil || !loaded.ResolveEffective("gpt-6", testAbsPath("/work"), "").Choose(PluginKind, "drive", false) {
 		t.Fatalf("roundtrip = %#v, %v", loaded, err)
 	}
 	for name, raw := range map[string]string{

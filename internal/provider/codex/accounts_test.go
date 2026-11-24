@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -136,8 +137,9 @@ func codexAuthJSON(accessToken, accountID, idToken string) []byte {
 
 func TestDiscoverAccountsSingleActive(t *testing.T) {
 	fs := newFakeFS()
+	fs.homeDir = filepath.Join(t.TempDir(), "home")
 	jwt := fakeCodexJWT("user@example.com", "acct-123", "user-456", "plus")
-	fs.files["/fake/home/.codex/auth.json"] = codexAuthJSON("tok-abc", "acct-123", jwt)
+	fs.files[filepath.Join(fs.homeDir, ".codex", "auth.json")] = codexAuthJSON("tok-abc", "acct-123", jwt)
 
 	accts := DiscoverAccounts(fs)
 	if len(accts) != 1 {

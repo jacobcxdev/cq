@@ -196,7 +196,7 @@ func renderManifests(config manifestConfig) (map[string][]byte, error) {
 		if err := parsed.ExecuteTemplate(&output, name, config); err != nil {
 			return nil, fmt.Errorf("render %s: %w", name, err)
 		}
-		manifests[strings.TrimSuffix(name, ".tmpl")] = output.Bytes()
+		manifests[strings.TrimSuffix(name, ".tmpl")] = bytes.ReplaceAll(output.Bytes(), []byte("\r\n"), []byte("\n"))
 	}
 	return manifests, nil
 }

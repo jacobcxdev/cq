@@ -3,6 +3,11 @@ name: Harness compatibility
 on:
   workflow_call:
   workflow_dispatch:
+    inputs:
+      desktop_preflight:
+        description: Probe the official Windows Desktop package on an isolated runner
+        type: boolean
+        default: false
   schedule:
     - cron: '17 6 * * 1'
 
@@ -12,6 +17,7 @@ permissions:
 jobs:
   native-harness:
     name: Native harness (${{ matrix.client }})
+    if: github.event_name != 'workflow_dispatch' || !inputs.desktop_preflight
     runs-on: macos-15
     timeout-minutes: 20
     strategy:
@@ -58,3 +64,449 @@ jobs:
           echo "CQ_HARNESS_EXECUTABLE=$client" >> "$GITHUB_ENV"
       - name: Qualify isolated native harness contracts
         run: bash .github/scripts/validate-harness-installed.sh "$CQ_HARNESS_EXECUTABLE"
+
+  windows-profile-driver:
+    name: Build race-instrumented Windows profile driver
+    if: github.event_name != 'workflow_dispatch' || !inputs.desktop_preflight
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version-file: go.mod
+      - name: Compile x64 driver for the ARM64 integration check
+        shell: pwsh
+        run: go test -race -c -o (Join-Path $env:RUNNER_TEMP 'cq-harness-driver.exe') ./internal/dots
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cq-windows-harness-driver
+          path: ${{ runner.temp }}/cq-harness-driver.exe
+          if-no-files-found: error
+          retention-days: 1
+
+  windows-harness:
+    name: Native harness (Windows ${{ matrix.architecture }})
+    if: github.event_name != 'workflow_dispatch' || !inputs.desktop_preflight
+    needs: windows-profile-driver
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            sha256: d5a5ab944b401727aba2983363f45e00702d0437a4cbf9036c7907e3a79cb1b9
+          - architecture: Arm64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            sha256: ac7d1dfc06cdab7fc95d41844decbfaeff2f92b7e79179e59ade3200600b3351
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        with:
+          go-version-file: go.mod
+      - name: Test Windows harness policy and CLI
+        if: matrix.architecture == 'x64'
+        run: |
+          go test -race -count=1 -timeout 2m ./internal/harness
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -race -count=1 -timeout 2m ./cmd/cq -run '^(TestCodexHarness|TestHarnessDisableBypasses|TestHarnessSkillInstallUnderWindowsCodexHome|TestOfficialWindowsCodexPackage|TestWindowsHarnessChildEnv)'
+      - name: Fetch the official Windows Codex CLI baseline
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'cq-pinned-codex'
+          New-Item -ItemType Directory -Path $root | Out-Null
+          $executable = 'codex-${{ matrix.target }}.exe'
+          $asset = "$executable.tar.gz"
+          $archive = Join-Path $root $asset
+          curl.exe --fail --location --retry 3 --max-time 180 --output $archive "https://github.com/openai/codex/releases/download/rust-v0.171.0-alpha.13/$asset"
+          if ($LASTEXITCODE -ne 0) { throw 'Codex download failed' }
+          if ((Get-FileHash -LiteralPath $archive).Hash -ne '${{ matrix.sha256 }}') { throw 'Codex archive digest differs' }
+          tar.exe -xf $archive -C $root
+          if ($LASTEXITCODE -ne 0) { throw 'Codex unpack failed' }
+          $cli = Join-Path $root $executable
+          $version = & $cli --version
+          if ($LASTEXITCODE -ne 0 -or $version -ne 'codex-cli 0.171.0-alpha.13') { throw 'Codex CLI version differs' }
+          "CQ_TEST_NATIVE_INVENTORY_CLI=$cli" >> $env:GITHUB_ENV
+          "CQ_HARNESS_WINDOWS_CODEX=$cli" >> $env:GITHUB_ENV
+      - name: Exercise native CQ commands with a fresh Codex home
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'cq-pinned-codex'
+          $profile = Join-Path $root 'profile'
+          $homePath = Join-Path $profile '.codex'
+          $project = Join-Path $root 'project'
+          $cq = Join-Path $root 'cq.exe'
+          New-Item -ItemType Directory -Path $homePath, $project -Force | Out-Null
+          $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          $security = [Security.AccessControl.DirectorySecurity]::new()
+          $security.SetSecurityDescriptorSddlForm("O:${sid}D:P(A;OICI;FA;;;${sid})(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)")
+          Set-Acl -LiteralPath $homePath -AclObject $security
+          $config = Join-Path $homePath 'config.toml'
+          Set-Content -LiteralPath $config -Encoding utf8 -Value '[computer_use.windows]', 'always_allowed_app_ids = ["com.example.fixture"]'
+          $configHash = (Get-FileHash -LiteralPath $config).Hash
+          Copy-Item -LiteralPath $env:CQ_TEST_NATIVE_INVENTORY_CLI -Destination (Join-Path $root 'codex.exe')
+          go build -o $cq ./cmd/cq
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$root;$env:PATH"
+          $env:USERPROFILE = $profile
+          $env:CODEX_HOME = $null
+          foreach ($changed in @($true, $false)) {
+            $raw = & $cq codex harness skill install --json
+            if ($LASTEXITCODE -ne 0) { throw 'Native skill install failed' }
+            $result = $raw | ConvertFrom-Json
+            if ($result.changed -ne $changed -or $result.path -ne (Join-Path $homePath 'skills\curate-harness\SKILL.md')) {
+              throw 'Native skill install returned an unexpected result'
+            }
+          }
+          $env:CODEX_HOME = $homePath
+          $raw = & $cq codex harness inventory --project $project --json
+          if ($LASTEXITCODE -ne 0) { throw 'Native harness inventory failed' }
+          $inventory = $raw | ConvertFrom-Json
+          if (@($inventory.capabilities | Where-Object name -eq 'curate-harness').Count -ne 1 -or
+              (Get-FileHash -LiteralPath $config).Hash -ne $configHash) {
+            throw 'Native inventory did not find the installed skill or changed Codex configuration'
+          }
+          Write-Output 'Verified native inventory, preserved config, and first and repeat skill installation.'
+      - name: Qualify isolated native harness contracts
+        if: matrix.architecture == 'x64'
+        env:
+          CQ_HARNESS_WINDOWS_NATIVE_ACCEPTANCE: '1'
+        run: |
+          go test -race -count=1 ./internal/harness -run '^(TestNativeAppManagedConfigWarningRequiresOnlyKnownField|TestNativeInventoryWindows.*|TestNativePluginInventoryWindowsAppManagedConfig|TestWindowsPortableWorkspace.*)$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -race -count=1 ./internal/dots -run '^TestHarnessWindowsNativeProfileContract$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test -race -count=1 ./cmd/cq -run '^TestHarnessSkillInstallUnderWindowsCodexHome$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/download-artifact@v8
+        if: matrix.architecture == 'Arm64'
+        with:
+          name: cq-windows-harness-driver
+          path: ${{ runner.temp }}/cq-pinned-codex
+      - name: Verify profile application and restoration with native ARM64 CQ and Codex
+        if: matrix.architecture == 'Arm64'
+        env:
+          CQ_HARNESS_WINDOWS_NATIVE_ACCEPTANCE: '1'
+        run: |
+          # Go's Windows race runtime runs as x64. Both product executables run as ARM64.
+          $root = Join-Path $env:RUNNER_TEMP 'cq-pinned-codex'
+          $env:CQ_HARNESS_WINDOWS_NATIVE_CQ = Join-Path $root 'cq.exe'
+          $env:CQ_HARNESS_WINDOWS_CODEX = Join-Path $root 'codex.exe'
+          & (Join-Path $root 'cq-harness-driver.exe') '-test.v' '-test.timeout=3m' '-test.run=^TestHarnessWindowsNativeProfileContract$/^native-cq$'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  windows-desktop-preflight:
+    name: Official Desktop preflight (Windows ${{ matrix.arch }})
+    if: github.event_name == 'workflow_dispatch' && inputs.desktop_preflight
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, goarch: amd64, runner: windows-latest }
+          - { arch: arm64, goarch: arm64, runner: windows-11-arm }
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check interactive session and clean state
+        id: preflight
+        run: |
+          $session = (Get-Process -Id $PID).SessionId
+          $desktopShell = @(Get-Process explorer -ErrorAction SilentlyContinue | Where-Object SessionId -eq $session)
+          if ($session -eq 0 -or -not [Environment]::UserInteractive -or $desktopShell.Count -eq 0) {
+            'interactive=false' >> $env:GITHUB_OUTPUT
+            'Desktop preflight skipped: the runner has no interactive user session.' >> $env:GITHUB_STEP_SUMMARY
+            exit 0
+          }
+          if (Get-AppxPackage -Name OpenAI.Codex) { throw 'OpenAI.Codex is already installed for the runner user' }
+          if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.codex')) { throw 'Runner user has existing Codex home state' }
+          $packageState = Join-Path $env:LOCALAPPDATA 'Packages'
+          if (Test-Path -LiteralPath $packageState) {
+            if (Get-ChildItem -LiteralPath $packageState -Directory -Filter 'OpenAI.Codex_*' -ErrorAction Stop) {
+              throw 'Runner user has existing Desktop package state'
+            }
+          }
+          foreach ($root in @($env:SystemDrive, [IO.Path]::GetPathRoot($env:RUNNER_TEMP)) | Sort-Object -Unique) {
+            $volume = Get-Volume -DriveLetter $root[0] -ErrorAction Stop
+            if ($volume.SizeRemaining -lt 7GB) { throw "Insufficient free space on $root for Desktop package preflight" }
+          }
+          'interactive=true' >> $env:GITHUB_OUTPUT
+      - name: Verify and register official Desktop package
+        if: steps.preflight.outputs.interactive == 'true'
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'cq-desktop-preflight'
+          New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+          $packagePath = Join-Path $root 'ChatGPT-${{ matrix.arch }}.msix'
+          $packageURL = 'https://persistent.oaistatic.com/codex-app-prod/ChatGPT-${{ matrix.arch }}.msix'
+          $metadata = Invoke-RestMethod -Uri 'https://persistent.oaistatic.com/codex-app-prod/windows-store-update.json' -ErrorAction Stop
+          if ($metadata.schemaVersion -ne 1 -or $metadata.packageIdentity -ne 'OpenAI.Codex' -or $metadata.storeProductId -ne '9PLM9XGG6VKS') {
+            throw 'Official Desktop update metadata has an unexpected identity'
+          }
+          $head = Invoke-WebRequest -Uri $packageURL -Method Head -ErrorAction Stop
+          $length = [long]$head.Headers['Content-Length'][0]
+          if ($length -le 0 -or $length -gt 2GB) { throw 'Official Desktop package exceeds the preflight download limit' }
+          curl.exe --fail --location --retry 2 --max-time 600 --output $packagePath $packageURL
+          if ($LASTEXITCODE -ne 0) { throw 'Official Desktop package download failed' }
+          if ((Get-Item -LiteralPath $packagePath).Length -ne $length) { throw 'Official Desktop package length changed during download' }
+          $digest = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash
+          $archive = [IO.Compression.ZipFile]::OpenRead($packagePath)
+          try {
+            $entry = $archive.GetEntry('AppxManifest.xml')
+            if ($null -eq $entry) { throw 'Desktop package has no AppxManifest.xml' }
+            $reader = [IO.StreamReader]::new($entry.Open())
+            try { [xml]$manifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
+          } finally { $archive.Dispose() }
+          $identity = $manifest.SelectSingleNode('/*[local-name()="Package"]/*[local-name()="Identity"]')
+          $manifestVersion = [version]::new()
+          if ($null -eq $identity -or
+              $identity.GetAttribute('Name') -ne 'OpenAI.Codex' -or
+              $identity.GetAttribute('Publisher') -ne 'CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B' -or
+              $identity.GetAttribute('ProcessorArchitecture') -ne '${{ matrix.arch }}' -or
+              -not [version]::TryParse($identity.GetAttribute('Version'), [ref]$manifestVersion) -or
+              $manifestVersion.Revision -lt 0) {
+            throw 'Downloaded Desktop package manifest identity is unexpected'
+          }
+          Write-Output "Desktop CDN package version $manifestVersion; Store update metadata version $($metadata.buildVersion)."
+          Add-AppxPackage -Path $packagePath -ErrorAction Stop
+          $installed = Get-AppxPackage -Name OpenAI.Codex -ErrorAction Stop
+          if ($null -eq $installed -or
+              $installed.PackageFamilyName -ne 'OpenAI.Codex_2p2nqsd0c76g0' -or
+              $installed.Publisher -ne $identity.GetAttribute('Publisher') -or
+              $installed.Version -ne $manifestVersion -or
+              $installed.Architecture.ToString() -ne '${{ matrix.arch }}' -or
+              $installed.SignatureKind.ToString() -ne 'Store') {
+            throw 'Registered Desktop package lacks the expected signed identity'
+          }
+          "Official Desktop MSIX registered: $($installed.PackageFullName), SHA256 $digest" >> $env:GITHUB_STEP_SUMMARY
+      - uses: actions/checkout@v5
+        if: steps.preflight.outputs.interactive == 'true'
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-go
+        if: steps.preflight.outputs.interactive == 'true'
+        with:
+          go-version-file: go.mod
+      - name: Build native CQ harness launcher
+        if: steps.preflight.outputs.interactive == 'true'
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'cq-desktop-preflight'
+          $cq = Join-Path $root 'cq.exe'
+          if ((go env GOVERSION) -ne 'go1.26.1' -or (go env GOARCH) -ne '${{ matrix.goarch }}') {
+            throw 'Desktop CQ launcher requires native Go 1.26.1'
+          }
+          go build -trimpath -o $cq ./cmd/cq
+          if ($LASTEXITCODE -ne 0) { throw 'Native CQ harness launcher build failed' }
+      - name: Verify native CQ adapter initialization
+        if: steps.preflight.outputs.interactive == 'true'
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'cq-desktop-preflight'
+          $installed = Get-AppxPackage -Name OpenAI.Codex -ErrorAction Stop
+          $stock = Join-Path $installed.InstallLocation 'app/resources/codex.exe'
+          $homePath = Join-Path $root 'adapter-rpc-home'
+          New-Item -ItemType Directory -Path $homePath -ErrorAction Stop | Out-Null
+          $start = [Diagnostics.ProcessStartInfo]::new((Join-Path $root 'cq.exe'))
+          $start.UseShellExecute = $false
+          $start.CreateNoWindow = $true
+          $start.RedirectStandardInput = $true
+          $start.RedirectStandardOutput = $true
+          $start.RedirectStandardError = $true
+          $start.WorkingDirectory = $root
+          $start.Environment['CODEX_HOME'] = $homePath
+          $start.Environment['CQ_WINDOWS_HARNESS_STOCK_CLI'] = $stock
+          foreach ($argument in @('-c', 'features.code_mode_host=true', 'app-server', '--analytics-default-enabled')) {
+            $start.ArgumentList.Add($argument)
+          }
+          $adapter = [Diagnostics.Process]::Start($start)
+          try {
+            $null = $adapter.StandardError.ReadToEndAsync()
+            $adapter.StandardInput.WriteLine('{"id":1,"method":"initialize","params":{"clientInfo":{"name":"cq-desktop-fixture","version":"0.0.0"}}}')
+            $line = $adapter.StandardOutput.ReadLineAsync()
+            if (-not $line.Wait(15000)) { throw 'Native CQ adapter did not answer initialize' }
+            $reply = $line.Result | ConvertFrom-Json
+            if ($reply.id -ne 1 -or $null -eq $reply.result -or $null -ne $reply.error) {
+              throw 'Bundled Codex did not accept initialize through CQ'
+            }
+            $adapter.StandardInput.Close()
+            if (-not $adapter.WaitForExit(8000) -or $adapter.ExitCode -ne 0) { throw 'Native CQ adapter did not exit cleanly' }
+            Write-Output 'Verified native CQ adapter initialization through the official bundled Codex CLI.'
+          } finally {
+            if (-not $adapter.HasExited) { $adapter.Kill($true) }
+            $adapter.Dispose()
+          }
+      - name: Check launch headroom
+        if: steps.preflight.outputs.interactive == 'true'
+        run: |
+          foreach ($root in @($env:SystemDrive, [IO.Path]::GetPathRoot($env:RUNNER_TEMP)) | Sort-Object -Unique) {
+            if ((Get-Volume -DriveLetter $root[0] -ErrorAction Stop).SizeRemaining -lt 3GB) {
+              throw "Insufficient free space on $root for Desktop launch probe"
+            }
+          }
+      - name: Qualify isolated packaged CQ Desktop launch
+        if: steps.preflight.outputs.interactive == 'true'
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'cq-desktop-preflight'
+          $cq = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath (Join-Path $root 'cq.exe')).Path)
+          $installed = Get-AppxPackage -Name OpenAI.Codex -ErrorAction Stop
+          $packagePrefix = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $installed.InstallLocation).Path).TrimEnd('\') + '\'
+          $stock = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath (Join-Path $installed.InstallLocation 'app/resources/codex.exe')).Path)
+          if (-not $stock.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Bundled stock Codex CLI escapes its registered package'
+          }
+          $session = (Get-Process -Id $PID).SessionId
+          $owned = { @(Get-CimInstance Win32_Process | Where-Object {
+            $_.SessionId -eq $session -and $_.ExecutablePath -and (
+              $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+              $_.ExecutablePath.Equals($cq, [StringComparison]::OrdinalIgnoreCase))
+          }) }
+          # Registration can start packaged processes before the first deliberate launch.
+          for ($attempt = 0; $attempt -lt 20 -and (& $owned).Count -ne 0; $attempt++) {
+            foreach ($process in & $owned) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Milliseconds 250
+          }
+          if ((& $owned).Count -ne 0) { throw 'Desktop or CQ process remained before isolated launch' }
+          $env:CODEX_HOME = Join-Path $root 'codex-home'
+          $env:CODEX_ELECTRON_USER_DATA_PATH = Join-Path $root 'electron-user-data'
+          $env:HTTP_PROXY = $null
+          $env:HTTPS_PROXY = $null
+          $env:ALL_PROXY = $null
+          New-Item -ItemType Directory -Path $env:CODEX_HOME, $env:CODEX_ELECTRON_USER_DATA_PATH -ErrorAction Stop | Out-Null
+          $originalPath = $env:Path
+          try {
+            $env:Path = Join-Path $env:SystemRoot 'System32'
+            if (Get-Command codex -ErrorAction SilentlyContinue) { throw 'Codex unexpectedly resolves on PATH' }
+            $inventory = & $cq codex harness inventory --project $root --json
+            if ($LASTEXITCODE -ne 0) { throw 'Inventory did not resolve the registered package without Codex on PATH' }
+            $inventory | ConvertFrom-Json -ErrorAction Stop | Out-Null
+            Write-Output 'Verified inventory through the registered Codex Desktop package without Codex on PATH.'
+          } finally {
+            $env:Path = $originalPath
+          }
+          $logRoots = @(
+            (Join-Path $env:LOCALAPPDATA 'Packages/OpenAI.Codex_2p2nqsd0c76g0/LocalCache/Local/Codex/Logs'),
+            (Join-Path $env:LOCALAPPDATA 'Codex/Logs'),
+            (Join-Path $env:APPDATA 'Codex/Logs')
+          )
+          $started = [DateTime]::UtcNow
+          $desktopSeen = $false
+          $cqImageSeen = $false
+          $stockImageSeen = $false
+          $freshLogSeen = $false
+          $bootstrapSeen = $false
+          $spawnSeen = $false
+          $startupErrorSeen = $false
+          $bootstrapMarkers = [Collections.Generic.HashSet[string]]::new()
+          $bootstrapMessages = [ordered]@{
+            'single-instance' = 'Exiting second desktop instance'
+            'network' = 'Desktop network requirements prevented startup'
+            'handoff' = 'Desktop bootstrap failed to start the main app'
+            'identity' = 'windows_runtime_framework_identity_unavailable'
+            'hydration' = 'windows_runtime_framework_gate_hydration_failed'
+            'core' = 'windows_core_runtime_launch_selected'
+            'activation' = 'windows_primary_runtime_framework_activation_failed'
+          }
+          $cqChildSeen = $false
+          $stockChildSeen = $false
+          $connectedSeen = $false
+          try {
+            & $cq codex harness launch
+            if ($LASTEXITCODE -ne 0) { throw 'CQ Desktop harness launch failed' }
+            $deadline = [DateTime]::UtcNow.AddSeconds(60)
+            while ([DateTime]::UtcNow -lt $deadline -and -not ($cqChildSeen -and $stockChildSeen -and $connectedSeen)) {
+              $processes = & $owned
+              $packagePids = @($processes | Where-Object { $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object ProcessId)
+              if ($packagePids.Count -gt 0) { $desktopSeen = $true }
+              if (@($processes | Where-Object { $_.ExecutablePath.Equals($cq, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { $cqImageSeen = $true }
+              if (@($processes | Where-Object { $_.ExecutablePath.Equals($stock, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { $stockImageSeen = $true }
+              $cqChildren = @($processes | Where-Object {
+                $_.ExecutablePath.Equals($cq, [StringComparison]::OrdinalIgnoreCase) -and
+                $_.CommandLine -match '(^|[\s"])app-server([\s"]|$)' -and
+                $packagePids -contains $_.ParentProcessId
+              })
+              if ($cqChildren.Count -gt 0) { $cqChildSeen = $true }
+              $cqPids = @($cqChildren | ForEach-Object ProcessId)
+              if (@($processes | Where-Object {
+                $_.ExecutablePath.Equals($stock, [StringComparison]::OrdinalIgnoreCase) -and
+                $_.CommandLine -match '(^|[\s"])app-server([\s"]|$)' -and
+                $cqPids -contains $_.ParentProcessId
+              }).Count -gt 0) { $stockChildSeen = $true }
+              # Leave startup logs alone until both CLI processes exist or the deadline is near.
+              if (-not ($cqChildSeen -and $stockChildSeen) -and ([DateTime]::UtcNow.AddSeconds(2) -lt $deadline)) {
+                Start-Sleep -Milliseconds 500
+                continue
+              }
+              foreach ($logRoot in $logRoots) {
+                if (-not (Test-Path -LiteralPath $logRoot)) { continue }
+                foreach ($log in Get-ChildItem -LiteralPath $logRoot -Recurse -File -Filter 'codex-desktop-*.log' -ErrorAction Stop) {
+                  if ($log.LastWriteTimeUtc -lt $started) { continue }
+                  $freshLogSeen = $true
+                  $stream = [IO.FileStream]::new($log.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+                  $reader = [IO.StreamReader]::new($stream)
+                  try { while ($null -ne ($line = $reader.ReadLine())) {
+                    foreach ($key in $bootstrapMessages.Keys) {
+                      if ($line.Contains($bootstrapMessages[$key])) { [void]$bootstrapMarkers.Add($key) }
+                    }
+                    if ($line.Contains('Launching app')) { $bootstrapSeen = $true }
+                    if ($line.Contains('stdio_transport_spawned')) { $spawnSeen = $true }
+                    if ($line -match 'Desktop network requirements prevented startup|app_server_connection.fail|Initialization failed|Codex CLI process exited|Failed to spawn Codex CLI|Unable to locate the Codex CLI binary') { $startupErrorSeen = $true }
+                    if ($line.Contains('initialize_handshake_result') -and $line.Contains('outcome=success') -and $line.Contains('transportKind=stdio')) {
+                      $connectedSeen = $true
+                    }
+                    if ($line.Contains('app_server_connection.state_changed') -and
+                        $line.Contains('hostId=local') -and $line.Contains('initialized=true') -and
+                        $line.Contains('next=connected') -and $line.Contains('transport=stdio')) {
+                      $connectedSeen = $true
+                      break
+                    }
+                  } } finally { $reader.Dispose() }
+                  if ($connectedSeen) { break }
+                }
+                if ($connectedSeen) { break }
+              }
+              if (-not ($cqChildSeen -and $stockChildSeen -and $connectedSeen)) { Start-Sleep -Milliseconds 500 }
+            }
+            if (-not ($cqChildSeen -and $stockChildSeen -and $connectedSeen)) {
+              throw 'Packaged CQ Desktop launch did not prove the adapter, stock CLI and initialized local connection'
+            }
+          } finally {
+            $outcome = "Packaged CQ Desktop: desktop-image=$desktopSeen; adapter-image=$cqImageSeen; stock-image=$stockImageSeen; fresh-log=$freshLogSeen; bootstrap=$bootstrapSeen; spawn=$spawnSeen; startup-error=$startupErrorSeen; adapter=$cqChildSeen; stock-child=$stockChildSeen; initialized-local-connection=$connectedSeen; bootstrap-markers=$($bootstrapMarkers -join ',')."
+            Write-Output $outcome
+            $outcome >> $env:GITHUB_STEP_SUMMARY
+            for ($attempt = 0; $attempt -lt 20 -and (& $owned).Count -ne 0; $attempt++) {
+              foreach ($process in & $owned) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
+              Start-Sleep -Milliseconds 250
+            }
+            if ((& $owned).Count -ne 0) { throw 'Packaged CQ Desktop process cleanup failed' }
+          }
+      - name: Verify isolated native profile apply and restore
+        if: steps.preflight.outputs.interactive == 'true' && matrix.goarch == 'amd64'
+        run: |
+          $installed = Get-AppxPackage -Name OpenAI.Codex -ErrorAction Stop
+          $env:CQ_HARNESS_WINDOWS_CODEX = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath (Join-Path $installed.InstallLocation 'app/resources/codex.exe')).Path)
+          $env:CQ_HARNESS_WINDOWS_NATIVE_ACCEPTANCE = '1'
+          $env:HTTP_PROXY = $null
+          $env:HTTPS_PROXY = $null
+          $env:ALL_PROXY = $null
+          go test -race -count=1 -timeout 3m -run '^TestHarnessWindowsNativeProfileContract$' ./internal/dots
+          if ($LASTEXITCODE -ne 0) { throw 'Isolated native profile contract failed' }
+      - name: Remove downloaded package
+        if: always() && steps.preflight.outputs.interactive == 'true'
+        run: |
+          $registered = Get-AppxPackage -Name OpenAI.Codex
+          if ($registered) { Remove-AppxPackage -Package $registered.PackageFullName -ErrorAction Stop }
+          $expected = [IO.Path]::GetFullPath((Join-Path $env:RUNNER_TEMP 'cq-desktop-preflight'))
+          if (Test-Path -LiteralPath $expected) {
+            $actual = (Resolve-Path -LiteralPath $expected).Path
+            if ($actual -ne $expected) { throw 'Unexpected Desktop preflight cleanup path' }
+            Remove-Item -LiteralPath $actual -Recurse -Force -ErrorAction Stop
+          }
