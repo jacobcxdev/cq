@@ -81,22 +81,18 @@ func TestCodexEgressDefaultsAndDirect(t *testing.T) {
 }
 
 func TestCodexEgressRescuePersistence(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	paths := proxyConfigTestPaths(t)
 	cfg := &Config{LocalToken: "synthetic-local", ProxyResilienceStateDir: filepath.Join(t.TempDir(), "state"), CodexEgressProxy: "http://127.0.0.1:8080"}
-	if err := SaveConfig(cfg); err != nil {
+	if err := saveProxyTestConfig(t, paths, cfg); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := LoadExistingConfig()
+	loaded, err := loadConfigFile(paths.ConfigFile)
 	if err != nil || loaded.CodexEgressProxy != cfg.CodexEgressProxy {
 		t.Fatalf("normal config: %v", err)
 	}
-	bootstrap, err := LoadProxyRescueBootstrapConfig()
+	bootstrap, err := loadProxyRescueBootstrapConfig(paths)
 	if err != nil || bootstrap.CodexEgressProxy != cfg.CodexEgressProxy {
 		t.Fatalf("rescue config: %v", err)
-	}
-	paths, err := ResolveDefaultPaths()
-	if err != nil {
-		t.Fatal(err)
 	}
 	// A manual edit followed by restart must not retain stale direct egress.
 	cfg.CodexEgressProxy = "http://127.0.0.1:8081"
@@ -107,7 +103,7 @@ func TestCodexEgressRescuePersistence(t *testing.T) {
 	if err := os.WriteFile(paths.ConfigFile, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	bootstrap, err = LoadProxyRescueBootstrapConfig()
+	bootstrap, err = loadProxyRescueBootstrapConfig(paths)
 	if err != nil || bootstrap.CodexEgressProxy != cfg.CodexEgressProxy {
 		t.Fatalf("manual egress edit ignored: %v", err)
 	}
@@ -115,40 +111,36 @@ func TestCodexEgressRescuePersistence(t *testing.T) {
 	if err := os.WriteFile(paths.ConfigFile, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	bootstrap, err = LoadProxyRescueBootstrapConfig()
+	bootstrap, err = loadProxyRescueBootstrapConfig(paths)
 	if err != nil || bootstrap.CodexEgressProxy != cfg.CodexEgressProxy {
 		t.Fatalf("mixed-case egress edit ignored: %v", err)
 	}
 	if err := os.Remove(paths.RescueBootstrap); err != nil {
 		t.Fatal(err)
 	}
-	bootstrap, err = LoadProxyRescueBootstrapConfig()
+	bootstrap, err = loadProxyRescueBootstrapConfig(paths)
 	if err != nil || bootstrap.CodexEgressProxy != cfg.CodexEgressProxy {
 		t.Fatalf("bootstrap fallback: %v", err)
 	}
 }
 
 func TestCodexEgressRescueRejectsInvalidManualEdit(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	if err := SaveConfig(&Config{LocalToken: "synthetic", ProxyResilienceStateDir: filepath.Join(t.TempDir(), "state"), CodexEgressProxy: "direct"}); err != nil {
-		t.Fatal(err)
-	}
-	paths, err := ResolveDefaultPaths()
-	if err != nil {
+	paths := proxyConfigTestPaths(t)
+	if err := saveProxyTestConfig(t, paths, &Config{LocalToken: "synthetic", ProxyResilienceStateDir: filepath.Join(t.TempDir(), "state"), CodexEgressProxy: "direct"}); err != nil {
 		t.Fatal(err)
 	}
 	for _, value := range []string{`123`, `null`, `"http://alice:secret@proxy"`, `"socks4://proxy:1080"`} {
 		if err := os.WriteFile(paths.ConfigFile, []byte(`{"codex_egress_proxy":`+value+`}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadProxyRescueBootstrapConfig(); err == nil || strings.Contains(err.Error(), "secret") {
+		if _, err := loadProxyRescueBootstrapConfig(paths); err == nil || strings.Contains(err.Error(), "secret") {
 			t.Fatalf("invalid edit allowed rescue or leaked secret: %v", err)
 		}
 	}
 	if err := os.WriteFile(paths.ConfigFile, []byte(`null`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadProxyRescueBootstrapConfig(); err == nil {
+	if _, err := loadProxyRescueBootstrapConfig(paths); err == nil {
 		t.Fatal("null normal configuration cleared the saved rescue egress policy")
 	}
 }

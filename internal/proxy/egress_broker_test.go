@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,18 +25,21 @@ func (f egressBrokerTestDialer) DialContext(ctx context.Context, network, addres
 
 func egressBrokerTestSocket(t *testing.T) (string, net.Listener) {
 	t.Helper()
-	// Keep below the macOS Unix socket path limit even when TMPDIR is long.
-	dir, err := os.MkdirTemp("/tmp", "cq-broker-")
+	dir := ""
+	if runtime.GOOS != "windows" {
+		// Keep below the macOS Unix socket path limit even when TMPDIR is long.
+		var err error
+		dir, err = os.MkdirTemp("/tmp", "cq-broker-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Remove(dir) })
+	}
+	path, listener, cleanup, err := listenRuntimeEgress(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	path := filepath.Join(dir, "broker.sock")
-	listener, err := net.Listen("unix", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
+	t.Cleanup(func() { _ = listener.Close(); cleanup() })
 	return path, listener
 }
 
@@ -150,7 +153,7 @@ func TestEgressBrokerRejectsBeforeDispatch(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return (&net.Dialer{}).DialContext(ctx, "unix", path)
+				return dialRuntimeEgress(ctx, path)
 			}}
 			defer transport.CloseIdleConnections()
 			req, err := http.NewRequest(tc.method, "http://"+tc.target, nil)

@@ -65,6 +65,15 @@ func NewResetAttemptStore(fs fsutil.DurableFileSystem, cacheRoot string) (*Reset
 		return nil, errors.New("exclusive reset attempt creation unavailable")
 	}
 	dir := filepath.Join(cacheRoot, resetAttemptDirName)
+	if native, ok := fs.(fsutil.OSFileSystem); ok {
+		// The ordinary cache is created by quota checks. Keep its ACL and
+		// fence private reset records to that owner-controlled parent.
+		scoped, err := native.WithPrivateDestination(dir)
+		if err != nil {
+			return nil, fmt.Errorf("scope reset attempt directory: %w", err)
+		}
+		fs = scoped
+	}
 	if _, inspectable := fs.(fsutil.SecurePathInspector); inspectable {
 		if _, durable := fs.(fsutil.DurableDirectoryOpener); !durable {
 			return nil, fsutil.ErrSecureCapabilityUnavailable

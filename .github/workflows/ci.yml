@@ -347,14 +347,21 @@ jobs:
         if: matrix.architecture == 'amd64'
       - run: go test -race -count=1 ./cmd/cq-install
         if: matrix.architecture == 'amd64'
-      - run: go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot)'
+      - run: go test -race -count=1 ./cmd/cq -run '^(TestWindows|TestRunService|TestServiceSnapshot|TestGrokCommandsManageOnlyCQAccounts|TestZCodeOuterLogin)'
         if: matrix.architecture == 'amd64'
         env:
           CQ_NATIVE_WINDOWS_SCHEDULER_TEST: "1"
-      - run: go test -race -count=1 ./internal/provider/codex -run '^TestWindowsCredential'
+      - name: Validate Windows account login and browser behaviour
         if: matrix.architecture == 'amd64'
-      - run: go test -race -count=1 ./internal/provider/grok -run '^TestWindowsStoreDiscoveryInheritedDirectoryWithoutAccounts$'
+        run: |
+          go test -race -count=1 ./internal/auth
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          go test -race -count=1 ./internal/app -run '^TestWindowsCodexLogin'
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          go test -race -count=1 ./internal/provider/codex ./internal/provider/grok ./internal/provider/zai/zcode -run '^TestWindows'
+      - name: Validate isolated proxy configuration
         if: matrix.architecture == 'amd64'
+        run: go test -race -count=1 ./internal/proxy -run '^(TestConfig|TestSaveConfig|TestLoadExistingConfig|TestRescueBootstrap|TestGeneratedConfig|TestCodexEgressRescue|TestWireGuardConfigurationPersists)'
       - name: Validate per-user MSI install, upgrade, and uninstall
         shell: pwsh
         run: |

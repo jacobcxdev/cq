@@ -36,6 +36,13 @@ type storedAccount struct {
 	VerifiedAPIKeyIDs []string `json:"verified_api_key_ids,omitempty"`
 }
 
+type directCQCredentialFileSystem interface {
+	fsutil.FileSystem
+	fsutil.SecurePathInspector
+	IsDirectCQDirectory(string) bool
+	OpenOwnerControlledCQDirectory(string) (fsutil.SecureDirectory, error)
+}
+
 type credentialFile struct {
 	// Keep the preferred key readable by older CQ versions during upgrades.
 	APIKey   string           `json:"api_key"`
@@ -157,7 +164,21 @@ func readOwnedAccounts(fsys fsutil.FileSystem, env func(string) string, configDi
 		}
 		return []Account{newAccount(key, "Environment")}, nil
 	}
-	data, err := fsys.ReadFile(filepath.Join(configDir, "zai.json"))
+	var data []byte
+	var err error
+	if direct, ok := fsys.(directCQCredentialFileSystem); ok && direct.IsDirectCQDirectory(configDir) {
+		directory, openErr := direct.OpenOwnerControlledCQDirectory(configDir)
+		if errors.Is(openErr, os.ErrNotExist) {
+			return nil, nil
+		}
+		if openErr != nil {
+			return nil, errors.New("read Z.ai credentials")
+		}
+		data, _, err = fsutil.ReadOwnerControlledFileInDirectoryWithIdentity(direct, directory, configDir, "zai.json", 1<<20)
+		err = errors.Join(err, directory.Close())
+	} else {
+		data, err = fsys.ReadFile(filepath.Join(configDir, "zai.json"))
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -513,6 +534,17 @@ func writeAccounts(fsys fsutil.FileSystem, configDir string, accounts []Account)
 	data, err := json.MarshalIndent(credentials, "", "  ")
 	if err != nil {
 		return errors.New("encode Z.ai credentials")
+	}
+	if direct, ok := fsys.(directCQCredentialFileSystem); ok && direct.IsDirectCQDirectory(configDir) {
+		if directory, openErr := direct.OpenOwnerControlledCQDirectory(configDir); openErr == nil {
+			err = fsutil.SecureAtomicWriteInOwnerControlledDirectoryChecked(direct, directory, configDir, "zai.json", append(data, '\n'), nil)
+			if errors.Join(err, directory.Close()) != nil {
+				return errors.New("save Z.ai credentials")
+			}
+			return nil
+		} else if !errors.Is(openErr, os.ErrNotExist) {
+			return errors.New("save Z.ai credentials")
+		}
 	}
 	if err := fsutil.SecureAtomicWrite(fsys, filepath.Join(configDir, "zai.json"), append(data, '\n')); err != nil {
 		return errors.New("save Z.ai credentials")

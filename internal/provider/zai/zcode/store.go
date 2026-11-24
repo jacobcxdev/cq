@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
@@ -18,9 +19,10 @@ import (
 // SessionStore owns fresh browser logins under CQ's private configuration tree.
 // CipherSecret is supplied by the caller and is excluded from public output.
 type SessionStore struct {
-	FS           fsutil.FileSystem
-	Path         string
-	CipherSecret string `json:"-"`
+	FS              fsutil.FileSystem
+	Path            string
+	CipherSecret    string `json:"-"`
+	ownerControlled bool
 }
 
 type storedLoginSession struct {
@@ -51,7 +53,19 @@ func (s SessionStore) Accounts() ([]LoginSession, error) {
 	if s.FS == nil || s.Path == "" || s.CipherSecret == "" {
 		return nil, errors.New("ZCode session store unavailable")
 	}
-	data, err := s.FS.ReadFile(s.Path)
+	var data []byte
+	var err error
+	if s.ownerControlled {
+		fsys := s.FS.(ownerControlledCQFileSystem)
+		directory, openErr := fsys.OpenOwnerControlledCQDirectory(filepath.Dir(s.Path))
+		if openErr != nil {
+			return nil, errors.New("read CQ ZCode sessions")
+		}
+		data, _, err = fsutil.ReadOwnerControlledFileInDirectoryWithIdentity(fsys, directory, filepath.Dir(s.Path), filepath.Base(s.Path), httputil.MaxResponseBody)
+		err = errors.Join(err, directory.Close())
+	} else {
+		data, err = s.FS.ReadFile(s.Path)
+	}
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
@@ -178,6 +192,19 @@ func (s SessionStore) write(accounts []LoginSession) error {
 	data, err := json.MarshalIndent(file, "", "  ")
 	if err != nil {
 		return errors.New("encode CQ ZCode sessions")
+	}
+	if s.ownerControlled {
+		fsys := s.FS.(ownerControlledCQFileSystem)
+		directory, err := fsys.OpenOwnerControlledCQDirectory(filepath.Dir(s.Path))
+		if err != nil {
+			return errors.New("save CQ ZCode sessions")
+		}
+		err = fsutil.SecureAtomicWriteInOwnerControlledDirectoryChecked(fsys, directory, filepath.Dir(s.Path), filepath.Base(s.Path), append(data, '\n'), nil)
+		err = errors.Join(err, directory.Close())
+		if err != nil {
+			return errors.New("save CQ ZCode sessions")
+		}
+		return nil
 	}
 	if err := fsutil.SecureAtomicWrite(s.FS, s.Path, append(data, '\n')); err != nil {
 		return errors.New("save CQ ZCode sessions")

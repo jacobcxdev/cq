@@ -269,7 +269,7 @@ func (c *egressBrokerClient) DialContext(ctx context.Context, network, target st
 	}
 	handshake, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(handshake, "unix", c.socketPath)
+	conn, err := dialRuntimeEgress(handshake, c.socketPath)
 	if err != nil {
 		return nil, egressBrokerClientError(handshake)
 	}

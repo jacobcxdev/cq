@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -845,9 +846,19 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	codexClientBuild := defaultCodexRoutingClientBuild()
 	fsys := fsutil.OSFileSystem{}
 	var codexEgress *proxy.CodexEgress
-	if workerRole != nil {
+	var standaloneListener *net.TCPListener
+	switch {
+	case workerRole != nil:
 		codexEgress, err = proxy.OpenRuntimeEgressClient(cfg.Port, fsys)
-	} else {
+	case runtime.GOOS == "windows":
+		// Claim this runtime's port before publishing its egress descriptor.
+		standaloneListener, err = net.ListenTCP("tcp4", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.Port})
+		if err != nil {
+			return err
+		}
+		defer standaloneListener.Close()
+		codexEgress, err = proxy.StartRuntimeEgress(context.Background(), cfg, fsys)
+	default:
 		codexEgress, err = proxy.OpenReloadingCodexEgress(context.Background(), cfg, fsys)
 	}
 	if err != nil {
@@ -1549,6 +1560,8 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		})
 		err = proxy.RunRuntimeWorkerRoleWithHandlerAndCallerCredentialSource(proxyCtx, *workerRole, workerFiles, handler, credentialSource)
 		workerFiles = proxy.RuntimeRoleFiles{}
+	} else if standaloneListener != nil {
+		err = srv.ServeAdoptedListener(proxyCtx, standaloneListener)
 	} else {
 		err = srv.ListenAndServe(proxyCtx)
 	}

@@ -10,10 +10,8 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -77,36 +75,11 @@ func startRuntimeEgress(ctx context.Context, cfg *Config, fs fsutil.FileSystem, 
 		return nil, err
 	}
 	life, cancel := context.WithCancel(ctx)
-	socketDir, err := os.MkdirTemp(dir, "e-")
+	socketPath, listener, cleanupSocket, err := listenRuntimeEgress(dir)
 	if err != nil {
 		cancel()
 		manager.Close()
-		return nil, errors.New("create private egress directory failed")
-	}
-	socketPath := filepath.Join(socketDir, "s")
-	cleanupSocket := func() { _ = os.Remove(socketPath); _ = os.Remove(socketDir) }
-	if len(socketPath) > 103 {
-		cancel()
-		manager.Close()
-		cleanupSocket()
-		return nil, errors.New("runtime egress socket path exceeds platform limit")
-	}
-	listener, err := net.Listen("unix", socketPath)
-	if err != nil {
-		cancel()
-		manager.Close()
-		cleanupSocket()
-		return nil, errors.New("create private egress listener failed")
-	}
-	if unixListener, ok := listener.(*net.UnixListener); ok {
-		unixListener.SetUnlinkOnClose(false)
-	}
-	if err := os.Chmod(socketPath, 0o600); err != nil {
-		listener.Close()
-		cancel()
-		manager.Close()
-		cleanupSocket()
-		return nil, errors.New("secure private egress listener failed")
+		return nil, err
 	}
 	var random [64]byte
 	if _, err := rand.Read(random[:]); err != nil {
@@ -359,25 +332,7 @@ func readEgressDescriptor(fs fsutil.FileSystem, path, dir string, port int, nati
 		return nil, invalid
 	}
 	clear(raw)
-	if !fsutil.IsCleanAbsoluteNonRootPath(descriptor.Socket) || len(descriptor.Socket) > 103 {
-		return nil, invalid
-	}
-	socketDir := filepath.Dir(descriptor.Socket)
-	if filepath.Dir(socketDir) != dir || !strings.HasPrefix(filepath.Base(socketDir), "e-") || filepath.Base(descriptor.Socket) != "s" {
-		return nil, invalid
-	}
-	if err := fsutil.ValidateSecureDirectory(fs, socketDir); err != nil {
-		return nil, invalid
-	}
-	inspector, ok := fs.(fsutil.SecurePathInspector)
-	if !ok {
-		return nil, invalid
-	}
-	info, err := inspector.Lstat(descriptor.Socket)
-	if err != nil || info.Mode()&os.ModeSocket == 0 || info.Mode().Perm() != 0o600 {
-		return nil, invalid
-	}
-	if err := fsutil.ValidateSecureOwner(inspector, info); err != nil {
+	if !validRuntimeEgressEndpoint(fs, dir, descriptor.Socket) {
 		return nil, invalid
 	}
 	return &descriptor, nil

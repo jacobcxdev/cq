@@ -269,19 +269,26 @@ func zcodeDeviceMid() (string, error) {
 // The inspected official CLI reuses deviceMid or generates createUuid() under a
 // local lock. CQ keeps its own registration without modifying ZCode-owned files.
 func ensureZCodeCommandDevice(fsys fsutil.FileSystem, configDir, installedState string) (string, error) {
+	if opener, ok := fsys.(interface {
+		IsDirectCQDirectory(string) bool
+		OpenOwnerControlledCQDirectory(string) (fsutil.SecureDirectory, error)
+	}); ok && opener.IsDirectCQDirectory(configDir) {
+		directory, err := opener.OpenOwnerControlledCQDirectory(configDir)
+		if err == nil {
+			defer directory.Close()
+			return ensureZCodeCommandDeviceInDirectory(fsys, directory, configDir, installedState)
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", errors.New("prepare private ZCode device directory")
+		}
+	}
 	path := filepath.Join(configDir, "zcode-device.json")
 	read := func(name string) (string, error) {
 		data, err := fsys.ReadFile(name)
 		if err != nil {
 			return "", err
 		}
-		var state struct {
-			DeviceMid string `json:"deviceMid"`
-		}
-		if len(data) > 1<<20 || json.Unmarshal(data, &state) != nil || !zcodeDeviceHeader(state.DeviceMid) {
-			return "", errors.New("invalid ZCode device identity")
-		}
-		return state.DeviceMid, nil
+		return decodeZCodeCommandDevice(data)
 	}
 	if existing, err := read(path); err == nil {
 		return existing, nil
@@ -317,6 +324,76 @@ func ensureZCodeCommandDevice(fsys fsutil.FileSystem, configDir, installedState 
 		return "", errors.New("save ZCode device identity")
 	}
 	return device, nil
+}
+
+func ensureZCodeCommandDeviceInDirectory(fsys fsutil.FileSystem, directory fsutil.SecureDirectory, configDir, installedState string) (string, error) {
+	inspector, ok := fsys.(fsutil.SecurePathInspector)
+	if !ok {
+		return "", fsutil.ErrSecureCapabilityUnavailable
+	}
+	const name = "zcode-device.json"
+	read := func() (string, error) {
+		data, _, err := fsutil.ReadOwnerControlledFileInDirectoryWithIdentity(inspector, directory, configDir, name, 1<<20)
+		if err != nil {
+			return "", err
+		}
+		return decodeZCodeCommandDevice(data)
+	}
+	if existing, err := read(); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", errors.New("read CQ ZCode device identity")
+	}
+	lock, err := fsutil.AcquireExclusiveLockInOwnerControlledDirectory(inspector, directory, configDir, name+".lock")
+	if err != nil {
+		return "", errors.New("lock ZCode device identity")
+	}
+	defer lock.Close()
+	info, err := lock.Stat()
+	if err != nil {
+		return "", errors.New("inspect ZCode device identity lock")
+	}
+	identity, ok := inspector.FileIdentity(info)
+	if !ok {
+		return "", fsutil.ErrSecureCapabilityUnavailable
+	}
+	fence := func() error {
+		return fsutil.ValidateExclusiveLockHeldInOwnerControlledDirectory(inspector, directory, configDir, name+".lock", identity)
+	}
+	if existing, err := read(); err == nil {
+		return existing, nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", errors.New("read CQ ZCode device identity")
+	}
+	data, err := fsys.ReadFile(installedState)
+	var device string
+	if errors.Is(err, os.ErrNotExist) {
+		device = newZCodeCommandUUID()
+		if device == "" {
+			return "", errors.New("create ZCode device identity")
+		}
+	} else if err != nil {
+		return "", errors.New("read installed ZCode device identity")
+	} else if device, err = decodeZCodeCommandDevice(data); err != nil {
+		return "", errors.New("read installed ZCode device identity")
+	}
+	encoded, _ := json.Marshal(struct {
+		DeviceMid string `json:"deviceMid"`
+	}{device})
+	if err := fsutil.SecureAtomicWriteInOwnerControlledDirectoryChecked(inspector, directory, configDir, name, append(encoded, '\n'), fence); err != nil {
+		return "", errors.New("save ZCode device identity")
+	}
+	return device, nil
+}
+
+func decodeZCodeCommandDevice(data []byte) (string, error) {
+	var state struct {
+		DeviceMid string `json:"deviceMid"`
+	}
+	if len(data) > 1<<20 || json.Unmarshal(data, &state) != nil || !zcodeDeviceHeader(state.DeviceMid) {
+		return "", errors.New("invalid ZCode device identity")
+	}
+	return state.DeviceMid, nil
 }
 
 func zcodeDeviceHeader(value string) bool {

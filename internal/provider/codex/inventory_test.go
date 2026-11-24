@@ -40,7 +40,7 @@ func TestAuthoritativeInventoryRejectsHighFileIDChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	fsys := &changingFileIDFS{MemFS: mem}
-	if _, _, err := readAuthoritativeCredentialFile(fsys, path); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
+	if _, _, err := readAuthoritativeCredentialFile(fsys, path, false); !errors.Is(err, fsutil.ErrUnsafeSecurePath) {
 		t.Fatalf("changed high file ID error = %v, want unsafe", err)
 	}
 }
@@ -56,7 +56,7 @@ func TestAuthoritativeInventoryAcceptsPrincipalInspectionWithoutUID(t *testing.T
 	}
 	principal := fsutil.SecurePrincipal{Kind: fsutil.SecurePrincipalSID, SIDLength: 4, SID: [68]byte{1, 2, 3, 4}}
 	fsys := &principalOnlyInventoryFS{MemFS: mem, principal: principal}
-	data, found, err := readAuthoritativeCredentialFile(fsys, path)
+	data, found, err := readAuthoritativeCredentialFile(fsys, path, false)
 	if err != nil || !found || len(data) == 0 {
 		t.Fatalf("principal-only credential read = (%q, %v, %v)", data, found, err)
 	}
