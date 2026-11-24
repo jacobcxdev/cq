@@ -3,9 +3,9 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"testing"
 )
 
@@ -32,10 +32,21 @@ func TestOfficialWindowsCodexPackage(t *testing.T) {
 }
 
 func TestWindowsHarnessChildEnv(t *testing.T) {
-	base := []string{"PATH=C:\\bin", "CODEX_CLI_PATH=old", "cq_windows_harness_stock_cli=old", "USER_SETTING=preserve"}
-	want := []string{"PATH=C:\\bin", "USER_SETTING=preserve", "CODEX_CLI_PATH=C:\\cq.exe", windowsHarnessStockCLIEnv + "=C:\\codex.exe"}
-	if got := windowsHarnessChildEnv(base, `C:\cq.exe`, `C:\codex.exe`); !reflect.DeepEqual(got, want) {
-		t.Fatalf("child env = %#v, want %#v", got, want)
+	t.Setenv("CODEX_CLI_PATH", "old")
+	t.Setenv(windowsHarnessStockCLIEnv, "")
+	t.Setenv("USER_SETTING", "preserve")
+	if err := os.Unsetenv(windowsHarnessStockCLIEnv); err != nil {
+		t.Fatal(err)
+	}
+	failure := errors.New("launch failed")
+	err := withWindowsHarnessEnvironment(`C:\cq.exe`, `C:\codex.exe`, func() error {
+		if os.Getenv("CODEX_CLI_PATH") != `C:\cq.exe` || os.Getenv(windowsHarnessStockCLIEnv) != `C:\codex.exe` || os.Getenv("USER_SETTING") != "preserve" {
+			t.Fatal("desktop launch environment differs from the scoped overrides")
+		}
+		return failure
+	})
+	if _, exists := os.LookupEnv(windowsHarnessStockCLIEnv); exists || os.Getenv("CODEX_CLI_PATH") != "old" || !errors.Is(err, failure) {
+		t.Fatal("desktop launch environment or error was not restored correctly")
 	}
 }
 

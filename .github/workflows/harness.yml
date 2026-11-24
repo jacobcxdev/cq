@@ -463,6 +463,13 @@ jobs:
             (Join-Path $env:APPDATA 'Codex/Logs')
           )
           $started = [DateTime]::UtcNow
+          $desktopSeen = $false
+          $cqImageSeen = $false
+          $stockImageSeen = $false
+          $freshLogSeen = $false
+          $bootstrapSeen = $false
+          $spawnSeen = $false
+          $startupErrorSeen = $false
           $cqChildSeen = $false
           $stockChildSeen = $false
           $connectedSeen = $false
@@ -473,6 +480,9 @@ jobs:
             while ([DateTime]::UtcNow -lt $deadline -and -not ($cqChildSeen -and $stockChildSeen -and $connectedSeen)) {
               $processes = & $owned
               $packagePids = @($processes | Where-Object { $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) } | ForEach-Object ProcessId)
+              if ($packagePids.Count -gt 0) { $desktopSeen = $true }
+              if (@($processes | Where-Object { $_.ExecutablePath.Equals($cq, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { $cqImageSeen = $true }
+              if (@($processes | Where-Object { $_.ExecutablePath.Equals($stock, [StringComparison]::OrdinalIgnoreCase) }).Count -gt 0) { $stockImageSeen = $true }
               $cqChildren = @($processes | Where-Object {
                 $_.ExecutablePath.Equals($cq, [StringComparison]::OrdinalIgnoreCase) -and
                 $_.CommandLine -match '(^|\s)app-server(\s|$)' -and
@@ -489,7 +499,14 @@ jobs:
                 if (-not (Test-Path -LiteralPath $logRoot)) { continue }
                 foreach ($log in Get-ChildItem -LiteralPath $logRoot -Recurse -File -Filter 'codex-desktop-*.log' -ErrorAction Stop) {
                   if ($log.LastWriteTimeUtc -lt $started) { continue }
+                  $freshLogSeen = $true
                   foreach ($line in [IO.File]::ReadLines($log.FullName)) {
+                    if ($line.Contains('Launching app')) { $bootstrapSeen = $true }
+                    if ($line.Contains('stdio_transport_spawned')) { $spawnSeen = $true }
+                    if ($line -match 'Desktop network requirements prevented startup|app_server_connection.fail|Initialization failed|Codex CLI process exited|Failed to spawn Codex CLI|Unable to locate the Codex CLI binary') { $startupErrorSeen = $true }
+                    if ($line.Contains('initialize_handshake_result') -and $line.Contains('outcome=success') -and $line.Contains('transportKind=stdio')) {
+                      $connectedSeen = $true
+                    }
                     if ($line.Contains('app_server_connection.state_changed') -and
                         $line.Contains('hostId=local') -and $line.Contains('initialized=true') -and
                         $line.Contains('next=connected') -and $line.Contains('transport=stdio')) {
@@ -507,7 +524,7 @@ jobs:
               throw 'Packaged CQ Desktop launch did not prove the adapter, stock CLI and initialized local connection'
             }
           } finally {
-            $outcome = "Packaged CQ Desktop: adapter=$cqChildSeen; stock-child=$stockChildSeen; initialized-local-connection=$connectedSeen."
+            $outcome = "Packaged CQ Desktop: desktop-image=$desktopSeen; adapter-image=$cqImageSeen; stock-image=$stockImageSeen; fresh-log=$freshLogSeen; bootstrap=$bootstrapSeen; spawn=$spawnSeen; startup-error=$startupErrorSeen; adapter=$cqChildSeen; stock-child=$stockChildSeen; initialized-local-connection=$connectedSeen."
             Write-Output $outcome
             $outcome >> $env:GITHUB_STEP_SUMMARY
             for ($attempt = 0; $attempt -lt 20 -and (& $owned).Count -ne 0; $attempt++) {

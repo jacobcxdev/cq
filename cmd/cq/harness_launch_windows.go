@@ -7,8 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,7 +23,22 @@ var (
 	windowsPackageAPI            = windows.NewLazySystemDLL("kernel32.dll")
 	windowsPackagesByFamily      = windowsPackageAPI.NewProc("GetPackagesByPackageFamily")
 	windowsPackagePathByFullName = windowsPackageAPI.NewProc("GetPackagePathByFullName")
+	windowsShellExecuteEx        = windows.NewLazySystemDLL("shell32.dll").NewProc("ShellExecuteExW")
 )
+
+// shellExecuteInfo mirrors SHELLEXECUTEINFOW from <shellapi.h>.
+type shellExecuteInfo struct {
+	size, mask                        uint32
+	window                            windows.Handle
+	verb, file, parameters, directory *uint16
+	show                              int32
+	instance                          windows.Handle
+	idList                            unsafe.Pointer
+	class                             *uint16
+	classKey                          windows.Handle
+	hotKey                            uint32
+	iconOrMonitor, process            windows.Handle
+}
 
 func launchHarnessDesktop(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
@@ -54,13 +69,36 @@ func launchHarnessDesktop(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	cmd := exec.Command(desktop)
-	cmd.Dir = filepath.Dir(desktop)
-	cmd.Env = windowsHarnessChildEnv(os.Environ(), self, stock)
-	if err := cmd.Start(); err != nil {
+	app, err := windows.UTF16PtrFromString(desktop)
+	if err != nil {
+		return err
+	}
+	if err := withWindowsHarnessEnvironment(self, stock, func() error { return activateWindowsDesktop(app) }); err != nil {
 		return fmt.Errorf("start Codex Desktop: %w", err)
 	}
-	return cmd.Process.Release()
+	return nil
+}
+
+func activateWindowsDesktop(app *uint16) error {
+	const (
+		shellExecuteNoAsync = 0x00000100
+		shellExecuteNoUI    = 0x00000400
+	)
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	err := windows.CoInitializeEx(0, windows.COINIT_APARTMENTTHREADED|windows.COINIT_DISABLE_OLE1DDE)
+	if err != nil && !errors.Is(err, syscall.Errno(1)) { // S_FALSE is also a successful COM initialization.
+		return err
+	}
+	defer windows.CoUninitialize()
+	// SEE_MASK_NOASYNC keeps activation synchronous while the short-lived CQ
+	// process still owns the environment for the new Desktop process.
+	info := shellExecuteInfo{mask: shellExecuteNoAsync | shellExecuteNoUI, file: app, show: windows.SW_SHOWNORMAL}
+	info.size = uint32(unsafe.Sizeof(info))
+	if ok, _, err := windowsShellExecuteEx.Call(uintptr(unsafe.Pointer(&info))); ok == 0 {
+		return err
+	}
+	return nil
 }
 
 func officialWindowsCodexPackage(full string) bool {
@@ -86,16 +124,22 @@ func officialWindowsCodexPackage(full string) bool {
 	return true
 }
 
-func windowsHarnessChildEnv(base []string, self, stock string) []string {
-	env := make([]string, 0, len(base)+2)
-	for _, item := range base {
-		key, _, ok := strings.Cut(item, "=")
-		if ok && (strings.EqualFold(key, "CODEX_CLI_PATH") || strings.EqualFold(key, windowsHarnessStockCLIEnv)) {
-			continue
+func withWindowsHarnessEnvironment(self, stock string, start func() error) error {
+	for _, setting := range [][2]string{{"CODEX_CLI_PATH", self}, {windowsHarnessStockCLIEnv, stock}} {
+		key, value := setting[0], setting[1]
+		previous, existed := os.LookupEnv(key)
+		if err := os.Setenv(key, value); err != nil {
+			return err
 		}
-		env = append(env, item)
+		defer func() {
+			if existed {
+				_ = os.Setenv(key, previous)
+			} else {
+				_ = os.Unsetenv(key)
+			}
+		}()
 	}
-	return append(env, "CODEX_CLI_PATH="+self, windowsHarnessStockCLIEnv+"="+stock)
+	return start()
 }
 
 func resolveWindowsHarnessDesktop() (desktop, stock string, err error) {
