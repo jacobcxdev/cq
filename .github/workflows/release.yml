@@ -645,7 +645,7 @@ jobs:
           esac
           go run ./internal/tools/nativepackage verify-install dist/bundled-native-network.json "dist/cq_${GITHUB_REF_NAME#v}_darwin_${architecture}_bundle.tar.gz" "$RUNNER_TEMP/native-release.json" --allow-draft
 
-      - name: Publish complete release and Homebrew Cask
+      - name: Publish complete release and package manifests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -659,6 +659,10 @@ jobs:
           test "$(jq '.assets | length' <<<"$release")" -ge 14
           release_notes=$(gh release view "$RELEASE_TAG" --json body --jq .body)
           grep -q '^## Changelog$' <<<"$release_notes"
+          scoop="$RUNNER_TEMP/scoop-manifest"
+          mkdir -p "$scoop"
+          gh release download "$RELEASE_TAG" --pattern checksums.txt --dir "$scoop" --clobber
+          bash .github/scripts/generate-scoop-manifest.sh "$RELEASE_TAG" "$RUNNER_TEMP/native-release.json" "$scoop/checksums.txt" >"$scoop/cq.json"
           draft="$(jq -r '.isDraft' <<<"$release")"
           case "$draft" in
             true) gh release edit "$RELEASE_TAG" --draft=false ;;
@@ -666,14 +670,13 @@ jobs:
             *) echo "release draft state is invalid: $draft" >&2; exit 1 ;;
           esac
 
-          # Both receipts select the same shared-version bundle. Commit their
-          # verified references together through GitHub's signed commit API.
+          # Commit the verified package references together through GitHub's signed commit API.
           for token in cq-network cq; do
             cask="$RUNNER_TEMP/homebrew-cask/$token.rb"
             test -f "$cask"
             .github/scripts/format-homebrew-cask.sh "$cask"
           done
-          GH_TOKEN="$HOMEBREW_TAP_TOKEN" bash .github/scripts/publish-homebrew-casks.sh "$RUNNER_TEMP/homebrew-cask"
+          GH_TOKEN="$HOMEBREW_TAP_TOKEN" bash .github/scripts/publish-homebrew-casks.sh "$RUNNER_TEMP/homebrew-cask" "$scoop/cq.json"
 
       - name: Audit published Homebrew Cask
         run: |
@@ -858,6 +861,28 @@ jobs:
           $currentMSI = Join-Path $publicRoot "cq_${version}_windows_${{ matrix.architecture }}.msi"
           .\.github\scripts\validate-windows-install.ps1 -SkipWinGet -ExpectedVersion $version -PreviousGoVersion $previousGoVersion
           .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion $version
+
+  scoop-deployed:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, architecture: amd64 }
+          - { runner: windows-11-arm, architecture: arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate deployed Scoop lifecycle
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          .\.github\scripts\validate-windows-scoop.ps1 -Architecture "${{ matrix.architecture }}" -Version $env:RELEASE_TAG
 
   winget-publish:
     needs: [windows-deployed, linux-install]

@@ -1,5 +1,5 @@
 name: Published Windows validation
-run-name: Published Windows ARM64 ${{ inputs.release_tag }}
+run-name: ${{ inputs.scoop_preflight && 'Scoop preflight' || 'Published Windows ARM64' }} ${{ inputs.release_tag }}
 
 on:
   workflow_dispatch:
@@ -8,12 +8,17 @@ on:
         description: Immutable published stable release to qualify
         type: string
         required: true
+      scoop_preflight:
+        description: Exercise Scoop using a manifest seeded in the disposable bucket checkout
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
   windows-arm64:
+    if: ${{ !inputs.scoop_preflight }}
     runs-on: windows-11-arm
     timeout-minutes: 45
     steps:
@@ -79,6 +84,7 @@ jobs:
           .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previous -CurrentMSI $current -PreviousVersion $env:PREVIOUS_VERSION -CurrentVersion $env:CURRENT_VERSION
 
   winget-permissions:
+    if: ${{ !inputs.scoop_preflight }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 5
     steps:
@@ -89,3 +95,25 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.WINGET_PKGS_TOKEN }}
         run: bash .github/scripts/check-winget-permissions.sh
+
+  scoop-preflight:
+    if: inputs.scoop_preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-latest, architecture: amd64 }
+          - { runner: windows-11-arm, architecture: arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Validate Scoop against immutable CQ ZIPs
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          .\.github\scripts\validate-windows-scoop.ps1 -Architecture "${{ matrix.architecture }}" -Version $env:RELEASE_TAG -Preflight

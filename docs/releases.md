@@ -153,12 +153,18 @@ The workflow stages are:
 | `draft-build` | Require the commit-bound live routing status, bind corpus provenance/native manifest/Gemini secret, add CLI packages and verified combined macOS bundles to the existing draft |
 | `release` | macOS Cask formatting, quarantine and actual predecessor-to-candidate lifecycle checks |
 | `windows-packages`, `windows-acceptance` | Build AMD64/ARM64 per-user MSI and manifests, validate package/installer lifecycle |
-| `publish` | Publish the qualified parent release and paired companion/main Casks together |
+| `publish` | Verify the two Scoop ZIP digests, publish the qualified parent release and sign the tap commit with both Homebrew Casks and the Scoop manifest |
 | `linux-install`, `windows-deployed` | Download public packages and verify deployed installer/lifecycle behaviour |
+| `scoop-deployed` | Verify public Scoop installation, upgrade and removal on native Windows AMD64 and ARM64 |
 | `winget-publish` | Submit the community manifest after deployed checks, then account for superseded candidates |
 
+Before first Scoop publication, dispatch **Published Windows validation** with
+`scoop_preflight=true` and an existing stable `release_tag`. Native Windows
+runners verify the Scoop lifecycle with that release and its predecessor. The
+workflow seeds the candidate in a temporary checkout of the public tap.
+
 Some jobs run in parallel; dependency edges in the workflow remain authoritative.
-The post-publication checks can fail after GitHub/Homebrew publication. Report
+The post-publication checks can fail after GitHub or tap publication. Report
 which channels are already public and the exact failed stage. Do not describe a
 partially published attempt as either an unpublished draft or completed delivery.
 
@@ -173,8 +179,11 @@ attributing an installation failure to its URL or package.
 
 Publication writes use GitHub's `createCommitOnBranch` API with an exact expected
 branch head, then require the resulting commit's verified signature, parent and
-changed files. The paired Homebrew Casks are committed together; unchanged bytes
-create no commit. WinGet submission uses the same signed path and checks the
+changed files. One commit updates both Homebrew Casks and `bucket/cq.json` in
+`jacobcxdev/homebrew-tap`. The Scoop manifest points to the versioned portable
+Windows ZIPs. Its SHA-256 values must match `checksums.txt` and the GitHub
+release asset digests. Unchanged inputs create no commit.
+WinGet submission uses the same signed path and checks the
 actual publication token's actor and owned fork's identity and write permission
 before creating a branch or PR. These automated community submissions use a
 public fork; they do not require upstream push access or a PR assignee. This is
@@ -259,7 +268,7 @@ Only names and purposes belong in repository documentation:
 | Input | Purpose |
 | --- | --- |
 | `GITHUB_TOKEN` | Workflow-scoped repository read/write and commit status inspection, according to each job's permissions |
-| `HOMEBREW_TAP_TOKEN` | Write generated Casks to `jacobcxdev/homebrew-tap`; use a token authorised for that target repository |
+| `HOMEBREW_TAP_TOKEN` | Write generated Casks and the Scoop manifest to the authorised `jacobcxdev/homebrew-tap` repository |
 | `GEMINI_ANTIGRAVITY_CLIENT_SECRET` | Required release-link input for the direct Antigravity OAuth client |
 | `WINGET_PKGS_TOKEN` | Submit CQ's manifest PR through the authorised WinGet fork and manage superseded CQ candidates |
 | `APPLE_DEVELOPER_ID_P12_BASE64`, `APPLE_DEVELOPER_ID_P12_PASSWORD` | Password-protected Developer ID Application signing identity for the company team |
@@ -291,6 +300,8 @@ Verify these outcomes separately:
   after explicit system-extension activation and any required macOS approval.
 - Linux and Windows public-package lifecycle checks pass on their native hosts.
   Inspect the actual runner/MSI versions and user service/task ownership.
+- Scoop selects the native ZIP on both Windows architectures. The shim runs the
+  installed CQ, follows the upgrade and is removed on uninstall.
 - WinGet's community PR is accepted and the manifest is available through the
   intended channel. Submission or successful validation of a local manifest does
   not prove community publication.
