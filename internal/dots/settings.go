@@ -176,6 +176,14 @@ func CanonicalPath(path string) (string, error) {
 	}
 }
 
+func canonicalProtectedPath(path, appPath string) (string, error) {
+	boundary, err := CanonicalPath(path)
+	if err != nil && path == appPath {
+		return windowsRegisteredAppBoundary(path, err)
+	}
+	return boundary, err
+}
+
 func within(parent, child string) bool {
 	relative, err := filepath.Rel(parent, child)
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
@@ -297,7 +305,7 @@ func (s *Settings) Validate() error {
 	}
 	protected = append(protected, appRoots...)
 	for _, path := range protected {
-		canonical, err := CanonicalPath(path)
+		canonical, err := canonicalProtectedPath(path, s.AppPath)
 		if err != nil {
 			return err
 		}

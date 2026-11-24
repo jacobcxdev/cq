@@ -120,13 +120,13 @@ jobs:
         run: |
           go test -race -count=1 -timeout 2m ./internal/harness
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go test -race -count=1 -timeout 2m ./cmd/cq -run '^(TestCodexHarness|TestHarnessDisableBypasses|TestHarnessSkillInstallUnderWindowsCodexHome|TestOfficialWindowsCodexPackage|TestWindowsHarnessChildEnv|TestWindowsDots)'
+          go test -race -count=1 -timeout 2m ./cmd/cq -run '^(TestCodexHarness|TestHarnessDisableBypasses|TestHarnessSkillInstallUnderWindowsCodexHome|TestOfficialWindowsCodexPackage|TestWindowsHarnessChildEnv|TestWindowsDots|TestWindowsCQConsoleAllocationManifest)'
       - name: Qualify Windows Dots and proxy runtime contracts
         if: matrix.architecture == 'x64'
         run: |
           go test -race -count=1 -timeout 3m ./internal/dots -run '^TestWindows'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go test -race -count=1 -timeout 2m ./internal/proxy -run '^TestWindowsRuntimeEgress'
+          go test -race -count=1 -timeout 2m ./internal/proxy ./internal/executil -run '^(TestWindowsRuntimeEgress|TestWindowsPipeCommandHasNoConsole)'
       - name: Fetch the official Windows Codex CLI baseline
         run: |
           $root = Join-Path $env:RUNNER_TEMP 'cq-pinned-codex'
@@ -513,6 +513,9 @@ jobs:
           $env:CQ_DOTS_WINDOWS_PIPE_ACCEPTANCE = '1'
           go test -race -count=1 -timeout 2m -v -run '^TestWindowsNativePipeInstalledApp$' ./internal/dots
           if ($LASTEXITCODE -ne 0) { throw 'Registered Desktop private renderer pipe qualification failed' }
+          $env:CQ_TEST_WINDOWS_DOTS_REGISTERED = '1'
+          go test -race -count=1 -timeout 3m -v -run '^TestRegisteredWindowsDotsPackageReadOnly$' ./cmd/cq
+          if ($LASTEXITCODE -ne 0) { throw 'Registered Desktop first-install path qualification failed' }
       - name: Remove downloaded package
         if: always() && steps.preflight.outputs.interactive == 'true'
         run: |

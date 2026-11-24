@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/executil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
 
@@ -313,6 +314,7 @@ func StartHeadroomBridge() (*HeadroomBridge, error) {
 	}
 
 	cmd := exec.Command(pythonPath, "-u", "-c", headroomScript)
+	executil.SuppressConsoleWindow(cmd)
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

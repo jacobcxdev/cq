@@ -12,11 +12,29 @@ import (
 	"strings"
 
 	"github.com/jacobcxdev/cq/internal/winpackage"
+	"golang.org/x/sys/windows"
 )
 
 const windowsDotsPublisher = "CN=50BDFD77-8903-4850-9FFE-6E8522F64D5B"
 
 var windowsDotsVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$`)
+
+// A Store package can be traversable even when WindowsApps cannot be listed.
+// Protect its verified parent, including when settings pin a retired version.
+func windowsRegisteredAppBoundary(path string, canonicalErr error) (string, error) {
+	if !errors.Is(canonicalErr, windows.ERROR_ACCESS_DENIED) || !winpackage.OfficialCodexPackage(filepath.Base(path)) {
+		return "", canonicalErr
+	}
+	registered, err := winpackage.RegisteredCodexRoot()
+	parent := filepath.Dir(path)
+	if err != nil || !strings.EqualFold(filepath.Dir(registered), parent) {
+		return "", canonicalErr
+	}
+	if err := winpackage.CheckPath(filepath.Join(registered, "AppxManifest.xml")); err != nil {
+		return "", fmt.Errorf("validate registered Codex package path: %w", err)
+	}
+	return parent, nil
+}
 
 type windowsAppIdentity struct {
 	version, build, executable, archive string
