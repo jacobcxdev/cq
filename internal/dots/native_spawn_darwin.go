@@ -3,13 +3,29 @@ package dots
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"sync"
 	"syscall"
 
 	"github.com/ebitengine/purego"
 	"golang.org/x/sys/unix"
 )
+
+func nativeAppExecutable(s *Settings) string {
+	return filepath.Join(s.AppPath, "Contents", "MacOS", "ChatGPT")
+}
+func nativeAppCheck(s *Settings) error { return AppCheck(s) }
+func nativeAppArchive(s *Settings) string {
+	return filepath.Join(s.AppPath, "Contents", "Resources", "app.asar")
+}
+func nativePipeLaunchArgs(args []string) []string {
+	return append(append([]string(nil), args...), "--remote-debugging-pipe")
+}
+func nativeDebugFlagsMatch(flags []string) bool {
+	return slices.Equal(flags, []string{"--remote-debugging-pipe"})
+}
 
 // Keep Chromium's private fd 3/4 transport, but give the signed app its own
 // macOS privacy responsibility. LaunchServices cannot pass these descriptors.

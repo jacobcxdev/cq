@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"time"
 )
@@ -25,6 +26,16 @@ type Controller struct {
 	Stdout, Stderr            io.Writer
 	Catalogue                 *CatalogueClient
 	Native                    NativeEvaluator
+	currentAppPin             func() (Settings, error)
+	appRunning                func(context.Context, *Settings) (bool, error)
+}
+
+func (c Controller) registeredAppPin() (Settings, error) {
+	if c.currentAppPin != nil {
+		return c.currentAppPin()
+	}
+	pin, _, err := ResolveRegisteredWindowsApp()
+	return pin, err
 }
 
 func (c Controller) settings() (*Settings, error) {
@@ -43,14 +54,41 @@ func (c Controller) settings() (*Settings, error) {
 // Callers hold the installation operation lock.
 func (c Controller) refreshAppPin(s *Settings, pins []Settings) error {
 	missingRecovery := s.NativeBindings != nil && (s.NativeBindings.ProfileQuery == "" || s.NativeBindings.ProfileRecovery == "")
-	if AppCheck(s) == nil && !missingRecovery {
-		return nil
-	}
-	pin, err := qualifiedAppPin(s.AppPath, pins)
-	if err != nil {
-		return err
+	var pin Settings
+	var err error
+	if runtime.GOOS == "windows" {
+		pin, err = c.registeredAppPin()
+		if err != nil {
+			return err
+		}
+		changed := pin.AppPath != s.AppPath || pin.AppVersion != s.AppVersion || pin.AppBuild != s.AppBuild || pin.ASARSHA256 != s.ASARSHA256 || pin.ModuleAsset != s.ModuleAsset || missingRecovery
+		if !changed && AppCheck(s) == nil {
+			return nil
+		}
+		running := c.appRunning
+		if running == nil {
+			running = NormalAppRunning
+		}
+		probe, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		active, err := running(probe, s)
+		if err != nil {
+			return err
+		}
+		if active {
+			return errors.New("Native app updated; quit the active Desktop before refreshing Dots")
+		}
+	} else {
+		if AppCheck(s) == nil && !missingRecovery {
+			return nil
+		}
+		pin, err = qualifiedAppPin(s.AppPath, pins)
+		if err != nil {
+			return err
+		}
 	}
 	next := *s
+	next.AppPath = pin.AppPath
 	next.AppVersion, next.AppBuild = pin.AppVersion, pin.AppBuild
 	next.ASARSHA256, next.ModuleAsset = pin.ASARSHA256, pin.ModuleAsset
 	next.NativeBindings = pin.NativeBindings
@@ -59,6 +97,26 @@ func (c Controller) refreshAppPin(s *Settings, pins []Settings) error {
 	}
 	*s = next
 	return nil
+}
+
+func (c Controller) statusAppCheck(s *Settings) error {
+	if runtime.GOOS == "windows" {
+		pin, err := c.registeredAppPin()
+		if err != nil {
+			return err
+		}
+		if pin.AppPath != s.AppPath || pin.AppVersion != s.AppVersion || pin.AppBuild != s.AppBuild || pin.ASARSHA256 != s.ASARSHA256 || pin.ModuleAsset != s.ModuleAsset || AppCheck(s) != nil {
+			return errors.New("Native app updated; quit it when ready, then run cq codex dots start to refresh compatibility")
+		}
+		return nil
+	}
+	if AppCheck(s) == nil {
+		return nil
+	}
+	if _, err := qualifiedAppPin(s.AppPath, qualifiedAppPins); err != nil {
+		return err
+	}
+	return errors.New("Native app updated; quit it when ready, then run cq codex dots start to refresh compatibility")
 }
 
 func (c Controller) client(s *Settings) *CatalogueClient {
@@ -379,7 +437,13 @@ func waitContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func helperExecutable(s *Settings) string { return filepath.Join(s.RuntimeRoot, "cq-dots-runtime") }
+func helperExecutable(s *Settings) string {
+	name := "cq-dots-runtime"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	return filepath.Join(s.RuntimeRoot, name)
+}
 
 func processRoles(rows []RuntimeProcess) []string {
 	roles := make([]string, 0, len(rows))

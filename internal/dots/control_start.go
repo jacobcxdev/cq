@@ -44,11 +44,8 @@ func (c Controller) Status(ctx context.Context) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := AppCheck(s); err != nil {
-		if _, err := qualifiedAppPin(s.AppPath, qualifiedAppPins); err != nil {
-			return nil, err
-		}
-		return nil, errors.New("Native app updated; quit it when ready, then run cq codex dots start to refresh compatibility")
+	if err := c.statusAppCheck(s); err != nil {
+		return nil, err
 	}
 	expression := nativeAsset(`(async()=>{if(document.querySelector('[data-testid="onboarding-progress-bar"]'))return {native_catalog_ready:false,onboarding_required:true};const m=await import('app://-/assets/MODULE_ASSET_PLACEHOLDER');const c=await m.Ymr.safeGet('/tbo');const p=await m.Ymr.safeGet('/tbo/primary');return {profiles:c.items.map(x=>x.id),primary:p.profile?.id,available:p.selection?.available,workspaceError:[...document.querySelectorAll('aside[role="status"][aria-live="polite"] h3')].some(el=>el.textContent.trim().replace(/’/g,"'")==="Couldn't load workspace settings")};})()`, s)
 	values, err := c.evaluator(s).EvaluateAll(ctx, expression)

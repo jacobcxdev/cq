@@ -9,9 +9,29 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
+
+func proxyConfigTestPaths(t *testing.T) DefaultPaths {
+	t.Helper()
+	root := t.TempDir()
+	protectProxyConfigTestRoot(t, root)
+	return PathsForRoots(userdirs.Roots{
+		Config: filepath.Join(root, "config"),
+		State:  filepath.Join(root, "state"),
+	})
+}
+
+func saveProxyTestConfig(t *testing.T, paths DefaultPaths, cfg *Config) error {
+	t.Helper()
+	fsys, err := fsutil.NewPrivateDestinationFileSystem(paths.RescueBootstrap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return saveConfigForPaths(cfg, paths, fsys)
+}
 
 func TestPathsForRootsSeparatesCQOwnedData(t *testing.T) {
 	roots := userdirs.Roots{
@@ -35,10 +55,9 @@ func TestPathsForRootsSeparatesCQOwnedData(t *testing.T) {
 }
 
 func TestSaveConfigSeparatesNormalAndRescueRoots(t *testing.T) {
-	configBase := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configBase)
+	paths := proxyConfigTestPaths(t)
 	resilienceRoot := filepath.Join(t.TempDir(), "resilience")
-	if err := SaveConfig(&Config{
+	if err := saveProxyTestConfig(t, paths, &Config{
 		LocalToken:              "local-token",
 		ClaudeUpstream:          DefaultUpstream,
 		CodexUpstream:           DefaultCodexUpstream,
@@ -48,35 +67,30 @@ func TestSaveConfigSeparatesNormalAndRescueRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	for _, path := range []string{
-		filepath.Join(configBase, "cq", "proxy.json"),
-		filepath.Join(configBase, "cq", "state", "proxy-rescue.json"),
-	} {
+	for _, path := range []string{paths.ConfigFile, paths.RescueBootstrap} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected %s: %v", path, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(configBase, "cq", "proxy-rescue.json")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(filepath.Dir(paths.ConfigFile), "proxy-rescue.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("legacy rescue path exists: %v", err)
 	}
 }
 
 func TestLoadExistingConfigDoesNotCreateMissingState(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", root)
-	if _, err := LoadExistingConfig(); !errors.Is(err, os.ErrNotExist) {
+	paths := proxyConfigTestPaths(t)
+	if _, err := loadConfigFile(paths.ConfigFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "cq")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Dir(paths.ConfigFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("config directory created: %v", err)
 	}
 }
 
 func TestRescueBootstrapSurvivesInvalidNormalConfig(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", root)
-	stateRoot := filepath.Join(root, "resilience")
-	if err := SaveConfig(&Config{
+	paths := proxyConfigTestPaths(t)
+	stateRoot := filepath.Join(t.TempDir(), "resilience")
+	if err := saveProxyTestConfig(t, paths, &Config{
 		LocalToken:              "local-token",
 		ClaudeUpstream:          DefaultUpstream,
 		CodexUpstream:           DefaultCodexUpstream,
@@ -85,13 +99,13 @@ func TestRescueBootstrapSurvivesInvalidNormalConfig(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "cq", "proxy.json"), []byte("{"), 0o600); err != nil {
+	if err := os.WriteFile(paths.ConfigFile, []byte("{"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadExistingConfig(); err == nil {
+	if _, err := loadConfigFile(paths.ConfigFile); err == nil {
 		t.Fatal("invalid normal config loaded")
 	}
-	bootstrap, err := LoadProxyRescueBootstrapConfig()
+	bootstrap, err := loadProxyRescueBootstrapConfig(paths)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,12 +115,11 @@ func TestRescueBootstrapSurvivesInvalidNormalConfig(t *testing.T) {
 }
 
 func TestRescueBootstrapMissingIsNonCreating(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", root)
-	if _, err := LoadProxyRescueBootstrapConfig(); !errors.Is(err, os.ErrNotExist) {
+	paths := proxyConfigTestPaths(t)
+	if _, err := loadProxyRescueBootstrapConfig(paths); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(root, "cq")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(paths.StateDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("bootstrap load created state: %v", err)
 	}
 }
@@ -184,13 +197,10 @@ func TestConfigCodexWindowPrimingRejectsEmptyOverride(t *testing.T) {
 }
 
 func TestConfigPreservesUnknownFieldsAcrossLoadSave(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	configDir := filepath.Join(dir, "cq")
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
+	paths := proxyConfigTestPaths(t)
+	if err := os.MkdirAll(filepath.Dir(paths.ConfigFile), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(configDir, "proxy.json")
 	original := []byte(`{
 		"port": 19280,
 		"local_token": "token",
@@ -200,10 +210,10 @@ func TestConfigPreservesUnknownFieldsAcrossLoadSave(t *testing.T) {
 		"future_scalar": 7,
 		"future_object": {"nested": [1, {"keep": true}]}
 	}`)
-	if err := os.WriteFile(path, original, 0o600); err != nil {
+	if err := os.WriteFile(paths.ConfigFile, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg, err := LoadConfig()
+	cfg, err := loadOrGenerateConfig(paths.ConfigFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,10 +221,10 @@ func TestConfigPreservesUnknownFieldsAcrossLoadSave(t *testing.T) {
 		t.Fatalf("routing default = %q, want opaque key", cfg.CodexRoutingDefaultAccountKey)
 	}
 	cfg.PinnedClaudeAccount = "person@example.test"
-	if err := SaveConfig(cfg); err != nil {
+	if err := saveProxyTestConfig(t, paths, cfg); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(paths.ConfigFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,9 +250,8 @@ func TestConfigPreservesUnknownFieldsAcrossLoadSave(t *testing.T) {
 }
 
 func TestGeneratedConfigDefaultsCodexRoutingOff(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	cfg, err := LoadConfig()
+	paths := proxyConfigTestPaths(t)
+	cfg, err := loadOrGenerateConfig(paths.ConfigFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +264,7 @@ func TestGeneratedConfigDefaultsCodexRoutingOff(t *testing.T) {
 	if cfg.CodexRoutingDefaultAccountKey != "" {
 		t.Fatalf("routing default = %q, want unconfigured", cfg.CodexRoutingDefaultAccountKey)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "cq", "proxy.json"))
+	data, err := os.ReadFile(paths.ConfigFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,10 +277,9 @@ func TestGeneratedConfigDefaultsCodexRoutingOff(t *testing.T) {
 }
 
 func TestConfigCodexRoutingDefaultAccountKeySaveLoad(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	paths := proxyConfigTestPaths(t)
 	want := codex.AccountKey("acct_opaque_default")
-	if err := SaveConfig(&Config{
+	if err := saveProxyTestConfig(t, paths, &Config{
 		LocalToken:                    "token",
 		ClaudeUpstream:                DefaultUpstream,
 		CodexUpstream:                 DefaultCodexUpstream,
@@ -280,7 +288,7 @@ func TestConfigCodexRoutingDefaultAccountKeySaveLoad(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
-	got, err := LoadConfig()
+	got, err := loadOrGenerateConfig(paths.ConfigFile)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
@@ -380,9 +388,8 @@ func TestConfigRejectsInvalidCodexRoutingAccountKeys(t *testing.T) {
 }
 
 func TestConfigCodexRoutingPinOverridesWithoutMutatingPolicy(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	cfg, err := LoadConfig()
+	paths := proxyConfigTestPaths(t)
+	cfg, err := loadOrGenerateConfig(paths.ConfigFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,10 +397,10 @@ func TestConfigCodexRoutingPinOverridesWithoutMutatingPolicy(t *testing.T) {
 	cfg.CodexRoutingDefaultAccountKey = "account-a"
 	cfg.CodexRoutingPinnedAccountKey = "account-c"
 
-	if err := SaveConfig(cfg); err != nil {
+	if err := saveProxyTestConfig(t, paths, cfg); err != nil {
 		t.Fatal(err)
 	}
-	got, err := LoadConfig()
+	got, err := loadOrGenerateConfig(paths.ConfigFile)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,18 +503,17 @@ func TestConfigPayloadDiagnosticsLogDefaultDisabled(t *testing.T) {
 }
 
 func TestConfigDiagnosticsLogPersisted(t *testing.T) {
-	configHome := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", configHome)
+	paths := proxyConfigTestPaths(t)
 	path := filepath.Join(t.TempDir(), "routes.jsonl")
 
-	if err := SaveConfig(&Config{
+	if err := saveProxyTestConfig(t, paths, &Config{
 		LocalToken:     "tok",
 		DiagnosticsLog: path,
 	}); err != nil {
 		t.Fatalf("SaveConfig: %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(configHome, "cq", "proxy.json"))
+	data, err := os.ReadFile(paths.ConfigFile)
 	if err != nil {
 		t.Fatalf("read proxy.json: %v", err)
 	}
@@ -526,7 +532,7 @@ func TestConfigDiagnosticsLogPersisted(t *testing.T) {
 		t.Fatalf("persisted diagnostics_log = %q, want %q in %s", persisted, path, data)
 	}
 
-	cfg, err := LoadConfig()
+	cfg, err := loadOrGenerateConfig(paths.ConfigFile)
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}

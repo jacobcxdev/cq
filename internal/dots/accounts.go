@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,6 +86,9 @@ func revision(info os.FileInfo) fileRevision {
 func ReadOwned(path, root string) ([]byte, error) { return readPrivate(path, root, false) }
 
 func readPrivate(path, root string, exactMode bool) ([]byte, error) {
+	if runtime.GOOS == "windows" {
+		return windowsReadPrivate(path, root, exactMode)
+	}
 	if root != "" {
 		if !cleanAbsolute(path) || !cleanAbsolute(root) || !within(root, path) {
 			return nil, fmt.Errorf("invalid declared credential path")
@@ -196,6 +200,16 @@ func ParseCredential(data []byte, now time.Time) (Account, error) {
 }
 
 func privateSource(path string, declared bool) error {
+	if runtime.GOOS == "windows" {
+		fsys, err := windowsStateFS(path)
+		if err != nil {
+			return err
+		}
+		if declared {
+			return fsutil.ValidateExternalCredentialDirectory(fsys, path)
+		}
+		return fsutil.ValidateSecureDirectory(fsys, path)
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -293,7 +307,7 @@ func (c *CatalogueClient) Inventory() (Inventory, error) {
 	if s == nil {
 		return Inventory{}, fmt.Errorf("Dots settings unavailable")
 	}
-	data, err := ReadOwned(s.SystemAuth, "")
+	data, err := readSystemAuth(s.SystemAuth)
 	if err != nil {
 		return Inventory{}, err
 	}

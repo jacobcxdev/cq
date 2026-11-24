@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,7 +21,7 @@ import (
 func setEnvironment(env []string, key, value string) []string {
 	result := make([]string, 0, len(env)+1)
 	for _, entry := range env {
-		if !strings.HasPrefix(entry, key+"=") {
+		if !matchesEnvironmentKey(entry, key) {
 			result = append(result, entry)
 		}
 	}
@@ -29,16 +30,26 @@ func setEnvironment(env []string, key, value string) []string {
 
 func environmentValue(env []string, key string) string {
 	for _, entry := range env {
-		if strings.HasPrefix(entry, key+"=") {
-			return strings.TrimPrefix(entry, key+"=")
+		if matchesEnvironmentKey(entry, key) {
+			_, value, _ := strings.Cut(entry, "=")
+			return value
 		}
 	}
 	return ""
 }
 
+func matchesEnvironmentKey(entry, key string) bool {
+	name, _, found := strings.Cut(entry, "=")
+	return found && (name == key || runtime.GOOS == "windows" && strings.EqualFold(name, key))
+}
+
 func launchWrite(path string, data []byte, mode os.FileMode) error {
 	if mode == 0o600 {
-		return fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, path, data)
+		fsys, err := dotsFileSystem(path)
+		if err != nil {
+			return err
+		}
+		return fsutil.SecureAtomicWrite(fsys, path, data)
 	}
 	return launcherWrite(path, data, mode)
 }
@@ -116,16 +127,21 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 		}
 		resolved, err := CanonicalPath(normalHome)
 		expected, e := CanonicalPath(filepath.Dir(s.SystemAuth))
-		if err != nil || e != nil || !filepath.IsAbs(normalHome) || resolved != expected {
+		sameHome := resolved == expected || runtime.GOOS == "windows" && strings.EqualFold(resolved, expected)
+		if err != nil || e != nil || !filepath.IsAbs(normalHome) || !sameHome {
 			return nil, nil, errors.New("Native Dots launch requires the configured normal CODEX_HOME")
 		}
 		for _, entry := range env {
-			if strings.HasPrefix(entry, "CODEX_ELECTRON_USER_DATA_PATH=") {
+			if matchesEnvironmentKey(entry, "CODEX_ELECTRON_USER_DATA_PATH") {
 				return nil, nil, errors.New("Native Dots launch requires the normal desktop profile")
 			}
-			if entry == "CODEX_HOME=" {
+			_, value, _ := strings.Cut(entry, "=")
+			if matchesEnvironmentKey(entry, "CODEX_HOME") && value == "" {
 				return nil, nil, errors.New("Native Dots launch requires the configured normal CODEX_HOME")
 			}
+		}
+		if runtime.GOOS == "windows" && environmentValue(env, "CODEX_HOME") != "" {
+			env = setEnvironment(env, "CODEX_HOME", normalHome)
 		}
 	}
 	portData, err := ReadOwned(filepath.Join(s.RuntimeRoot, "port"), s.RuntimeRoot)
@@ -195,11 +211,7 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 	}
 	env = setEnvironment(env, "CODEX_API_BASE_URL", apiBaseURL)
 	env = setEnvironment(env, "CODEX_APP_SERVER_CHATGPT_BASE_URL", "https://localhost:"+strconv.Itoa(port)+"/backend-api")
-	publicPath := environmentValue(env, "SSL_CERT_FILE")
-	if publicPath == "" {
-		publicPath = "/etc/ssl/cert.pem"
-	}
-	public, err := publicCertificate(publicPath)
+	public, err := launchPublicTrust(env)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -218,11 +230,14 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 	if err = launchWrite(filepath.Join(s.RuntimeRoot, "native-extra-ca.pem"), additional, 0o600); err != nil {
 		return nil, nil, err
 	}
-	env = setEnvironment(env, "SSL_CERT_FILE", filepath.Join(s.RuntimeRoot, "native-trust.pem"))
+	caVariable := "SSL_CERT_FILE"
+	if runtime.GOOS == "windows" {
+		caVariable = "CODEX_CA_CERTIFICATE"
+	}
+	env = setEnvironment(env, caVariable, filepath.Join(s.RuntimeRoot, "native-trust.pem"))
 	env = setEnvironment(env, "NODE_EXTRA_CA_CERTS", filepath.Join(s.RuntimeRoot, "native-extra-ca.pem"))
 	if native {
-		// Electron's Node WebSockets also need the macOS trust store when
-		// CQ Network's separately approved usage certificate is presented.
+		// Electron's Node WebSockets use the platform's configured roots.
 		env = setEnvironment(env, "NODE_USE_SYSTEM_CA", "1")
 	}
 	bypass, seen := []string{}, map[string]bool{}
@@ -233,16 +248,53 @@ func prepareLaunch(s *Settings, baseURL, executable string, env []string) ([]str
 		}
 	}
 	env = setEnvironment(env, "NO_PROXY", strings.Join(bypass, ","))
-	script := "#!/bin/sh\nexec " + shellQuote(helperExecutable(s)) + " __dots cloud-stdio " + shellQuote(filepath.Dir(s.RuntimeRoot)) + " \"$@\"\n"
-	launcher := filepath.Join(s.RuntimeRoot, "cloud-stdio-launch")
-	if err = launchWrite(launcher, []byte(script), 0o700); err != nil {
+	launcher, env, err := prepareCloudLauncher(s, env)
+	if err != nil {
 		return nil, nil, err
 	}
 	// CODEX_CLI_PATH selects our local wrapper without forcing remote hosts to
 	// spawn another local app-server against the same thread store.
 	env = slices.DeleteFunc(env, func(entry string) bool {
-		return strings.HasPrefix(entry, "CODEX_APP_SERVER_FORCE_CLI=")
+		return matchesEnvironmentKey(entry, "CODEX_APP_SERVER_FORCE_CLI")
 	})
 	env = setEnvironment(env, "CODEX_CLI_PATH", launcher)
 	return args, env, nil
+}
+
+func launchPublicTrust(env []string) ([]byte, error) {
+	path := environmentValue(env, "SSL_CERT_FILE")
+	if runtime.GOOS == "windows" {
+		if custom := environmentValue(env, "CODEX_CA_CERTIFICATE"); custom != "" {
+			path = custom
+		}
+		// Codex adds CODEX_CA_CERTIFICATE to its Windows native roots.
+		if path == "" {
+			return nil, nil
+		}
+	} else if path == "" {
+		path = "/etc/ssl/cert.pem"
+	}
+	return publicCertificate(path)
+}
+
+func prepareCloudLauncher(s *Settings, env []string) (string, []string, error) {
+	if runtime.GOOS == "windows" {
+		root := filepath.Dir(s.RuntimeRoot)
+		launcher := WindowsCloudWrapperPath(root)
+		if err := windowsValidatePrivateFile(launcher); err != nil {
+			return "", nil, errors.New("Windows Dots cloud helper unavailable or redirected")
+		}
+		return launcher, setEnvironment(env, WindowsCloudRootEnv, root), nil
+	}
+	script := "#!/bin/sh\nexec " + shellQuote(helperExecutable(s)) + " __dots cloud-stdio " + shellQuote(filepath.Dir(s.RuntimeRoot)) + " \"$@\"\n"
+	launcher := filepath.Join(s.RuntimeRoot, "cloud-stdio-launch")
+	return launcher, env, launchWrite(launcher, []byte(script), 0o700)
+}
+
+const WindowsCloudRootEnv = "CQ_DOTS_WINDOWS_CLOUD_ROOT"
+
+// WindowsCloudWrapperPath binds the Desktop CLI redirection to the installed
+// private runtime helper. The ordinary CQ executable never consumes the marker.
+func WindowsCloudWrapperPath(root string) string {
+	return filepath.Join(root, "runtime", "cq-dots-runtime.exe")
 }

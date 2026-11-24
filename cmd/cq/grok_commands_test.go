@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -89,7 +88,8 @@ func TestGrokRefreshPreservesOptionalPrincipalIdentity(t *testing.T) {
 
 func TestGrokCommandsManageOnlyCQAccounts(t *testing.T) {
 	var output bytes.Buffer
-	a := grok.NewAuthority(grok.Store{FS: fsutil.OSFileSystem{}, ConfigDir: filepath.Join(t.TempDir(), "cq")}, nil, nil)
+	fsys, configDir := grokCommandFixtureFS(t)
+	a := grok.NewAuthority(grok.Store{FS: fsys, ConfigDir: configDir}, nil, nil)
 	deps := grokCommandDependencies{authority: a, output: &output, login: func(context.Context) (auth.GrokLogin, error) {
 		return auth.GrokLogin{UserID: "user-1", Email: "test@example.com", Tokens: auth.GrokTokens{AccessToken: "access-test", RefreshToken: "refresh-test", IDToken: "id-test", ExpiresAt: time.Now().Add(time.Hour)}}, nil
 	}, validate: func(_ context.Context, login grok.Login) (grok.Login, error) {

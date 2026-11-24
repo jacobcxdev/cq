@@ -316,9 +316,13 @@ func LoadConfig() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := loadConfigFile(paths.ConfigFile)
+	return loadOrGenerateConfig(paths.ConfigFile)
+}
+
+func loadOrGenerateConfig(path string) (*Config, error) {
+	cfg, err := loadConfigFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return generateDefaultConfig(paths.ConfigFile)
+		return generateDefaultConfig(path)
 	}
 	return cfg, err
 }
@@ -339,6 +343,10 @@ func LoadProxyRescueBootstrapConfig() (*ProxyRescueBootstrapConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	return loadProxyRescueBootstrapConfig(paths)
+}
+
+func loadProxyRescueBootstrapConfig(paths DefaultPaths) (*ProxyRescueBootstrapConfig, error) {
 	data, err := os.ReadFile(paths.RescueBootstrap)
 	if errors.Is(err, os.ErrNotExist) {
 		return loadProxyRescueBootstrapFromNormalConfig(paths.ConfigFile)
@@ -517,6 +525,10 @@ func SaveConfig(cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	return saveConfigForPaths(cfg, paths, fsutil.OSFileSystem{})
+}
+
+func saveConfigForPaths(cfg *Config, paths DefaultPaths, fsys fsutil.FileSystem) error {
 	saved := *cfg
 	saved.setDefaults()
 	if err := saved.validate(); err != nil {
@@ -544,7 +556,7 @@ func SaveConfig(cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("marshal proxy rescue bootstrap: %w", err)
 	}
-	if err := fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, bootstrapPath, bootstrap); err != nil {
+	if err := fsutil.SecureAtomicWrite(fsys, bootstrapPath, bootstrap); err != nil {
 		return fmt.Errorf("write proxy rescue bootstrap: %w", err)
 	}
 	return nil

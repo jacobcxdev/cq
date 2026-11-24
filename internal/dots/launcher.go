@@ -288,7 +288,11 @@ func RecoverApp(ctx context.Context, settings *Settings) error {
 	return recoverApp(running, err, func() error {
 		query, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		if err := exec.CommandContext(query, "/usr/bin/open", "-a", settings.AppPath).Run(); err != nil {
+		app, err := currentDesktopAppPath(settings)
+		if err != nil {
+			return fmt.Errorf("Native app recovery failed")
+		}
+		if err := openDesktopApp(query, app); err != nil {
 			return fmt.Errorf("Native app recovery failed")
 		}
 		return nil

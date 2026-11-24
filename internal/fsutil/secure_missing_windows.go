@@ -11,9 +11,20 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// OpenOwnerControlledCQPolicyDirectory retains an owner-controlled direct CQ
-// root for private harness policy files without changing its inherited ACL.
-func (fsys OSFileSystem) OpenOwnerControlledCQPolicyDirectory(path string) (SecureDirectory, error) {
+// IsDirectCQDirectory identifies the registered or explicitly scoped CQ root
+// without opening it. Callers must still use OpenOwnerControlledCQDirectory.
+func (fsys OSFileSystem) IsDirectCQDirectory(path string) bool {
+	clean, err := validateWindowsAbsolutePath(path)
+	if err != nil {
+		return false
+	}
+	selection, err := fsys.resolveSecureBoundary(clean, secureBoundaryCQPrivate)
+	return err == nil && strings.EqualFold(clean, filepath.Join(selection.AnchorPath, "cq"))
+}
+
+// OpenOwnerControlledCQDirectory retains the registered direct CQ root with
+// owner-controlled ACLs while preserving the AppData boundary identity.
+func (fsys OSFileSystem) OpenOwnerControlledCQDirectory(path string) (SecureDirectory, error) {
 	clean, err := validateWindowsAbsolutePath(path)
 	if err != nil {
 		return nil, err
@@ -22,9 +33,8 @@ func (fsys OSFileSystem) OpenOwnerControlledCQPolicyDirectory(path string) (Secu
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Dir(clean)
-	if !strings.EqualFold(dir, filepath.Join(selection.AnchorPath, "cq")) || filepath.Base(clean) != "harness.json" {
-		return nil, fmt.Errorf("%w: policy outside direct CQ root", ErrUnsafeSecurePath)
+	if !strings.EqualFold(clean, filepath.Join(selection.AnchorPath, "cq")) {
+		return nil, fmt.Errorf("%w: directory outside direct CQ root", ErrUnsafeSecurePath)
 	}
 	boundary, err := fsys.windowsPathBoundary(selection, secureBoundaryCQPrivate)
 	if err != nil {
@@ -49,9 +59,22 @@ func (fsys OSFileSystem) OpenOwnerControlledCQPolicyDirectory(path string) (Secu
 	if closeErr != nil {
 		return nil, errors.Join(closeErr, directory.Close())
 	}
-	if err := ValidateOwnerControlledDirectoryHandle(fsys, directory, dir); err != nil {
+	if err := ValidateOwnerControlledDirectoryHandle(fsys, directory, clean); err != nil {
 		return nil, errors.Join(err, directory.Close())
 	}
 	directory.ownerControlled = true
 	return directory, nil
+}
+
+// OpenOwnerControlledCQPolicyDirectory restricts the harness exception to its
+// one policy filename while reusing the direct CQ root authority check.
+func (fsys OSFileSystem) OpenOwnerControlledCQPolicyDirectory(path string) (SecureDirectory, error) {
+	clean, err := validateWindowsAbsolutePath(path)
+	if err != nil {
+		return nil, err
+	}
+	if filepath.Base(clean) != "harness.json" {
+		return nil, fmt.Errorf("%w: non-harness policy file", ErrUnsafeSecurePath)
+	}
+	return fsys.OpenOwnerControlledCQDirectory(filepath.Dir(clean))
 }

@@ -141,6 +141,15 @@ func SecureAtomicCreateInDirectoryChecked(inspector SecurePathInspector, directo
 	return secureAtomicWriteInDirectory(inspector, directory, name, data, beforePublish, nil, true)
 }
 
+// SecureAtomicCreateInOwnerControlledDirectory publishes only a new
+// private file through a retained owner-controlled directory. The destination
+// cannot replace an existing entry, including one created concurrently.
+func SecureAtomicCreateInOwnerControlledDirectory(inspector SecurePathInspector, directory SecureDirectory, path, name string, data []byte) error {
+	return secureAtomicWriteInDirectory(inspector, directory, name, data, nil, func() error {
+		return ValidateOwnerControlledDirectoryHandle(inspector, directory, path)
+	}, true)
+}
+
 func secureAtomicWriteInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, data []byte, beforeReplace, fence func() error, noReplace bool) (result error) {
 	if inspector == nil || directory == nil {
 		return commitFailure("validate filesystem", ErrSecureCapabilityUnavailable)
@@ -1189,13 +1198,29 @@ func AcquireNewExclusiveLockInDirectory(inspector SecurePathInspector, directory
 // descriptor currently holds its non-blocking exclusive lock. It never creates
 // the lock or retains ownership of an unlocked file.
 func ValidateExclusiveLockHeldInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, expected SecureFileIdentity) error {
+	return validateExclusiveLockHeldInDirectory(inspector, directory, name, expected, nil)
+}
+
+// ValidateExclusiveLockHeldInOwnerControlledDirectory fences a private lock
+// held below a retained owner-controlled directory by its canonical path.
+func ValidateExclusiveLockHeldInOwnerControlledDirectory(inspector SecurePathInspector, directory SecureDirectory, path, name string, expected SecureFileIdentity) error {
+	return validateExclusiveLockHeldInDirectory(inspector, directory, name, expected, func() error {
+		return ValidateOwnerControlledDirectoryHandle(inspector, directory, path)
+	})
+}
+
+func validateExclusiveLockHeldInDirectory(inspector SecurePathInspector, directory SecureDirectory, name string, expected SecureFileIdentity, fence func() error) error {
 	if inspector == nil || directory == nil {
 		return ErrSecureCapabilityUnavailable
 	}
 	if err := validateSecureEntryName(name); err != nil {
 		return err
 	}
-	if err := validateSecureDirectoryDescriptor(inspector, directory); err != nil {
+	validateDirectory := func() error { return validateSecureDirectoryDescriptor(inspector, directory) }
+	if fence != nil {
+		validateDirectory = fence
+	}
+	if err := validateDirectory(); err != nil {
 		return fmt.Errorf("validate opened lock directory: %w", err)
 	}
 	beforeInfo, err := secureRegularFileInfoInDirectory(inspector, directory, name)
@@ -1229,7 +1254,7 @@ func ValidateExclusiveLockHeldInDirectory(inspector SecurePathInspector, directo
 	if !ok || afterIdentity != expected {
 		return fmt.Errorf("%w: revalidated lock identity", ErrUnsafeSecurePath)
 	}
-	if err := validateSecureDirectoryDescriptor(inspector, directory); err != nil {
+	if err := validateDirectory(); err != nil {
 		return fmt.Errorf("revalidate opened lock directory: %w", err)
 	}
 	return nil

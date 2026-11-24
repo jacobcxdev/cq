@@ -162,17 +162,28 @@ func (s *ManagedStore) saveNewForAccount(credential LoginCredential, existingAcc
 }
 
 func (s *ManagedStore) Load(path string) (ManagedRecord, error) {
-	data, err := s.FS.ReadFile(path)
-	if err != nil {
-		return ManagedRecord{}, err
+	data, handled, err := s.nativeReadManaged(path)
+	if handled {
+		if err != nil {
+			return ManagedRecord{}, err
+		}
+	} else {
+		data, err = s.FS.ReadFile(path)
+		if err != nil {
+			return ManagedRecord{}, err
+		}
+		info, err := s.FS.Stat(path)
+		if err != nil {
+			return ManagedRecord{}, err
+		}
+		if info.Mode().Perm() != 0o600 {
+			return ManagedRecord{}, fmt.Errorf("managed credential permissions %o, want 600", info.Mode().Perm())
+		}
 	}
-	info, err := s.FS.Stat(path)
-	if err != nil {
-		return ManagedRecord{}, err
-	}
-	if info.Mode().Perm() != 0o600 {
-		return ManagedRecord{}, fmt.Errorf("managed credential permissions %o, want 600", info.Mode().Perm())
-	}
+	return decodeManagedRecord(path, data)
+}
+
+func decodeManagedRecord(path string, data []byte) (ManagedRecord, error) {
 	var doc map[string]any
 	if err := json.Unmarshal(data, &doc); err != nil || doc == nil {
 		return ManagedRecord{}, errors.New("invalid managed credential JSON")
@@ -248,6 +259,9 @@ func (s *ManagedStore) Commit(record *ManagedRecord, expected Revision) error {
 }
 
 func (s *ManagedStore) durableReplace(path string, data []byte) error {
+	if handled, err := s.nativeDurableReplace(path, data); handled {
+		return err
+	}
 	if err := s.FS.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return &CommitError{Step: "mkdir", Err: err}
 	}

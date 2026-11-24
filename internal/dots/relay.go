@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 //go:embed relay_read.js
@@ -188,7 +186,7 @@ func RunRoomCoordination(ctx context.Context, s *Settings, c *CatalogueClient, n
 	if e := ValidateRuntimePaths(s.RuntimeRoot); e != nil {
 		return e
 	}
-	lock, e := fsutil.AcquireExclusiveLock(fsutil.OSFileSystem{}, filepath.Join(root, "process.lock"))
+	lock, e := acquireDotsLock(filepath.Join(root, "process.lock"))
 	if e != nil {
 		return e
 	}

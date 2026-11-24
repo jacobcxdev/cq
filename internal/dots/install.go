@@ -82,6 +82,22 @@ func nativeArchiveDigest(path string) (string, error) {
 type InstallOptions struct {
 	Root, App, SystemAuth, CQAccounts, AccountSource string
 	Mode, Executable, BaseURL                        string
+	launcher                                         func(string, string, string) (string, error)
+}
+
+func dotsFileSystem(path string) (fsutil.OSFileSystem, error) {
+	if runtime.GOOS == "windows" {
+		return windowsStateFS(filepath.Dir(path))
+	}
+	return fsutil.OSFileSystem{}, nil
+}
+
+func acquireDotsLock(path string) (fsutil.ExclusiveLock, error) {
+	fsys, err := dotsFileSystem(path)
+	if err != nil {
+		return nil, err
+	}
+	return fsutil.AcquireExclusiveLock(fsys, path)
 }
 
 // OperationLock serialises installation mutations without blocking status reads.
@@ -94,7 +110,7 @@ func OperationLock(ctx context.Context, root string, wait time.Duration) (io.Clo
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		lock, err := fsutil.AcquireExclusiveLock(fsutil.OSFileSystem{}, filepath.Join(root, "operation.lock"))
+		lock, err := acquireDotsLock(filepath.Join(root, "operation.lock"))
 		if err == nil {
 			return lock, nil
 		}
@@ -115,6 +131,9 @@ func OperationLock(ctx context.Context, root string, wait time.Duration) (io.Clo
 }
 
 func ensureInstallDirectory(path string) error {
+	if runtime.GOOS == "windows" {
+		return windowsEnsurePrivateDirectory(path)
+	}
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return err
 	}
@@ -126,7 +145,11 @@ func installSave(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	return fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, path, append(data, '\n'))
+	fsys, err := dotsFileSystem(path)
+	if err != nil {
+		return err
+	}
+	return fsutil.SecureAtomicWrite(fsys, path, append(data, '\n'))
 }
 
 // ValidateInstallLocation rejects overlap before any installation state is made.
@@ -154,13 +177,15 @@ func ValidateInstallLocation(options InstallOptions) (string, error) {
 	if within(root, home) {
 		return "", fmt.Errorf("Installation must not contain the home directory")
 	}
-	protected := []string{options.App, filepath.Dir(options.SystemAuth), options.CQAccounts, filepath.Join(home, ".codex")}
+	protected := []string{options.App, filepath.Dir(options.SystemAuth), options.CQAccounts}
 	if options.AccountSource != "" {
 		protected = append(protected, options.AccountSource)
 	}
-	for _, name := range []string{"Codex", "ChatGPT", "com.openai.codex", "com.openai.chat", "OpenAI"} {
-		protected = append(protected, filepath.Join(home, "Library", "Application Support", name))
+	appRoots, err := ProtectedAppRoots(home)
+	if err != nil {
+		return "", err
 	}
+	protected = append(protected, appRoots...)
 	for _, path := range protected {
 		if !cleanAbsolute(path) {
 			return "", fmt.Errorf("Installation paths must be absolute")
@@ -178,6 +203,9 @@ func ValidateInstallLocation(options InstallOptions) (string, error) {
 
 // AppCheck checks the discovered application snapshot without changing its signed bundle.
 func AppCheck(settings *Settings) error {
+	if runtime.GOOS == "windows" {
+		return windowsAppCheck(settings)
+	}
 	if _, err := readAppPlist(filepath.Join(settings.AppPath, "Contents", "Info.plist")); err != nil {
 		return err
 	}
@@ -223,7 +251,11 @@ func Provision(root, mode string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if !info.Mode().IsRegular() || !owned(info) || info.Mode().Perm() != 0o600 {
+		if runtime.GOOS == "windows" {
+			if err := windowsValidatePrivateFile(filepath.Join(runtimeRoot, name)); err != nil {
+				return "", fmt.Errorf("Private certificate authority changed: %w", err)
+			}
+		} else if !info.Mode().IsRegular() || !owned(info) || info.Mode().Perm() != 0o600 {
 			return "", fmt.Errorf("Private certificate authority changed")
 		}
 		present++
@@ -249,14 +281,23 @@ func Provision(root, mode string) (string, error) {
 		cert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 		material := map[string][]byte{"leaf-key.pem": pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}), "leaf-cert.pem": cert, "probe-cert.pem": cert, "realtime-cert.pem": cert}
 		for _, name := range names {
-			if err := fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, filepath.Join(runtimeRoot, name), material[name]); err != nil {
+			path := filepath.Join(runtimeRoot, name)
+			fsys, err := dotsFileSystem(path)
+			if err != nil {
+				return "", err
+			}
+			if err := fsutil.SecureAtomicWrite(fsys, path, material[name]); err != nil {
 				return "", err
 			}
 		}
 	}
 	port := filepath.Join(runtimeRoot, "port")
 	if _, err := os.Lstat(port); os.IsNotExist(err) {
-		if err := fsutil.SecureAtomicWrite(fsutil.OSFileSystem{}, port, []byte("8000")); err != nil {
+		fsys, err := dotsFileSystem(port)
+		if err != nil {
+			return "", err
+		}
+		if err := fsutil.SecureAtomicWrite(fsys, port, []byte("8000")); err != nil {
 			return "", err
 		}
 	} else if err != nil {
@@ -275,6 +316,9 @@ func Provision(root, mode string) (string, error) {
 // Python wrote these non-secret ports as 0644. Preserve their values while
 // adopting the private file mode required by the Go runtime.
 func migrateLegacyProxyPort(path string) error {
+	if runtime.GOOS == "windows" {
+		return windowsMigratePrivatePort(path)
+	}
 	file, err := (fsutil.OSFileSystem{}).OpenNoFollow(path)
 	if os.IsNotExist(err) {
 		return nil
@@ -319,6 +363,9 @@ func migrateLegacyProxyPort(path string) error {
 // Install prepares an installation. Starting its workers remains a separate
 // controller operation so an existing native app is never interrupted here.
 func Install(ctx context.Context, options InstallOptions) (map[string]any, error) {
+	if runtime.GOOS == "windows" {
+		return windowsInstall(ctx, options)
+	}
 	if runtime.GOOS != "darwin" {
 		return nil, fmt.Errorf("Native Dots installation currently requires macOS")
 	}
@@ -360,7 +407,7 @@ func installPrepared(ctx context.Context, options InstallOptions, pin Settings) 
 	if _, err := ValidateInstallLocation(options); err != nil {
 		return nil, err
 	}
-	data, err := ReadOwned(options.SystemAuth, "")
+	data, err := readSystemAuth(options.SystemAuth)
 	if err != nil {
 		return nil, err
 	}
@@ -409,12 +456,23 @@ func installPrepared(ctx context.Context, options InstallOptions, pin Settings) 
 		return nil, err
 	}
 	result := map[string]any{"installed": true, "system_app_modified": false, "runtime": "go"}
-	if options.Mode == "native" {
+	if options.Mode == "native" && runtime.GOOS != "windows" {
 		if err := InstallLauncher(root, options.App, options.Executable); err != nil {
 			return nil, err
 		}
 		home, _ := os.UserHomeDir()
 		result["dock_launcher"] = filepath.Join(home, "Applications", "ChatGPT via CQ.app")
+	}
+	if options.Mode == "native" && runtime.GOOS == "windows" {
+		launcher := options.launcher
+		if launcher == nil {
+			launcher = installWindowsDotsLauncher
+		}
+		path, err := launcher(root, options.App, options.Executable)
+		if err != nil {
+			return nil, err
+		}
+		result["start_menu_launcher"] = path
 	}
 	if err := installSave(filepath.Join(root, "installation.json"), map[string]any{"schema": 1, "installed": true, "app": map[string]string{"app_version": pin.AppVersion, "app_build": pin.AppBuild, "asar_sha256": pin.ASARSHA256, "module_asset": pin.ModuleAsset}, "installed_at": float64(time.Now().UnixNano()) / 1e9, "system_app_modified": false, "runtime": "go"}); err != nil {
 		return nil, err

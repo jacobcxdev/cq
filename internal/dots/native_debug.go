@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -27,10 +28,7 @@ func nativeRoot(root string) error {
 	if err := privateDirectory(root); err != nil {
 		return err
 	}
-	if len(filepath.Join(root, nativeSocketName)) > 103 {
-		return errors.New("native debugger socket path is too long")
-	}
-	return nil
+	return nativeEndpointCheck(root)
 }
 func nativeReceive(c net.Conn, limit int) (map[string]any, error) {
 	reader := bufio.NewReaderSize(c, limit+1)
@@ -63,30 +61,17 @@ func nativeRequest(ctx context.Context, s *Settings, request map[string]any) (ma
 	if err := nativeRoot(s.RuntimeRoot); err != nil {
 		return nil, err
 	}
-	path := filepath.Join(s.RuntimeRoot, nativeSocketName)
-	info, err := os.Lstat(path)
-	if err != nil || info.Mode()&os.ModeSocket == 0 || !owned(info) || info.Mode().Perm() != 0o600 {
-		return nil, errors.New("native debugger socket must be owned and mode 0600")
-	}
 	ctx, cancel := context.WithTimeout(ctx, nativeTimeout+5*time.Second)
 	defer cancel()
-	raw, err := (&net.Dialer{}).DialContext(ctx, "unix", path)
+	c, err := nativeDial(ctx, s.RuntimeRoot)
 	if err != nil {
 		return nil, errors.New("native debugger unavailable")
 	}
-	defer raw.Close()
-	c, ok := raw.(*net.UnixConn)
-	if !ok {
-		return nil, errors.New("native debugger unavailable")
-	}
+	defer c.Close()
 	deadline, _ := ctx.Deadline()
 	_ = c.SetDeadline(deadline)
 	stop := context.AfterFunc(ctx, func() { _ = c.SetDeadline(time.Now()) })
 	defer stop()
-	uid, err := nativePeerUID(c)
-	if err != nil || uid != uint32(os.Getuid()) {
-		return nil, errors.New("native debugger peer mismatch")
-	}
 	if err = nativeSend(c, request, nativeMaxRequest); err != nil {
 		return nil, err
 	}
@@ -118,7 +103,7 @@ func NativeIdentity(ctx context.Context, s *Settings) (map[string]int, error) {
 }
 
 type nativeBroker struct {
-	listener  *net.UnixListener
+	listener  net.Listener
 	lock      fsutil.ExclusiveLock
 	closeOnce sync.Once
 	path      string
@@ -127,77 +112,15 @@ type nativeBroker struct {
 	pipe      *nativePipe
 }
 
-func newNativeBroker(root string) (*nativeBroker, error) {
-	if err := nativeRoot(root); err != nil {
-		return nil, err
-	}
-	path := filepath.Join(root, nativeSocketName)
-	// Keep this lock until the listener is closed and its exact path removed.
-	// Otherwise simultaneous recovery could unlink another broker's new socket.
-	lock, err := fsutil.AcquireExclusiveLock(fsutil.OSFileSystem{}, filepath.Join(root, "native-debug.lock"))
-	if err != nil {
-		return nil, errors.New("native debugger is already running or its lock is unavailable")
-	}
-	keepLock := false
-	defer func() {
-		if !keepLock {
-			_ = lock.Close()
-		}
-	}()
-	if info, err := os.Lstat(path); err == nil {
-		if info.Mode()&os.ModeSocket == 0 || !owned(info) || info.Mode()&(os.ModePerm|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0o600 {
-			return nil, errors.New("native debugger socket must be owned and mode 0600")
-		}
-		// A legacy broker may not hold the lock. A successful connection, timeout,
-		// permission error or other ambiguous failure must never displace it.
-		conn, err := net.DialTimeout("unix", path, 250*time.Millisecond)
-		if err == nil {
-			_ = conn.Close()
-			return nil, errors.New("native debugger socket already exists")
-		}
-		if !errors.Is(err, syscall.ECONNREFUSED) {
-			return nil, errors.New("native debugger socket availability could not be verified")
-		}
-		current, err := os.Lstat(path)
-		if err != nil || !os.SameFile(info, current) {
-			return nil, errors.New("native debugger socket changed during recovery")
-		}
-		if err := os.Remove(path); err != nil {
-			return nil, errors.New("native debugger abandoned socket could not be removed")
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, errors.New("native debugger socket unavailable")
-	}
-	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
-	if err != nil {
-		return nil, err
-	}
-	listener.SetUnlinkOnClose(false)
-	b := &nativeBroker{listener: listener, lock: lock, path: path}
-	keepLock = true
-	b.identity, err = os.Lstat(path)
-	if err != nil {
-		b.close()
-		return nil, err
-	}
-	if err = os.Chmod(path, 0o600); err != nil {
-		b.close()
-		return nil, err
-	}
-	return b, nil
-}
 func (b *nativeBroker) close() {
 	b.closeOnce.Do(func() {
 		_ = b.listener.Close()
-		if info, err := os.Lstat(b.path); err == nil && b.identity != nil && os.SameFile(info, b.identity) {
-			_ = os.Remove(b.path)
-		}
+		nativeRemoveEndpoint(b)
 		_ = b.lock.Close()
 	})
 }
 func (b *nativeBroker) once(ctx context.Context) error {
-	_ = b.listener.SetDeadline(time.Now().Add(250 * time.Millisecond))
-	c, err := b.listener.AcceptUnix()
+	c, err := nativeAccept(b.listener)
 	if err != nil {
 		if e, ok := err.(net.Error); ok && e.Timeout() {
 			return nil
@@ -207,8 +130,7 @@ func (b *nativeBroker) once(ctx context.Context) error {
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(nativeTimeout + 5*time.Second))
 	response := map[string]any{"ok": false, "error": "Native debugger request failed"}
-	uid, err := nativePeerUID(c)
-	if err == nil && uid == uint32(os.Getuid()) {
+	if nativeServerPeer(c) {
 		request, e := nativeReceive(c, nativeMaxRequest)
 		if e == nil {
 			if request["operation"] == "identity" && len(request) == 1 {
@@ -238,10 +160,10 @@ func (b *nativeBroker) once(ctx context.Context) error {
 // Cancellation or SIGTERM closes IPC, then waits without terminating the app.
 // Run it in the detached native-broker helper, never in a short-lived CLI process.
 func LaunchNativeBroker(ctx context.Context, s *Settings, executable string, args, env []string) error {
-	if executable != filepath.Join(s.AppPath, "Contents", "MacOS", "ChatGPT") {
+	if executable != nativeAppExecutable(s) {
 		return errors.New("native debugger requires the configured official executable")
 	}
-	if err := AppCheck(s); err != nil {
+	if err := nativeAppCheck(s); err != nil {
 		return err
 	}
 	for _, arg := range args {
@@ -280,7 +202,7 @@ func LaunchNativeBroker(ctx context.Context, s *Settings, executable string, arg
 		return err
 	}
 	defer parentRead.Close()
-	args = append(append([]string{}, args...), "--remote-debugging-pipe")
+	args = nativePipeLaunchArgs(args)
 	signals := make(chan os.Signal, 2)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(signals)
@@ -344,10 +266,10 @@ func LaunchNativeBroker(ctx context.Context, s *Settings, executable string, arg
 // permits read-only status during migration without launching Python or restarting
 // the user's app. Both implementations retain the same exact process boundary.
 func nativeBrokerMatches(s *Settings, uid int, args []string, cwd string) bool {
-	if uid != os.Getuid() || cwd != s.RuntimeRoot || len(args) == 0 {
+	if uid != os.Getuid() || runtime.GOOS != "windows" && cwd != s.RuntimeRoot || len(args) == 0 {
 		return false
 	}
-	if args[0] == filepath.Join(s.RuntimeRoot, "cq-dots-runtime") {
+	if dotsSamePath(args[0], helperExecutable(s)) {
 		return len(args) >= 4 && slices.Equal(args[1:4], []string{"__dots", "native-broker", filepath.Dir(s.RuntimeRoot)})
 	}
 	return len(args) >= 3 && pythonExecutables(s)[args[0]] && slices.Equal(args[1:3], []string{"-u", filepath.Join(s.RuntimeRoot, "native_debug.py")})
@@ -361,7 +283,7 @@ func nativeProcessPID(ctx context.Context, s *Settings, port int) (int, error) {
 	var matches []int
 	for _, pid := range pids {
 		uid, args, e := dotsProcessArguments(ctx, pid)
-		if e != nil || uid != os.Getuid() || len(args) == 0 || args[0] != filepath.Join(s.AppPath, "Contents", "MacOS", "ChatGPT") {
+		if e != nil || uid != os.Getuid() || len(args) == 0 || !dotsSamePath(args[0], nativeAppExecutable(s)) {
 			continue
 		}
 		var data, debug, markers []string
@@ -377,7 +299,7 @@ func nativeProcessPID(ctx context.Context, s *Settings, port int) (int, error) {
 			}
 		}
 		if s.IntegrationMode == "native" {
-			if len(data) == 0 && slices.Equal(debug, []string{"--remote-debugging-pipe"}) && slices.Equal(markers, []string{"--cq-dots-runtime=" + s.RuntimeRoot}) {
+			if len(data) == 0 && nativeDebugFlagsMatch(debug) && slices.Equal(markers, []string{"--cq-dots-runtime=" + s.RuntimeRoot}) {
 				matches = append(matches, pid)
 			}
 		} else if slices.Equal(data, []string{"--user-data-dir=" + filepath.Join(s.RuntimeRoot, "user-data")}) && slices.Contains(debug, "--remote-debugging-port="+strconv.Itoa(port)) {
@@ -401,8 +323,8 @@ func nativeProcessPID(ctx context.Context, s *Settings, port int) (int, error) {
 		if e != nil || cwdErr != nil || !nativeBrokerMatches(s, uid, args, cwd) {
 			return 0, errors.New("native private renderer broker identity changed")
 		}
-		parent, e := exec.CommandContext(ctx, "/bin/ps", "-p", strconv.Itoa(pid), "-o", "ppid=").Output()
-		if e != nil || strings.TrimSpace(string(parent)) != strconv.Itoa(identity["broker_pid"]) {
+		parent, e := dotsParentPID(ctx, pid)
+		if e != nil || parent != identity["broker_pid"] {
 			return 0, errors.New("native private renderer broker identity changed")
 		}
 		return pid, nil

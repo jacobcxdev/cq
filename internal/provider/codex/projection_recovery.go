@@ -92,6 +92,9 @@ func (c *CredentialCoordinator) recoverManagedProjectionLocked() error {
 func (c *CredentialCoordinator) RecoverCredentialState(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.Store.recoverManagedPermissions(); err != nil {
+		return &ManagedProjectionError{Err: err}
+	}
 	if err := c.finishPendingRemovalLocked(ctx); err != nil {
 		return err
 	}

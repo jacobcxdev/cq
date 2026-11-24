@@ -11,8 +11,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 //go:embed executor_primary.js
@@ -233,7 +231,7 @@ func runSecondaryExecutors(ctx context.Context, s *Settings, c *CatalogueClient,
 	if err != nil {
 		return err
 	}
-	lock, err := fsutil.AcquireExclusiveLock(fsutil.OSFileSystem{}, filepath.Join(root, "process.lock"))
+	lock, err := acquireDotsLock(filepath.Join(root, "process.lock"))
 	if err != nil {
 		return err
 	}

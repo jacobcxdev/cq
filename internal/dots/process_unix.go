@@ -20,6 +20,8 @@ func dotsTerminate(pid int) error {
 	return err
 }
 
+func dotsTerminateForSettings(_ *Settings, pid int) error { return dotsTerminate(pid) }
+
 // SpawnHelper starts a detached owned worker with a no-follow private log.
 func SpawnHelper(s *Settings, executable, role string, args, env []string) (*os.Process, error) {
 	if s == nil || !helperRole(role) || executable != filepath.Join(s.RuntimeRoot, "cq-dots-runtime") {

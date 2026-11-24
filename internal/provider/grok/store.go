@@ -19,11 +19,12 @@ import (
 
 // Store holds only CQ-owned Grok logins; it never writes native application state.
 type Store struct {
-	FS        fsutil.FileSystem
-	ConfigDir string
-	directory fsutil.SecureDirectory
-	inspector fsutil.SecurePathInspector
-	fence     func() error
+	FS              fsutil.FileSystem
+	ConfigDir       string
+	directory       fsutil.SecureDirectory
+	inspector       fsutil.SecurePathInspector
+	fence           func() error
+	ownerControlled bool
 }
 type privateTokens struct {
 	Access  string    `json:"access_token"`
@@ -159,6 +160,10 @@ func (s Store) readFile(name string, maxBytes int64) ([]byte, error) {
 		if err := s.fence(); err != nil {
 			return nil, err
 		}
+		if s.ownerControlled {
+			data, _, err := fsutil.ReadOwnerControlledFileInDirectoryWithIdentity(s.inspector, s.directory, s.ConfigDir, name, maxBytes)
+			return data, err
+		}
 		return fsutil.ReadSecureFileInDirectory(s.inspector, s.directory, name, maxBytes)
 	}
 	path := filepath.Join(s.ConfigDir, name)
@@ -171,11 +176,25 @@ func (s Store) readFile(name string, maxBytes int64) ([]byte, error) {
 	if _, err := inspector.Lstat(path); err != nil {
 		return nil, err
 	}
-	return fsutil.ReadSecureFile(s.FS, path, maxBytes)
+	data, err := fsutil.ReadSecureFile(s.FS, path, maxBytes)
+	if errors.Is(err, fsutil.ErrUnsafeSecurePath) {
+		if opener, ok := s.FS.(interface {
+			OpenOwnerControlledCQDirectory(string) (fsutil.SecureDirectory, error)
+		}); ok {
+			if directory, openErr := opener.OpenOwnerControlledCQDirectory(s.ConfigDir); openErr == nil {
+				data, _, readErr := fsutil.ReadOwnerControlledFileInDirectoryWithIdentity(inspector, directory, s.ConfigDir, name, maxBytes)
+				return data, errors.Join(readErr, directory.Close())
+			}
+		}
+	}
+	return data, err
 }
 func (s Store) writeFile(name string, data []byte) error {
 	if s.directory == nil {
 		return errors.New("Grok credential mutation requires owner lock")
+	}
+	if s.ownerControlled {
+		return fsutil.SecureAtomicWriteInOwnerControlledDirectoryChecked(s.inspector, s.directory, s.ConfigDir, name, data, s.fence)
 	}
 	return fsutil.SecureAtomicWriteInDirectoryChecked(s.inspector, s.directory, name, data, s.fence)
 }
@@ -183,8 +202,9 @@ func (s Store) lock(ctx context.Context) (*storeLock, error) {
 	if s.FS == nil || s.ConfigDir == "" || !filepath.IsAbs(s.ConfigDir) {
 		return nil, errors.New("Grok credential store unavailable")
 	}
-	if err := fsutil.EnsureSecureDirectory(s.FS, s.ConfigDir); err != nil {
-		return nil, err
+	ensureErr := fsutil.EnsureSecureDirectory(s.FS, s.ConfigDir)
+	if ensureErr != nil && !errors.Is(ensureErr, fsutil.ErrUnsafeSecurePath) {
+		return nil, ensureErr
 	}
 	inspector, ok := s.FS.(fsutil.SecurePathInspector)
 	if !ok {
@@ -194,7 +214,21 @@ func (s Store) lock(ctx context.Context) (*storeLock, error) {
 	if !ok {
 		return nil, fsutil.ErrSecureCapabilityUnavailable
 	}
-	directory, err := opener.OpenSecureDirectory(s.ConfigDir)
+	var directory fsutil.SecureDirectory
+	var err error
+	ownerControlled := false
+	if ensureErr != nil {
+		ownerOpener, ok := s.FS.(interface {
+			OpenOwnerControlledCQDirectory(string) (fsutil.SecureDirectory, error)
+		})
+		if !ok {
+			return nil, ensureErr
+		}
+		directory, err = ownerOpener.OpenOwnerControlledCQDirectory(s.ConfigDir)
+		ownerControlled = true
+	} else {
+		directory, err = opener.OpenSecureDirectory(s.ConfigDir)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +237,12 @@ func (s Store) lock(ctx context.Context) (*storeLock, error) {
 		if err := ctx.Err(); err != nil {
 			return closeError(err)
 		}
-		lock, err := fsutil.AcquireExclusiveLockInDirectory(inspector, directory, "grok-accounts.lock")
+		var lock fsutil.ExclusiveLock
+		if ownerControlled {
+			lock, err = fsutil.AcquireExclusiveLockInOwnerControlledDirectory(inspector, directory, s.ConfigDir, "grok-accounts.lock")
+		} else {
+			lock, err = fsutil.AcquireExclusiveLockInDirectory(inspector, directory, "grok-accounts.lock")
+		}
 		if err == nil {
 			info, err := lock.Stat()
 			if err != nil {
@@ -215,10 +254,19 @@ func (s Store) lock(ctx context.Context) (*storeLock, error) {
 				lock.Close()
 				return closeError(fsutil.ErrSecureCapabilityUnavailable)
 			}
-			s.directory, s.inspector = directory, inspector
+			s.directory, s.inspector, s.ownerControlled = directory, inspector, ownerControlled
 			s.fence = func() error {
-				if err := fsutil.ValidateSecureDirectoryHandle(inspector, directory, s.ConfigDir); err != nil {
+				var err error
+				if ownerControlled {
+					err = fsutil.ValidateOwnerControlledDirectoryHandle(inspector, directory, s.ConfigDir)
+				} else {
+					err = fsutil.ValidateSecureDirectoryHandle(inspector, directory, s.ConfigDir)
+				}
+				if err != nil {
 					return err
+				}
+				if ownerControlled {
+					return fsutil.ValidateExclusiveLockHeldInOwnerControlledDirectory(inspector, directory, s.ConfigDir, "grok-accounts.lock", identity)
 				}
 				return fsutil.ValidateExclusiveLockHeldInDirectory(inspector, directory, "grok-accounts.lock", identity)
 			}

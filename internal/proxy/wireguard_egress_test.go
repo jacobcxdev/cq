@@ -197,33 +197,29 @@ func TestWireGuardMultipleEndpointsResolveBeforeActivation(t *testing.T) {
 }
 
 func TestWireGuardConfigurationPersistsWithoutReadingProfile(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	paths := proxyConfigTestPaths(t)
 	root := t.TempDir()
 	profilePath := filepath.Join(root, "absent-profile.conf")
 	cfg := &Config{LocalToken: "synthetic-local", ProxyResilienceStateDir: filepath.Join(root, "runtime"), CodexWireGuardProfile: profilePath}
-	if err := SaveConfig(cfg); err != nil {
+	if err := saveProxyTestConfig(t, paths, cfg); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := LoadExistingConfig()
+	loaded, err := loadConfigFile(paths.ConfigFile)
 	if err != nil || loaded.CodexWireGuardProfile != profilePath {
 		t.Fatalf("normal profile setting: %v", err)
 	}
-	bootstrap, err := LoadProxyRescueBootstrapConfig()
+	bootstrap, err := loadProxyRescueBootstrapConfig(paths)
 	if err != nil || bootstrap.CodexWireGuardProfile != profilePath {
 		t.Fatalf("rescue profile setting: %v", err)
 	}
 	if _, err := os.Stat(profilePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("configuration inspection touched the profile")
 	}
-	paths, err := ResolveDefaultPaths()
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, value := range []string{`null`, `123`, `"relative.conf"`} {
 		if err := os.WriteFile(paths.ConfigFile, []byte(`{"CODEX_WIREGUARD_PROFILE":`+value+`}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := LoadProxyRescueBootstrapConfig(); err == nil {
+		if _, err := loadProxyRescueBootstrapConfig(paths); err == nil {
 			t.Fatal("invalid manual profile setting retained stale rescue egress")
 		}
 	}
@@ -231,7 +227,7 @@ func TestWireGuardConfigurationPersistsWithoutReadingProfile(t *testing.T) {
 	if err := os.WriteFile(paths.ConfigFile, conflicting, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadProxyRescueBootstrapConfig(); err == nil {
+	if _, err := loadProxyRescueBootstrapConfig(paths); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatal("conflicting rescue egress accepted")
 	}
 }

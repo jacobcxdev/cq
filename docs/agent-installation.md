@@ -227,8 +227,8 @@ winget install jacobcxdev.cq
 For Linux and explicit alternative installation requirements, follow the
 [platform installation instructions](../README.md#install). The Go installer
 runner downloads an official release but needs a Go toolchain; a source-built
-`go install` binary is not an equivalent complete installation. Do not apply
-macOS-only CQ Network or native Dots instructions to other platforms.
+`go install` binary is not an equivalent complete installation. Use the
+[Dots setup guide](dots.md) for native ChatGPT on macOS or Windows.
 
 ### Verify installation ownership
 

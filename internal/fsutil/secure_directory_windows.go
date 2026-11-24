@@ -117,7 +117,7 @@ func (fsys OSFileSystem) openOwnerControlledDirectory(name string) (SecureDirect
 	if err != nil {
 		return nil, err
 	}
-	return &windowsSecureDirectory{file: file}, nil
+	return &windowsSecureDirectory{file: file, ownerControlled: true}, nil
 }
 
 func (fsys OSFileSystem) openSecureDirectoryAncestor(target, ancestor string) (DurableDirectory, error) {

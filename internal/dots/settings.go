@@ -89,6 +89,9 @@ func owned(info os.FileInfo) bool {
 }
 
 func privateDirectory(path string) error {
+	if runtime.GOOS == "windows" {
+		return windowsPrivateDirectory(path)
+	}
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -104,6 +107,9 @@ func PrivateDirectory(path string) error {
 	if !cleanAbsolute(path) {
 		return fmt.Errorf("private directory must be absolute")
 	}
+	if runtime.GOOS == "windows" {
+		return windowsEnsurePrivateDirectory(path)
+	}
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return err
 	}
@@ -114,6 +120,9 @@ func PrivateDirectory(path string) error {
 func SaveJSON(path string, value any) error {
 	if !cleanAbsolute(path) {
 		return fmt.Errorf("private state path must be absolute")
+	}
+	if runtime.GOOS == "windows" {
+		return windowsSaveJSON(path, value)
 	}
 	if err := PrivateDirectory(filepath.Dir(path)); err != nil {
 		return err
@@ -278,13 +287,15 @@ func (s *Settings) Validate() error {
 	if within(root, home) {
 		return fmt.Errorf("Dots runtime must not contain the home directory")
 	}
-	protected := []string{s.AppPath, s.CQAccounts, filepath.Dir(s.SystemAuth), filepath.Join(home, ".codex")}
+	protected := []string{s.AppPath, s.CQAccounts, filepath.Dir(s.SystemAuth)}
 	if s.AccountSource != "" {
 		protected = append(protected, s.AccountSource)
 	}
-	for _, name := range []string{"Codex", "ChatGPT", "com.openai.codex", "com.openai.chat", "OpenAI"} {
-		protected = append(protected, filepath.Join(home, "Library", "Application Support", name))
+	appRoots, err := ProtectedAppRoots(home)
+	if err != nil {
+		return err
 	}
+	protected = append(protected, appRoots...)
 	for _, path := range protected {
 		canonical, err := CanonicalPath(path)
 		if err != nil {
@@ -377,7 +388,11 @@ func ValidateRuntimePaths(root string) error {
 		}
 	}
 	if info, err := os.Lstat(filepath.Join(root, "launch.json")); err == nil {
-		if !info.Mode().IsRegular() || !owned(info) || info.Mode()&(os.ModePerm|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0o600 {
+		if runtime.GOOS == "windows" {
+			if err := windowsValidatePrivateFile(filepath.Join(root, "launch.json")); err != nil {
+				return fmt.Errorf("Dots launch state must be an owned private regular file: %w", err)
+			}
+		} else if !info.Mode().IsRegular() || !owned(info) || info.Mode()&(os.ModePerm|os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0o600 {
 			return fmt.Errorf("Dots launch state must be an owned regular file with mode 0600")
 		}
 	} else if !os.IsNotExist(err) {

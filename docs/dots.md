@@ -2,6 +2,11 @@
 
 [Getting started](../README.md) · [Other client integrations](usage.md#connecting-a-client) · [Troubleshooting](troubleshooting.md#native-network-and-dots)
 
+Dots supports the native ChatGPT profile on macOS and Windows. Windows
+requires the registered official ChatGPT package. The launcher uses a private
+pipe to reach the renderer and runs CQ's Codex adapter with the current
+Windows user's permissions.
+
 Use this integration to bring existing Dots from several accounts into one
 ChatGPT sidebar and coordinate between them. Secondary Dots must already be
 onboarded; CQ does not add secondary onboarding slots. If you only need access
@@ -13,7 +18,10 @@ catalogue requires the system Dot to be onboarded before it starts.
 
 `cq codex dots` defaults to the normal native app, using its existing profile, local tasks and signed-in account. Existing account-owned Dots share that app's sidebar. The packaged CQ binary includes the Go controller and runtime; installation creates private adapter state and loopback certificates. Python, pip and virtual environments are not needed. It uses the installed app bundle without patching or re-signing it. Account credential sources and CQ services remain unchanged.
 
-Native installation creates `~/Applications/ChatGPT via CQ.app` from the controller bundled in CQ. Launch it through Raycast, Spotlight or Finder for new sessions, or run `cq codex dots start`. Both routes preserve OpenAI's original app signature and use the existing profile.
+On Windows, installation adds **ChatGPT via CQ** to the current user's Start
+Menu. On macOS, installation creates `~/Applications/ChatGPT via CQ.app` for
+Raycast, Spotlight or Finder. On either platform, `cq codex dots launch` opens a
+session through the adapter. The launcher uses the existing ChatGPT profile.
 
 The launcher sets `OPENAI_BASE_URL` to CQ's configured local proxy, normally
 `http://127.0.0.1:19280`. The app and its child Codex app-server inherit this
@@ -25,11 +33,11 @@ for verification.
 
 Direct launches of OpenAI's original app bypass the adapter. CQ does not quit an already-running normal app. Installation and account changes report `restart_required` until the user quits it and starts it through CQ. The launcher reports that instruction instead of silently opening an unmanaged app. Verify launcher routing with the running app and child app-server environments plus a real Desktop chat request and matching CQ trace.
 
-Native launching gives the signed ChatGPT app its own macOS privacy responsibility and removes inherited launcher identity variables. ChatGPT keeps its normal Dock identity while the Spotlight launcher stays hidden. CQ retains the private renderer pipe without modifying the app bundle. This uses a private macOS spawn attribute; if it is unavailable, startup reports an error instead of attributing ChatGPT's permissions to CQ.
+On macOS, the launcher gives the signed ChatGPT app its own privacy responsibility and removes inherited launcher identity variables. ChatGPT keeps its normal Dock identity while the Spotlight launcher stays hidden. CQ retains the private renderer pipe. If the macOS spawn attribute is unavailable, the launcher reports a startup error.
 
 Reinstallation retains the declared account source unless `--account-source` replaces it. If launcher startup fails, the signed app reopens for ordinary chats. A detached 40-second watchdog also covers stalled startup without killing the CLI during one-time setup. This recovery does not claim Dots are ready; the startup error still needs resolving. Existing app sessions are never stopped by the launcher.
 
-This remains an optional macOS feature built on private native endpoints. Live qualification on 17 October 2026 used an isolated research profile and covered a fresh installation, a two-owner native catalogue, automatic setup, manual reminders, directory lookup and peer-message delivery. Reinstallation preserved setup guards and skipped both previous attempts. Those results do not qualify the normal profile, cloud computer video or local-task execution on the pinned build; catalogue readiness alone does not prove those outcomes. A separate disposable-profile test verified the private renderer pipe against the installed Electron build.
+The isolated research profile is available on macOS. Live qualification on 17 October 2026 covered a fresh installation, a two-owner native catalogue, automatic setup, manual reminders, directory lookup and peer-message delivery. Reinstallation preserved setup guards and skipped both previous attempts. The result applies to the isolated profile. The normal profile, cloud computer video and local-task execution each need their own checks. A separate disposable-profile test verified the private renderer pipe against the installed Electron build.
 
 ## Install
 
@@ -68,9 +76,13 @@ quitting. The new account's Dot can then join the combined sidebar. Do not
 restart from the original app icon and assume the multi-account adapter is
 active; normal launching and the CQ launcher are separate paths.
 
-For disposable research, use `cq codex dots install --mode isolated`. Only that mode creates a separate app-data directory and Codex home. If its fresh window shows welcome or role onboarding, complete that native flow through the role stage. There is no supported Skip for that stage. The window stays open while CQ setup messages and the relay pause; the watcher resumes them once the native workspace is ready. Existing installations without a mode retain their isolated behaviour until explicitly reinstalled.
+On macOS, use `cq codex dots install --mode isolated` for disposable research. This mode creates a separate app-data directory and Codex home. If its fresh window shows welcome or role onboarding, complete the native flow through the role stage. The window stays open while CQ setup messages and the relay pause. The watcher resumes them when the native workspace is ready. On macOS, existing installations without a mode use the isolated profile until you reinstall them.
 
-The Dots installation root is independent of the CQ platform configuration/cache roots. The default installation root is `~/.local/share/cq/dots`. Account discovery reads the signed-in account at `~/.codex/auth.json` and CQ accounts under `~/.codex/accounts`. These credential sources remain read-only. Optional CodexBar discovery reads explicitly declared managed accounts; it does not scan arbitrary account homes or refresh their credentials.
+The default installation root is `~/.local/share/cq/dots` on macOS and
+`%LOCALAPPDATA%\cq\state\dots` on Windows. Account discovery reads
+`~/.codex/auth.json` and CQ accounts under `~/.codex/accounts`. These
+credential sources are read-only. Optional CodexBar discovery reads explicitly
+declared managed accounts and treats their credentials as read-only.
 
 Use absolute paths to override the installation or account sources:
 
@@ -85,7 +97,15 @@ cq codex dots --root /absolute/private/dots list --json
 
 `--account-source` is optional. Runtime helpers use the staged CQ executable. The installer generates private configuration, so no hand-written settings file, profile IDs or research directory is needed.
 
-The installation root must be private and outside source checkouts, app bundles and production credential or app-data directories. Existing roots must belong to the current user and have mode `0700`; configuration uses `0600` and staged executables use `0700`. Symlink destinations are rejected. The installer checks renderer contracts rather than rejecting unknown app versions or build numbers. Known archives retain their reviewed bindings; rebuilt archives discover authenticated API, account/user atoms, readiness, messaging cache, local executor and message bus exports from source. Asset hashes and minified names may change without a CQ update. Missing or ambiguous contracts stop startup with a specific compatibility diagnostic. Build `22943` source excerpts exercise native cache ownership; these checks do not establish live native UI or egress readiness. After a compatible app update, `start` or `sync` refreshes the discovered renderer snapshot while preserving accounts, stable handles and setup records. An already-running app reports `restart_required`; CQ does not attach new bindings to its old session. A CQ fix is needed only when the required renderer contracts change.
+The installation root must be private and outside source checkouts, app packages and production credential or app-data directories. The current user must own it. On macOS, the root and staged executables use mode `0700`. Configuration uses mode `0600`. Windows uses private access controls. CQ rejects symlink destinations.
+
+The installer checks renderer contracts. Known archives retain their reviewed bindings. For rebuilt archives, CQ discovers the API, readiness, cache, local executor and message bus exports from source. Asset hashes and minified names may change between app builds. Missing or ambiguous contracts stop startup with a compatibility diagnostic. The build `22943` source excerpts exercise native cache ownership. Live UI and egress readiness have separate checks.
+
+After a compatible app update, `start` or `sync` refreshes the renderer
+snapshot and preserves accounts, stable handles and setup records. An
+already-running app reports `restart_required`. The new bindings take effect
+after the next launch through CQ. If a required renderer contract changes, CQ
+needs an update.
 
 The qualified native app permits authenticated local proxy requests on `localhost:8000`. Dots therefore requires loopback port `8000` to be free. If another service owns it, startup stops without terminating that service or choosing an unsupported port.
 

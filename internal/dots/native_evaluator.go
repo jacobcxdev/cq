@@ -29,7 +29,7 @@ func NewNativeEvaluator(s *Settings) NativeEvaluator { return &nativeEvaluator{s
 func (e *nativeEvaluator) check() error {
 	e.verification.Lock()
 	defer e.verification.Unlock()
-	info, err := os.Stat(filepath.Join(e.settings.AppPath, "Contents", "Resources", "app.asar"))
+	info, err := os.Stat(nativeAppArchive(e.settings))
 	if err != nil {
 		return err
 	}
@@ -37,7 +37,7 @@ func (e *nativeEvaluator) check() error {
 	if e.verified && current == e.archiveRevision {
 		return nil
 	}
-	if err = AppCheck(e.settings); err != nil {
+	if err = nativeAppCheck(e.settings); err != nil {
 		return err
 	}
 	e.archiveRevision = current

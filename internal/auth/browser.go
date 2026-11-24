@@ -1,7 +1,9 @@
 package auth
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode/utf16"
 )
 
 var validBrowserName = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -52,7 +55,7 @@ func openBrowserContext(ctx context.Context, rawURL, platform string, command br
 	case "linux":
 		return openBrowserLinux(ctx, rawURL, command)
 	case "windows":
-		return openBrowserWindows(ctx, rawURL, command)
+		return openBrowserWindows(ctx, rawURL, command, output)
 	default:
 		return fmt.Errorf("unsupported OS: %s", platform)
 	}
@@ -88,19 +91,26 @@ func openBrowserDarwin(ctx context.Context, rawURL string, command browserComman
 	}
 
 	// Browser already running: copy URL to clipboard for manual paste into private window
-	cmd := command(ctx, "pbcopy")
+	err := runBrowserClipboardCommand(command(ctx, "pbcopy"), strings.NewReader(rawURL))
+	return reportBrowserClipboard(ctx, err, rawURL, " in a private window", output)
+}
+
+func runBrowserClipboardCommand(cmd *exec.Cmd, input io.Reader) error {
 	cmd.WaitDelay = time.Second
-	cmd.Stdin = strings.NewReader(rawURL)
-	if err := cmd.Run(); err != nil {
+	cmd.Stdin = input
+	return cmd.Run()
+}
+
+func reportBrowserClipboard(ctx context.Context, copyErr error, rawURL, pasteLocation string, output io.Writer) error {
+	if copyErr != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		_, err = fmt.Fprintf(output, "Browser already running \u2014 open this URL in a private window:\n  %s\n", rawURL)
-		return err
-	} else {
-		_, err = fmt.Fprintln(output, "Browser already running \u2014 URL copied to clipboard. Paste in a private window.")
+		_, err := fmt.Fprintf(output, "Browser already running \u2014 open this URL%s:\n  %s\n", pasteLocation, rawURL)
 		return err
 	}
+	_, err := fmt.Fprintf(output, "Browser already running \u2014 URL copied to clipboard. Paste%s.\n", pasteLocation)
+	return err
 }
 
 func defaultBrowserBundleID(ctx context.Context, command browserCommandFactory) string {
@@ -155,8 +165,46 @@ func openBrowserLinux(ctx context.Context, rawURL string, command browserCommand
 	return startBrowser(ctx, command, "xdg-open", rawURL)
 }
 
-// Windows: detect default browser via registry, open in private mode.
-func openBrowserWindows(ctx context.Context, rawURL string, command browserCommandFactory) error {
+const windowsBrowserWindowProbe = `
+[Console]::InputEncoding = [Text.Encoding]::UTF8
+$browser = [Console]::In.ReadToEnd()
+$name = [System.Management.Automation.WildcardPattern]::Escape([IO.Path]::GetFileNameWithoutExtension($browser))
+foreach ($process in Get-Process -Name $name -ErrorAction SilentlyContinue) {
+    if ($process.MainWindowHandle -ne [IntPtr]::Zero -and $process.Path -eq $browser) {
+        'true'
+        break
+    }
+}
+`
+
+func copyWindowsBrowserURL(ctx context.Context, command browserCommandFactory, rawURL string) error {
+	// clip.exe detects UTF-16LE independently of the terminal's active code page.
+	units := utf16.Encode([]rune(rawURL))
+	data := make([]byte, 0, len(units)*2)
+	for _, unit := range units {
+		data = binary.LittleEndian.AppendUint16(data, unit)
+	}
+	copyCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	var err error
+	for attempt := range 4 {
+		if attempt != 0 {
+			select {
+			case <-copyCtx.Done():
+				return copyCtx.Err()
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+		err = runBrowserClipboardCommand(command(copyCtx, "clip.exe"), bytes.NewReader(data))
+		if err == nil {
+			return nil
+		}
+	}
+	return err
+}
+
+// Windows browsers can keep background processes running with no browser window.
+func openBrowserWindows(ctx context.Context, rawURL string, command browserCommandFactory, output io.Writer) error {
 	out, _ := browserCommandOutput(ctx, command, "reg", "query",
 		`HKEY_CURRENT_USER\Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserChoice`,
 		"/v", "ProgId")
@@ -175,12 +223,16 @@ func openBrowserWindows(ctx context.Context, rawURL string, command browserComma
 			return err
 		}
 		if browserPath := parseBrowserPath(string(cmdOut)); browserPath != "" {
-			flag := "--incognito"
-			if strings.Contains(strings.ToLower(progID), "firefox") {
-				flag = "--private-window"
+			probe := command(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", windowsBrowserWindowProbe)
+			probe.Stdin = strings.NewReader(browserPath)
+			probe.WaitDelay = time.Second
+			out, err := probe.Output()
+			if ctx.Err() != nil {
+				return ctx.Err()
 			}
-			if startBrowser(ctx, command, browserPath, flag, rawURL) == nil {
-				return nil
+			if err == nil && strings.TrimSpace(string(out)) == "true" {
+				err := copyWindowsBrowserURL(ctx, command, rawURL)
+				return reportBrowserClipboard(ctx, err, rawURL, " in your browser", output)
 			}
 		}
 	}

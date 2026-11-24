@@ -1,11 +1,35 @@
 package proxy
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/windows"
 )
+
+func protectProxyConfigTestRoot(t *testing.T, root string) {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := user.User.Sid.String()
+	descriptor, err := windows.SecurityDescriptorFromString(fmt.Sprintf("D:P(A;OICI;FA;;;%s)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", sid))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := windows.SECURITY_INFORMATION(windows.OWNER_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	if err := windows.SetNamedSecurityInfo(root, windows.SE_FILE_OBJECT, flags, user.User.Sid, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestConfigRejectsWindowsVolumeRootStateDirectories(t *testing.T) {
 	volumeRoot := filepath.VolumeName(os.TempDir()) + string(filepath.Separator)

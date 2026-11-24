@@ -411,7 +411,8 @@ func readRawCandidate(fs fsutil.FileSystem, path string, source CredentialSource
 	if authoritative {
 		var present bool
 		var err error
-		data, present, err = readAuthoritativeCredentialFile(fs, path)
+		allowCodexSandbox := source == SourceSystem && filepath.Base(path) == "auth.json" && filepath.Base(filepath.Dir(path)) == ".codex"
+		data, present, err = readAuthoritativeCredentialFile(fs, path, allowCodexSandbox)
 		if err != nil || !present {
 			return rawCandidate{}, false, err
 		}
@@ -475,7 +476,7 @@ func readRawCandidate(fs fsutil.FileSystem, path string, source CredentialSource
 	}, true, nil
 }
 
-func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string) ([]byte, bool, error) {
+func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string, allowCodexSandbox bool) ([]byte, bool, error) {
 	inspector, ok := fs.(fsutil.SecurePathInspector)
 	if !ok {
 		return nil, false, fsutil.ErrSecureCapabilityUnavailable
@@ -494,7 +495,7 @@ func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string) ([]byte,
 	if err := fsutil.ValidateExternalCredentialDirectory(fs, filepath.Dir(path)); err != nil {
 		return nil, false, err
 	}
-	pathIdentity, err := validateAuthoritativeCredentialInfo(inspector, pathInfo)
+	pathIdentity, err := validateAuthoritativeCredentialInfo(inspector, pathInfo, allowCodexSandbox)
 	if err != nil {
 		return nil, false, err
 	}
@@ -507,7 +508,25 @@ func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string) ([]byte,
 	if err != nil {
 		return nil, false, err
 	}
-	openedIdentity, err := validateAuthoritativeCredentialInfo(inspector, openedInfo)
+	validateOpened := func(info os.FileInfo) (fsutil.SecureFileIdentity, error) {
+		identity, err := validateAuthoritativeCredentialInfo(inspector, info, allowCodexSandbox)
+		if err != nil {
+			return fsutil.SecureFileIdentity{}, err
+		}
+		if allowCodexSandbox && fsutil.ValidateExternalCredentialFile(inspector, info) != nil {
+			validator, ok := fs.(interface {
+				ValidateCodexSystemCredential(fsutil.SecureReadFile) error
+			})
+			if !ok {
+				return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
+			}
+			if err := validator.ValidateCodexSystemCredential(file); err != nil {
+				return fsutil.SecureFileIdentity{}, err
+			}
+		}
+		return identity, nil
+	}
+	openedIdentity, err := validateOpened(openedInfo)
 	if err != nil || !fsutil.SameSecureObject(openedIdentity, pathIdentity) {
 		if err != nil {
 			return nil, false, err
@@ -525,7 +544,7 @@ func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string) ([]byte,
 	if err != nil {
 		return nil, false, err
 	}
-	afterIdentity, err := validateAuthoritativeCredentialInfo(inspector, afterInfo)
+	afterIdentity, err := validateOpened(afterInfo)
 	if err != nil || afterIdentity != openedIdentity {
 		if err != nil {
 			return nil, false, err
@@ -535,8 +554,12 @@ func readAuthoritativeCredentialFile(fs fsutil.FileSystem, path string) ([]byte,
 	return data, true, nil
 }
 
-func validateAuthoritativeCredentialInfo(inspector fsutil.SecurePathInspector, info os.FileInfo) (fsutil.SecureFileIdentity, error) {
-	if err := fsutil.ValidateExternalCredentialFile(inspector, info); err != nil {
+func validateAuthoritativeCredentialInfo(inspector fsutil.SecurePathInspector, info os.FileInfo, allowCodexSandbox bool) (fsutil.SecureFileIdentity, error) {
+	validate := fsutil.ValidateExternalCredentialFile
+	if allowCodexSandbox {
+		validate = fsutil.ValidateExternalCacheFile
+	}
+	if err := validate(inspector, info); err != nil {
 		return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
 	}
 	identity, ok := inspector.FileIdentity(info)
