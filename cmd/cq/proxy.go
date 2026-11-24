@@ -1737,11 +1737,13 @@ var proxyStatusGet = func(addr string) (*http.Response, error) {
 	return (&http.Client{Timeout: 5 * time.Second}).Get(addr)
 }
 
+var proxyStatusPaths = proxy.ResolveDefaultPaths
+
 func loadProxyStatusPort(opts proxyCommandOptions) (int, error) {
 	if opts.Port != 0 {
 		return opts.Port, nil
 	}
-	paths, err := proxy.ResolveDefaultPaths()
+	paths, err := proxyStatusPaths()
 	if err != nil {
 		return 0, err
 	}

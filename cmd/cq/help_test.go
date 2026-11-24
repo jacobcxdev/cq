@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -229,6 +228,7 @@ func TestProxyHookCommandReachesHandler(t *testing.T) {
 
 func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 	if os.Getenv("CQ_TEST_BARE_PROXY_STATUS") == "1" {
+		useProxyStatusConfigFixture(t)
 		proxyStatusGet = func(string) (*http.Response, error) {
 			return &http.Response{Body: io.NopCloser(strings.NewReader(`{"status":"ok"}`))}, nil
 		}
@@ -314,10 +314,6 @@ func TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState(t *testing.T) {
 		{args: []string{"codex", "validate", "capture", "--input"}, exitCode: 1},
 		{args: []string{"codex", "canary", "unknown"}, exitCode: 1},
 	} {
-		if tt.helper && runtime.GOOS == "windows" {
-			// The default CQ config root is registry-bound on Windows.
-			continue
-		}
 		command := exec.Command(binary, tt.args...)
 		if tt.helper {
 			command = exec.Command(os.Args[0], "-test.run=^TestGlobalHelpAndVersionDoNotCreateHomeOrXDGState$")
@@ -395,7 +391,17 @@ func TestProxyStatusPreDispatchBoundaryUsesOnlyInjectedCollectors(t *testing.T) 
 	}
 }
 
+func useProxyStatusConfigFixture(t *testing.T) {
+	t.Helper()
+	original := proxyStatusPaths
+	t.Cleanup(func() { proxyStatusPaths = original })
+	proxyStatusPaths = func() (proxy.DefaultPaths, error) {
+		return proxy.DefaultPaths{ConfigFile: filepath.Join(os.Getenv("XDG_CONFIG_HOME"), "cq", "proxy.json")}, nil
+	}
+}
+
 func TestProxyStatusPreDispatchPreservesFrozenBareStatus(t *testing.T) {
+	useProxyStatusConfigFixture(t)
 	authority, err := ClassifyProxyCommand([]string{"proxy", "status"})
 	if err != nil || authority.Row != "proxy_status_frozen" {
 		t.Fatalf("bare status authority = %+v, %v", authority, err)
