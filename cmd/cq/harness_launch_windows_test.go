@@ -67,4 +67,16 @@ func TestWindowsHarnessInstalledPackageResolution(t *testing.T) {
 	if _, err := windowsHarnessDesktopRunning(desktop); err != nil {
 		t.Fatalf("inspect current-session Desktop processes: %v", err)
 	}
+	cliDir := t.TempDir()
+	t.Setenv("PATH", cliDir)
+	if got := harnessNativeExecutable(); got != stock {
+		t.Fatalf("harness executable without codex on PATH = %q, want %q", got, stock)
+	}
+	pathCLI := filepath.Join(cliDir, "codex.exe")
+	if err := os.WriteFile(pathCLI, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := harnessNativeExecutable(); got != pathCLI {
+		t.Fatalf("harness executable with codex on PATH = %q, want %q", got, pathCLI)
+	}
 }

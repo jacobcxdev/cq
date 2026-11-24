@@ -381,6 +381,17 @@ jobs:
           $env:HTTPS_PROXY = $null
           $env:ALL_PROXY = $null
           New-Item -ItemType Directory -Path $env:CODEX_HOME, $env:CODEX_ELECTRON_USER_DATA_PATH -ErrorAction Stop | Out-Null
+          $originalPath = $env:Path
+          try {
+            $env:Path = Join-Path $env:SystemRoot 'System32'
+            if (Get-Command codex -ErrorAction SilentlyContinue) { throw 'Codex unexpectedly resolves on PATH' }
+            $inventory = & $cq codex harness inventory --project $root --json
+            if ($LASTEXITCODE -ne 0) { throw 'Inventory did not resolve the registered package without Codex on PATH' }
+            $inventory | ConvertFrom-Json -ErrorAction Stop | Out-Null
+            Write-Output 'Verified inventory through the registered Codex Desktop package without Codex on PATH.'
+          } finally {
+            $env:Path = $originalPath
+          }
           $logRoots = @(
             (Join-Path $env:LOCALAPPDATA 'Packages/OpenAI.Codex_2p2nqsd0c76g0/LocalCache/Local/Codex/Logs'),
             (Join-Path $env:LOCALAPPDATA 'Codex/Logs'),

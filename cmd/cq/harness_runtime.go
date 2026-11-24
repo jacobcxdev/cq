@@ -51,8 +51,10 @@ func harnessNativeExecutable() string {
 	if runtime.GOOS == "darwin" {
 		return filepath.Join(nativeNetworkApplication, "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
 	}
-	path, _ := exec.LookPath("codex")
-	return path
+	if path, err := exec.LookPath("codex"); err == nil {
+		return path
+	}
+	return registeredHarnessExecutable()
 }
 
 func configureHarnessRunner(runner *codexHarnessRunner) {

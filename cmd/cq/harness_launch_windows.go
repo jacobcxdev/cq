@@ -142,6 +142,14 @@ func withWindowsHarnessEnvironment(self, stock string, start func() error) error
 	return start()
 }
 
+func registeredHarnessExecutable() string {
+	_, stock, err := resolveWindowsHarnessDesktop()
+	if err != nil {
+		return ""
+	}
+	return stock
+}
+
 func resolveWindowsHarnessDesktop() (desktop, stock string, err error) {
 	packages, err := windowsRegisteredCodexPackages()
 	if err != nil {
