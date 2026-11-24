@@ -241,12 +241,23 @@ jobs:
           if (-not $desktop.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase)) {
             throw 'Desktop application executable escapes its registered package'
           }
+          $session = (Get-Process -Id $PID).SessionId
           $owned = { @(Get-CimInstance Win32_Process | Where-Object {
-            $_.ExecutablePath -and (
+            $_.SessionId -eq $session -and $_.ExecutablePath -and (
               $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) -or
               $_.ExecutablePath.Equals($adapter, [StringComparison]::OrdinalIgnoreCase))
           }) }
-          if ((& $owned).Count -ne 0) { throw 'Desktop package processes already exist before launch' }
+          $registeredProcesses = @(& $owned | Where-Object { $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) })
+          if ($registeredProcesses.Count -ne 0) {
+            $names = ($registeredProcesses | ForEach-Object { [IO.Path]::GetFileName($_.ExecutablePath) } | Sort-Object -Unique) -join ', '
+            "Registration started $($registeredProcesses.Count) package process(es) in session $session ($names); stopping those PIDs before launch." >> $env:GITHUB_STEP_SUMMARY
+          }
+          for ($attempt = 0; $attempt -lt 20 -and $registeredProcesses.Count -ne 0; $attempt++) {
+            foreach ($process in $registeredProcesses) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
+            Start-Sleep -Milliseconds 250
+            $registeredProcesses = @(& $owned | Where-Object { $_.ExecutablePath.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) })
+          }
+          if ((& $owned).Count -ne 0) { throw 'Registered Desktop package processes remain before isolated launch' }
           $env:CODEX_HOME = Join-Path $root 'codex-home'
           $env:CODEX_ELECTRON_USER_DATA_PATH = Join-Path $root 'electron-user-data'
           $env:CODEX_APP_RUNTIME_CLI_PATH = $adapter
@@ -269,11 +280,22 @@ jobs:
             }
             'Desktop invoked the isolated CLI adapter with app-server; no account or profile RPC was attempted.' >> $env:GITHUB_STEP_SUMMARY
           } finally {
-            foreach ($process in & $owned) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
+            $launchPID = if ($null -eq $launched) { 'none' } else { $launched.Id }
+            $exitCode = 'not-started'
+            if ($null -ne $launched) {
+              $launched.Refresh()
+              $exitCode = if ($launched.HasExited) { $launched.ExitCode } else { 'running' }
+            }
+            $versionWitness = Test-Path -LiteralPath "$witness.version"
+            $appServerWitness = Test-Path -LiteralPath "$witness.app-server"
+            "Desktop startup: PID=$launchPID; exit=$exitCode; version=$versionWitness; app-server=$appServerWitness." >> $env:GITHUB_STEP_SUMMARY
             if ($null -ne $launched -and -not $launched.HasExited) {
               Stop-Process -Id $launched.Id -Force -ErrorAction SilentlyContinue
             }
-            Start-Sleep -Milliseconds 500
+            for ($attempt = 0; $attempt -lt 20 -and (& $owned).Count -ne 0; $attempt++) {
+              foreach ($process in & $owned) { Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue }
+              Start-Sleep -Milliseconds 250
+            }
             if ((& $owned).Count -ne 0) { throw 'Desktop package process cleanup failed' }
           }
       - name: Remove downloaded package

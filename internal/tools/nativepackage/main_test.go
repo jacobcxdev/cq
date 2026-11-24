@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -186,22 +187,66 @@ func TestNativeParentPinRetainsNativeIdentityAndSharedVersion(t *testing.T) {
 	}
 }
 
+func TestMain(m *testing.M) {
+	if os.Getenv("CQ_NATIVEPACKAGE_GIT_MOCK") == "1" {
+		os.Exit(runNativeGitMock(os.Args[1:]))
+	}
+	os.Exit(m.Run())
+}
+
+func runNativeGitMock(args []string) int {
+	source, target := os.Getenv("NATIVE_SOURCE"), os.Getenv("NATIVE_TARGET")
+	switch strings.Join(args, " ") {
+	case "merge-base --is-ancestor " + source + " " + target:
+		if value := os.Getenv("NATIVE_ANCESTRY_ERROR"); value != "" {
+			code, err := strconv.Atoi(value)
+			if err != nil {
+				return 99
+			}
+			return code
+		}
+		return 0
+	case "rev-parse --verify " + source + ":native/macos-network":
+		_, _ = io.WriteString(os.Stdout, strings.Repeat("c", 40)+"\n")
+	case "rev-parse --verify " + target + ":native/macos-network":
+		tree := os.Getenv("NATIVE_TARGET_TREE")
+		if tree == "" {
+			tree = strings.Repeat("c", 40)
+		}
+		_, _ = io.WriteString(os.Stdout, tree+"\n")
+	case "rev-parse --verify refs/tags/v0.41.0^{commit}":
+		commit := os.Getenv("NATIVE_TAG_TARGET")
+		if commit == "" {
+			commit = target
+		}
+		_, _ = io.WriteString(os.Stdout, commit+"\n")
+	default:
+		_, _ = io.WriteString(os.Stderr, "unexpected git operation\n")
+		return 99
+	}
+	return 0
+}
+
 func mockNativeSourceGit(t *testing.T, source, target string) {
 	t.Helper()
 	directory := t.TempDir()
-	script := `#!/bin/sh
-case "$*" in
-  "merge-base --is-ancestor $NATIVE_SOURCE $NATIVE_TARGET") exit "${NATIVE_ANCESTRY_ERROR:-0}" ;;
-  "rev-parse --verify $NATIVE_SOURCE:native/macos-network") echo cccccccccccccccccccccccccccccccccccccccc ;;
-  "rev-parse --verify $NATIVE_TARGET:native/macos-network") echo "${NATIVE_TARGET_TREE:-cccccccccccccccccccccccccccccccccccccccc}" ;;
-  "rev-parse --verify refs/tags/v0.41.0^{commit}") echo "${NATIVE_TAG_TARGET:-$NATIVE_TARGET}" ;;
-  *) echo "unexpected git operation" >&2; exit 99 ;;
-esac
-`
-	if err := os.WriteFile(filepath.Join(directory, "git"), []byte(script), 0o700); err != nil {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "git"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	data, err := os.ReadFile(executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, name), data, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CQ_NATIVEPACKAGE_GIT_MOCK", "1")
 	t.Setenv("NATIVE_SOURCE", source)
 	t.Setenv("NATIVE_TARGET", target)
 }

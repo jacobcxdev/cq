@@ -197,7 +197,7 @@ func SetEnabled(root string, fsys fsutil.FileSystem, enabled bool) error {
 }
 
 func validateRoot(root string, fsys fsutil.FileSystem) error {
-	if fsys == nil || !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) {
+	if fsys == nil || !filepath.IsAbs(root) || filepath.Clean(root) != root || root == filepath.VolumeName(root)+string(filepath.Separator) {
 		return errors.New("usage certificate directory is invalid")
 	}
 	return nil

@@ -196,6 +196,8 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			_ = bridgeOutput.Close()
 		}()
 		defer func() {
+			// After the last RPC the bridge can still forward native notifications.
+			go func() { _, _ = io.Copy(io.Discard, clientOutput) }()
 			_ = clientInput.Close()
 			select {
 			case err := <-finished:
@@ -240,6 +242,23 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 			policy.Chats = map[string]harness.Profile{chat: profile}
 			policyMu.Unlock()
 		}
+		assertApplied := func(profile harness.Profile) {
+			t.Helper()
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				receipt, err := receipts.Load(chat)
+				if err == nil && receipt.Profile == profile && receipt.State == "applied" {
+					return
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("CQ bridge %s receipt = %+v, %v", profile, receipt, err)
+				}
+				// An applied receipt can follow turn/completed. Keep reading the
+				// stdio stream while waiting for the verifier to record its result.
+				rpc.call("thread/read", map[string]any{"threadId": chat})
+				time.Sleep(25 * time.Millisecond)
+			}
+		}
 		if reduced := turn(); reduced.skill || reduced.mcp {
 			t.Fatalf("CQ bridge did not apply fresh minimal profile: %+v", reduced)
 		}
@@ -247,16 +266,12 @@ CQ_HARNESS_INSTALLED_MCP_HELPER = "1"
 		if restored := turn(); !restored.skill || !restored.mcp {
 			t.Fatalf("CQ bridge did not restore skill and MCP: %+v", restored)
 		}
-		if receipt, err := receipts.Load(chat); err != nil || receipt.Profile != harness.Full || receipt.State != "applied" {
-			t.Fatalf("CQ bridge full receipt = %+v, %v", receipt, err)
-		}
+		assertApplied(harness.Full)
 		setProfile(harness.Minimal)
 		if reduced := turn(); reduced.mcp {
 			t.Fatalf("CQ bridge retained MCP after minimal reload: %+v", reduced)
 		}
-		if receipt, err := receipts.Load(chat); err != nil || receipt.Profile != harness.Minimal || receipt.State != "applied" {
-			t.Fatalf("CQ bridge restored minimal receipt = %+v, %v", receipt, err)
-		}
+		assertApplied(harness.Minimal)
 	})
 	input, err := command.StdinPipe()
 	if err != nil {
