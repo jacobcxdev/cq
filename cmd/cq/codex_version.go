@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/executil"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/modelregistry"
 )
@@ -125,7 +126,9 @@ func probeCodexBinaryVersion() (string, bool) {
 func probeCodexVersionCommand(path string) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, path, "--version").Output()
+	command := exec.CommandContext(ctx, path, "--version")
+	executil.SuppressConsoleWindow(command)
+	out, err := command.Output()
 	if err != nil {
 		return "", false
 	}
