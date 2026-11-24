@@ -8,10 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 //go:embed native_room_cache.js
@@ -215,17 +217,17 @@ func NativeSend(ctx context.Context, s *Settings, e NativeEvaluator, target, tex
 	}
 	summary := map[string]any{"at": float64(time.Now().UnixMilli()) / 1000, "target": target, "request_id": id, "outcome": "pending"}
 	data, _ := json.Marshal(summary)
-	file, err := os.OpenFile(ledger, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	fsys, err := dotsFileSystem(ledger)
 	if err != nil {
 		return nil, err
 	}
-	_, err = file.Write(data)
-	closeErr := file.Close()
+	directory, err := fsys.OpenSecureDirectory(filepath.Dir(ledger))
 	if err != nil {
 		return nil, err
 	}
-	if closeErr != nil {
-		return nil, closeErr
+	err = fsutil.SecureAtomicCreateInDirectory(fsys, directory, filepath.Base(ledger), data)
+	if err := errors.Join(err, directory.Close()); err != nil {
+		return nil, err
 	}
 	expression := fmt.Sprintf(nativeSendJS, nativeJSON(map[string]any{"profile": dot.ProfileID, "text": text, "request": id}), nativeJSON(system.ProfileID))
 	value, evaluateErr := single.Evaluate(ctx, nativeAsset(expression, s))

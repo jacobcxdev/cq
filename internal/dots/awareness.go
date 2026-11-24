@@ -14,8 +14,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 // Awareness delivers ordinary, explicit setup messages. Its persisted owner/profile
@@ -86,12 +84,7 @@ func coordinationExists(path string) (bool, error) {
 	return e == nil, e
 }
 func coordinationSave(path string, value any) error { return installSave(path, value) }
-func coordinationDirectory(path string) error {
-	if e := os.MkdirAll(path, 0o700); e != nil {
-		return e
-	}
-	return privateDirectory(path)
-}
+func coordinationDirectory(path string) error       { return PrivateDirectory(path) }
 func coordinationOutcome(result map[string]any) string {
 	v, _ := result["outcome"].(string)
 	if v == "accepted" || v == "rejected" {
@@ -314,7 +307,7 @@ func (a *Awareness) Prime(ctx context.Context, reference string, all, manual boo
 	if e := coordinationDirectory(root); e != nil {
 		return nil, e
 	}
-	lock, e := fsutil.AcquireExclusiveLock(fsutil.OSFileSystem{}, filepath.Join(root, "process.lock"))
+	lock, e := acquireDotsLock(filepath.Join(root, "process.lock"))
 	if e != nil {
 		return nil, e
 	}

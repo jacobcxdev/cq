@@ -92,6 +92,14 @@ func dotsFileSystem(path string) (fsutil.OSFileSystem, error) {
 	return fsutil.OSFileSystem{}, nil
 }
 
+func acquireDotsLock(path string) (fsutil.ExclusiveLock, error) {
+	fsys, err := dotsFileSystem(path)
+	if err != nil {
+		return nil, err
+	}
+	return fsutil.AcquireExclusiveLock(fsys, path)
+}
+
 // OperationLock serialises installation mutations without blocking status reads.
 func OperationLock(ctx context.Context, root string, wait time.Duration) (io.Closer, error) {
 	if err := ctx.Err(); err != nil {
@@ -102,11 +110,7 @@ func OperationLock(ctx context.Context, root string, wait time.Duration) (io.Clo
 	}
 	deadline := time.Now().Add(wait)
 	for {
-		fsys, err := dotsFileSystem(filepath.Join(root, "operation.lock"))
-		if err != nil {
-			return nil, err
-		}
-		lock, err := fsutil.AcquireExclusiveLock(fsys, filepath.Join(root, "operation.lock"))
+		lock, err := acquireDotsLock(filepath.Join(root, "operation.lock"))
 		if err == nil {
 			return lock, nil
 		}
@@ -403,7 +407,7 @@ func installPrepared(ctx context.Context, options InstallOptions, pin Settings) 
 	if _, err := ValidateInstallLocation(options); err != nil {
 		return nil, err
 	}
-	data, err := ReadOwned(options.SystemAuth, "")
+	data, err := readSystemAuth(options.SystemAuth)
 	if err != nil {
 		return nil, err
 	}

@@ -13,14 +13,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 var executorEnvironmentPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+var errExecutorSandboxUnavailable = errors.New("proof executor requires the macOS sandbox")
 
 func validExecutorEnvironment(value string) bool {
 	return executorEnvironmentPattern.MatchString(value)
@@ -39,10 +39,7 @@ func executorDirectory(s *Settings, parts ...string) (string, error) {
 			return "", errors.New("invalid executor directory")
 		}
 		current = filepath.Join(current, part)
-		if err := os.Mkdir(current, 0o700); err != nil && !os.IsExist(err) {
-			return "", err
-		}
-		if err := privateDirectory(current); err != nil {
+		if err := PrivateDirectory(current); err != nil {
 			return "", err
 		}
 		canonical, err := CanonicalPath(current)
@@ -66,16 +63,19 @@ func executorRead(path, root string) (map[string]any, error) {
 
 // ExecutorCLIEnvironment contains only non-secret ambient values and a local broker capability.
 func ExecutorCLIEnvironment(root, capability string) []string {
+	home, temp := filepath.Join(root, "home"), filepath.Join(root, "tmp")
+	keys := []string{"PATH", "HOME", "USER", "LOGNAME", "LANG"}
 	env := []string{}
-	for _, key := range []string{"PATH", "HOME", "USER", "LOGNAME", "LANG"} {
+	if runtime.GOOS == "windows" {
+		keys = []string{"PATH", "LANG", "SystemRoot", "SystemDrive", "WINDIR", "COMSPEC", "PATHEXT"}
+		env = append(env, "HOME="+home, "USERPROFILE="+home, "APPDATA="+home, "LOCALAPPDATA="+home, "TEMP="+temp, "TMP="+temp)
+	}
+	for _, key := range keys {
 		if value, ok := os.LookupEnv(key); ok {
 			env = append(env, key+"="+value)
 		}
 	}
-	return append(env, "CODEX_HOME="+filepath.Join(root, "home"), "TMPDIR="+filepath.Join(root, "tmp"), "CODEX_API_KEY="+capability, "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE=true", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codex_work_desktop", "LOG_FORMAT=json", "RUST_LOG=codex_exec_server::remote=info")
-}
-func executorReal(s *Settings) string {
-	return filepath.Join(s.AppPath, "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+	return append(env, "CODEX_HOME="+home, "TMPDIR="+temp, "CODEX_API_KEY="+capability, "CODEX_EXEC_SERVER_EXIT_ON_STDIN_CLOSE=true", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE=codex_work_desktop", "LOG_FORMAT=json", "RUST_LOG=codex_exec_server::remote=info")
 }
 func prepareLocalExecutor(s *Settings) (string, error) {
 	root, err := executorDirectory(s, "null-executor")
@@ -156,7 +156,10 @@ func executorCommandFor(s *Settings, root string, port int, environment, capabil
 	if !validExecutorEnvironment(environment) || port <= 0 || port > 65535 {
 		return nil, errors.New("invalid executor environment")
 	}
-	real := executorReal(s)
+	if sandbox && runtime.GOOS == "windows" {
+		return nil, errExecutorSandboxUnavailable
+	}
+	real := cloudStockExecutable(s)
 	args := []string{"-c", `cli_auth_credentials_store="file"`, "exec-server", "--remote", fmt.Sprintf("http://127.0.0.1:%d/api", port), "--environment-id", environment, "--exit-on-stdin-close"}
 	if sandbox {
 		args = append([]string{"-f", filepath.Join(root, "isolation.sb"), real}, args...)
@@ -325,6 +328,9 @@ func RunLocalExecutor(ctx context.Context, s *Settings, c *CatalogueClient, args
 	return runProofExecutor(ctx, s, args, executorDefaults(s, c, s.SecondaryAlias), false)
 }
 func runProofExecutor(ctx context.Context, s *Settings, args []string, deps executorDependencies, forward bool) (result error) {
+	if runtime.GOOS == "windows" {
+		return errExecutorSandboxUnavailable
+	}
 	root := filepath.Join(s.RuntimeRoot, "null-executor")
 	proof, err := executorRead(filepath.Join(root, "proof.json"), s.RuntimeRoot)
 	if err != nil {
@@ -363,7 +369,7 @@ func runProofExecutor(ctx context.Context, s *Settings, args []string, deps exec
 	if err != nil {
 		return err
 	}
-	lock, err := fsutil.AcquireExclusiveLock(fsutil.OSFileSystem{}, filepath.Join(root, "process.lock"))
+	lock, err := acquireDotsLock(filepath.Join(root, "process.lock"))
 	if err != nil {
 		return err
 	}
@@ -432,6 +438,9 @@ func runProofExecutor(ctx context.Context, s *Settings, args []string, deps exec
 func ReuseNativeExecutor(ctx context.Context, s *Settings, c *CatalogueClient, headers http.Header, body []byte) (map[string]any, map[string]any, error) {
 	if s == nil {
 		return nil, nil, errors.New("executor settings unavailable")
+	}
+	if runtime.GOOS == "windows" {
+		return nil, nil, errExecutorSandboxUnavailable
 	}
 	deps := executorDefaults(s, c, s.SecondaryAlias)
 	inventory, err := deps.inventory()

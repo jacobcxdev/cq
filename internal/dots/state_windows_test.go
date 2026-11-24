@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	"github.com/jacobcxdev/cq/internal/userdirs"
@@ -43,6 +44,109 @@ func TestWindowsPrivateDotsStateCreateAndRepeat(t *testing.T) {
 	}
 	if err := fsutil.ValidateSecureRegularFile(fsys, path); err != nil {
 		t.Fatalf("private state ACL: %v", err)
+	}
+}
+
+func TestWindowsDotsSystemAuthAcceptsOnlyCodexSandboxReader(t *testing.T) {
+	computer, err := windows.ComputerName()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox, domain, kind, err := windows.LookupSID("", computer+`\CodexSandboxUsers`)
+	if err != nil || !strings.EqualFold(domain, computer) || kind != windows.SidTypeAlias {
+		t.Skipf("local Codex sandbox group unavailable: %v", err)
+	}
+	home := t.TempDir()
+	privateWindowsDotsTestAnchor(t, home)
+	t.Setenv("USERPROFILE", home)
+	codex := filepath.Join(home, ".codex")
+	if err := os.Mkdir(codex, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	privateWindowsDotsTestAnchor(t, codex)
+	path := filepath.Join(codex, "auth.json")
+	document, err := json.Marshal(catalogueTestDocument("fixture", time.Now().Add(time.Hour).Unix()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, document, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsDotsCredentialReader(t, path, sandbox)
+	if _, err := ReadOwned(path, ""); err == nil {
+		t.Fatal("generic credential reader accepted Codex sandbox ACE")
+	}
+	if _, err := readSystemAuth(path); err != nil {
+		t.Fatalf("default Codex system auth reader: %v", err)
+	}
+	accounts := filepath.Join(codex, "accounts")
+	if err := PrivateDirectory(accounts); err != nil {
+		t.Fatal(err)
+	}
+	settings := &Settings{SystemAuth: path, SystemAlias: AccountAlias("fixture"), SystemAccountID: "fixture", CQAccounts: accounts, Dots: map[string]Dot{}}
+	catalogue := &CatalogueClient{Settings: settings}
+	if inventory, err := catalogue.Inventory(); err != nil || len(inventory.Accounts) != 1 {
+		t.Fatalf("system catalogue: %d accounts, %v", len(inventory.Accounts), err)
+	}
+	if _, err := NewNativeGate(settings, catalogue).load(); err != nil {
+		t.Fatalf("native system gate: %v", err)
+	}
+	anchor := t.TempDir()
+	privateWindowsDotsTestAnchor(t, anchor)
+	executable := filepath.Join(anchor, "cq.exe")
+	if err := os.WriteFile(executable, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := InstallOptions{Root: filepath.Join(anchor, "dots"), App: windowsAppFixture(t), SystemAuth: path,
+		CQAccounts: accounts, Mode: "native", Executable: executable,
+		launcher: func(string, string, string) (string, error) {
+			return filepath.Join(anchor, windowsDotsShortcutName), nil
+		},
+	}
+	if _, err := Install(t.Context(), options); err != nil {
+		t.Fatalf("first install with default Codex auth: %v", err)
+	}
+	custom := filepath.Join(home, "custom.auth.json")
+	if err := os.WriteFile(custom, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsDotsCredentialReader(t, custom, sandbox)
+	if _, err := readSystemAuth(custom); err == nil {
+		t.Fatal("custom credential accepted Codex sandbox ACE")
+	}
+	world, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setWindowsDotsCredentialReader(t, path, world)
+	if _, err := readSystemAuth(path); err == nil {
+		t.Fatal("world-readable system credential accepted")
+	}
+}
+
+func setWindowsDotsCredentialReader(t *testing.T, path string, reader *windows.SID) {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := user.User.Sid.String()
+	mask := uint32(windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE)
+	sddl := fmt.Sprintf("O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x%x;;;%s)", sid, sid, mask, reader.String())
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, owner, nil, dacl, nil); err != nil {
+		t.Fatal(err)
 	}
 }
 

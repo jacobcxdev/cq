@@ -10,8 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"time"
-
-	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 const accountWatchInterval = 5 * time.Second
@@ -103,7 +101,7 @@ func RunAccountWatch(ctx context.Context, settings *Settings, controller Control
 	if err := ValidateRuntimePaths(settings.RuntimeRoot); err != nil {
 		return err
 	}
-	lock, err := fsutil.AcquireExclusiveLock(fsutil.OSFileSystem{}, filepath.Join(settings.RuntimeRoot, "account-watch.lock"))
+	lock, err := acquireDotsLock(filepath.Join(settings.RuntimeRoot, "account-watch.lock"))
 	if err != nil {
 		return err
 	}
@@ -138,7 +136,7 @@ func (c Controller) ensureWatcher(ctx context.Context, settings *Settings) (map[
 	if err := ValidateRuntimePaths(settings.RuntimeRoot); err != nil {
 		return nil, err
 	}
-	lock, err := fsutil.AcquireExclusiveLock(fsutil.OSFileSystem{}, filepath.Join(settings.RuntimeRoot, "account-watch-start.lock"))
+	lock, err := acquireDotsLock(filepath.Join(settings.RuntimeRoot, "account-watch-start.lock"))
 	if err != nil {
 		return nil, err
 	}

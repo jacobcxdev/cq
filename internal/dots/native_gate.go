@@ -26,7 +26,7 @@ type NativeGate struct {
 func NewNativeGate(s *Settings, c *CatalogueClient) *NativeGate {
 	g := &NativeGate{settings: s, now: time.Now}
 	g.load = func() (Account, error) {
-		data, err := ReadOwned(s.SystemAuth, "")
+		data, err := readSystemAuth(s.SystemAuth)
 		if err != nil {
 			return Account{}, err
 		}

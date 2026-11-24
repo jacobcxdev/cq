@@ -307,7 +307,7 @@ func (c *CatalogueClient) Inventory() (Inventory, error) {
 	if s == nil {
 		return Inventory{}, fmt.Errorf("Dots settings unavailable")
 	}
-	data, err := ReadOwned(s.SystemAuth, "")
+	data, err := readSystemAuth(s.SystemAuth)
 	if err != nil {
 		return Inventory{}, err
 	}

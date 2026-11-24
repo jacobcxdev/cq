@@ -21,3 +21,5 @@ func windowsReadPrivate(string, string, bool) ([]byte, error) {
 	return nil, errors.New("Windows private state unavailable")
 }
 func windowsMigratePrivatePort(string) error { return errors.New("Windows private state unavailable") }
+
+func readSystemAuth(path string) ([]byte, error) { return ReadOwned(path, "") }

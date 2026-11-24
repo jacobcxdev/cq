@@ -102,6 +102,85 @@ func windowsReadPrivate(path, root string, exactMode bool) ([]byte, error) {
 	return data, nil
 }
 
+func readSystemAuth(path string) ([]byte, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(filepath.Clean(path), filepath.Join(home, ".codex", "auth.json")) || !cleanAbsolute(path) {
+		return windowsReadPrivate(path, "", false)
+	}
+	fsys := fsutil.OSFileSystem{}
+	if err := fsutil.ValidateExternalCredentialDirectory(fsys, filepath.Dir(path)); err != nil {
+		return nil, err
+	}
+	named, err := fsys.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	validateInfo := func(info os.FileInfo) (fsutil.SecureFileIdentity, error) {
+		if info.Size() > 1<<20 {
+			return fsutil.SecureFileIdentity{}, fsutil.ErrSecureFileTooLarge
+		}
+		if err := fsutil.ValidateExternalCacheFile(fsys, info); err != nil {
+			return fsutil.SecureFileIdentity{}, err
+		}
+		identity, ok := fsys.FileIdentity(info)
+		if !ok || identity.Links != 1 {
+			return fsutil.SecureFileIdentity{}, fsutil.ErrUnsafeSecurePath
+		}
+		return identity, nil
+	}
+	namedID, err := validateInfo(named)
+	if err != nil {
+		return nil, err
+	}
+	file, err := fsys.OpenNoFollow(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	validateOpened := func(info os.FileInfo) (fsutil.SecureFileIdentity, error) {
+		identity, err := validateInfo(info)
+		if err != nil {
+			return fsutil.SecureFileIdentity{}, err
+		}
+		if fsutil.ValidateExternalCredentialFile(fsys, info) != nil {
+			if err := fsys.ValidateCodexSystemCredential(file); err != nil {
+				return fsutil.SecureFileIdentity{}, err
+			}
+		}
+		return identity, nil
+	}
+	before, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	openedID, err := validateOpened(before)
+	if err != nil {
+		return nil, err
+	}
+	if !fsutil.SameSecureObject(namedID, openedID) {
+		return nil, fsutil.ErrUnsafeSecurePath
+	}
+	data, err := httputil.ReadBody(file)
+	if err != nil {
+		return nil, err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	afterID, err := validateOpened(after)
+	if err != nil {
+		return nil, err
+	}
+	if afterID != openedID || revision(before) != revision(after) {
+		return nil, fsutil.ErrUnsafeSecurePath
+	}
+	return data, nil
+}
+
 func windowsMigratePrivatePort(path string) error {
 	data, err := windowsReadPrivate(path, "", true)
 	if errors.Is(err, os.ErrNotExist) {
