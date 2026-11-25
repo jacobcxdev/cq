@@ -4,6 +4,7 @@ package dots
 
 import (
 	"runtime"
+	"slices"
 	"testing"
 	"unsafe"
 
@@ -29,7 +30,12 @@ func TestWindowsDotsTaskbarPropertiesUseCQIconAndRelaunch(t *testing.T) {
 		t.Fatalf("create the test window: %v", err)
 	}
 	defer destroy.Call(window)
-	values := [4]string{`"C:\Program Files\CQ\cq.exe" codex dots start`, `C:\CQ\ChatGPT.ico,0`, "ChatGPT via CQ", windowsDotsAppID}
+	executable, root := `C:\Program Files\CQ\cq.exe`, `C:\CQ Data\dots`
+	values := windowsDotsRelaunchProperties(executable, root, `C:\CQ Data\dots\ChatGPT.ico`)
+	args, err := windows.DecomposeCommandLine(values[0])
+	if err != nil || !slices.Equal(args, []string{executable, "codex", "dots", "launch", "--root", root}) {
+		t.Fatalf("taskbar relaunch arguments = %q, %v", args, err)
+	}
 	if !windowsDotsWindowProperties(window, values, false) || !windowsDotsWindowProperties(window, values, false) {
 		t.Fatal("failed to apply or refresh the CQ taskbar properties")
 	}

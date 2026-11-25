@@ -121,6 +121,11 @@ func windowsDotsWindowPID(window uintptr) uint32 {
 	return pid
 }
 
+func windowsDotsRelaunchProperties(executable, root, icon string) [4]string {
+	command := syscall.EscapeArg(executable) + " " + windowsDotsLaunchArguments + syscall.EscapeArg(root)
+	return [4]string{command, icon + ",0", "ChatGPT via CQ", windowsDotsAppID}
+}
+
 func nativeAppPresentation(s *Settings, pid int, env []string) func() {
 	executable := environmentValue(env, "CQ_DOTS_CQ_PATH")
 	root := filepath.Dir(s.RuntimeRoot)
@@ -144,8 +149,7 @@ func nativeAppPresentation(s *Settings, pid int, env []string) func() {
 			return
 		}
 		defer dotsCoUninitialize.Call()
-		command := syscall.EscapeArg(executable) + " codex dots start --root " + syscall.EscapeArg(root)
-		values := [4]string{command, icon + ",0", "ChatGPT via CQ", windowsDotsAppID}
+		values := windowsDotsRelaunchProperties(executable, root, icon)
 		applied := map[uintptr]bool{}
 		releaseWindow := func(window uintptr) {
 			if windowsDotsWindowPID(window) == uint32(pid) {

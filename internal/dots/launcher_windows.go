@@ -24,12 +24,13 @@ import (
 
 const windowsDotsShortcutName = "ChatGPT via CQ.lnk"
 const windowsDotsIconName = "ChatGPT.ico"
+const windowsDotsLaunchArguments = "codex dots launch --root "
 
 const windowsDotsShortcutScript = `$ErrorActionPreference = 'Stop'
 $shell = New-Object -ComObject WScript.Shell
 $path = $env:CQ_DOTS_SHORTCUT_PATH
 $target = $env:CQ_DOTS_SHORTCUT_TARGET
-$arguments = 'codex dots launch --root "' + $env:CQ_DOTS_SHORTCUT_ROOT + '"'
+$arguments = '` + windowsDotsLaunchArguments + `"' + $env:CQ_DOTS_SHORTCUT_ROOT + '"'
 if (Test-Path -LiteralPath $path) {
     $existing = $shell.CreateShortcut($path)
     if (-not [string]::Equals($existing.TargetPath, $target, [StringComparison]::OrdinalIgnoreCase) -or $existing.Arguments -ne $arguments) { exit 43 }
@@ -48,7 +49,7 @@ const windowsDotsShortcutStageScript = `$ErrorActionPreference = 'Stop'
 $shell = New-Object -ComObject WScript.Shell
 $path = $env:CQ_DOTS_SHORTCUT_STAGE
 $target = $env:CQ_DOTS_SHORTCUT_TARGET
-$arguments = 'codex dots launch --root "' + $env:CQ_DOTS_SHORTCUT_ROOT + '"'
+$arguments = '` + windowsDotsLaunchArguments + `"' + $env:CQ_DOTS_SHORTCUT_ROOT + '"'
 if (Test-Path -LiteralPath $path) { exit 45 }
 try {
     $shortcut = $shell.CreateShortcut($path)
