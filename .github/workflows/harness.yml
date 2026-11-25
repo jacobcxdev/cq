@@ -513,6 +513,9 @@ jobs:
           $env:CQ_DOTS_WINDOWS_PIPE_ACCEPTANCE = '1'
           go test -race -count=1 -timeout 2m -v -run '^TestWindowsNativePipeInstalledApp$' ./internal/dots
           if ($LASTEXITCODE -ne 0) { throw 'Registered Desktop private renderer pipe qualification failed' }
+          $env:CQ_TEST_WINDOWS_DOTS_PACKAGE = $env:CQ_DOTS_WINDOWS_PACKAGE
+          go test -race -count=1 -timeout 2m -v -run '^TestInstalledWindowsAppDiscovery$' ./internal/dots
+          if ($LASTEXITCODE -ne 0) { throw 'Registered Desktop icon qualification failed' }
           $env:CQ_TEST_WINDOWS_DOTS_REGISTERED = '1'
           go test -race -count=1 -timeout 3m -v -run '^TestRegisteredWindowsDotsPackageReadOnly$' ./cmd/cq
           if ($LASTEXITCODE -ne 0) { throw 'Registered Desktop first-install path qualification failed' }

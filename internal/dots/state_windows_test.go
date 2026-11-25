@@ -46,6 +46,41 @@ func TestWindowsPrivateDotsStateCreateAndRepeat(t *testing.T) {
 	}
 }
 
+func TestWindowsDotsCatalogueReadsPrivateAccountsInReadableDirectory(t *testing.T) {
+	anchor := windowsDotsTestRoot(t)
+	accounts := filepath.Join(anchor, "accounts")
+	if err := PrivateDirectory(accounts); err != nil {
+		t.Fatal(err)
+	}
+	windowsDotsTestReadableDirectory(t, accounts)
+	auth := filepath.Join(anchor, "auth.json")
+	for path, owner := range map[string]string{
+		auth: "system", filepath.Join(accounts, "private.auth.json"): "secondary",
+		filepath.Join(accounts, "shared.auth.json"): "shared",
+	} {
+		document, err := json.Marshal(catalogueTestDocument(owner, time.Now().Add(time.Hour).Unix()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, document, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if owner != "shared" {
+			windowsDotsTestACL(t, path, false)
+		}
+	}
+	client := &CatalogueClient{Settings: &Settings{SystemAuth: auth, SystemAccountID: "system", SystemAlias: AccountAlias("system"), CQAccounts: accounts}}
+	inventory, err := client.Inventory()
+	if err != nil || len(inventory.Accounts) != 2 || inventory.Accounts[1].AccountID != "secondary" || len(inventory.Failures) != 1 {
+		t.Fatalf("catalogue has %d accounts and %d rejected entries: %v", len(inventory.Accounts), len(inventory.Failures), err)
+	}
+	windowsDotsTestACL(t, accounts, true)
+	inventory, err = client.Inventory()
+	if err != nil || len(inventory.Accounts) != 1 || len(inventory.Failures) != 1 {
+		t.Fatalf("writable directory yielded %d accounts and %d failures: %v", len(inventory.Accounts), len(inventory.Failures), err)
+	}
+}
+
 func TestWindowsDotsSystemAuthAcceptsOnlyCodexSandboxReader(t *testing.T) {
 	computer, err := windows.ComputerName()
 	if err != nil {
