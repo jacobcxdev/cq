@@ -4,6 +4,8 @@ package dots
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -132,6 +134,7 @@ func nativeAppPresentation(s *Settings, pid int, env []string) func() {
 		defer func() { _ = recover() }()
 		icon, err := installWindowsDotsIcon(root, s.AppPath)
 		if err != nil {
+			fmt.Fprintf(os.Stderr, "cq: Windows Dots taskbar icon unavailable: %v\n", err)
 			return
 		}
 		runtime.LockOSThread()

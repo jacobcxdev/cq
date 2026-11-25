@@ -189,9 +189,14 @@ func installWindowsDotsIcon(root, app string) (string, error) {
 	if !filepath.IsLocal(logo) || !strings.EqualFold(filepath.Ext(logo), ".png") {
 		return "", errors.New("Windows Dots package logo path invalid")
 	}
+	registered, registeredErr := winpackage.RegisteredCodexRoot()
+	useStoreAssetReader := registeredErr == nil && strings.EqualFold(app, registered)
 	icon, err := windowsLauncherIcon(filepath.Join(app, logo), func(path string) ([]byte, error) {
 		if err := winpackage.CheckPath(path); err != nil {
 			return nil, err
+		}
+		if useStoreAssetReader {
+			return readWindowsStoreIconAsset(path)
 		}
 		file, err := (fsutil.OSFileSystem{}).OpenNoFollow(path)
 		if err != nil {
@@ -208,6 +213,30 @@ func installWindowsDotsIcon(root, app string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// Registered WindowsApps packages use Store callback ACEs. Read package assets
+// without the private-state ACL parser after validating the registered path.
+func readWindowsStoreIconAsset(path string) ([]byte, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	const share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ, share, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	defer file.Close()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return nil, err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+		return nil, errors.New("Windows Store icon asset is not a regular file")
+	}
+	return httputil.ReadBody(file)
 }
 
 func validateWindowsDotsLauncherFile(fsys fsutil.OSFileSystem, path string) error {

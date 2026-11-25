@@ -100,5 +100,12 @@ func TestInstalledWindowsAppDiscovery(t *testing.T) {
 	if err := CheckWindowsApp(&pin); err != nil {
 		t.Fatal(err)
 	}
+	launcher := filepath.Join(windowsDotsTestRoot(t), "launcher")
+	if err := PrivateDirectory(launcher); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installWindowsDotsIcon(launcher, root); err != nil {
+		t.Fatalf("prepare icon from installed Windows package: %v", err)
+	}
 	t.Logf("qualified installed Windows renderer: executable=%s version=%s asset=%s", filepath.Base(executable), pin.AppVersion, pin.ModuleAsset)
 }
