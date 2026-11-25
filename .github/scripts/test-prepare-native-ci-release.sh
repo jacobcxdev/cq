@@ -87,7 +87,7 @@ fixture() {
 }
 run() {
   cp "$script" "$root/scripts/prepare-native-ci-release.sh"
-  bash "$root/scripts/prepare-native-ci-release.sh" v1.2.3 "${1:-101}" "$root/output"
+  bash "$root/scripts/prepare-native-ci-release.sh" "${2:-v1.2.3}" "${1:-101}" "$root/output"
 }
 reject() {
   : > "$GITHUB_OUTPUT"
@@ -129,6 +129,13 @@ fixture
 jq '.[0] += [{tag_name:"v9.9.9",name:"v9.9.9",draft:true,prerelease:false,target_commitish:"other",assets:[]}]' "$root/releases.json" > "$root/temp.json"
 mv "$root/temp.json" "$root/releases.json"
 reject
+fixture
+jq --arg commit "$HEAD_COMMIT" '.[0] += [{tag_name:"v1.2.3",name:"v1.2.3 (retired)",draft:true,prerelease:false,target_commitish:$commit,assets:[{name:"CQNetwork_1.2.3_universal.zip",state:"uploaded"}]}]' "$root/releases.json" > "$root/temp.json"
+mv "$root/temp.json" "$root/releases.json"
+reject
+run 102 v1.3.0
+grep -Fq 'release create v1.3.0 ' "$root/create.log"
+grep -Fxq existing=false "$GITHUB_OUTPUT"
 fixture
 jq --arg commit "$HEAD_COMMIT" '.[0] += [{tag_name:"v1.2.3",name:"v1.2.3",draft:true,prerelease:false,target_commitish:$commit,assets:[{name:"CQNetwork_1.2.3_universal.zip",state:"uploaded"}]}]' "$root/releases.json" > "$root/temp.json"
 mv "$root/temp.json" "$root/releases.json"

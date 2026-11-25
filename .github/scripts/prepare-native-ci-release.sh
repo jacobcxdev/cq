@@ -56,7 +56,13 @@ git merge-base --is-ancestor "$previous_tag" "$source_commit"
 # A failed or concurrent attempt must be reconciled, never silently replaced.
 jq --arg tag "$tag" '[.[] | select(.tag_name == $tag)]' "$temporary/releases.json" > "$temporary/parent.json"
 [[ "$(jq 'length' "$temporary/parent.json")" -le 1 ]] || fail 'ambiguous parent release'
-jq -e --arg tag "$tag" '[.[] | select(.draft == true and .tag_name != $tag)] | length == 0' "$temporary/releases.json" >/dev/null || fail 'another release draft is active'
+jq -e --arg tag "$tag" '
+  def retired:
+    .prerelease == false and
+    ((.tag_name // "") | test("^v[0-9]+\\.[0-9]+\\.[0-9]+$")) and
+    .name == (.tag_name + " (retired)");
+  [.[] | select(.draft == true and .tag_name != $tag and (retired | not))] | length == 0
+' "$temporary/releases.json" >/dev/null || fail 'another release draft is active'
 existing=false
 if [[ "$(jq 'length' "$temporary/parent.json")" == 1 ]]; then
   existing=true
