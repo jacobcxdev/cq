@@ -158,6 +158,13 @@ asset, digest, signed bundle and requested build number and reuses it. A mismatc
 fails; CI never replaces the asset. Do not rerun a complete release after
 publication to repair omissions: use the next complete sequential version.
 
+If an unpublished attempt cannot ship from its signed tags, record the failure
+and replacement version in the draft notes and set its title to `vVERSION (retired)`.
+Keep the draft private with its original tags and assets. CI will reject that
+draft as a release target and allow a separate active draft. Choose the next
+allowed stable version from the latest published release and account for all
+changes in the retired attempt.
+
 Missing, incomplete or mismatched manifests fail the release gate. Validation checks
 GitHub tag, source ancestry and tree identity, asset ID and server digest, then
 verifies the downloaded ZIP digest, safe archive paths, company Developer ID

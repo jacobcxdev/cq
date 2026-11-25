@@ -1462,6 +1462,10 @@ func TestNormalProxyTransportHTTPSuccessorRoutesAfterAbandonedPredecessor(t *tes
 	harness.backend.assertNoFailure(t)
 }
 
+// The race-instrumented 128 MiB fixtures check the transport limit and payload
+// integrity. Hosted macOS runners can take over 90 seconds to process a frame.
+const normalTransportGateLargeRequestTimeout = 3 * time.Minute
+
 func TestNormalProxyTransportWebSocketAccepts128MiB(t *testing.T) {
 	harness := newNormalTransportGateHarness(t, normalTransportGateHTTPSuccess)
 	connection := normalTransportGateWebSocket(t, harness)
@@ -1471,7 +1475,7 @@ func TestNormalProxyTransportWebSocketAccepts128MiB(t *testing.T) {
 	if err := connection.WriteMessage(websocket.TextMessage, frame); err != nil {
 		t.Fatal(err)
 	}
-	normalTransportGateReadWSCompletionWithTimeout(t, connection, 90*time.Second)
+	normalTransportGateReadWSCompletionWithTimeout(t, connection, normalTransportGateLargeRequestTimeout)
 	receipts := normalTransportGateReceipts(harness.backend.snapshot(), "websocket_frame")
 	if len(receipts) != 1 || receipts[0].payload != string(frame) {
 		t.Fatalf("provider did not receive the complete WebSocket request: %d receipts", len(receipts))
@@ -1517,7 +1521,7 @@ func TestNormalProxyTransportWebSocketOversizeFallsBackToHTTP(t *testing.T) {
 	}
 	// The client rebuilds response.create as a streaming HTTP request.
 	httpBody := bytes.Replace(frame, []byte(`"type":"response.create",`), []byte(`"stream":true,`), 1)
-	status, body := normalTransportGateHTTPCallWithTimeout(t, harness, httpBody, 90*time.Second, header)
+	status, body := normalTransportGateHTTPCallWithTimeout(t, harness, httpBody, normalTransportGateLargeRequestTimeout, header)
 	if status != http.StatusOK || !bytes.Contains(body, []byte(`"type":"response.completed"`)) {
 		t.Fatalf("HTTP fallback = %d %q, want completed 200", status, body)
 	}
