@@ -164,7 +164,7 @@ func (p *realtimeProxy) accounts() (map[string]Account, error) {
 
 func realtimePort(path, root string, allowMissing bool) (int, error) {
 	data, err := readPrivate(path, root, true)
-	if allowMissing && os.IsNotExist(err) {
+	if allowMissing && errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}
 	if err != nil {

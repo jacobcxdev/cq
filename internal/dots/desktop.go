@@ -3,6 +3,7 @@ package dots
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"runtime"
 	"time"
@@ -28,7 +29,13 @@ type desktopDependencies struct {
 
 func desktopDefaults() desktopDependencies {
 	return desktopDependencies{
-		stage: ensureDesktopExecutable,
+		stage: func(s *Settings, source string) (string, error) {
+			if runtime.GOOS == "windows" {
+				// Windows cannot replace the helper once the watchdog runs it.
+				return StageExecutable(source, s.RuntimeRoot)
+			}
+			return ensureDesktopExecutable(s, source)
+		},
 		spawn: func(s *Settings, executable, role string, args, env []string) (desktopWatchdog, error) {
 			return SpawnHelper(s, executable, role, args, env)
 		},
@@ -86,7 +93,9 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 	if s == nil || s.IntegrationMode != "native" {
 		return errors.New("Spotlight launcher requires a native Dots installation")
 	}
-	const failure = "CQ could not start Dots. Run cq codex dots status for details."
+	failure := func(action string) error {
+		return fmt.Errorf("CQ could not %s. Run cq codex dots status to check the adapter", action)
+	}
 	openCurrent := func() error {
 		app := s.AppPath
 		if deps.appPath != nil {
@@ -125,7 +134,7 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 			return activateRepaired()
 		}
 		recoverNow()
-		return errors.New(failure)
+		return failure("prepare the Dots helper executable")
 	}
 	env := os.Environ()
 	if c.BaseURL != "" {
@@ -138,7 +147,7 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 			return activateRepaired()
 		}
 		recoverNow()
-		return errors.New(failure)
+		return failure("start the Dots recovery helper")
 	}
 	stopWatchdog := false
 	defer func() {
@@ -155,7 +164,7 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 			return activateRepaired()
 		}
 		stopWatchdog = recoverNow()
-		return errors.New(failure)
+		return failure("start the Dots adapter")
 	}
 	if result["restart_required"] == true {
 		stopWatchdog = recoverNow()
@@ -167,7 +176,7 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 	}
 	if err := openCurrent(); err != nil {
 		stopWatchdog = recoverNow()
-		return errors.New(failure)
+		return failure("activate the ChatGPT window")
 	}
 	stopWatchdog = true
 	return nil

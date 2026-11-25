@@ -4,13 +4,78 @@ package dots
 
 import (
 	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestWindowsRealtimePortAllowsMissingPrivateFile(t *testing.T) {
+	root := filepath.Join(windowsDotsTestRoot(t), "runtime")
+	if err := PrivateDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "realtime-port")
+	if port, err := realtimePort(path, root, true); err != nil || port != 0 {
+		t.Fatalf("fresh realtime port = %d, %v", port, err)
+	}
+	if _, err := realtimePort(path, root, false); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("required realtime port returned %v", err)
+	}
+}
+
+func TestWindowsDesktopStagesBeforeMappedWatchdog(t *testing.T) {
+	const childEnv = "CQ_TEST_WINDOWS_MAPPED_DOTS_WATCHDOG"
+	if os.Getenv(childEnv) == "1" {
+		time.Sleep(30 * time.Second)
+		return
+	}
+	anchor := windowsDotsTestRoot(t)
+	s := &Settings{RuntimeRoot: filepath.Join(anchor, "runtime")}
+	if err := PrivateDirectory(s.RuntimeRoot); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(anchor, "cq.exe")
+	if err := os.WriteFile(source, []byte("previous version"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	windowsDotsTestACL(t, source, false)
+	if _, err := StageExecutable(source, s.RuntimeRoot); err != nil {
+		t.Fatal(err)
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, current, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := desktopDefaults().stage(s, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	watchdog := exec.Command(staged, "-test.run=^TestWindowsDesktopStagesBeforeMappedWatchdog$")
+	watchdog.Env = append(os.Environ(), childEnv+"=1")
+	if err := watchdog.Start(); err != nil {
+		t.Fatalf("launch current staged watchdog: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = watchdog.Process.Kill()
+		_ = watchdog.Wait()
+	})
+	if reused, err := StageExecutable(source, s.RuntimeRoot); err != nil || reused != staged {
+		t.Fatalf("reuse staged executable with watchdog running: %q, %v", reused, err)
+	}
+}
 
 func TestWindowsProcessIdentityReadsCurrentOwnedImage(t *testing.T) {
 	handle, err := windowsOwnedProcess(os.Getpid(), windows.PROCESS_VM_READ)

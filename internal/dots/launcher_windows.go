@@ -16,17 +16,21 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/httputil"
 	"github.com/jacobcxdev/cq/internal/userdirs"
+	"github.com/jacobcxdev/cq/internal/winpackage"
 	"golang.org/x/sys/windows"
 )
 
 const windowsDotsShortcutName = "ChatGPT via CQ.lnk"
+const windowsDotsIconName = "ChatGPT.ico"
+const windowsDotsLaunchArguments = "codex dots launch --root "
 
 const windowsDotsShortcutScript = `$ErrorActionPreference = 'Stop'
 $shell = New-Object -ComObject WScript.Shell
 $path = $env:CQ_DOTS_SHORTCUT_PATH
 $target = $env:CQ_DOTS_SHORTCUT_TARGET
-$arguments = 'codex dots launch --root "' + $env:CQ_DOTS_SHORTCUT_ROOT + '"'
+$arguments = '` + windowsDotsLaunchArguments + `"' + $env:CQ_DOTS_SHORTCUT_ROOT + '"'
 if (Test-Path -LiteralPath $path) {
     $existing = $shell.CreateShortcut($path)
     if (-not [string]::Equals($existing.TargetPath, $target, [StringComparison]::OrdinalIgnoreCase) -or $existing.Arguments -ne $arguments) { exit 43 }
@@ -38,14 +42,14 @@ $shortcut.WorkingDirectory = $env:CQ_DOTS_SHORTCUT_ROOT
 $shortcut.IconLocation = $env:CQ_DOTS_SHORTCUT_ICON
 $shortcut.Save()
 $check = $shell.CreateShortcut($path)
-if (-not [string]::Equals($check.TargetPath, $target, [StringComparison]::OrdinalIgnoreCase) -or $check.Arguments -ne $arguments) { exit 44 }
+if (-not [string]::Equals($check.TargetPath, $target, [StringComparison]::OrdinalIgnoreCase) -or $check.Arguments -ne $arguments -or $check.IconLocation -ine ($env:CQ_DOTS_SHORTCUT_ICON + ',0')) { exit 44 }
 `
 
 const windowsDotsShortcutStageScript = `$ErrorActionPreference = 'Stop'
 $shell = New-Object -ComObject WScript.Shell
 $path = $env:CQ_DOTS_SHORTCUT_STAGE
 $target = $env:CQ_DOTS_SHORTCUT_TARGET
-$arguments = 'codex dots launch --root "' + $env:CQ_DOTS_SHORTCUT_ROOT + '"'
+$arguments = '` + windowsDotsLaunchArguments + `"' + $env:CQ_DOTS_SHORTCUT_ROOT + '"'
 if (Test-Path -LiteralPath $path) { exit 45 }
 try {
     $shortcut = $shell.CreateShortcut($path)
@@ -55,7 +59,7 @@ try {
     $shortcut.IconLocation = $env:CQ_DOTS_SHORTCUT_ICON
     $shortcut.Save()
     $check = $shell.CreateShortcut($path)
-    if (-not [string]::Equals($check.TargetPath, $target, [StringComparison]::OrdinalIgnoreCase) -or $check.Arguments -ne $arguments) { exit 44 }
+    if (-not [string]::Equals($check.TargetPath, $target, [StringComparison]::OrdinalIgnoreCase) -or $check.Arguments -ne $arguments -or $check.IconLocation -ine ($env:CQ_DOTS_SHORTCUT_ICON + ',0')) { exit 44 }
     $staged = Get-Item -LiteralPath $path -Force
     if ($staged.Length -lt 1 -or $staged.Length -gt 65536 -or ($staged.Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 46 }
     [Console]::Out.Write([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)))
@@ -98,6 +102,10 @@ func installWindowsDotsLauncherAt(path, root, app, executable string) (string, e
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
+	icon, err := installWindowsDotsIcon(root, app)
+	if err != nil {
+		return "", err
+	}
 	script := windowsDotsShortcutScript
 	stage := ""
 	if !existing {
@@ -124,7 +132,7 @@ func installWindowsDotsLauncherAt(path, root, app, executable string) (string, e
 		"CQ_DOTS_SHORTCUT_PATH":   path,
 		"CQ_DOTS_SHORTCUT_ROOT":   root,
 		"CQ_DOTS_SHORTCUT_TARGET": executable,
-		"CQ_DOTS_SHORTCUT_ICON":   filepath.Join(app, "app", "ChatGPT.exe"),
+		"CQ_DOTS_SHORTCUT_ICON":   icon,
 		"CQ_DOTS_SHORTCUT_STAGE":  stage,
 	}
 	for _, entry := range os.Environ() {
@@ -171,6 +179,65 @@ func installWindowsDotsLauncherAt(path, root, app, executable string) (string, e
 		return "", errors.New("Windows Dots Start Menu shortcut is unsafe")
 	}
 	return path, nil
+}
+
+func installWindowsDotsIcon(root, app string) (string, error) {
+	identity, err := windowsAppIdentityAt(app)
+	if err != nil {
+		return "", err
+	}
+	logo := filepath.FromSlash(identity.logo)
+	if !filepath.IsLocal(logo) || !strings.EqualFold(filepath.Ext(logo), ".png") {
+		return "", errors.New("Windows Dots package logo path invalid")
+	}
+	registered, registeredErr := winpackage.RegisteredCodexRoot()
+	useStoreAssetReader := registeredErr == nil && strings.EqualFold(app, registered)
+	icon, err := windowsLauncherIcon(filepath.Join(app, logo), func(path string) ([]byte, error) {
+		if err := winpackage.CheckPath(path); err != nil {
+			return nil, err
+		}
+		if useStoreAssetReader {
+			return readWindowsStoreIconAsset(path)
+		}
+		file, err := (fsutil.OSFileSystem{}).OpenNoFollow(path)
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+		return httputil.ReadBody(file)
+	})
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(root, windowsDotsIconName)
+	if err := launchWrite(path, icon, 0o600); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// Registered WindowsApps packages use Store callback ACEs. Read package assets
+// without the private-state ACL parser after validating the registered path.
+func readWindowsStoreIconAsset(path string) ([]byte, error) {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, err
+	}
+	const share = windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ, share, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(handle), path)
+	defer file.Close()
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+		return nil, err
+	}
+	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+		return nil, errors.New("Windows Store icon asset is not a regular file")
+	}
+	return httputil.ReadBody(file)
 }
 
 func validateWindowsDotsLauncherFile(fsys fsutil.OSFileSystem, path string) error {

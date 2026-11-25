@@ -1,8 +1,10 @@
 package dots
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -311,7 +313,7 @@ func stopRuntime(ctx context.Context, s *Settings, preserveWatcher bool, ops pro
 	return nil
 }
 
-// StageExecutable atomically replaces the staged path without changing running mapped inodes.
+// StageExecutable reuses an identical private helper or atomically installs new bytes.
 func StageExecutable(source, runtimeRoot string) (string, error) {
 	if !cleanAbsolute(source) || !cleanAbsolute(runtimeRoot) {
 		return "", errors.New("Dots executable paths must be absolute")
@@ -358,7 +360,8 @@ func StageExecutable(source, runtimeRoot string) (string, error) {
 		name += ".exe"
 	}
 	destination := filepath.Join(runtimeRoot, name)
-	if existing, err := os.Lstat(destination); err == nil {
+	existing, err := fs.Lstat(destination)
+	if err == nil {
 		if runtime.GOOS == "windows" {
 			if err := windowsValidatePrivateFile(destination); err != nil {
 				return "", errors.New("Staged Dots executable must be an owned private regular file")
@@ -366,7 +369,7 @@ func StageExecutable(source, runtimeRoot string) (string, error) {
 		} else if !existing.Mode().IsRegular() || !owned(existing) || existing.Mode().Perm() != 0o700 {
 			return "", errors.New("Staged Dots executable must be owned and mode 0700")
 		}
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
 	var random [16]byte
@@ -379,7 +382,13 @@ func StageExecutable(source, runtimeRoot string) (string, error) {
 		return "", err
 	}
 	defer directory.Remove(temporary)
-	if _, err = io.Copy(output, input); err != nil {
+	var copyTo io.Writer = output
+	digest := sha256.New()
+	compareExisting := existing != nil && existing.Size() == before.Size()
+	if compareExisting {
+		copyTo = io.MultiWriter(output, digest)
+	}
+	if _, err = io.Copy(copyTo, input); err != nil {
 		output.Close()
 		return "", err
 	}
@@ -391,6 +400,18 @@ func StageExecutable(source, runtimeRoot string) (string, error) {
 	if revision(before) != revision(after) {
 		output.Close()
 		return "", errors.New("Dots executable changed during staging")
+	}
+	if compareExisting {
+		matches, err := stagedExecutableMatches(fs, directory, destination, existing, digest.Sum(nil))
+		if err != nil {
+			return "", errors.Join(err, output.Close())
+		}
+		if matches {
+			if err := output.Close(); err != nil {
+				return "", err
+			}
+			return destination, nil
+		}
 	}
 	if err = output.Sync(); err != nil {
 		output.Close()
@@ -429,4 +450,32 @@ func StageExecutable(source, runtimeRoot string) (string, error) {
 		return "", err
 	}
 	return destination, nil
+}
+
+func stagedExecutableMatches(fsys fsutil.OSFileSystem, directory fsutil.SecureDirectory, destination string, expected os.FileInfo, sourceDigest []byte) (bool, error) {
+	staged, err := directory.OpenNoFollow(filepath.Base(destination))
+	if err != nil {
+		return false, err
+	}
+	defer staged.Close()
+	info, err := staged.Stat()
+	if err != nil {
+		return false, err
+	}
+	if revision(info) != revision(expected) {
+		return false, errors.New("Staged Dots executable changed during comparison")
+	}
+	digest := sha256.New()
+	read, err := io.Copy(digest, io.LimitReader(staged, expected.Size()+1))
+	if err != nil {
+		return false, err
+	}
+	current, err := fsys.Lstat(destination)
+	if err != nil {
+		return false, err
+	}
+	if read != expected.Size() || revision(current) != revision(expected) {
+		return false, errors.New("Staged Dots executable changed during comparison")
+	}
+	return bytes.Equal(digest.Sum(nil), sourceDigest), nil
 }

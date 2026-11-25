@@ -208,7 +208,7 @@ func privateSource(path string, declared bool) error {
 		if declared {
 			return fsutil.ValidateExternalCredentialDirectory(fsys, path)
 		}
-		return fsutil.ValidateSecureDirectory(fsys, path)
+		return fsutil.ValidateOwnerControlledDirectory(fsys, path)
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
