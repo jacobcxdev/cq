@@ -5,13 +5,58 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jacobcxdev/cq/internal/cache"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
+
+func TestZAIRoutingQuotaRetainsFutureResetsInStaleSnapshot(t *testing.T) {
+	now := time.Now()
+	dir := t.TempDir()
+	c, err := cache.New(cache.OSFileSystem{}, dir, 5*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reset := now.Add(time.Hour).Unix()
+	results := []quota.Result{
+		{AccountID: "depleted", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day:  {ResetAtUnix: reset},
+			quota.Window5Hour: {},
+		}},
+		{AccountID: "auth-failed", Status: quota.StatusError, Error: &quota.ErrorInfo{Code: "auth_expired"}},
+	}
+	if err := c.Put(t.Context(), "zai", results); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "zai.json")
+	old := now.Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, fresh, err := c.Get(t.Context(), "zai"); err != nil || fresh {
+		t.Fatalf("aged quota cache unexpectedly fresh, fresh=%t err=%v", fresh, err)
+	}
+	got := zaiRoutingQuota(c, now)
+	if len(got) != 1 || got[0].AccountID != "depleted" || len(got[0].Windows) != 1 || got[0].Windows[quota.Window7Day].ResetAtUnix != reset {
+		t.Fatalf("stale quota rules selected %+v", got)
+	}
+	if got := zaiRoutingQuota(c, time.Unix(reset, 0)); len(got) != 0 {
+		t.Fatalf("elapsed reset is still active: %+v", got)
+	}
+	if err := c.Delete(t.Context(), "zai"); err != nil {
+		t.Fatal(err)
+	}
+	if got := zaiRoutingQuota(c, now); len(got) != 0 {
+		t.Fatalf("invalidated quota remained active: %+v", got)
+	}
+}
 
 type failingCodexHealthInventory struct{ err error }
 

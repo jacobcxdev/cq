@@ -35,6 +35,15 @@ func New(fs FileSystem, dir string, ttl time.Duration) (*Cache, error) {
 
 // Get returns cached results if present and not expired.
 func (c *Cache) Get(_ context.Context, id string) ([]quota.Result, bool, error) {
+	return c.get(id, false)
+}
+
+// GetLast returns the latest stored results even after the TTL, with a separate freshness flag.
+func (c *Cache) GetLast(id string) ([]quota.Result, bool, error) {
+	return c.get(id, true)
+}
+
+func (c *Cache) get(id string, includeStale bool) ([]quota.Result, bool, error) {
 	if id == "" {
 		return nil, false, fmt.Errorf("empty cache ID")
 	}
@@ -47,7 +56,8 @@ func (c *Cache) Get(_ context.Context, id string) ([]quota.Result, bool, error) 
 	if err != nil {
 		return nil, false, nil
 	}
-	if c.nowFunc().Sub(info.ModTime()) > c.ttl {
+	fresh := c.nowFunc().Sub(info.ModTime()) <= c.ttl
+	if !fresh && !includeStale {
 		return nil, false, nil
 	}
 	data, err := c.fs.ReadFile(path)
@@ -58,7 +68,7 @@ func (c *Cache) Get(_ context.Context, id string) ([]quota.Result, bool, error) 
 	if err := json.Unmarshal(data, &results); err != nil {
 		return nil, false, nil
 	}
-	return results, true, nil
+	return results, fresh, nil
 }
 
 // Age returns how old the cached entry is, or false if not present.

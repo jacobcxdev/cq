@@ -35,6 +35,37 @@ import (
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
+func zaiRoutingQuota(c *cache.Cache, now time.Time) []quota.Result {
+	if c == nil {
+		return nil
+	}
+	results, fresh, err := c.GetLast("zai")
+	if err != nil {
+		return nil
+	}
+	if fresh {
+		return results
+	}
+	// A reported reset bounds stale quota evidence. Undated quota and auth
+	// errors lose their routing effect when the ordinary snapshot expires.
+	bounded := results[:0]
+	nowUnix := now.Unix()
+	for _, result := range results {
+		if !result.IsUsable() {
+			continue
+		}
+		for name, window := range result.Windows {
+			if window.ResetAtUnix <= nowUnix {
+				delete(result.Windows, name)
+			}
+		}
+		if len(result.Windows) != 0 {
+			bounded = append(bounded, result)
+		}
+	}
+	return bounded
+}
+
 func normalCallerCredentials(ctx context.Context, cfg *proxy.Config, claudeAccounts []keyring.ClaudeOAuth, codexInventory codexprov.Inventory, codexSecrets codexprov.ExactSecretResolver) ([]proxy.NormalCallerCredentialV1, error) {
 	return normalCallerCredentialsFromInventory(ctx, cfg, claudeAccounts, codexInventory, nil, codexSecrets)
 }
@@ -1475,14 +1506,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			return zaiprov.ReadAccounts(fsys, os.Getenv, roots.Config)
 		},
 		ZAIQuota: func() []quota.Result {
-			if zaiQuotaCache == nil {
-				return nil
-			}
-			results, fresh, err := zaiQuotaCache.Get(context.Background(), "zai")
-			if err != nil || !fresh {
-				return nil
-			}
-			return results
+			return zaiRoutingQuota(zaiQuotaCache, time.Now())
 		},
 		ZAIPrimer:         zaiPrimer,
 		ZAIGateway:        zcodeGateway,
