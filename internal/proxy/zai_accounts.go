@@ -19,33 +19,41 @@ import (
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
-// PrioritiseZAIAccounts keeps preferred order among healthy or unknown accounts,
-// followed by subscriptions known to be unavailable. Callers supply fresh quota
-// results. Every credential remains available for explicit rejection fallback.
-func PrioritiseZAIAccounts(accounts []zaiprov.Account, results []quota.Result, now time.Time) []zaiprov.Account {
+type zaiAvailability uint8
+
+const (
+	zaiEligible zaiAvailability = iota
+	zaiDeprioritised
+	zaiDepleted
+)
+
+// eligibleZAIAccounts preserves preference within each group and excludes
+// accounts with a zero balance in an active quota window.
+func eligibleZAIAccounts(accounts []zaiprov.Account, results []quota.Result, now time.Time) []zaiprov.Account {
 	unavailable := zaiUnavailableAccounts(results, now)
 	ordered := make([]zaiprov.Account, 0, len(accounts))
 	for _, account := range accounts {
-		if !unavailable[account.ID] {
+		if unavailable[account.ID] == zaiEligible {
 			ordered = append(ordered, account)
 		}
 	}
 	for _, account := range accounts {
-		if unavailable[account.ID] {
+		if unavailable[account.ID] == zaiDeprioritised {
 			ordered = append(ordered, account)
 		}
 	}
 	return ordered
 }
 
-func zaiUnavailableAccounts(results []quota.Result, now time.Time) map[string]bool {
-	unavailable := make(map[string]bool)
+func zaiUnavailableAccounts(results []quota.Result, now time.Time) map[string]zaiAvailability {
+	unavailable := make(map[string]zaiAvailability)
+	nowUnix := now.Unix()
 	for _, result := range results {
 		if result.AccountID == "" {
 			continue
 		}
 		if result.Status == quota.StatusError && result.Error != nil && result.Error.Code == "auth_expired" {
-			unavailable[result.AccountID] = true
+			unavailable[result.AccountID] = max(unavailable[result.AccountID], zaiDeprioritised)
 			continue
 		}
 		if !result.IsUsable() {
@@ -53,7 +61,7 @@ func zaiUnavailableAccounts(results []quota.Result, now time.Time) map[string]bo
 		}
 		for _, name := range []quota.WindowName{quota.Window5Hour, quota.Window7Day} {
 			window, exists := result.Windows[name]
-			if !exists || window.ResetAtUnix > 0 && window.ResetAtUnix <= now.Unix() {
+			if !exists || window.ResetAtUnix > 0 && window.ResetAtUnix <= nowUnix {
 				continue
 			}
 			remaining := float64(window.RemainingPct)
@@ -61,7 +69,8 @@ func zaiUnavailableAccounts(results []quota.Result, now time.Time) map[string]bo
 				remaining = *window.RemainingPctExact
 			}
 			if remaining == 0 {
-				unavailable[result.AccountID] = true
+				unavailable[result.AccountID] = zaiDepleted
+				break
 			}
 		}
 	}
@@ -74,7 +83,7 @@ func (s *Server) zaiAccountsKnownUnavailable(accounts []zaiprov.Account) bool {
 	}
 	unavailable := zaiUnavailableAccounts(s.ZAIQuota(), time.Now())
 	for _, account := range accounts {
-		if account.ID == "" || !unavailable[account.ID] {
+		if account.ID == "" || unavailable[account.ID] == zaiEligible {
 			return false
 		}
 	}
@@ -127,8 +136,16 @@ func (s *Server) doZAIRequest(ctx context.Context, target string, header http.He
 	}
 	if accounts[0].Transport == "zcode-start" || request.PreviousResponseID != "" {
 		accounts = accounts[:1]
-	} else if s.ZAIQuota != nil {
-		accounts = PrioritiseZAIAccounts(accounts, s.ZAIQuota(), time.Now())
+	}
+	if s.ZAIQuota != nil && accounts[0].Transport != "zcode-start" {
+		accounts = eligibleZAIAccounts(accounts, s.ZAIQuota(), time.Now())
+		if len(accounts) == 0 {
+			return &http.Response{
+				StatusCode: http.StatusTooManyRequests,
+				Header:     http.Header{"Content-Type": {"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"rate_limit_exceeded","message":"Z.ai quota exhausted"}}`)),
+			}, nil
+		}
 	}
 	transport := s.ZAITransport
 	if transport == nil {

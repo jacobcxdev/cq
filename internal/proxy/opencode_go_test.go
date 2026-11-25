@@ -25,25 +25,27 @@ import (
 
 func TestOpenCodeGoSkipsKnownExhaustedZAI(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		results []quota.Result
-		body    string
-		wantZAI int32
-		wantGo  int32
+		name       string
+		results    []quota.Result
+		body       string
+		wantZAI    int32
+		wantGo     int32
+		wantStatus int
 	}{
 		{"all exhausted", []quota.Result{
 			{AccountID: "first", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0, ResetAtUnix: time.Now().Add(time.Hour).Unix()}}},
 			{AccountID: "second", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0, ResetAtUnix: time.Now().Add(time.Hour).Unix()}}},
-		}, `{"model":"glm-5.3","input":"hello"}`, 0, 1},
+		}, `{"model":"glm-5.3","input":"hello"}`, 0, 1, http.StatusOK},
 		{"one healthy", []quota.Result{
 			{AccountID: "first", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0, ResetAtUnix: time.Now().Add(time.Hour).Unix()}}},
 			{AccountID: "second", Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 50}}},
-		}, `{"model":"glm-5.3","input":"hello"}`, 1, 0},
-		{"quota unknown", nil, `{"model":"glm-5.3","input":"hello"}`, 1, 0},
-		{"opaque continuation", []quota.Result{
+		}, `{"model":"glm-5.3","input":"hello"}`, 1, 0, http.StatusOK},
+		{"quota unknown", nil, `{"model":"glm-5.3","input":"hello"}`, 1, 0, http.StatusOK},
+		{"opaque continuation with unknown quota", nil, `{"model":"glm-5.3","previous_response_id":"zai-owned","input":"hello"}`, 1, 0, http.StatusOK},
+		{"opaque continuation with depleted quota", []quota.Result{
 			{AccountID: "first", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0}}},
 			{AccountID: "second", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {RemainingPct: 0}}},
-		}, `{"model":"glm-5.3","previous_response_id":"zai-owned","input":"hello"}`, 1, 0},
+		}, `{"model":"glm-5.3","previous_response_id":"zai-owned","input":"hello"}`, 0, 0, http.StatusTooManyRequests},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var zaiCalls, goCalls atomic.Int32
@@ -65,7 +67,7 @@ func TestOpenCodeGoSkipsKnownExhaustedZAI(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 			s.handleLegacyCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(tc.body)))
-			if w.Code != http.StatusOK || zaiCalls.Load() != tc.wantZAI || goCalls.Load() != tc.wantGo {
+			if w.Code != tc.wantStatus || zaiCalls.Load() != tc.wantZAI || goCalls.Load() != tc.wantGo {
 				t.Fatalf("status=%d Z.ai=%d Go=%d", w.Code, zaiCalls.Load(), goCalls.Load())
 			}
 		})

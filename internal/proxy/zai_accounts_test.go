@@ -266,7 +266,7 @@ func TestZAIMultiAccountOpaqueHTTPIDDoesNotRetrySSERejection(t *testing.T) {
 	}
 }
 
-func TestPrioritiseZAIAccountsQuotaWindows(t *testing.T) {
+func TestEligibleZAIAccountsQuotaWindows(t *testing.T) {
 	now := time.Unix(1000, 0)
 	for _, test := range []struct {
 		name      string
@@ -274,21 +274,21 @@ func TestPrioritiseZAIAccountsQuotaWindows(t *testing.T) {
 		remaining int
 		exact     *float64
 		reset     int64
-		wantFirst string
+		wantOrder string
 	}{
 		{"five hour exhausted", quota.Window5Hour, 0, nil, 2000, "second"},
 		{"weekly exhausted", quota.Window7Day, 0, nil, 2000, "second"},
-		{"missing reset", quota.Window5Hour, 0, nil, 0, "second"},
-		{"past reset", quota.Window5Hour, 0, nil, 999, "first"},
-		{"reset now", quota.Window7Day, 0, nil, 1000, "first"},
-		{"MCP quota exhausted", "monthly:mcp", 0, nil, 2000, "first"},
-		{"other model bucket", "5h:other", 0, nil, 2000, "first"},
-		{"healthy quota", quota.Window5Hour, 1, nil, 2000, "first"},
-		{"rounded quota still available", quota.Window5Hour, 0, zaiTestFloatPointer(0.1), 2000, "first"},
+		{"fresh quota without reset", quota.Window5Hour, 0, nil, 0, "second"},
+		{"past reset", quota.Window5Hour, 0, nil, 999, "first,second"},
+		{"reset now", quota.Window7Day, 0, nil, 1000, "first,second"},
+		{"MCP quota exhausted", "monthly:mcp", 0, nil, 2000, "first,second"},
+		{"other model bucket", "5h:other", 0, nil, 2000, "first,second"},
+		{"healthy quota", quota.Window5Hour, 1, nil, 2000, "first,second"},
+		{"rounded quota still available", quota.Window5Hour, 0, zaiTestFloatPointer(0.1), 2000, "first,second"},
 		{"exact quota exhausted", quota.Window5Hour, 1, zaiTestFloatPointer(0), 2000, "second"},
-		{"negative quota malformed", quota.Window5Hour, -5, nil, 2000, "first"},
-		{"NaN quota malformed", quota.Window5Hour, 0, zaiTestFloatPointer(math.NaN()), 2000, "first"},
-		{"infinite quota malformed", quota.Window7Day, 0, zaiTestFloatPointer(math.Inf(1)), 2000, "first"},
+		{"negative quota malformed", quota.Window5Hour, -5, nil, 2000, "first,second"},
+		{"NaN quota malformed", quota.Window5Hour, 0, zaiTestFloatPointer(math.NaN()), 2000, "first,second"},
+		{"infinite quota malformed", quota.Window7Day, 0, zaiTestFloatPointer(math.Inf(1)), 2000, "first,second"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			accounts, _ := zaiTestAccounts()
@@ -296,9 +296,9 @@ func TestPrioritiseZAIAccountsQuotaWindows(t *testing.T) {
 			results := []quota.Result{{AccountID: "first", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{
 				test.window: {RemainingPct: test.remaining, RemainingPctExact: test.exact, ResetAtUnix: test.reset},
 			}}}
-			got := PrioritiseZAIAccounts(accounts, results, now)
-			if len(got) != len(accounts) || got[0].ID != test.wantFirst {
-				t.Fatalf("order = %v, want first %q", zaiTestAccountIDs(got), test.wantFirst)
+			got := eligibleZAIAccounts(accounts, results, now)
+			if order := strings.Join(zaiTestAccountIDs(got), ","); order != test.wantOrder {
+				t.Fatalf("order = %q, want %q", order, test.wantOrder)
 			}
 			if !reflect.DeepEqual(accounts, before) {
 				t.Fatal("account input mutated")
@@ -307,7 +307,7 @@ func TestPrioritiseZAIAccountsQuotaWindows(t *testing.T) {
 	}
 }
 
-func TestPrioritiseZAIAccountsStablePartitionAndErrors(t *testing.T) {
+func TestEligibleZAIAccountsStablePartitionAndErrors(t *testing.T) {
 	accounts := []zaiprov.Account{{ID: "exhausted"}, {ID: "unknown"}, {ID: "healthy"}, {ID: "expired"}, {ID: "fetch-failed"}, {ID: "also-exhausted"}}
 	results := []quota.Result{
 		{AccountID: "exhausted", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0, ResetAtUnix: 2000}, quota.Window7Day: {RemainingPct: 80, ResetAtUnix: 4000}}},
@@ -318,8 +318,8 @@ func TestPrioritiseZAIAccountsStablePartitionAndErrors(t *testing.T) {
 		{AccountID: "another-pool", Email: "unknown", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}},
 		{Status: quota.StatusError},
 	}
-	got := PrioritiseZAIAccounts(accounts, results, time.Unix(1000, 0))
-	want := []string{"unknown", "healthy", "fetch-failed", "exhausted", "expired", "also-exhausted"}
+	got := eligibleZAIAccounts(accounts, results, time.Unix(1000, 0))
+	want := []string{"unknown", "healthy", "fetch-failed", "expired"}
 	if !reflect.DeepEqual(zaiTestAccountIDs(got), want) {
 		t.Fatalf("order = %v, want %v", zaiTestAccountIDs(got), want)
 	}
@@ -328,7 +328,7 @@ func TestPrioritiseZAIAccountsStablePartitionAndErrors(t *testing.T) {
 	}
 }
 
-func TestPrioritiseZAIAccountsRetainsAllExhaustedAndUnknown(t *testing.T) {
+func TestEligibleZAIAccountsKeepsUnknownQuota(t *testing.T) {
 	accounts, _ := zaiTestAccounts()
 	results := []quota.Result{
 		{AccountID: "first", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{quota.Window5Hour: {RemainingPct: 0}}},
@@ -338,16 +338,17 @@ func TestPrioritiseZAIAccountsRetainsAllExhaustedAndUnknown(t *testing.T) {
 		name     string
 		accounts []zaiprov.Account
 		results  []quota.Result
+		want     []string
 	}{
-		{"all exhausted", accounts, results},
-		{"unknown", accounts, nil},
-		{"empty", nil, results},
-		{"missing windows", accounts, []quota.Result{{AccountID: "first", Status: quota.StatusExhausted}}},
+		{"all exhausted", accounts, results, []string{}},
+		{"unknown", accounts, nil, []string{"first", "second"}},
+		{"empty", nil, results, []string{}},
+		{"missing windows", accounts, []quota.Result{{AccountID: "first", Status: quota.StatusExhausted}}, []string{"first", "second"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got := PrioritiseZAIAccounts(test.accounts, test.results, time.Unix(1000, 0))
-			if !reflect.DeepEqual(zaiTestAccountIDs(got), zaiTestAccountIDs(test.accounts)) {
-				t.Fatalf("order = %v, want %v", zaiTestAccountIDs(got), zaiTestAccountIDs(test.accounts))
+			got := eligibleZAIAccounts(test.accounts, test.results, time.Unix(1000, 0))
+			if !reflect.DeepEqual(zaiTestAccountIDs(got), test.want) {
+				t.Fatalf("order = %v, want %v", zaiTestAccountIDs(got), test.want)
 			}
 		})
 	}
@@ -381,10 +382,12 @@ func TestZAIMultiAccountQuotaOrderingPreservesOpaqueContinuation(t *testing.T) {
 			w := httptest.NewRecorder()
 			s.handleCodexResponsesRoute(w, httptest.NewRequest(http.MethodPost, "/responses", strings.NewReader(body)))
 			want := "Bearer second-key"
+			wantStatus := http.StatusNoContent
 			if previous {
-				want = "Bearer first-key"
+				want = ""
+				wantStatus = http.StatusTooManyRequests
 			}
-			if w.Code != http.StatusNoContent || seen != want {
+			if w.Code != wantStatus || seen != want {
 				t.Fatalf("status=%d account=%q want=%q", w.Code, seen, want)
 			}
 		})
@@ -446,6 +449,58 @@ func TestZAIMultiAccountHTTPFailover(t *testing.T) {
 			defer mu.Unlock()
 			if !reflect.DeepEqual(seen, test.want) {
 				t.Fatalf("attempts = %v, want %v", seen, test.want)
+			}
+		})
+	}
+}
+
+func TestZAIRequestSkipsAccountsUntilKnownQuotaReset(t *testing.T) {
+	now := time.Now()
+	accounts, _ := zaiTestAccounts()
+	for _, tt := range []struct {
+		name       string
+		reset      time.Time
+		previous   string
+		all        bool
+		wantKeys   []string
+		wantStatus int
+	}{
+		{name: "fallback skips depleted account", reset: now.Add(time.Hour), wantKeys: []string{"Bearer second-key"}, wantStatus: http.StatusTooManyRequests},
+		{name: "all known depleted", reset: now.Add(time.Hour), all: true, wantStatus: http.StatusTooManyRequests},
+		{name: "opaque continuation stays with its owner", reset: now.Add(time.Hour), previous: "opaque", wantStatus: http.StatusTooManyRequests},
+		{name: "elapsed reset restores eligibility", reset: now.Add(-time.Hour), wantKeys: []string{"Bearer first-key"}, wantStatus: http.StatusNoContent},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var keys []string
+			results := []quota.Result{{AccountID: "first", Status: quota.StatusExhausted, Windows: map[quota.WindowName]quota.Window{
+				quota.Window5Hour: {RemainingPct: 80, ResetAtUnix: tt.reset.Unix()},
+				quota.Window7Day:  {ResetAtUnix: tt.reset.Unix()},
+			}}}
+			if tt.all {
+				second := results[0]
+				second.AccountID = "second"
+				results = append(results, second)
+			}
+			s := &Server{ZAIQuota: func() []quota.Result { return results }, ZAITransport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				key := r.Header.Get("Authorization")
+				keys = append(keys, key)
+				status := http.StatusNoContent
+				if key == "Bearer second-key" {
+					status = http.StatusTooManyRequests
+				}
+				return &http.Response{StatusCode: status, Header: make(http.Header), Body: http.NoBody}, nil
+			})}
+			body, err := json.Marshal(map[string]string{"previous_response_id": tt.previous})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := s.doZAIRequest(t.Context(), "https://example.invalid/responses", nil, body, accounts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			if response.StatusCode != tt.wantStatus || !reflect.DeepEqual(keys, tt.wantKeys) {
+				t.Fatalf("status=%d keys=%v, want status=%d keys=%v", response.StatusCode, keys, tt.wantStatus, tt.wantKeys)
 			}
 		})
 	}
