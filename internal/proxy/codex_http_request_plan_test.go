@@ -1410,6 +1410,52 @@ func TestCodexHTTPRequestPlanFactoryDetachesPortableQuotaExhaustedBoundAcrossTra
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryKeepsFallbackForRewrittenModel(t *testing.T) {
+	t.Parallel()
+
+	runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "bound"}}
+	factory := codexHTTPRequestPlanTestFactory(runtime)
+	now := factory.Now()
+	var inventory codex.Inventory
+	for _, key := range []codex.AccountKey{"bound", "fallback", "native"} {
+		account := frozenDispatchTestLogicalAccount(key,
+			frozenDispatchCandidate(key, "candidate", "revision", codex.SourceExternal, false, now.Add(time.Hour)))
+		if key != "native" {
+			account.Identity.PlanType = "plus"
+		}
+		inventory.Accounts = append(inventory.Accounts, account)
+	}
+	factory.Inventory = &codexHTTPRequestPlanTestInventory{inventory: inventory}
+	factory.Routes = &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+		JournalGeneration: 1, BoundAccountKey: "bound",
+	}}
+	factory.Capacity = NewCodexCapacityLedger(factory.Now, quotaSnapshotMaxAge)
+	frozenDispatchObserveCapacity(t, factory.Capacity, "fallback", CapacityBucketBase, 66, now)
+	factory.Capacity.ObserveQuotaSnapshot("native", QuotaSnapshot{
+		FetchedAt: now,
+		Result: quota.Result{Windows: map[quota.WindowName]quota.Window{
+			quota.WindowName("7d:" + codexSparkModel): {RemainingPct: 28, ResetAtUnix: now.Add(time.Hour).Unix()},
+		}},
+	})
+
+	prepared, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+		Encoded: frozenRequestBody(codexSparkModel, CodexRequestTurn, "full history"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Frozen.Release()
+	if choice := prepared.Dispatch.Accounts()[0].Choice(); choice.AccountKey != "bound" || choice.EffectiveModel != codexFallbackModel {
+		t.Fatalf("primary = %+v, want bound account and rewritten model", choice)
+	}
+	if fallback := prepared.Dispatch.AccountUnavailableFallbacks(); len(fallback) != 1 || fallback[0].Choice().AccountKey != "fallback" {
+		t.Fatalf("fallbacks = %+v, want the account supporting the rewritten route", fallback)
+	}
+	if reset := prepared.Dispatch.AccountUnavailableResetCandidates(); !slices.Equal(reset, []codex.AccountKey{"fallback"}) {
+		t.Fatalf("reset candidates = %v, want only fallback", reset)
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryFreezesDetachedFullCreateResetCandidates(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	for _, test := range []struct {
@@ -3460,10 +3506,12 @@ func TestCodexHTTPRequestPlanFactoryCyberOffResetPreservesSystemAccount(t *testi
 		name          string
 		systemAccount codex.AccountKey
 		ordinaryValue PoolValue
+		activeExpiry  bool
 		wantReset     bool
 	}{
 		{name: "ordinary Cyber stays ahead of system", systemAccount: "ordinary"},
 		{name: "system Cyber yields to maximum pool value", systemAccount: "cyber", ordinaryValue: ^PoolValue(0), wantReset: true},
+		{name: "earlier weekly reset keeps active socket", systemAccount: "cyber", activeExpiry: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			now := time.Unix(1_700_000_000, 0).UTC()
@@ -3489,6 +3537,14 @@ func TestCodexHTTPRequestPlanFactoryCyberOffResetPreservesSystemAccount(t *testi
 				Now:              func() time.Time { return now },
 			}
 			frozenDispatchObserveCapacity(t, factory.Capacity, "ordinary", CapacityBucketBase, 50, now)
+			if test.activeExpiry {
+				factory.Capacity.ObserveQuotaSnapshot("cyber", QuotaSnapshot{
+					FetchedAt: now,
+					Result: quota.Result{Windows: map[quota.WindowName]quota.Window{
+						quota.Window7Day: {RemainingPct: 28, ResetAtUnix: now.Add(time.Hour).Unix()},
+					}},
+				})
+			}
 			ctx := withRuntimeCallerAuthority(context.Background(), RuntimeCallerAuthorityV1{Domain: NormalCallerLocal, SubjectID: "local"})
 			protocol := CodexProtocolRequest{Model: "gpt-5", Metadata: CodexTurnMetadataResult{Metadata: CodexTurnMetadata{SessionID: "session"}}}
 			if got := factory.ShouldResetCyberOff(ctx, protocol, "cyber"); got != test.wantReset {

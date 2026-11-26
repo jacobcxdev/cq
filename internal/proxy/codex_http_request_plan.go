@@ -445,6 +445,7 @@ func (factory *CodexHTTPRequestPlanFactory) ShouldResetCyberOff(ctx context.Cont
 	for _, candidate := range candidates {
 		if candidate.Choice.AccountKey == active {
 			activeCandidate.SystemAccount = candidate.SystemAccount
+			activeCandidate.ExpiringWeeklyReset = candidate.ExpiringWeeklyReset
 			break
 		}
 	}
@@ -453,6 +454,7 @@ func (factory *CodexHTTPRequestPlanFactory) ShouldResetCyberOff(ctx context.Cont
 		candidate.Value = decision.AccountValues[account]
 		if account != active && candidate.Routable && candidate.Compatible && codexRoutePolicyCapacity(candidate).State == CapacityPositive &&
 			containsCodexHTTPRequestAccountKey(decision.Allowed, account) &&
+			!codexWeeklyResetBefore(activeCandidate.ExpiringWeeklyReset, candidate.ExpiringWeeklyReset) &&
 			codexRoutePolicyAccountValueLess(candidate, activeCandidate) {
 			return true
 		}
@@ -868,6 +870,7 @@ func (factory *CodexHTTPRequestPlanFactory) buildOnce(ctx context.Context, input
 			resetInput.AffinityAccountKey = ""
 			resetInput.AffinityEffectiveModel = ""
 			resetInput.BoundAccountKey = ""
+			resetInput.fallbackFor = &choice
 			resetPlan, err = factory.buildDispatch(ctx, resetInput)
 			if err != nil {
 				var exhausted *CachedUsageLimitError

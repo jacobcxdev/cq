@@ -50,6 +50,7 @@ type CapacityFact struct {
 	ObservedAt           time.Time
 	ResetAt              time.Time
 	Confidence           CapacityConfidence
+	backfilledUsage      bool
 }
 
 // CapacityState is the admission state derived from current facts.
@@ -265,15 +266,16 @@ func (l *CodexCapacityLedger) ObserveQuotaSnapshot(account codex.AccountKey, sna
 		l.mu.Lock()
 		l.seq++
 		fact := CapacityFact{
-			AccountKey:   account,
-			Windows:      aggregate.windows,
-			Bucket:       bucket,
-			RemainingPct: aggregate.remaining,
-			Source:       CapacitySourceUsageCache,
-			Sequence:     l.seq,
-			ObservedAt:   snap.FetchedAt,
-			ResetAt:      aggregate.reset,
-			Confidence:   CapacityConfidenceAdvisory,
+			AccountKey:      account,
+			Windows:         aggregate.windows,
+			Bucket:          bucket,
+			RemainingPct:    aggregate.remaining,
+			Source:          CapacitySourceUsageCache,
+			Sequence:        l.seq,
+			ObservedAt:      snap.FetchedAt,
+			ResetAt:         aggregate.reset,
+			Confidence:      CapacityConfidenceAdvisory,
+			backfilledUsage: snap.Result.CacheAge != 0,
 		}
 		l.observeLocked(fact)
 		l.mu.Unlock()
@@ -432,8 +434,12 @@ func (l *CodexCapacityLedger) expiringWeeklyReset(account codex.AccountKey, buck
 	if bucket != CapacityBucketBase {
 		name += ":" + quota.WindowName(strings.TrimPrefix(string(bucket), capacityBucketModelPrefix))
 	}
-	window, observed, ok := l.windowObservation(account, name)
-	if !ok || observed.IsZero() || observed.After(now) || now.Sub(observed) >= l.maxAge ||
+	l.mu.RLock()
+	entry, ok := l.windows[account][canonicalReserveWindow(name)]
+	l.mu.RUnlock()
+	window, observed := entry.window, entry.fact.ObservedAt
+	// A report can persist an older backfilled row with a new file timestamp.
+	if !ok || entry.fact.backfilledUsage || observed.IsZero() || observed.After(now) || now.Sub(observed) >= l.maxAge ||
 		window.ResetAtUnix <= 0 || windowRemaining(window) <= 0 {
 		return time.Time{}
 	}
@@ -442,6 +448,10 @@ func (l *CodexCapacityLedger) expiringWeeklyReset(account codex.AccountKey, buck
 		return time.Time{}
 	}
 	return reset
+}
+
+func codexWeeklyResetBefore(left, right time.Time) bool {
+	return !left.IsZero() && (right.IsZero() || left.Before(right))
 }
 
 func (l *CodexCapacityLedger) capacityLocked(account codex.AccountKey, bucket CapacityBucket) (CapacityView, bool) {

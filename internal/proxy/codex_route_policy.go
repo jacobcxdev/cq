@@ -373,7 +373,7 @@ func codexRoutePolicyCandidateLess(left, right CodexRoutePolicyCandidate, affini
 		return !left.IncludedQuotaExhausted
 	}
 	if !left.ExpiringWeeklyReset.Equal(right.ExpiringWeeklyReset) {
-		return !left.ExpiringWeeklyReset.IsZero() && (right.ExpiringWeeklyReset.IsZero() || left.ExpiringWeeklyReset.Before(right.ExpiringWeeklyReset))
+		return codexWeeklyResetBefore(left.ExpiringWeeklyReset, right.ExpiringWeeklyReset)
 	}
 	// Preserve the system account for clients and hosts outside CQ when quota
 	// expiry has equal priority. Hard continuation binding is handled first.

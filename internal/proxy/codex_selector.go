@@ -306,7 +306,7 @@ func betterRoute(candidate, current struct {
 	index       int
 }) bool {
 	if !candidate.weeklyReset.Equal(current.weeklyReset) {
-		return !candidate.weeklyReset.IsZero() && (current.weeklyReset.IsZero() || candidate.weeklyReset.Before(current.weeklyReset))
+		return codexWeeklyResetBefore(candidate.weeklyReset, current.weeklyReset)
 	}
 	if candidate.system != current.system {
 		return !candidate.system

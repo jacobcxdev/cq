@@ -24,6 +24,7 @@ type CodexFrozenDispatchInput struct {
 	ProbeUnavailableAccountKeys []codex.AccountKey
 	ProbeUnavailableWhenAll     bool
 	requireConfirmedQuotaProbe  bool
+	fallbackFor                 *RouteChoice
 	AcceptedRevision            codex.Revision
 	Now                         time.Time
 }
@@ -90,6 +91,11 @@ func BuildCodexFrozenDispatchPlan(ctx context.Context, input CodexFrozenDispatch
 			return CodexFrozenDispatchPlan{status: CodexRoutePlanCanceled}, cancelErr
 		}
 		return CodexFrozenDispatchPlan{}, err
+	}
+	if input.fallbackFor != nil {
+		candidates = slices.DeleteFunc(candidates, func(candidate CodexRoutePolicyCandidate) bool {
+			return !codexRoutePolicyCompatibleWithFrozen(candidate.Choice, *input.fallbackFor)
+		})
 	}
 	// Preserve bound attempts so dispatch can reject a reserve locally and run
 	// the account-unavailable lifecycle before selecting a replacement.
