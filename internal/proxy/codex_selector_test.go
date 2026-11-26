@@ -88,6 +88,39 @@ func TestCodexSelectorPreservesSystemAccount(t *testing.T) {
 	}
 }
 
+func TestCodexSelectorPrioritisesExpiringWeeklyQuota(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+	selector := newCodexSelectorWithCapacity(func() []codex.CodexAccount {
+		return []codex.CodexAccount{
+			{AccountKey: "later", AccessToken: "later-token"},
+			{AccountKey: "next", AccessToken: "next-token", IsActive: true},
+		}
+	}, nil, capacity)
+	for _, entry := range []struct {
+		account   codex.AccountKey
+		resetAt   time.Time
+		remaining int
+	}{
+		{account: "later", resetAt: now.Add(6 * 24 * time.Hour), remaining: 89},
+		{account: "next", resetAt: now.Add(3 * time.Hour), remaining: 28},
+	} {
+		capacity.ObserveQuotaSnapshot(entry.account, QuotaSnapshot{
+			FetchedAt: now,
+			Result: quota.Result{Windows: map[quota.WindowName]quota.Window{
+				quota.Window7Day: {RemainingPct: entry.remaining, ResetAtUnix: entry.resetAt.Unix()},
+			}},
+		})
+	}
+	choice, err := selector.Choose(context.Background(), CodexRouteRequirements{RequestedModel: "gpt-5"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if choice.AccountKey != "next" {
+		t.Fatalf("selected account = %q, want next", choice.AccountKey)
+	}
+}
+
 func TestCodexSelector_FallsBackToFirstWithToken(t *testing.T) {
 	sel := NewCodexSelector(func() []codex.CodexAccount {
 		return []codex.CodexAccount{

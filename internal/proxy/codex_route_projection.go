@@ -54,11 +54,17 @@ func ProjectCodexRoutePolicyCandidates(
 		buckets := routeBuckets(effectiveModel, requirements.RequiredModels, account.Identity.PlanType)
 		views := make([]CapacityView, len(buckets))
 		includedQuotaExhausted := false
+		knownPositive := true
 		for i, bucket := range buckets {
 			views[i] = capacity.Capacity(account.Key, bucket)
+			knownPositive = knownPositive && views[i].State == CapacityPositive
 			if capacity.IncludedCapacity(account.Key, bucket).State == CapacityZero {
 				includedQuotaExhausted = true
 			}
+		}
+		var expiringWeeklyReset time.Time
+		if effectiveModel == requirements.RequestedModel && knownPositive && !includedQuotaExhausted {
+			expiringWeeklyReset = capacity.expiringWeeklyReset(account.Key, buckets[0], now)
 		}
 		candidates = append(candidates, CodexRoutePolicyCandidate{
 			Choice: RouteChoice{
@@ -69,6 +75,7 @@ func ProjectCodexRoutePolicyCandidates(
 			},
 			RequiredCapacity:       views,
 			IncludedQuotaExhausted: includedQuotaExhausted,
+			ExpiringWeeklyReset:    expiringWeeklyReset,
 			SystemAccount:          account.Active,
 			Compatible:             compatible,
 			Routable:               codexRouteProjectionAccountRoutable(account, now),

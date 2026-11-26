@@ -662,9 +662,9 @@ cq proxy policy session unbind --session-id YOUR_SESSION_ID
 
 Session selectors accept `--session-id`, `--session-id-stdin`, or a full keyed `--digest`. Live policy operations use authenticated loopback control; explicit `--state-root` supports offline state.
 
-Pool names are case-insensitive selectors and retain their configured display casing. Higher values preserve a pool's account capacity by routing ordinary unbound work through lower-value viable accounts first.
+Pool names are case-insensitive selectors and retain their configured display casing. For unbound work, CQ gives eligible accounts with usable weekly quota in its final 24 hours first priority, in reset-time order. CQ uses fresh quota for the requested model and can switch away from soft affinity at a new turn.
 
-The current Codex system account has an inherent preservation tier above every pool value because it may also serve clients on other hosts. Ordinary routing tries other eligible accounts first, even when soft affinity points to the system account. Within each tier, pool values retain their ordering. Hard continuation bindings and session-pool restrictions remain enforced, and the configured quota reserve still blocks protected system-account usage.
+When expiry priority ties or no account qualifies, ordinary routing preserves the current Codex system account for other clients and favours lower-value pools within each tier. Hard continuation bindings, explicit pins, session-pool restrictions, and the configured quota reserve still apply.
 
 Bindings select one exact session at a time. To keep several related chats
 within the same account group, bind each to the same pool. CQ does not provide

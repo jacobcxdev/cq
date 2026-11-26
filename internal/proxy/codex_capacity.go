@@ -420,6 +420,30 @@ func (l *CodexCapacityLedger) IncludedCapacity(account codex.AccountKey, bucket 
 	return view
 }
 
+const codexWeeklyResetPriorityWindow = 24 * time.Hour
+
+// expiringWeeklyReset uses the weekly window for the model's exact bucket.
+// The aggregate capacity reset can refer to a shorter window.
+func (l *CodexCapacityLedger) expiringWeeklyReset(account codex.AccountKey, bucket CapacityBucket, now time.Time) time.Time {
+	if l == nil {
+		return time.Time{}
+	}
+	name := quota.Window7Day
+	if bucket != CapacityBucketBase {
+		name += ":" + quota.WindowName(strings.TrimPrefix(string(bucket), capacityBucketModelPrefix))
+	}
+	window, observed, ok := l.windowObservation(account, name)
+	if !ok || observed.IsZero() || observed.After(now) || now.Sub(observed) >= l.maxAge ||
+		window.ResetAtUnix <= 0 || windowRemaining(window) <= 0 {
+		return time.Time{}
+	}
+	reset := time.Unix(window.ResetAtUnix, 0)
+	if !reset.After(now) || reset.Sub(now) > codexWeeklyResetPriorityWindow {
+		return time.Time{}
+	}
+	return reset
+}
+
 func (l *CodexCapacityLedger) capacityLocked(account codex.AccountKey, bucket CapacityBucket) (CapacityView, bool) {
 	now := l.now()
 	var selected CapacityFact

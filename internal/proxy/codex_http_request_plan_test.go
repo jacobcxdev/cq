@@ -562,6 +562,81 @@ func TestCodexHTTPRequestPlanFactoryAppliesPoolValueToWebSocketPrewarm(t *testin
 	}
 }
 
+func TestCodexHTTPRequestPlanFactoryPrioritisesExpiringWeeklyQuota(t *testing.T) {
+	t.Parallel()
+
+	for _, prewarm := range []bool{false, true} {
+		t.Run(fmt.Sprintf("prewarm=%t", prewarm), func(t *testing.T) {
+			runtime := &codexHTTPRequestPlanTestRuntime{handle: &CodexLeaseRequestHandle{account: "next"}}
+			factory := codexHTTPRequestPlanTestFactory(runtime)
+			now := factory.Now()
+			capacity := NewCodexCapacityLedger(factory.Now, quotaSnapshotMaxAge)
+			var inventory codex.Inventory
+			for _, entry := range []struct {
+				account   codex.AccountKey
+				weekly    time.Duration
+				short     time.Duration
+				remaining int
+			}{
+				{account: "depleted", weekly: 3 * time.Hour, short: time.Hour, remaining: 0},
+				{account: "next", weekly: 3*time.Hour + 33*time.Minute, short: 4 * time.Hour, remaining: 28},
+				{account: "following", weekly: 18*time.Hour + 41*time.Minute, short: 2 * time.Hour, remaining: 28},
+				{account: "later", weekly: 6 * 24 * time.Hour, short: time.Minute, remaining: 89},
+			} {
+				account := frozenDispatchTestLogicalAccount(entry.account,
+					frozenDispatchCandidate(entry.account, "candidate", "revision", codex.SourceExternal, false, now.Add(time.Hour)))
+				account.Active = entry.account == "next"
+				inventory.Accounts = append(inventory.Accounts, account)
+				exactRemaining := float64(entry.remaining)
+				capacity.ObserveLivePositiveQuotaSnapshot(capacity.NewObservationStream(), entry.account, QuotaSnapshot{
+					FetchedAt: now,
+					Result: quota.Result{Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
+						quota.Window5Hour: {RemainingPct: 100, ResetAtUnix: now.Add(entry.short).Unix()},
+						quota.Window7Day:  {RemainingPct: entry.remaining, RemainingPctExact: &exactRemaining, ResetAtUnix: now.Add(entry.weekly).Unix()},
+					}},
+				})
+			}
+			factory.Capacity = capacity
+			factory.Inventory = &codexHTTPRequestPlanTestInventory{inventory: inventory}
+			factory.DefaultAccountKey = "later"
+			factory.Routes = &codexHTTPRequestPlanTestSnapshotter{snapshot: CodexLeaseRouteSnapshot{
+				JournalGeneration: 1, AffinityPresent: true, AffinityAccountKey: "later",
+				AffinityEffectiveModel: "gpt-5.6-sol", AffinityCacheAdmittedAt: now.Add(-time.Minute),
+			}}
+			factory.SessionPolicy = NewSessionPolicyResolver(make([]byte, 32), RoutingPolicyV2{
+				SchemaVersion: 2, RoutingGeneration: 7,
+				Pools: []AccountPoolV2{{ID: testPoolIDA, Name: "Priority", Value: 10, Members: []codex.AccountKey{"next"}}},
+			})
+
+			var dispatch CodexFrozenDispatchPlan
+			if prewarm {
+				payload := []byte(`{"type":"response.create","model":"gpt-5.6-sol","generate":false,"client_metadata":{"x-codex-turn-metadata":"{\"session_id\":\"session\",\"thread_id\":\"thread\",\"turn_id\":\"\",\"request_kind\":\"prewarm\"}"},"input":[]}`)
+				var err error
+				dispatch, err = factory.planWebSocketPrewarm(context.Background(), CodexHTTPRequestPlanInput{Encoded: payload})
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				prepared, err := factory.Build(context.Background(), CodexHTTPRequestPlanInput{
+					Encoded: frozenRequestBody("gpt-5.6-sol", CodexRequestTurn, "request"),
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer prepared.Frozen.Release()
+				dispatch = prepared.Dispatch
+			}
+			var got []codex.AccountKey
+			for _, account := range dispatch.Accounts() {
+				got = append(got, account.Choice().AccountKey)
+			}
+			if want := []codex.AccountKey{"next", "following", "later", "depleted"}; !slices.Equal(got, want) {
+				t.Fatalf("account order = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
 func TestCodexHTTPRequestPlanFactoryPreservesSystemAccount(t *testing.T) {
 	t.Parallel()
 

@@ -174,16 +174,17 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 	}
 
 	type candidate struct {
-		choice    RouteChoice
-		system    bool
-		state     CapacityState
-		remaining int
-		resetAt   time.Time
-		native    bool
-		leases    int
-		index     int
+		choice      RouteChoice
+		system      bool
+		state       CapacityState
+		remaining   int
+		weeklyReset time.Time
+		native      bool
+		leases      int
+		index       int
 	}
 	for pass := 0; ; pass++ {
+		now := s.capacity.now()
 		var best *candidate
 		hadZero := false
 		var zeroReset time.Time
@@ -223,6 +224,13 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 			if state == CapacityUnknown {
 				unknownAccounts = append(unknownAccounts, key)
 			}
+			var weeklyReset time.Time
+			if native && state == CapacityPositive {
+				weeklyReset = s.capacity.expiringWeeklyReset(key, buckets[0], now)
+				if !weeklyReset.IsZero() && s.capacity.IncludedCapacity(key, buckets[0]).State == CapacityZero {
+					weeklyReset = time.Time{}
+				}
+			}
 			current := candidate{
 				choice: RouteChoice{
 					AccountKey:      key,
@@ -230,13 +238,13 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 					EffectiveModel:  effectiveModel,
 					RequiredBuckets: buckets,
 				},
-				state:     state,
-				system:    account.system,
-				remaining: remaining,
-				resetAt:   resetAt,
-				native:    native,
-				leases:    s.capacity.ActiveLeases(key),
-				index:     i,
+				state:       state,
+				system:      account.system,
+				remaining:   remaining,
+				weeklyReset: weeklyReset,
+				native:      native,
+				leases:      s.capacity.ActiveLeases(key),
+				index:       i,
 			}
 			if best == nil || betterRoute(current, *best) {
 				copy := current
@@ -288,15 +296,18 @@ func (s *codexSelector) routeAccounts(ctx context.Context) ([]codexRouteAccount,
 }
 
 func betterRoute(candidate, current struct {
-	choice    RouteChoice
-	system    bool
-	state     CapacityState
-	remaining int
-	resetAt   time.Time
-	native    bool
-	leases    int
-	index     int
+	choice      RouteChoice
+	system      bool
+	state       CapacityState
+	remaining   int
+	weeklyReset time.Time
+	native      bool
+	leases      int
+	index       int
 }) bool {
+	if !candidate.weeklyReset.Equal(current.weeklyReset) {
+		return !candidate.weeklyReset.IsZero() && (current.weeklyReset.IsZero() || candidate.weeklyReset.Before(current.weeklyReset))
+	}
 	if candidate.system != current.system {
 		return !candidate.system
 	}
