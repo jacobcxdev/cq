@@ -12,6 +12,66 @@ import (
 	"github.com/jacobcxdev/cq/internal/quota"
 )
 
+func TestCodexCapacityExpiringWeeklyReset(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0)
+	ledger := NewCodexCapacityLedger(func() time.Time { return now }, quotaSnapshotMaxAge)
+	weekly := now.Add(24 * time.Hour)
+	sparkWeekly := now.Add(time.Hour)
+	ledger.ObserveQuotaSnapshot("account", QuotaSnapshot{
+		FetchedAt: now,
+		Result: quota.Result{Windows: map[quota.WindowName]quota.Window{
+			quota.Window5Hour:                         {RemainingPct: 99, ResetAtUnix: now.Add(time.Minute).Unix()},
+			quota.Window7Day:                          {RemainingPct: 20, ResetAtUnix: weekly.Unix()},
+			quota.WindowName("7d:" + codexSparkModel): {RemainingPct: 20, ResetAtUnix: sparkWeekly.Unix()},
+		}},
+	})
+	if got := ledger.expiringWeeklyReset("account", CapacityBucketBase, now); !got.Equal(weekly) {
+		t.Fatalf("base reset = %v, want %v", got, weekly)
+	}
+	spark := CapacityBucketForModel(codexSparkModel)
+	if got := ledger.expiringWeeklyReset("account", spark, now); !got.Equal(sparkWeekly) {
+		t.Fatalf("scoped reset = %v, want %v", got, sparkWeekly)
+	}
+	if got := ledger.expiringWeeklyReset("account", "model:other", now); !got.IsZero() {
+		t.Fatalf("unknown scope reset = %v, want no priority", got)
+	}
+	if got := ledger.expiringWeeklyReset("account", CapacityBucketBase, now.Add(quotaSnapshotMaxAge)); !got.IsZero() {
+		t.Fatalf("stale observation reset = %v, want no priority", got)
+	}
+	ledger.ObserveQuotaSnapshot("account", QuotaSnapshot{
+		FetchedAt: sparkWeekly.Add(-time.Second),
+		Result: quota.Result{Windows: map[quota.WindowName]quota.Window{
+			quota.WindowName("7d:" + codexSparkModel): {RemainingPct: 20, ResetAtUnix: sparkWeekly.Unix()},
+		}},
+	})
+	if got := ledger.expiringWeeklyReset("account", spark, sparkWeekly); !got.IsZero() {
+		t.Fatalf("elapsed reset = %v, want no priority", got)
+	}
+	ledger.ObserveQuotaSnapshot("backfilled", QuotaSnapshot{
+		FetchedAt: now,
+		Result: quota.Result{CacheAge: int64(time.Hour.Seconds()), Windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day: {RemainingPct: 20, ResetAtUnix: weekly.Unix()},
+		}},
+	})
+	if got := ledger.expiringWeeklyReset("backfilled", CapacityBucketBase, now); !got.IsZero() {
+		t.Fatalf("backfilled quota with a recent file timestamp got priority at %v", got)
+	}
+	if got := ledger.Capacity("backfilled", CapacityBucketBase); got.State != CapacityPositive {
+		t.Fatalf("advisory capacity = %v, want positive", got.State)
+	}
+	ledger.ObserveQuotaSnapshot("account", QuotaSnapshot{
+		FetchedAt: now.Add(time.Second),
+		Result: quota.Result{CacheAge: int64(time.Hour.Seconds()), Windows: map[quota.WindowName]quota.Window{
+			quota.Window7Day: {RemainingPct: 30, ResetAtUnix: sparkWeekly.Unix()},
+		}},
+	})
+	if got := ledger.expiringWeeklyReset("account", CapacityBucketBase, now.Add(time.Second)); !got.Equal(weekly) {
+		t.Fatalf("backfill displaced fresh weekly reset: got %v, want %v", got, weekly)
+	}
+}
+
 func TestCodexCapacityObservationStreamOrdersFacts(t *testing.T) {
 	ledger := NewCodexCapacityLedger(nil, time.Hour)
 	firstStream := ledger.NewObservationStream()

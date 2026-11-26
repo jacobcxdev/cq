@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
@@ -15,6 +16,7 @@ type CodexRoutePolicyCandidate struct {
 	SystemAccount bool
 	// IncludedQuotaExhausted preserves ordinary admission as a paid fallback.
 	IncludedQuotaExhausted bool
+	ExpiringWeeklyReset    time.Time
 	// RequiredCapacity aligns one-to-one with Choice.RequiredBuckets.
 	RequiredCapacity  []CapacityView
 	Compatible        bool
@@ -370,8 +372,11 @@ func codexRoutePolicyCandidateLess(left, right CodexRoutePolicyCandidate, affini
 	if left.IncludedQuotaExhausted != right.IncludedQuotaExhausted {
 		return !left.IncludedQuotaExhausted
 	}
-	// Preserve the system account for clients and hosts outside CQ, regardless
-	// of pool value or soft affinity. Hard continuation binding is handled first.
+	if !left.ExpiringWeeklyReset.Equal(right.ExpiringWeeklyReset) {
+		return codexWeeklyResetBefore(left.ExpiringWeeklyReset, right.ExpiringWeeklyReset)
+	}
+	// Preserve the system account for clients and hosts outside CQ when quota
+	// expiry has equal priority. Hard continuation binding is handled first.
 	if left.SystemAccount != right.SystemAccount || left.Value != right.Value {
 		return codexRoutePolicyAccountValueLess(left, right)
 	}

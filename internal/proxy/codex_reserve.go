@@ -52,6 +52,9 @@ func (l *CodexCapacityLedger) observeWindowsLocked(fact CapacityFact) {
 			continue
 		}
 		old, ok := l.windows[fact.AccountKey][name]
+		if ok && quota.BaseWindow(name) == quota.Window7Day && fact.backfilledUsage && !old.fact.backfilledUsage {
+			continue
+		}
 		if ok && fact.ConnectionGeneration > 0 && old.fact.ConnectionGeneration > 0 && !capacityCursorAfter(fact, old.fact) {
 			continue
 		}
