@@ -139,7 +139,7 @@ func (end codexWSRelayEnd) upstreamDisconnected() bool {
 		return false
 	}
 	var networkError *net.OpError
-	return websocket.IsCloseError(end.err, websocket.CloseAbnormalClosure) ||
+	return websocket.IsCloseError(end.err, websocket.CloseAbnormalClosure, websocket.CloseInternalServerErr) ||
 		errors.Is(end.err, io.EOF) || errors.Is(end.err, io.ErrUnexpectedEOF) ||
 		errors.Is(end.err, net.ErrClosed) || errors.As(end.err, &networkError)
 }
