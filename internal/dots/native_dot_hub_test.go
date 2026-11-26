@@ -17,6 +17,7 @@ func (evaluate dotHubTestEvaluator) EvaluateAll(_ context.Context, expression st
 
 func TestNativeDotHubPinsAndTeamModes(t *testing.T) {
 	const windowsHash = "7b5175d7932e26f8fca91fb0b25bc85e424304ce368c8ce21a68b1be2c174b28"
+	const mac30866Hash = "c6488597167abbbeff5a2422cdbe63f7466143b9770a224c9bc6ac2168631f13"
 	base := Settings{
 		IntegrationMode: "native",
 		Dots: map[string]Dot{
@@ -41,6 +42,8 @@ func TestNativeDotHubPinsAndTeamModes(t *testing.T) {
 		{"single Dot", func(s *Settings) { s.Dots = map[string]Dot{"one": {ProfileID: "profile-one"}} }, false, false},
 		{"legacy Mac", func(s *Settings) { s.AppBuild, s.ASARSHA256 = "29803", dotHubArchive29803 }, true, false},
 		{"Team Hub Mac", func(s *Settings) { s.AppBuild, s.ASARSHA256 = "30607", dotHubArchive30607 }, true, true},
+		{"Team Hub Mac build 30866", func(s *Settings) { s.AppBuild, s.ASARSHA256 = "30866", mac30866Hash }, true, true},
+		{"unqualified Mac build 30866", func(s *Settings) { s.AppBuild, s.ASARSHA256 = "30866", dotHubArchive30607 }, false, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := base
