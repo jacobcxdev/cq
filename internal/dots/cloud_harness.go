@@ -135,42 +135,50 @@ func (h *cloudHarness) run() {
 			case <-ticker.C:
 			case <-h.wake:
 			}
-			func() {
-				h.op.Lock()
-				defer h.op.Unlock()
-				h.mu.Lock()
-				ids := make([]string, 0, len(h.threads))
-				for id, t := range h.threads {
-					if t.owned || t.lease != nil {
-						ids = append(ids, id)
-					}
+			h.mu.Lock()
+			ids := make([]string, 0, len(h.threads))
+			for id, t := range h.threads {
+				if t.owned || t.lease != nil {
+					ids = append(ids, id)
 				}
-				h.mu.Unlock()
-				for _, id := range ids {
-					if h.b.ctx.Err() != nil {
-						break
-					}
-					if err := h.refresh(id); err != nil {
-						h.mu.Lock()
-						held := h.threads[id] != nil && h.threads[id].goalHold != nil
-						h.mu.Unlock()
-						if held {
-							// A failed activity probe cannot qualify a reload. Release
-							// our verified hold so it does not block native goal work.
-							restoreErr := h.finishGoalHold(id, true)
-							h.mu.Lock()
-							pending := h.threads[id] != nil && h.threads[id].goalHold != nil
-							h.mu.Unlock()
-							reason, code := cloudHarnessFailureReason(err)
-							h.b.event(map[string]any{"harness_activity_read_failed": true, "thread_id": id, "reason": reason, "native_code": code, "goal_restore_failed": restoreErr != nil, "goal_restore_pending": pending})
-						}
-						continue
-					}
-					_ = h.reconcile(id, "", "")
+			}
+			h.mu.Unlock()
+			for _, id := range ids {
+				if h.b.ctx.Err() != nil {
+					break
 				}
-			}()
+				h.refreshAndReconcile(id)
+			}
 		}
 	})
+}
+
+func (h *cloudHarness) refreshAndReconcile(id string) {
+	// A native status read can wait for the RPC deadline. Keep that wait
+	// outside the operation lock used to prepare foreground requests.
+	read, err := h.readActivity(id)
+	h.op.Lock()
+	defer h.op.Unlock()
+	if h.b.ctx.Err() != nil || !h.applyActivity(id, read, true) {
+		return
+	}
+	if err == nil {
+		_ = h.reconcile(id, "", "")
+		return
+	}
+	h.mu.Lock()
+	held := h.threads[id] != nil && h.threads[id].goalHold != nil
+	h.mu.Unlock()
+	if held {
+		// A failed activity probe cannot qualify a reload. Release
+		// our verified hold so it does not block native goal work.
+		restoreErr := h.finishGoalHold(id, true)
+		h.mu.Lock()
+		pending := h.threads[id] != nil && h.threads[id].goalHold != nil
+		h.mu.Unlock()
+		reason, code := cloudHarnessFailureReason(err)
+		h.b.event(map[string]any{"harness_activity_read_failed": true, "thread_id": id, "reason": reason, "native_code": code, "goal_restore_failed": restoreErr != nil, "goal_restore_pending": pending})
+	}
 }
 
 func (h *cloudHarness) signal() {
@@ -492,8 +500,17 @@ func (h *cloudHarness) prepareFrom(source string, request cloudMessage, raw []by
 	h.op.Lock()
 	defer h.op.Unlock()
 	params := cloudHarnessObject(request["params"])
+	id := cloudThreadID(request["params"])
+	defer func() {
+		// A background read can start while preparation is in progress.
+		// Invalidate it before releasing the operation lock.
+		h.mu.Lock()
+		if thread := h.threads[id]; thread != nil {
+			thread.activityRevision++
+		}
+		h.mu.Unlock()
+	}()
 	if method == "thread/goal/set" || method == "thread/goal/clear" {
-		id := cloudThreadID(request["params"])
 		h.mu.Lock()
 		thread := h.threads[id]
 		busy := thread != nil && thread.goalMutationPending
@@ -507,7 +524,6 @@ func (h *cloudHarness) prepareFrom(source string, request cloudMessage, raw []by
 		}
 	}
 	if method == "thread/unsubscribe" || method == "thread/archive" {
-		id := cloudThreadID(request["params"])
 		h.mu.Lock()
 		thread := h.threads[id]
 		last := thread != nil && (method == "thread/archive" || len(thread.subscriptions) <= 1)
@@ -586,7 +602,6 @@ func (h *cloudHarness) prepareFrom(source string, request cloudMessage, raw []by
 			pending.minimal = true
 		}
 	} else if method == "turn/start" {
-		id := cloudThreadID(request["params"])
 		h.mu.Lock()
 		if thread := h.threads[id]; thread != nil {
 			thread.profileRefresh = true
@@ -897,43 +912,72 @@ func (h *cloudHarness) baselineConfig(native cloudMessage, originalRaw json.RawM
 	return restore, nil
 }
 
-func (h *cloudHarness) refresh(id string) error {
+type cloudHarnessActivityRead struct {
+	thread   *cloudHarnessThread
+	revision uint64
+	result   cloudMessage
+}
+
+func (h *cloudHarness) readActivity(id string) (cloudHarnessActivityRead, error) {
 	h.mu.Lock()
 	thread := h.threads[id]
+	read := cloudHarnessActivityRead{thread: thread}
 	needed := thread != nil && thread.owned && (thread.refresh || thread.goalHold != nil)
-	var revision uint64
 	if thread != nil {
-		revision = thread.activityRevision
+		read.revision = thread.activityRevision
 	}
 	h.mu.Unlock()
 	if !needed {
-		return nil
+		return read, nil
 	}
 	result, err := h.call("thread/read", map[string]any{"threadId": id, "includeTurns": false})
 	if err != nil {
-		return err
+		return read, err
 	}
 	if cloudThreadID(cloudHarnessRaw(result)) != id {
-		return errors.New("native harness read a different chat")
+		return read, errors.New("native harness read a different chat")
 	}
 	if cloudHarnessModel(cloudHarnessObject(result["thread"])) == "" {
-		return errors.New("native harness current model unavailable")
+		return read, errors.New("native harness current model unavailable")
 	}
+	read.result = result
+	return read, nil
+}
+
+func (h *cloudHarness) applyActivity(id string, read cloudHarnessActivityRead, background bool) bool {
 	h.mu.Lock()
-	if thread = h.threads[id]; thread != nil {
-		current := thread.activityRevision == revision
-		if current && cloudHarnessString(cloudHarnessObject(cloudHarnessObject(result["thread"])["status"]), "type") == "idle" {
+	defer h.mu.Unlock()
+	thread := h.threads[id]
+	if thread != read.thread {
+		return false
+	}
+	if thread != nil {
+		current := thread.activityRevision == read.revision
+		if background && !current {
+			return false
+		}
+		if read.result == nil {
+			return true
+		}
+		if current && cloudHarnessString(cloudHarnessObject(cloudHarnessObject(read.result["thread"])["status"]), "type") == "idle" {
 			if thread.activeTurnID != "" {
 				thread.completedTurnID = thread.activeTurnID
 				thread.activeTurnID = ""
 				thread.activityRevision++
 			}
 		}
-		cloudHarnessActualWithActivity(thread, result, current)
+		cloudHarnessActualWithActivity(thread, read.result, current)
 		thread.refresh = !current
 	}
-	h.mu.Unlock()
-	return nil
+	return true
+}
+
+func (h *cloudHarness) refresh(id string) error {
+	read, err := h.readActivity(id)
+	if err == nil {
+		h.applyActivity(id, read, false)
+	}
+	return err
 }
 
 // Native config/read is the authority for server names, including raw project
@@ -1934,6 +1978,9 @@ func (h *cloudHarness) observeFrom(source string, raw []byte) bool {
 			threadID = cloudThreadID(cloudHarnessRaw(pending.params))
 		}
 		thread := h.threads[threadID]
+		if thread != nil {
+			thread.activityRevision++
+		}
 		switch pending.method {
 		case "thread/start", "thread/resume":
 			if threadID != "" {
@@ -2078,6 +2125,7 @@ func (h *cloudHarness) observeFrom(source string, raw []byte) bool {
 		}
 		cloudHarnessObserved(thread, params, source)
 		if message.method() == "thread/settings/updated" {
+			thread.activityRevision++
 			cloudHarnessActual(thread, cloudHarnessObject(params["threadSettings"]))
 			cloudHarnessCaptureSettings(thread, cloudHarnessObject(params["threadSettings"]), true)
 			if plugin, ok := cloudHarnessObject(params["threadSettings"])["disabledPluginIds"]; ok && thread.profileManaged {

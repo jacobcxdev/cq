@@ -31,6 +31,107 @@ type cloudHarnessFixture struct {
 	onRequest   func(cloudMessage) (any, error, bool)
 }
 
+func TestCloudHarnessPendingBackgroundReadDoesNotBlockArchive(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	readStarted := make(chan struct{}, 1)
+	bridge := &cloudBridge{
+		ctx: ctx,
+		deps: cloudStdioDependencies{
+			readHarnessPolicy: func() (harness.Policy, error) { return harness.Policy{}, nil },
+			harnessTimeout:    10 * time.Second,
+		},
+		local: &cloudLocal{input: cloudTestWriter{write: func(raw []byte) (int, error) {
+			var request cloudMessage
+			if err := json.Unmarshal(raw, &request); err != nil {
+				return 0, err
+			}
+			if request.method() == "thread/read" {
+				readStarted <- struct{}{}
+			}
+			return len(raw), nil
+		}}},
+	}
+	h := newCloudHarness(bridge)
+	h.threads["background"] = &cloudHarnessThread{owned: true, refresh: true}
+	bridge.workers.Add(1)
+	go h.run()
+	t.Cleanup(func() {
+		cancel()
+		bridge.workers.Wait()
+	})
+	h.signal()
+	select {
+	case <-readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background status read did not start")
+	}
+
+	raw := []byte(`{"method":"thread/archive","id":7,"params":{"threadId":"foreground"}}`)
+	archivePrepared := make(chan error, 1)
+	go func() {
+		var request cloudMessage
+		if err := json.Unmarshal(raw, &request); err != nil {
+			archivePrepared <- err
+			return
+		}
+		got, err := h.prepareFrom("remote", request, raw)
+		if err == nil && !bytes.Equal(got, raw) {
+			err = errors.New("archive request was changed")
+		}
+		archivePrepared <- err
+	}()
+	select {
+	case err := <-archivePrepared:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("archive waited for an unrelated background status read")
+	}
+}
+
+func TestCloudHarnessBackgroundReadDiscardsOlderModel(t *testing.T) {
+	thread := &cloudHarnessThread{owned: true, model: "original-model"}
+	h := &cloudHarness{
+		threads:  map[string]*cloudHarnessThread{"chat": thread},
+		requests: make(map[string]cloudHarnessRequest),
+	}
+	read := cloudHarnessActivityRead{
+		thread: thread,
+		result: cloudHarnessObject(json.RawMessage(`{"thread":{"id":"chat","model":"original-model","status":{"type":"idle"}}}`)),
+	}
+	raw := []byte(`{"method":"thread/settings/update","id":7,"params":{"threadId":"chat","model":"selected-model"}}`)
+	var request cloudMessage
+	if err := json.Unmarshal(raw, &request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.prepare(request, raw); err != nil {
+		t.Fatal(err)
+	}
+	h.observe([]byte(`{"id":7,"result":{"model":"selected-model"}}`))
+
+	if h.applyActivity("chat", read, true) {
+		t.Fatal("background status read overwrote a newer settings response")
+	}
+	if thread.model != "selected-model" {
+		t.Fatalf("model = %q, want the accepted foreground model", thread.model)
+	}
+}
+
+func TestCloudHarnessBackgroundReadDiscardsSettingsNotification(t *testing.T) {
+	thread := &cloudHarnessThread{owned: true, model: "original-model", cwd: "/original"}
+	h := &cloudHarness{threads: map[string]*cloudHarnessThread{"chat": thread}}
+	read := cloudHarnessActivityRead{
+		thread: thread,
+		result: cloudHarnessObject(json.RawMessage(`{"thread":{"id":"chat","model":"original-model","cwd":"/original","status":{"type":"idle"}}}`)),
+	}
+	h.observe([]byte(`{"method":"thread/settings/updated","params":{"threadId":"chat","threadSettings":{"model":"selected-model","cwd":"/selected"}}}`))
+
+	if h.applyActivity("chat", read, true) || thread.model != "selected-model" || thread.cwd != "/selected" {
+		t.Fatalf("stale read replaced the settings notification with model %q and directory %q", thread.model, thread.cwd)
+	}
+}
+
 func newCloudHarnessFixture(t *testing.T) *cloudHarnessFixture {
 	f := &cloudHarnessFixture{cloudTestHarness: newCloudTestHarness(t), policy: harness.Policy{Version: 1, Enabled: true}, models: make(map[string]string), plugins: make(map[string][]string), configs: make(map[string]cloudMessage), activeTurns: make(map[string]string), globalModel: "glm-5.3"}
 	f.deps.readHarnessPolicy = func() (harness.Policy, error) { f.mu.Lock(); defer f.mu.Unlock(); return f.policy, nil }
