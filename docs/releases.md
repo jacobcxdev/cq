@@ -240,7 +240,13 @@ provenance are linked at build time. Race validation runs separately on supporte
 native hosts; a cross-build does not replace it.
 
 Windows packaging uses .NET 8 and WiX 5.0.2. MSI lifecycle and WinGet manifests
-are separate from ZIP archives and the Go installer runner. Each macOS
+are separate from ZIP archives and the Go installer runner. Release v0.53.6
+publishes an MSP for each Windows architecture. The patch updates the v0.53.5
+MSI service actions in place before the next MSI removes that version. Windows
+qualification checks the original MSI, patch, rollback, and upgrade in that
+order. Later release checks use the same published patch assets.
+
+Each macOS
 `cq_VERSION_darwin_ARCH_bundle.tar.gz` contains `cq` and the signed universal
 `CQNetwork.app`, both at the parent version. The existing CLI-only archive names
 and contents remain available for installer compatibility. The `cq` and

@@ -11,6 +11,10 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$CurrentVersion,
 
+    [string]$LegacyPatch = "",
+
+    [switch]$VerifyLegacyRollback,
+
     [ValidateRange(1024, 65535)]
     [int]$Port = 19280
 )
@@ -40,19 +44,92 @@ $ownsTasks = $false
 
 function Invoke-MSI {
     param(
-        [ValidateSet("install", "uninstall")]
+        [ValidateSet("install", "uninstall", "patch")]
         [string]$Action,
         [string]$Path,
-        [string]$Log
+        [string]$Log,
+        [int[]]$ExpectedExitCodes = @(0, 3010)
     )
-    $verb = if ($Action -eq "install") { "/i" } else { "/x" }
+    $verb = switch ($Action) {
+        "install" { "/i" }
+        "uninstall" { "/x" }
+        "patch" { "/update" }
+    }
     $arguments = @($verb, ('"' + $Path + '"'), "/qn", "/norestart", "/l*v", ('"' + $Log + '"'))
+    if ($Action -eq "patch") {
+        # Rewrite the per-user registry marker without reinstalling a present executable.
+        $arguments += @("REINSTALL=ALL", "REINSTALLMODE=pmus")
+    }
     $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $arguments -Wait -PassThru
-    if ($process.ExitCode -ne 0 -and $process.ExitCode -ne 3010) {
+    if ($process.ExitCode -notin $ExpectedExitCodes) {
         if (Test-Path -LiteralPath $Log -PathType Leaf) {
             Get-Content -LiteralPath $Log -Tail 160 | Write-Error -ErrorAction Continue
         }
         throw "msiexec $Action failed with exit code $($process.ExitCode)"
+    }
+}
+
+function New-RollbackFixture {
+    param([string]$Source, [string]$Destination)
+    Copy-Item -LiteralPath $Source -Destination $Destination
+    $installer = New-Object -ComObject "WindowsInstaller.Installer"
+    try {
+        $database = $installer.OpenDatabase($Destination, 1)
+        try {
+            # RemoveExistingProducts has run by this point. Fail before the
+            # upgrade can commit so the predecessor's rollback action must run.
+            foreach ($statement in @(
+                'INSERT INTO `CustomAction` (`Action`, `Type`, `Target`) VALUES (''CQValidationForceRollback'', 19, ''CQ validation requested installer rollback'')',
+                'INSERT INTO `InstallExecuteSequence` (`Action`, `Condition`, `Sequence`) VALUES (''CQValidationForceRollback'', ''NOT Installed'', 6599)'
+            )) {
+                $view = $database.OpenView($statement)
+                try { [void]$view.Execute() }
+                finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view) }
+            }
+            $summary = $database.SummaryInformation(1)
+            try {
+                $summary.Property(9) = [guid]::NewGuid().ToString("B").ToUpperInvariant()
+                [void]$summary.Persist()
+            }
+            finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($summary) }
+            [void]$database.Commit()
+        }
+        finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($database) }
+    }
+    finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer) }
+}
+
+function Assert-PatchedLegacyUninstall {
+    param([string]$Log)
+    if (-not (Select-String -LiteralPath $Log -Pattern 'CustomActionSchedule\(Action=UninstallCQServices,ActionType=1026,.*Target=service uninstall --owner=winget --legacy-msi-executable=' -Quiet)) {
+        Select-String -LiteralPath $Log -Pattern 'UninstallCQServices|RollbackLegacyCQServices' | Select-Object -Last 30 | ForEach-Object { Write-Host $_.Line }
+        throw "upgrade did not execute the patched legacy uninstall action"
+    }
+}
+
+function Assert-LegacyPatchRegistered {
+    param([string]$ProductCode, [string]$PatchCode)
+    $marker = Get-ItemPropertyValue -LiteralPath "HKCU:\Software\jacobcxdev\CQ\Installer" -Name "LegacyQuietUpgrade"
+    if ($marker -ne $PatchCode) {
+        throw "migration patch registration marker differs"
+    }
+    $installer = New-Object -ComObject "WindowsInstaller.Installer"
+    try {
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $patch = $installer.Patch($PatchCode, $ProductCode, $sid, 2)
+        try {
+            # Use IDispatch directly because PowerShell cannot adapt the Patch object's properties.
+            $state = $patch.GetType().InvokeMember("State", [Reflection.BindingFlags]::GetProperty, $null, $patch, $null)
+        }
+        finally {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($patch)
+        }
+    }
+    finally {
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer)
+    }
+    if ($state -ne 1) {
+        throw "the current-user CQ legacy patch is not registered as applied"
     }
 }
 
@@ -186,6 +263,40 @@ try {
     if ([version]$PreviousVersion -ge [version]$CurrentVersion) {
         throw "previous MSI version must be older"
     }
+    $legacyMigration = $PreviousVersion -eq "0.53.5"
+    if ($legacyMigration -ne ($LegacyPatch -ne "")) {
+        throw "a legacy migration patch is required only for the published 0.53.5 predecessor"
+    }
+    if ($VerifyLegacyRollback -and -not $legacyMigration) {
+        throw "forced rollback verification requires the published 0.53.5 predecessor"
+    }
+    if ($legacyMigration) {
+        $LegacyPatch = (Resolve-Path -LiteralPath $LegacyPatch).Path
+        $architecture = [Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+        $legacy = switch ($architecture) {
+            "x64" {
+                @{
+                    Filename = "cq_0.53.5_windows_amd64.msi"
+                    SHA256 = "4ae8ac26ee0211a13f57e8796e6158183516ead5fe34efb1061cb6426e80ff37"
+                    ProductCode = "{35BC2A8A-8B84-4E6D-9AF2-78B5485354EC}"
+                    PatchCode = "{67038060-1859-4ABF-B9B7-7AD86C6290E7}"
+                }
+            }
+            "arm64" {
+                @{
+                    Filename = "cq_0.53.5_windows_arm64.msi"
+                    SHA256 = "5ee1e0855905c6bdb2cf8ed59b81cd4671b8d278a790215152a4b85df34bba12"
+                    ProductCode = "{845594B7-7E46-4694-8671-8D688B9F747B}"
+                    PatchCode = "{D268364B-6589-4C12-A47A-3059DBE180A0}"
+                }
+            }
+            default { throw "unsupported Windows architecture $architecture" }
+        }
+        if ([IO.Path]::GetFileName($PreviousMSI) -ne $legacy.Filename -or
+            (Get-FileHash -LiteralPath $PreviousMSI -Algorithm SHA256).Hash -ne $legacy.SHA256) {
+            throw "previous MSI differs from the published 0.53.5 $architecture package"
+        }
+    }
     foreach ($path in @($installedCQ, $codexRoot, $roamingCQ, $localCQ)) {
         if (Test-Path -LiteralPath $path) {
             throw "refusing to replace existing validation path $path"
@@ -304,13 +415,81 @@ try {
     }
 
     Invoke-MSI -Action install -Path $PreviousMSI -Log (Join-Path $temporaryRoot "install-previous.log")
-    $null = Assert-Installed -Version $PreviousVersion
+    $previous = Assert-Installed -Version $PreviousVersion
+    if ($legacyMigration) {
+        $oldDigest = (Get-FileHash -LiteralPath $installedCQ -Algorithm SHA256).Hash
+        $guardLog = Join-Path $temporaryRoot "unpatched-upgrade.log"
+        Invoke-MSI -Action install -Path $CurrentMSI -Log $guardLog -ExpectedExitCodes 1603
+        if (-not (Select-String -LiteralPath $guardLog -Pattern "Apply the CQ v0.53.5 quiet upgrade patch before installing this version." -SimpleMatch -Quiet)) {
+            throw "unpatched legacy upgrade failed without the migration guard"
+        }
+        $unpatched = Assert-Installed -Version $PreviousVersion
+        if ((Get-FileHash -LiteralPath $installedCQ -Algorithm SHA256).Hash -ne $oldDigest -or $unpatched.proxy.pid -ne $previous.proxy.pid -or
+            (Get-CQMSIRegistrationCount -Version $CurrentVersion) -ne 0) {
+            throw "unpatched legacy upgrade changed the previous executable or its services"
+        }
 
-    Invoke-MSI -Action install -Path $CurrentMSI -Log (Join-Path $temporaryRoot "upgrade-current.log")
+        Invoke-MSI -Action patch -Path $LegacyPatch -Log (Join-Path $temporaryRoot "patch-previous.log") -ExpectedExitCodes 0
+        Assert-LegacyPatchRegistered -ProductCode $legacy.ProductCode -PatchCode $legacy.PatchCode
+        $patched = Assert-Installed -Version $PreviousVersion
+        if ((Get-FileHash -LiteralPath $installedCQ -Algorithm SHA256).Hash -ne $oldDigest -or $patched.proxy.pid -ne $previous.proxy.pid) {
+            throw "legacy migration patch replaced the installed executable or restarted the proxy"
+        }
+        Write-Host "Published CQ $PreviousVersion migration patch applied without replacing the executable or restarting the proxy."
+        if ($VerifyLegacyRollback) {
+            $rollbackMSI = Join-Path $temporaryRoot "rollback-fixture.msi"
+            $rollbackLog = Join-Path $temporaryRoot "forced-rollback.log"
+            New-RollbackFixture -Source $CurrentMSI -Destination $rollbackMSI
+            Invoke-MSI -Action install -Path $rollbackMSI -Log $rollbackLog -ExpectedExitCodes 1603
+            Assert-PatchedLegacyUninstall -Log $rollbackLog
+            if (-not (Select-String -LiteralPath $rollbackLog -Pattern 'CQ validation requested installer rollback' -Quiet) -or
+                -not (Select-String -LiteralPath $rollbackLog -Pattern 'CustomActionSchedule\(Action=RollbackLegacyCQServices,ActionType=1282,' -Quiet)) {
+                Select-String -LiteralPath $rollbackLog -Pattern 'CQValidationForceRollback|RollbackLegacyCQServices' | Select-Object -Last 30 | ForEach-Object { Write-Host $_.Line }
+                throw "legacy migration did not reach the expected rollback action"
+            }
+            Assert-LegacyPatchRegistered -ProductCode $legacy.ProductCode -PatchCode $legacy.PatchCode
+            $restored = Assert-Installed -Version $PreviousVersion
+            if ((Get-FileHash -LiteralPath $installedCQ -Algorithm SHA256).Hash -ne $oldDigest -or $restored.proxy.pid -eq $patched.proxy.pid -or
+                (Get-CQMSIRegistrationCount -Version $CurrentVersion) -ne 0) {
+                throw "legacy migration rollback did not restore the previous executable and its services"
+            }
+            Write-Host "Legacy migration rollback restored CQ $PreviousVersion and a healthy replacement listener."
+        }
+    }
+
+    $upgradeLog = Join-Path $temporaryRoot "upgrade-current.log"
+    Invoke-MSI -Action install -Path $CurrentMSI -Log $upgradeLog
+    if ($legacyMigration) {
+        Assert-PatchedLegacyUninstall -Log $upgradeLog
+        $installerKey = Get-Item -LiteralPath "HKCU:\Software\jacobcxdev\CQ\Installer"
+        if ($installerKey.GetValueNames() -contains "LegacyQuietUpgrade") {
+            throw "legacy migration patch marker remains after upgrade"
+        }
+    }
+    if ((Get-CQMSIRegistrationCount -Version $PreviousVersion) -ne 0) {
+        throw "previous CQ MSI registration remains after upgrade"
+    }
     $status = Assert-Installed -Version $CurrentVersion
     if ($status.proxy.pid -eq 0) {
         throw "upgraded proxy has no manager PID"
     }
+
+    $previousProxyPID = $status.proxy.pid
+    $restart = [Diagnostics.Stopwatch]::StartNew()
+    & $installedCQ proxy restart
+    if ($LASTEXITCODE -ne 0) {
+        throw "installed CQ proxy restart failed"
+    }
+    $restart.Stop()
+    $listener = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort $Port -State Listen
+    if ($listener.OwningProcess -eq $previousProxyPID -or (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5).StatusCode -ne 200) {
+        throw "installed CQ proxy restart returned before the replacement listener was healthy"
+    }
+    $status = Assert-Installed -Version $CurrentVersion
+    if ($status.proxy.pid -eq 0 -or $status.proxy.pid -eq $previousProxyPID) {
+        throw "installed CQ proxy restart did not replace the listener process"
+    }
+    Write-Host ("CQ proxy restart verified in {0:N2} seconds (PID {1} to {2})" -f $restart.Elapsed.TotalSeconds, $previousProxyPID, $status.proxy.pid)
 
     Start-ScheduledTask -TaskPath $taskPath -TaskName "Refresh"
     for ($attempt = 0; $attempt -lt 60; $attempt++) {

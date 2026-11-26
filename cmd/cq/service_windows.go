@@ -13,8 +13,10 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf16"
 
@@ -35,7 +37,7 @@ var (
 		return config.Port, nil
 	}
 	runWindowsNetstat = func(ctx context.Context) ([]byte, error) {
-		return exec.CommandContext(ctx, "netstat.exe", "-ano", "-p", "tcp").Output()
+		return windowsServiceCommand(ctx, "netstat.exe", "-ano", "-p", "tcp").Output()
 	}
 	windowsProcessExecutable = queryWindowsProcessExecutable
 	checkWindowsProxyHealth  = checkWindowsProxyHTTPHealth
@@ -43,14 +45,19 @@ var (
 
 func init() {
 	serviceLifecycleFactory = defaultWindowsServiceLifecycle
+	legacyMSIServiceLifecycleFactory = newWindowsLegacyMSIServiceLifecycle
 }
 
 func defaultWindowsServiceLifecycle(stableExecutable string) (*serviceLifecycle, error) {
-	roots, err := userdirs.Default()
+	executable, err := resolveServiceExecutable(stableExecutable)
 	if err != nil {
 		return nil, err
 	}
-	executable, err := resolveServiceExecutable(stableExecutable)
+	return windowsServiceLifecycleForExecutable(executable)
+}
+
+func windowsServiceLifecycleForExecutable(executable string) (*serviceLifecycle, error) {
+	roots, err := userdirs.Default()
 	if err != nil {
 		return nil, err
 	}
@@ -66,6 +73,56 @@ func defaultWindowsServiceLifecycle(stableExecutable string) (*serviceLifecycle,
 		queryWindowsTaskState,
 		inspectWindowsProxyRuntime,
 	), nil
+}
+
+// The v0.53.5 patch runs CQ from Windows Installer's Binary table. Service
+// ownership and rollback still refer to the original, unchanged executable.
+func newWindowsLegacyMSIServiceLifecycle(path string) (*serviceLifecycle, error) {
+	anchors, err := userdirs.WindowsAppDataAnchors()
+	if err != nil {
+		return nil, err
+	}
+	programs := filepath.Join(anchors.LocalAppData, "Programs")
+	directory := filepath.Join(programs, "cq")
+	executable := filepath.Join(directory, "cq.exe")
+	if !equalWindowsPath(path, executable) {
+		return nil, fmt.Errorf("%w: legacy MSI executable is outside the current user's CQ installation", installstate.ErrOwnershipConflict)
+	}
+	for _, entry := range []string{programs, directory, executable} {
+		name, err := windows.UTF16PtrFromString(entry)
+		if err != nil {
+			return nil, err
+		}
+		attributes, err := windows.GetFileAttributes(name)
+		if err != nil {
+			return nil, fmt.Errorf("inspect legacy MSI path: %w", err)
+		}
+		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return nil, fmt.Errorf("%w: legacy MSI path contains a reparse point", installstate.ErrOwnershipConflict)
+		}
+	}
+	var expected string
+	switch runtime.GOARCH {
+	case "amd64":
+		expected = "797fa89597c4010af2132356d79d46f8f4abe47021b0328377ce40ef67fc89bd"
+	case "arm64":
+		expected = "b4a50a379821b81fb07b4c1b79be141610badff27f7a72affc2b5875d0c75c0a"
+	default:
+		return nil, fmt.Errorf("unsupported legacy MSI architecture %s", runtime.GOARCH)
+	}
+	digest, err := installstate.DigestFile(executable)
+	if err != nil {
+		return nil, fmt.Errorf("verify legacy MSI executable: %w", err)
+	}
+	if digest != expected {
+		return nil, fmt.Errorf("%w: legacy MSI executable differs from the published CQ v0.53.5 binary", installstate.ErrOwnershipConflict)
+	}
+	lifecycle, err := windowsServiceLifecycleForExecutable(path)
+	if err != nil {
+		return nil, err
+	}
+	lifecycle.Version = "0.53.5"
+	return lifecycle, nil
 }
 
 func newWindowsServiceLifecycle(
@@ -119,6 +176,12 @@ func resolveWindowsExecutable() (string, error) {
 	return resolveServiceExecutable("")
 }
 
+func windowsServiceCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, name, args...)
+	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	return command
+}
+
 func runWindowsSchtasks(ctx context.Context, args ...string) ([]byte, error) {
 	if len(args) >= 3 && strings.EqualFold(args[1], "/TN") {
 		switch strings.ToLower(args[0]) {
@@ -126,7 +189,7 @@ func runWindowsSchtasks(ctx context.Context, args ...string) ([]byte, error) {
 			return runWindowsTaskMutation(ctx, strings.ToLower(args[0]), args[2])
 		}
 	}
-	output, err := exec.CommandContext(ctx, "schtasks.exe", args...).CombinedOutput()
+	output, err := windowsServiceCommand(ctx, "schtasks.exe", args...).CombinedOutput()
 	if err == nil {
 		return output, nil
 	}
@@ -189,11 +252,11 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 	}
 	comTaskFolder := strings.TrimSuffix(taskFolder, `\`)
 	script := fmt.Sprintf(
-		`$ErrorActionPreference='Stop'; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); try { $registered=$service.GetFolder('%s').GetTask('%s'); $instances=$registered.GetInstances(0); $pids=@(); for($index=1;$index -le $instances.Count;$index++){ $pids += [uint32]$instances.Item($index).EnginePID }; [pscustomobject]@{Exists=$true;Code=[int64]0;Running=([int]$registered.State -eq 4);LastResult=[int64]$registered.LastTaskResult;EnginePIDs=@($pids);SecurityDescriptor=[string]$registered.GetSecurityDescriptor(4)} | ConvertTo-Json -Compress } catch { $code=[int64]$_.Exception.HResult; if($code -eq -2147024894){ [pscustomobject]@{Exists=$false;Code=$code;Running=$false;LastResult=[int64]0;EnginePIDs=@();SecurityDescriptor=''} | ConvertTo-Json -Compress } else { throw } }`,
+		`$ErrorActionPreference='Stop'; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); try { $registered=$service.GetFolder('%s').GetTask('%s'); $instances=$registered.GetInstances(0); $pids=@(); for($index=1;$index -le $instances.Count;$index++){ $pids += [uint32]$instances.Item($index).EnginePID }; $state=[int]$registered.State; [pscustomobject]@{Exists=$true;Code=[int64]0;Running=($state -eq 4);Queued=($state -eq 2);LastResult=[int64]$registered.LastTaskResult;EnginePIDs=@($pids);SecurityDescriptor=[string]$registered.GetSecurityDescriptor(4)} | ConvertTo-Json -Compress } catch { $code=[int64]$_.Exception.HResult; if($code -eq -2147024894){ [pscustomobject]@{Exists=$false;Code=$code;Running=$false;LastResult=[int64]0;EnginePIDs=@();SecurityDescriptor=''} | ConvertTo-Json -Compress } else { throw } }`,
 		comTaskFolder,
 		taskName,
 	)
-	output, err := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	output, err := windowsServiceCommand(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
 		return windowsTaskRuntimeState{}, fmt.Errorf("query Windows task runtime: %w: %s", err, message)
@@ -205,6 +268,7 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 		Exists             bool     `json:"Exists"`
 		Code               int64    `json:"Code"`
 		Running            bool     `json:"Running"`
+		Queued             bool     `json:"Queued"`
 		LastResult         int64    `json:"LastResult"`
 		EnginePIDs         []uint32 `json:"EnginePIDs"`
 		SecurityDescriptor string   `json:"SecurityDescriptor"`
@@ -227,6 +291,7 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 	}
 	return windowsTaskRuntimeState{
 		Running:            state.Running,
+		Queued:             state.Queued,
 		LastResult:         lastResult,
 		HasLastResult:      true,
 		EnginePIDs:         append([]uint32(nil), state.EnginePIDs...),
@@ -278,7 +343,7 @@ func removeWindowsTaskFolderIfEmpty(ctx context.Context) error {
 }
 
 func runWindowsTaskPowerShell(ctx context.Context, script string) ([]byte, error) {
-	output, err := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	output, err := windowsServiceCommand(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
 	if len(output) > 64<<10 {
 		return nil, fmt.Errorf("Windows Task Scheduler output exceeds size limit")
 	}
@@ -443,11 +508,16 @@ func uninstallProxyAgent() error {
 	return lifecycle.Platform.RemoveProxy(context.Background())
 }
 
-func restartProxyAgent() error {
+func restartProxyAgent() (returnErr error) {
 	lifecycle, err := defaultWindowsServiceLifecycle("")
 	if err != nil {
 		return err
 	}
+	lock, err := lifecycle.MutationLocker.Acquire()
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, lock.Close()) }()
 	return lifecycle.Platform.RestartProxy(context.Background())
 }
 

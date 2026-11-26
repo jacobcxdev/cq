@@ -12,6 +12,17 @@
     <MajorUpgrade
         Schedule="afterInstallInitialize"
         DowngradeErrorMessage="A later version of CQ is already installed." />
+    <Property Id="CQLEGACYQUIETPATCH" Secure="yes">
+      <RegistrySearch Id="CQLegacyQuietUpgrade" Root="HKCU"
+          Key="Software\jacobcxdev\CQ\Installer" Name="LegacyQuietUpgrade"
+          Type="raw" Bitness="always64" />
+    </Property>
+    <Launch
+        Condition="NOT (WIX_UPGRADE_DETECTED ~&gt;&lt; &quot;{35BC2A8A-8B84-4E6D-9AF2-78B5485354EC}&quot;) OR CQLEGACYQUIETPATCH ~= &quot;{67038060-1859-4ABF-B9B7-7AD86C6290E7}&quot;"
+        Message="Apply the CQ v0.53.5 quiet upgrade patch before installing this version." />
+    <Launch
+        Condition="NOT (WIX_UPGRADE_DETECTED ~&gt;&lt; &quot;{845594B7-7E46-4694-8671-8D688B9F747B}&quot;) OR CQLEGACYQUIETPATCH ~= &quot;{D268364B-6589-4C12-A47A-3059DBE180A0}&quot;"
+        Message="Apply the CQ v0.53.5 quiet upgrade patch before installing this version." />
 
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="ProgramsFolder" Name="Programs">
@@ -43,24 +54,31 @@
       <ComponentRef Id="CQExecutable" />
     </Feature>
 
+    <SetProperty Id="RollbackCQServices" Before="RollbackCQServices" Sequence="execute"
+        Condition="NOT Installed" Value="&quot;[#CQExe]&quot; service uninstall --owner=winget" />
+    <SetProperty Id="InstallCQServices" Before="InstallCQServices" Sequence="execute"
+        Condition="NOT Installed" Value="&quot;[#CQExe]&quot; service install --owner=winget" />
+    <SetProperty Id="UninstallCQServices" Before="UninstallCQServices" Sequence="execute"
+        Condition="Installed AND REMOVE~=&quot;ALL&quot;" Value="&quot;[#CQExe]&quot; service uninstall --owner=winget" />
+
     <CustomAction
         Id="RollbackCQServices"
-        FileRef="CQExe"
-        ExeCommand="service uninstall --owner=winget"
+        BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+        DllEntry="WixQuietExec"
         Execute="rollback"
         Impersonate="yes"
         Return="ignore" />
     <CustomAction
         Id="InstallCQServices"
-        FileRef="CQExe"
-        ExeCommand="service install --owner=winget"
+        BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+        DllEntry="WixQuietExec"
         Execute="deferred"
         Impersonate="yes"
         Return="check" />
     <CustomAction
         Id="UninstallCQServices"
-        FileRef="CQExe"
-        ExeCommand="service uninstall --owner=winget"
+        BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"
+        DllEntry="WixQuietExec"
         Execute="deferred"
         Impersonate="yes"
         Return="check" />

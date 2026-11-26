@@ -19,6 +19,28 @@ import (
 	"github.com/jacobcxdev/cq/internal/installstate"
 )
 
+func TestServiceCommandRestrictsLegacyMSIExecutable(t *testing.T) {
+	name := filepath.Join(t.TempDir(), "cq.exe")
+	option := "--legacy-msi-executable=" + name
+	for _, action := range []string{"install", "uninstall"} {
+		if _, err := parseServiceCommand([]string{action, "--owner=winget", option}); err != nil {
+			t.Errorf("legacy MSI %s: %v", action, err)
+		}
+	}
+	for _, args := range [][]string{
+		{"install", "--owner=manual", option},
+		{"status", option},
+		{"install", "--owner=winget", option, option},
+		{"uninstall", "--owner=winget", "--legacy-msi-executable="},
+		{"uninstall", "--owner=winget", "--legacy-msi-executable=cq.exe"},
+		{"uninstall", "--owner=winget", option, "--service-executable=" + name},
+	} {
+		if _, err := parseServiceCommand(args); err == nil {
+			t.Errorf("accepted legacy MSI arguments %v", args)
+		}
+	}
+}
+
 func TestRunServiceInstallDefaultsToManualOwner(t *testing.T) {
 	lifecycle, _, store := newServiceHarness(t)
 

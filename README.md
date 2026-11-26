@@ -50,6 +50,22 @@ WinGet installs CQ, its uninstaller, PATH and Add/Remove Programs metadata, and
 both scheduled tasks for the current Windows user without administrator access.
 The matching x64 or ARM64 MSI is also available from [GitHub Releases](https://github.com/jacobcxdev/cq/releases/latest).
 
+If you installed CQ v0.53.5 from an MSI, apply the one-time quiet upgrade patch
+before you upgrade. Download the patch for your installed architecture (`amd64`
+or `arm64`) from [CQ v0.53.6](https://github.com/jacobcxdev/cq/releases/tag/v0.53.6).
+Check its SHA-256 against `checksums.txt` in that release.
+
+From the download directory, run the following command. For ARM64, replace
+`amd64` with `arm64`.
+
+```powershell
+$patch = (Resolve-Path -LiteralPath '.\cq_0.53.5_windows_amd64_quiet-upgrade.msp').Path
+$result = Start-Process msiexec.exe -ArgumentList "/update `"$patch`" /qn /norestart REINSTALL=ALL REINSTALLMODE=pmus" -WindowStyle Hidden -Wait -PassThru
+$result.ExitCode
+```
+
+After exit code `0`, upgrade through WinGet or run the new MSI.
+
 ### Windows — Scoop
 
 ```powershell

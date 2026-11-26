@@ -163,8 +163,9 @@ func TestWindowsMSIPackageOwnsCompleteLifecycle(t *testing.T) {
 		`Source="$(var.CQExecutable)"`,
 		`Name="PATH"`,
 		`Value="[INSTALLFOLDER]"`,
-		`ExeCommand="service install --owner=winget"`,
-		`ExeCommand="service uninstall --owner=winget"`,
+		`Value="&quot;[#CQExe]&quot; service install --owner=winget"`,
+		`Value="&quot;[#CQExe]&quot; service uninstall --owner=winget"`,
+		`BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)"`,
 		`Execute="rollback"`,
 		`Return="check"`,
 		`<MajorUpgrade`,
@@ -174,6 +175,9 @@ func TestWindowsMSIPackageOwnsCompleteLifecycle(t *testing.T) {
 		if !strings.Contains(text, required) {
 			t.Fatalf("Windows MSI missing %q", required)
 		}
+	}
+	if strings.Count(text, `DllEntry="WixQuietExec"`) != 3 || strings.Contains(text, `ExeCommand="service `) {
+		t.Fatal("Windows MSI must launch install, uninstall, and rollback service actions without a console")
 	}
 	for _, forbidden := range []string{"SignTool", "notar", "App Store Connect"} {
 		if strings.Contains(text, forbidden) {

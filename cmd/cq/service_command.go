@@ -21,6 +21,7 @@ type serviceCommand struct {
 	OwnerSet            bool
 	JSON                bool
 	ServiceExecutable   string
+	LegacyMSIExecutable string
 	CandidateExecutable string
 	SnapshotFile        string
 	InstallerLockHeld   bool
@@ -32,12 +33,20 @@ var serviceLifecycleFactory = func(string) (*serviceLifecycle, error) {
 	return nil, fmt.Errorf("service platform adapter is unavailable")
 }
 
+var legacyMSIServiceLifecycleFactory = func(string) (*serviceLifecycle, error) {
+	return nil, fmt.Errorf("the legacy MSI service hook requires Windows")
+}
+
 func runService(args []string) error {
 	command, err := parseServiceCommand(args)
 	if err != nil {
 		return err
 	}
-	lifecycle, err := serviceLifecycleFactory(command.ServiceExecutable)
+	factory, executable := serviceLifecycleFactory, command.ServiceExecutable
+	if command.LegacyMSIExecutable != "" {
+		factory, executable = legacyMSIServiceLifecycleFactory, command.LegacyMSIExecutable
+	}
+	lifecycle, err := factory(executable)
 	if err != nil {
 		return err
 	}
@@ -214,6 +223,14 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 				return serviceCommand{}, fmt.Errorf("service %s: duplicate service executable", command.Action)
 			}
 			command.ServiceExecutable = strings.TrimPrefix(argument, "--service-executable=")
+		case strings.HasPrefix(argument, "--legacy-msi-executable="):
+			if command.LegacyMSIExecutable != "" {
+				return serviceCommand{}, fmt.Errorf("duplicate legacy MSI executable")
+			}
+			command.LegacyMSIExecutable = strings.TrimPrefix(argument, "--legacy-msi-executable=")
+			if command.LegacyMSIExecutable == "" {
+				return serviceCommand{}, fmt.Errorf("legacy MSI executable is required")
+			}
 		case strings.HasPrefix(argument, "--candidate-executable="):
 			if command.CandidateExecutable != "" {
 				return serviceCommand{}, fmt.Errorf("duplicate candidate executable")
@@ -249,6 +266,14 @@ func parseServiceCommand(args []string) (serviceCommand, error) {
 		}
 		if !filepath.IsAbs(command.ServiceExecutable) || filepath.Clean(command.ServiceExecutable) != command.ServiceExecutable {
 			return serviceCommand{}, fmt.Errorf("service %s: service executable must be a clean absolute path", command.Action)
+		}
+	}
+	if executable := command.LegacyMSIExecutable; executable != "" {
+		if command.Owner != installstate.OwnerWinGet || (command.Action != "install" && command.Action != "uninstall") || command.ServiceExecutable != "" || command.InstallerLockHeld {
+			return serviceCommand{}, fmt.Errorf("legacy MSI executable is only valid for per-user MSI install and uninstall hooks")
+		}
+		if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
+			return serviceCommand{}, fmt.Errorf("legacy MSI executable must be a clean absolute path")
 		}
 	}
 	if command.Action == "upgrade" {

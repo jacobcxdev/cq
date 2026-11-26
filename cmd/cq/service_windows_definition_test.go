@@ -344,11 +344,67 @@ func TestWindowsTaskDefinitionServiceRestartProxyReplacesInstance(t *testing.T) 
 		t.Fatalf("proxy PID remained %d", after)
 	}
 	want := [][]string{
+		{"/Query", "/TN", windowsProxyTaskPath, "/XML", "/HResult"},
 		{"/End", "/TN", windowsProxyTaskPath},
 		{"/Run", "/TN", windowsProxyTaskPath},
 	}
 	if !reflect.DeepEqual(runner.calls, want) {
 		t.Fatalf("restart calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
+func TestWindowsTaskDefinitionServiceRestartProxyRetriesIgnoredLaunch(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	ctx := context.Background()
+	if err := platform.InstallProxy(ctx, platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	before := runner.enginePIDs[windowsProxyTaskPath][0]
+	launches := 0
+	run := platform.run
+	platform.run = func(ctx context.Context, args ...string) ([]byte, error) {
+		if reflect.DeepEqual(args, []string{"/Run", "/TN", windowsProxyTaskPath}) {
+			launches++
+			if launches == 1 {
+				return nil, nil // Task Scheduler acknowledged Run without starting an instance.
+			}
+		}
+		return run(ctx, args...)
+	}
+
+	if err := platform.RestartProxy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, err := platform.inspect(ctx, windowsProxyTask)
+	if err != nil || launches != 2 || !state.Healthy || state.PID == int(before) {
+		t.Fatalf("restart = %d launches, new state %#v, %v", launches, state, err)
+	}
+}
+
+func TestWindowsTaskDefinitionServiceRestartProxyWaitsForReplacementListener(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	ctx := context.Background()
+	if err := platform.InstallProxy(ctx, platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	before := runner.enginePIDs[windowsProxyTaskPath][0]
+	probes := 0
+	platform.inspectProxy = func(ctx context.Context, executable string) componentStatus {
+		pid := runner.proxyPID
+		if pid != before {
+			probes++
+			if probes == 1 {
+				pid = before // The retiring listener still answers /health.
+			}
+		}
+		return componentStatus{Running: true, Healthy: true, PID: int(pid), LiveExecutable: executable, Listener: "127.0.0.1:19280"}
+	}
+
+	if err := platform.RestartProxy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if probes != 2 {
+		t.Fatalf("restart took %d probes of the replacement, want 2", probes)
 	}
 }
 
@@ -359,18 +415,27 @@ func TestWindowsTaskDefinitionServiceWaitsForTaskInstanceExitBeforeRestart(t *te
 	}
 
 	polls := 0
+	stopping := false
 	baseQueryState := platform.queryState
 	platform.queryState = func(ctx context.Context, taskPath string) (windowsTaskRuntimeState, error) {
-		polls++
-		if polls == 1 {
-			return windowsTaskRuntimeState{EnginePIDs: []uint32{902}}, nil
+		if stopping {
+			polls++
+			if polls == 1 {
+				return windowsTaskRuntimeState{EnginePIDs: []uint32{902}}, nil
+			}
 		}
 		return baseQueryState(ctx, taskPath)
 	}
 	baseRun := platform.run
 	platform.run = func(ctx context.Context, args ...string) ([]byte, error) {
-		if reflect.DeepEqual(args, []string{"/Run", "/TN", windowsProxyTaskPath}) && polls < 2 {
-			return nil, errors.New("task restarted before its process exited")
+		switch args[0] {
+		case "/End":
+			stopping = true
+		case "/Run":
+			if polls < 2 {
+				return nil, errors.New("task restarted before its process exited")
+			}
+			stopping = false
 		}
 		return baseRun(ctx, args...)
 	}
@@ -380,6 +445,41 @@ func TestWindowsTaskDefinitionServiceWaitsForTaskInstanceExitBeforeRestart(t *te
 	}
 	if polls != 2 {
 		t.Fatalf("task stop polls = %d, want 2", polls)
+	}
+}
+
+func TestWindowsTaskDefinitionServiceRestartProxyDoesNotRelaunchQueuedTask(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	ctx := context.Background()
+	if err := platform.InstallProxy(ctx, platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	launches, queuedPolls := 0, 0
+	platform.run = func(ctx context.Context, args ...string) ([]byte, error) {
+		if args[0] == "/Run" {
+			launches++
+			return nil, nil
+		}
+		return runner.Run(ctx, args...)
+	}
+	platform.queryState = func(ctx context.Context, path string) (windowsTaskRuntimeState, error) {
+		if launches > 0 {
+			queuedPolls++
+			if queuedPolls == 2 {
+				if _, err := runner.Run(ctx, "/Run", "/TN", path); err != nil {
+					return windowsTaskRuntimeState{}, err
+				}
+			}
+		}
+		state, err := runner.State(ctx, path)
+		state.Queued = queuedPolls == 1
+		return state, err
+	}
+	if err := platform.RestartProxy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if launches != 1 || queuedPolls != 2 {
+		t.Fatalf("restart took %d launch requests and %d queued polls", launches, queuedPolls)
 	}
 }
 
@@ -623,6 +723,7 @@ func newWindowsTaskServiceHarness(t *testing.T) (*windowsTaskServicePlatform, *f
 		lastResult: map[string]uint32{},
 		enginePIDs: map[string][]uint32{},
 		failOnce:   map[string]error{},
+		proxyPID:   901,
 	}
 	platform := &windowsTaskServicePlatform{
 		sid:             testWindowsSID,
@@ -635,7 +736,7 @@ func newWindowsTaskServiceHarness(t *testing.T) (*windowsTaskServicePlatform, *f
 		createFolder:    runner.CreateFolder,
 		removeFolder:    runner.RemoveFolderIfEmpty,
 		inspectProxy: func(_ context.Context, executable string) componentStatus {
-			return componentStatus{ID: windowsProxyTaskPath, Manager: "task-scheduler", Running: true, LiveExecutable: executable, PID: 902, Listener: "127.0.0.1:19280", Healthy: true}
+			return componentStatus{ID: windowsProxyTaskPath, Manager: "task-scheduler", Running: true, LiveExecutable: executable, PID: int(runner.proxyPID), Listener: "127.0.0.1:19280", Healthy: true}
 		},
 	}
 	return platform, runner
@@ -648,6 +749,7 @@ type fakeWindowsTaskRunner struct {
 	running      map[string]bool
 	lastResult   map[string]uint32
 	enginePIDs   map[string][]uint32
+	proxyPID     uint32
 	failOnce     map[string]error
 	folderExists bool
 	folderSDDL   string
@@ -691,7 +793,8 @@ func (runner *fakeWindowsTaskRunner) Run(_ context.Context, args ...string) ([]b
 		}
 		runner.running[path] = true
 		if path == windowsProxyTaskPath && len(runner.enginePIDs[path]) == 0 {
-			runner.enginePIDs[path] = []uint32{902}
+			runner.proxyPID++
+			runner.enginePIDs[path] = []uint32{runner.proxyPID}
 		}
 		return nil, nil
 	case "/end":

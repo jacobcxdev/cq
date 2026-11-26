@@ -30,6 +30,9 @@ const (
 	windowsTaskAlreadyRunning = uint32(0x8004131f)
 	windowsTaskStopAttempts   = 100
 	windowsTaskStopInterval   = 100 * time.Millisecond
+	windowsProxyRestartBudget = 30 * time.Second
+	windowsProxyRestartPoll   = 500 * time.Millisecond
+	windowsProxyLaunchLimit   = 3
 )
 
 type windowsTaskKind uint8
@@ -116,6 +119,7 @@ type windowsTaskExec struct {
 
 type windowsTaskRuntimeState struct {
 	Running            bool
+	Queued             bool
 	LastResult         uint32
 	HasLastResult      bool
 	EnginePIDs         []uint32
@@ -283,7 +287,47 @@ func (platform *windowsTaskServicePlatform) InstallRefresh(ctx context.Context, 
 }
 
 func (platform *windowsTaskServicePlatform) RestartProxy(ctx context.Context) error {
-	return platform.restartTask(ctx, windowsProxyTaskPath)
+	ctx, cancel := context.WithTimeout(ctx, windowsProxyRestartBudget)
+	defer cancel()
+	previous, err := platform.inspect(ctx, windowsProxyTask)
+	if err != nil {
+		return err
+	}
+	if !previous.Registered {
+		return fmt.Errorf("Windows proxy task %s is not registered", windowsProxyTaskPath)
+	}
+	if err := platform.restartTask(ctx, windowsProxyTaskPath); err != nil {
+		return err
+	}
+	launches := 1
+	for {
+		if err := waitForServicePoll(ctx, windowsProxyRestartPoll); err != nil {
+			return fmt.Errorf("%w: wait for replacement Windows proxy after %d launch requests: %w", ErrServiceUnhealthy, launches, err)
+		}
+		state, err := platform.queryState(ctx, windowsProxyTaskPath)
+		if err != nil {
+			return fmt.Errorf("inspect replacement Windows proxy task: %w", err)
+		}
+		if !validWindowsTaskSecurityDescriptor(state.SecurityDescriptor, platform.sid, false) {
+			return fmt.Errorf("%w: Windows task security descriptor differs", installstate.ErrOwnershipConflict)
+		}
+		if state.Running {
+			status := platform.inspectProxyInstance(ctx, componentStatus{
+				Running: true, ConfiguredExecutable: previous.ConfiguredExecutable,
+			}, state)
+			if status.Healthy && status.PID != previous.PID {
+				return nil
+			}
+		}
+		// An acknowledged Run can leave no instance. Reissue it only after
+		// Task Scheduler reports the task is neither running nor queued.
+		if !state.Running && !state.Queued && len(state.EnginePIDs) == 0 && launches < windowsProxyLaunchLimit {
+			if err := platform.runTask(ctx, windowsProxyTaskPath); err != nil {
+				return err
+			}
+			launches++
+		}
+	}
 }
 
 func (platform *windowsTaskServicePlatform) RestartRefresh(ctx context.Context) error {
@@ -501,23 +545,31 @@ func (platform *windowsTaskServicePlatform) inspect(ctx context.Context, kind wi
 		}
 		return status, nil
 	}
-	if status.Running && platform.inspectProxy != nil {
-		runtimeStatus := platform.inspectProxy(ctx, status.ConfiguredExecutable)
-		status.LiveExecutable = runtimeStatus.LiveExecutable
-		status.Listener = runtimeStatus.Listener
-		status.Error = runtimeStatus.Error
-		if len(runtimeState.EnginePIDs) != 1 || runtimeState.EnginePIDs[0] == 0 {
-			status.Error = "Task Scheduler returned ambiguous proxy instance PIDs"
-			return status, nil
-		}
-		status.PID = int(runtimeState.EnginePIDs[0])
-		if runtimeStatus.PID != status.PID {
-			status.Error = fmt.Sprintf("listener PID %d differs from Task Scheduler EnginePID %d", runtimeStatus.PID, status.PID)
-			return status, nil
-		}
-		status.Healthy = runtimeStatus.Healthy && sameServiceExecutable(status.LiveExecutable, status.ConfiguredExecutable)
+	if status.Running {
+		status = platform.inspectProxyInstance(ctx, status, runtimeState)
 	}
 	return status, nil
+}
+
+func (platform *windowsTaskServicePlatform) inspectProxyInstance(ctx context.Context, status componentStatus, runtimeState windowsTaskRuntimeState) componentStatus {
+	if platform.inspectProxy == nil {
+		return status
+	}
+	runtimeStatus := platform.inspectProxy(ctx, status.ConfiguredExecutable)
+	status.LiveExecutable = runtimeStatus.LiveExecutable
+	status.Listener = runtimeStatus.Listener
+	status.Error = runtimeStatus.Error
+	if len(runtimeState.EnginePIDs) != 1 || runtimeState.EnginePIDs[0] == 0 {
+		status.Error = "Task Scheduler returned ambiguous proxy instance PIDs"
+		return status
+	}
+	status.PID = int(runtimeState.EnginePIDs[0])
+	if runtimeStatus.PID != status.PID {
+		status.Error = fmt.Sprintf("listener PID %d differs from Task Scheduler EnginePID %d", runtimeStatus.PID, status.PID)
+		return status
+	}
+	status.Healthy = runtimeStatus.Healthy && sameServiceExecutable(status.LiveExecutable, status.ConfiguredExecutable)
+	return status
 }
 
 func (platform *windowsTaskServicePlatform) queryDefinition(ctx context.Context, kind windowsTaskKind) (windowsTaskDefinition, bool, error) {
