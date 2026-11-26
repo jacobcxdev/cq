@@ -19,11 +19,15 @@ func TestLegacyCodexWebSocketRecoversFromUpstreamDisconnect(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		terminal     string
+		prewarm      bool
+		generateOff  bool
 		clientCloses bool
 		wantStatus   int
 		wantStage    string
 	}{
 		{name: "upstream closes before completion", wantStatus: http.StatusUpgradeRequired, wantStage: "upstream_read"},
+		{name: "upstream closes during prewarm", prewarm: true, generateOff: true, wantStatus: http.StatusSwitchingProtocols, wantStage: "upstream_read"},
+		{name: "upstream closes during legacy generate false", generateOff: true, wantStatus: http.StatusSwitchingProtocols, wantStage: "upstream_read"},
 		{name: "upstream closes after completion", terminal: `{"type":"response.completed","response":{"id":"synthetic"}}`, wantStatus: http.StatusSwitchingProtocols, wantStage: "upstream_read"},
 		{name: "upstream sends a quota error", terminal: `{"type":"error","status":429,"error":{"type":"usage_limit_reached"}}`, wantStatus: http.StatusSwitchingProtocols, wantStage: "upstream_read"},
 		{name: "downstream closes first", clientCloses: true, wantStatus: http.StatusSwitchingProtocols, wantStage: "downstream_read"},
@@ -91,8 +95,14 @@ func TestLegacyCodexWebSocketRecoversFromUpstreamDisconnect(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer client.Close()
-			request := []byte(`{"type":"response.create","model":"gpt-5.4","input":"synthetic","client_metadata":{"x-codex-turn-metadata":{"session_id":"affected-session","thread_id":"affected-thread","turn_id":"turn","request_kind":"turn"}}}`)
-			if err := client.WriteMessage(websocket.TextMessage, request); err != nil {
+			request := `{"type":"response.create","model":"gpt-5.4","input":"synthetic","client_metadata":{"x-codex-turn-metadata":{"session_id":"affected-session","thread_id":"affected-thread","turn_id":"turn","request_kind":"turn"}}}`
+			if tc.prewarm {
+				request = strings.Replace(request, `"turn_id":"turn","request_kind":"turn"`, `"turn_id":"","request_kind":"prewarm"`, 1)
+			}
+			if tc.generateOff {
+				request = strings.Replace(request, `"model":`, `"generate":false,"model":`, 1)
+			}
+			if err := client.WriteMessage(websocket.TextMessage, []byte(request)); err != nil {
 				t.Fatal(err)
 			}
 			select {

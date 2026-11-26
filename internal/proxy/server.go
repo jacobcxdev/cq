@@ -1538,12 +1538,16 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, "downstream_request", messageType, message, 1)
 	var responsePending atomic.Bool
 	observeRequest := func(messageType int, message []byte) {
-		if diagnostics, accepted := inspectCodexLegacyWSClientFrame(messageType, message); accepted {
-			responsePending.Store(true)
-			fields := diagnostics.codex
-			updateCodexTraceIdentity(ctx, fields.SessionKey, fields.SessionSource, fields.ThreadKey, fields.RequestKind)
-			s.emitCodexWebSocketFrameObservation(diagnostics)
+		diagnostics, generatesResponse := inspectCodexLegacyWSClientFrame(messageType, message)
+		if diagnostics == nil {
+			return
 		}
+		if generatesResponse {
+			responsePending.Store(true)
+		}
+		fields := diagnostics.codex
+		updateCodexTraceIdentity(ctx, fields.SessionKey, fields.SessionSource, fields.ThreadKey, fields.RequestKind)
+		s.emitCodexWebSocketFrameObservation(diagnostics)
 	}
 	observeRequest(messageType, message)
 	wsObserver := s.codexWebSocketObserver()
@@ -1663,8 +1667,12 @@ func inspectCodexLegacyWSClientFrame(messageType int, frame []byte) (*routeDiagn
 		return nil, false
 	}
 	var envelope struct {
-		Type   string `json:"type"`
-		Method string `json:"method"`
+		Type     string `json:"type"`
+		Method   string `json:"method"`
+		Generate *bool  `json:"generate"`
+		Params   struct {
+			Generate *bool `json:"generate"`
+		} `json:"params"`
 	}
 	if err := json.Unmarshal(frame, &envelope); err != nil ||
 		(envelope.Type != "response.create" && envelope.Method != "response/create") {
@@ -1676,7 +1684,10 @@ func inspectCodexLegacyWSClientFrame(messageType int, frame []byte) (*routeDiagn
 	}
 	diagnostics := &routeDiagnostics{}
 	diagnostics.codex = codexObservationFieldsForProtocol(request, nil)
-	return diagnostics, true
+	prewarm := request.Metadata.Found && request.Metadata.Metadata.RequestKind == CodexRequestPrewarm
+	generatesResponse := !prewarm && (envelope.Generate == nil || *envelope.Generate) &&
+		(envelope.Params.Generate == nil || *envelope.Params.Generate)
+	return diagnostics, generatesResponse
 }
 
 func (s *Server) emitCodexWebSocketFrameObservation(diagnostics *routeDiagnostics) {
