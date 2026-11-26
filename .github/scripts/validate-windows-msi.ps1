@@ -114,24 +114,22 @@ function Assert-LegacyPatchRegistered {
         throw "migration patch registration marker differs"
     }
     $installer = New-Object -ComObject "WindowsInstaller.Installer"
-    $count = 0
     try {
-        foreach ($patch in @($installer.PatchesEx($ProductCode, "", 2, 1))) {
-            try {
-                if ($patch.PatchCode -eq $PatchCode) {
-                    $count++
-                }
-            }
-            finally {
-                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($patch)
-            }
+        $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $patch = $installer.Patch($PatchCode, $ProductCode, $sid, 2)
+        try {
+            # Use IDispatch directly because PowerShell cannot adapt the Patch object's properties.
+            $state = $patch.GetType().InvokeMember("State", [Reflection.BindingFlags]::GetProperty, $null, $patch, $null)
+        }
+        finally {
+            [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($patch)
         }
     }
     finally {
         [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer)
     }
-    if ($count -ne 1) {
-        throw "expected one applied current-user CQ legacy patch registration, found $count"
+    if ($state -ne 1) {
+        throw "the current-user CQ legacy patch is not registered as applied"
     }
 }
 
