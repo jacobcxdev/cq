@@ -176,7 +176,7 @@ func TestCodexExtraCreditsLegacyWebSocketChecksNestedFrameModel(t *testing.T) {
 	left := &reserveRelayConn{blockingRelayConn: newBlockingRelayConn(), frame: []byte(`{"type":"response.create","params":{"model":"gpt-6-astra","input":[]}}`)}
 	right := &reserveRelayConn{blockingRelayConn: newBlockingRelayConn()}
 	choice := RouteChoice{AccountKey: "account-1", RequestedModel: "gpt-5.4", EffectiveModel: "gpt-5.4"}
-	err := relayWebSocketPairGuarded(context.Background(), left, right, nil, codexExtraCreditsFrameGuard(context.Background(), capacity, choice))
+	err := relayWebSocketPairGuarded(context.Background(), left, right, nil, codexExtraCreditsFrameGuard(context.Background(), capacity, choice), nil)
 	var limit *CachedUsageLimitError
 	if !errors.As(err, &limit) || len(right.writes) != 0 {
 		t.Fatalf("nested paid model reached upstream: error=%v writes=%q", err, right.writes)

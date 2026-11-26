@@ -95,7 +95,7 @@ func (c *reserveRelayConn) WriteMessage(_ int, frame []byte) error {
 func TestCodexReserveLegacyWebSocketStopsBeforeForward(t *testing.T) {
 	left := &reserveRelayConn{blockingRelayConn: newBlockingRelayConn(), frame: []byte(`{"type":"response.create"}`)}
 	right := &reserveRelayConn{blockingRelayConn: newBlockingRelayConn()}
-	err := relayWebSocketPairGuarded(context.Background(), left, right, nil, func(int, []byte) error { return &CachedUsageLimitError{} })
+	err := relayWebSocketPairGuarded(context.Background(), left, right, nil, func(int, []byte) error { return &CachedUsageLimitError{} }, nil)
 	var limit *CachedUsageLimitError
 	if !errors.As(err, &limit) {
 		t.Fatal(err)

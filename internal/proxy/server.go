@@ -1296,9 +1296,10 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	fallbackKey := codexWSHTTPFallbackKey(r.Header)
-	if webSocketEnforcing && s.codexWSHTTPFallback.required(fallbackKey) {
+	if s.codexWSHTTPFallback.required(fallbackKey) {
 		statusCode = http.StatusUpgradeRequired
 		diagError = diagnosticsErrorCode("invalid_request_error", "Codex WebSocket request requires HTTP")
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "http_fallback", Outcome: "required", StatusCode: statusCode})
 		writeError(w, statusCode, "invalid_request_error", "Codex WebSocket request requires HTTP")
 		return
 	}
@@ -1535,15 +1536,27 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		requestedModel = extractCodexWebSocketFrameModel(message)
 	}
 	s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, "downstream_request", messageType, message, 1)
-	if diagnostics, accepted := inspectCodexLegacyWSClientFrame(messageType, message); accepted {
+	var responsePending atomic.Bool
+	observeRequest := func(messageType int, message []byte) {
+		diagnostics, generatesResponse := inspectCodexLegacyWSClientFrame(messageType, message)
+		if diagnostics == nil {
+			return
+		}
+		if generatesResponse {
+			responsePending.Store(true)
+		}
+		fields := diagnostics.codex
+		updateCodexTraceIdentity(ctx, fields.SessionKey, fields.SessionSource, fields.ThreadKey, fields.RequestKind)
 		s.emitCodexWebSocketFrameObservation(diagnostics)
 	}
+	observeRequest(messageType, message)
 	wsObserver := s.codexWebSocketObserver()
 	if wsObserver != nil {
 		r = r.WithContext(withCodexObservation(r.Context(), wsObserver))
 	}
 	upstreamConn, choice, _, capacity, err := s.dialCodexWebSocketWithCapacity(r.Context(), upstreamURL, r.Header, requestedModel)
 	if err != nil {
+		emitCodexTrace(ctx, CodexTraceEvent{Phase: "upstream_upgrade", Outcome: "error", Reason: codexTraceErrorReason(err)})
 		var limit *CachedUsageLimitError
 		if errors.As(err, &limit) {
 			_ = clientConn.WriteMessage(websocket.TextMessage, codexReserveWSLimitFrame)
@@ -1552,6 +1565,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream error"), time.Now().Add(time.Second))
 		return
 	}
+	emitCodexTrace(ctx, CodexTraceEvent{Phase: "upstream_upgrade", Outcome: "success", UpstreamStatus: http.StatusSwitchingProtocols})
 	defer upstreamConn.Close()
 	upstreamConn.SetReadLimit(codexWebSocketMessageMaxBytes)
 	observation := newCodexWSObservationSession(wsObserver, r.Context(), choice, capacity)
@@ -1568,7 +1582,33 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		_ = clientConn.WriteMessage(websocket.TextMessage, codexReserveWSLimitFrame)
 		return
 	}
+	var relayEnd codexWSRelayEnd
+	var httpFallback bool
+	onRelayEnd := func(end codexWSRelayEnd) {
+		relayEnd = end
+		if !responsePending.Load() || !end.upstreamDisconnected() || ctx.Err() != nil {
+			return
+		}
+		// Record the fallback before the client can reconnect. Codex can then
+		// reconstruct the request on HTTP without CQ replaying it.
+		s.codexWSHTTPFallback.remember(fallbackKey)
+		httpFallback = fallbackKey != ""
+		diagError = diagnosticsErrorCode("api_error", "Codex upstream WebSocket disconnected")
+		_ = clientConn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "upstream disconnected"), time.Now().Add(codexWSControlWriteTimeout))
+	}
+	defer func() {
+		if relayEnd.err == nil {
+			return
+		}
+		closeCode, closeReason := codexTraceWebSocketClose(relayEnd.err)
+		emitCodexTrace(ctx, CodexTraceEvent{
+			Phase: "relay_terminal", Stage: relayEnd.stage, Outcome: "closed",
+			Reason: codexTraceErrorReason(relayEnd.err), CloseCode: closeCode, CloseReason: closeReason,
+			LatencyMS: time.Since(start).Milliseconds(), Retry: httpFallback,
+		})
+	}()
 	if err := upstreamConn.WriteMessage(messageType, message); err != nil {
+		onRelayEnd(codexWSRelayEnd{"upstream_write", err})
 		if observation != nil {
 			observation.Close(err)
 		}
@@ -1601,8 +1641,11 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 		s.emitCodexWebSocketPayloadDiagnostics(r, legacyCodexResponsesPath, requestedModel, direction, messageType, message, frameIndex)
 		if fromClient {
-			if diagnostics, accepted := inspectCodexLegacyWSClientFrame(messageType, message); accepted {
-				s.emitCodexWebSocketFrameObservation(diagnostics)
+			observeRequest(messageType, message)
+		} else if responsePending.Load() {
+			switch classifyCodexWSEventType(messageType, message) {
+			case "response.completed", "response.failed", "response.incomplete", "error":
+				responsePending.Store(false)
 			}
 		}
 		if observation == nil || messageType != websocket.TextMessage {
@@ -1613,7 +1656,7 @@ func (s *Server) proxyCodexUpgrade(w http.ResponseWriter, r *http.Request) {
 		} else {
 			observation.ObserveUpstream(message)
 		}
-	}, guard)
+	}, guard, onRelayEnd)
 	if observation != nil {
 		observation.Close(relayErr)
 	}
@@ -1624,8 +1667,12 @@ func inspectCodexLegacyWSClientFrame(messageType int, frame []byte) (*routeDiagn
 		return nil, false
 	}
 	var envelope struct {
-		Type   string `json:"type"`
-		Method string `json:"method"`
+		Type     string `json:"type"`
+		Method   string `json:"method"`
+		Generate *bool  `json:"generate"`
+		Params   struct {
+			Generate *bool `json:"generate"`
+		} `json:"params"`
 	}
 	if err := json.Unmarshal(frame, &envelope); err != nil ||
 		(envelope.Type != "response.create" && envelope.Method != "response/create") {
@@ -1637,7 +1684,10 @@ func inspectCodexLegacyWSClientFrame(messageType int, frame []byte) (*routeDiagn
 	}
 	diagnostics := &routeDiagnostics{}
 	diagnostics.codex = codexObservationFieldsForProtocol(request, nil)
-	return diagnostics, true
+	prewarm := request.Metadata.Found && request.Metadata.Metadata.RequestKind == CodexRequestPrewarm
+	generatesResponse := !prewarm && (envelope.Generate == nil || *envelope.Generate) &&
+		(envelope.Params.Generate == nil || *envelope.Params.Generate)
+	return diagnostics, generatesResponse
 }
 
 func (s *Server) emitCodexWebSocketFrameObservation(diagnostics *routeDiagnostics) {
