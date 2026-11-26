@@ -8,6 +8,8 @@ param(
 
     [string]$PreviousVersion = "",
 
+    [string]$PreviousLegacyPatch = "",
+
     [string]$PreviousGoVersion = "",
 
     [switch]$SkipWinGet,
@@ -314,7 +316,7 @@ function Remove-ValidationPath {
 
 try {
     if ($SkipWinGet) {
-        if ($ManifestPath -ne "" -or $PreviousManifestPath -ne "" -or $PreviousVersion -ne "") {
+        if ($ManifestPath -ne "" -or $PreviousManifestPath -ne "" -or $PreviousVersion -ne "" -or $PreviousLegacyPatch -ne "") {
             throw "WinGet manifests cannot be supplied when WinGet validation is skipped"
         }
     }
@@ -325,6 +327,12 @@ try {
         $ManifestPath = (Resolve-Path -LiteralPath $ManifestPath).Path
     }
     $hasPreviousWinGet = $PreviousManifestPath -ne "" -or $PreviousVersion -ne ""
+    if (($PreviousVersion -eq "0.53.5") -ne ($PreviousLegacyPatch -ne "")) {
+        throw "a legacy migration patch is required only for the published 0.53.5 WinGet predecessor"
+    }
+    if ($PreviousLegacyPatch -ne "") {
+        $PreviousLegacyPatch = (Resolve-Path -LiteralPath $PreviousLegacyPatch).Path
+    }
     $hasPreviousGo = $PreviousGoVersion -ne ""
     if ($SkipWinGet -and $hasPreviousWinGet) {
         throw "previous WinGet inputs cannot be supplied when WinGet validation is skipped"
@@ -413,7 +421,20 @@ try {
     if (-not $SkipWinGet) {
         if ($hasPreviousWinGet) {
             Invoke-WinGet -Arguments @("install", "--manifest", $PreviousManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
-            $null = Assert-Installed -Executable $installedCQ -Version $PreviousVersion -Owner "winget" -ExpectWindowsMetadata $true
+            $previous = Assert-Installed -Executable $installedCQ -Version $PreviousVersion -Owner "winget" -ExpectWindowsMetadata $true
+            if ($PreviousLegacyPatch -ne "") {
+                $oldDigest = (Get-FileHash -LiteralPath $installedCQ -Algorithm SHA256).Hash
+                $log = Join-Path $temporaryRoot "patch-previous-winget.log"
+                $arguments = @("/update", ('"' + $PreviousLegacyPatch + '"'), "/qn", "/norestart", "/l*v", ('"' + $log + '"'), "REINSTALL=ALL", "REINSTALLMODE=pmus")
+                $patch = Start-Process -FilePath "msiexec.exe" -ArgumentList $arguments -Wait -PassThru
+                if ($patch.ExitCode -ne 0) {
+                    throw "WinGet predecessor migration patch failed with exit code $($patch.ExitCode)"
+                }
+                $patched = Assert-Installed -Executable $installedCQ -Version $PreviousVersion -Owner "winget" -ExpectWindowsMetadata $true
+                if ((Get-FileHash -LiteralPath $installedCQ -Algorithm SHA256).Hash -ne $oldDigest -or $patched.proxy.pid -ne $previous.proxy.pid) {
+                    throw "WinGet predecessor migration patch replaced the executable or restarted the proxy"
+                }
+            }
             Invoke-WinGet -Arguments @("upgrade", "--manifest", $ManifestPath, "--scope", "user", "--silent", "--accept-package-agreements", "--accept-source-agreements", "--disable-interactivity")
         }
         else {

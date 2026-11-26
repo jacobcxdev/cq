@@ -405,7 +405,7 @@ jobs:
         with:
           dotnet-version: 8.0.x
 
-      - name: Build and publish WinGet MSI assets
+      - name: Build and stage Windows MSI and migration patch assets
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -426,7 +426,26 @@ jobs:
             throw "failed to install WiX 5.0.2"
           }
           $wix = Join-Path $wixRoot "wix.exe"
-          $msiPaths = @()
+          $windowsAssets = @()
+          $needsLegacyPatch = [version]$version -gt [version]"0.53.5"
+          $buildLegacyPatch = $version -eq "0.53.6"
+          $legacyPatchRoot = Join-Path $releaseRoot "legacy-patches"
+          if ($needsLegacyPatch) {
+            gh release download v0.53.5 --repo jacobcxdev/cq --pattern "cq_0.53.5_windows_amd64.msi" --pattern "cq_0.53.5_windows_arm64.msi" --dir $releaseRoot
+            if ($LASTEXITCODE -ne 0) { throw "failed to download the published 0.53.5 MSIs" }
+            if (-not $buildLegacyPatch) {
+              # A PatchCode always identifies the same published bytes.
+              New-Item -ItemType Directory -Path $legacyPatchRoot | Out-Null
+              gh release download v0.53.6 --repo jacobcxdev/cq --pattern "cq_0.53.5_windows_*_quiet-upgrade.msp" --pattern "checksums.txt" --dir $legacyPatchRoot
+              if ($LASTEXITCODE -ne 0) { throw "failed to download the published 0.53.6 migration patches" }
+              $origin = gh release view v0.53.6 --repo jacobcxdev/cq --json isDraft,isPrerelease,assets | ConvertFrom-Json
+              if ($LASTEXITCODE -ne 0 -or $origin.isDraft -or $origin.isPrerelease) { throw "migration patch release is not published and stable" }
+              $verifiedChecksums = Join-Path $legacyPatchRoot "checksums.txt"
+              $checksumAsset = @($origin.assets | Where-Object { $_.name -eq "checksums.txt" })
+              $checksumDigest = (Get-FileHash -LiteralPath $verifiedChecksums -Algorithm SHA256).Hash.ToLowerInvariant()
+              if ($checksumAsset.Count -ne 1 -or $checksumAsset[0].digest -ne "sha256:$checksumDigest") { throw "migration patch checksums differ" }
+            }
+          }
           foreach ($architecture in @("amd64", "arm64")) {
             $archiveName = "cq_${version}_windows_${architecture}.zip"
             $archive = Join-Path $releaseRoot $archiveName
@@ -452,7 +471,40 @@ jobs:
             }
             $msi = Join-Path $releaseRoot "cq_${version}_windows_${architecture}.msi"
             .\.github\scripts\build-windows-msi.ps1 -Executable $payload[0].FullName -Version $version -Architecture $architecture -Output $msi -Wix $wix
-            $msiPaths += $msi
+            $windowsAssets += $msi
+
+            if ($needsLegacyPatch) {
+              $previousMSI = Join-Path $releaseRoot "cq_0.53.5_windows_${architecture}.msi"
+              $patchName = "cq_0.53.5_windows_${architecture}_quiet-upgrade.msp"
+              $legacyPatch = Join-Path $releaseRoot $patchName
+              if ($buildLegacyPatch) {
+                $quietExecutable = Join-Path $releaseRoot "cq-msi-service-$architecture.exe"
+                $env:GOOS = "windows"
+                $env:GOARCH = $architecture
+                $env:CGO_ENABLED = "0"
+                try {
+                  & go build -trimpath -ldflags "-H=windowsgui -s -w -X main.version=$version" -o $quietExecutable ./cmd/cq
+                  if ($LASTEXITCODE -ne 0) { throw "failed to build the $architecture quiet MSI service helper" }
+                }
+                finally {
+                  Remove-Item Env:GOOS, Env:GOARCH, Env:CGO_ENABLED
+                }
+                .\.github\scripts\build-windows-legacy-patch.ps1 -PreviousMSI $previousMSI -Executable $quietExecutable -Architecture $architecture -Output $legacyPatch -Wix $wix
+              }
+              else {
+                $publishedPatch = Join-Path $legacyPatchRoot $patchName
+                $patchDigest = (Get-FileHash -LiteralPath $publishedPatch -Algorithm SHA256).Hash.ToLowerInvariant()
+                $asset = @($origin.assets | Where-Object { $_.name -ceq $patchName })
+                $line = "$patchDigest  $patchName"
+                if ($asset.Count -ne 1 -or $asset[0].digest -ne "sha256:$patchDigest" -or
+                    @(Get-Content -LiteralPath $verifiedChecksums | Where-Object { $_ -ceq $line }).Count -ne 1) {
+                  throw "published migration patch digest differs for $patchName"
+                }
+                Copy-Item -LiteralPath $publishedPatch -Destination $legacyPatch
+              }
+              $windowsAssets += $legacyPatch
+              continue
+            }
 
             $previousRoot = Join-Path $releaseRoot "previous-$architecture"
             New-Item -ItemType Directory -Path $previousRoot -Force | Out-Null
@@ -467,10 +519,13 @@ jobs:
             $previousMSI = Join-Path $releaseRoot "cq_0.0.1_windows_${architecture}.msi"
             .\.github\scripts\build-windows-msi.ps1 -Executable $previousExecutable -Version 0.0.1 -Architecture $architecture -Output $previousMSI -Wix $wix
           }
-          $baseChecksums = @(Get-Content -LiteralPath $checksums | Where-Object { $_ -notmatch 'cq_[0-9]+\.[0-9]+\.[0-9]+_windows_(amd64|arm64)\.msi$' })
-          foreach ($msi in $msiPaths) {
-            $digest = (Get-FileHash -LiteralPath $msi -Algorithm SHA256).Hash.ToLowerInvariant()
-            $baseChecksums += "$digest  $([IO.Path]::GetFileName($msi))"
+          $baseChecksums = @(Get-Content -LiteralPath $checksums | Where-Object {
+            $_ -notmatch 'cq_[0-9]+\.[0-9]+\.[0-9]+_windows_(amd64|arm64)\.msi$' -and
+            $_ -notmatch 'cq_0\.53\.5_windows_(amd64|arm64)_quiet-upgrade\.msp$'
+          })
+          foreach ($path in $windowsAssets) {
+            $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $baseChecksums += "$digest  $([IO.Path]::GetFileName($path))"
           }
           $checksumText = (($baseChecksums | Sort-Object) -join "`n") + "`n"
           [IO.File]::WriteAllText($checksums, $checksumText, [Text.UTF8Encoding]::new($false))
@@ -505,15 +560,18 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $publicationState.isDraft -ne $true) {
             throw "refusing to replace assets on a published release"
           }
-          gh release upload $env:RELEASE_TAG @msiPaths $checksums --clobber
+          gh release upload $env:RELEASE_TAG @windowsAssets $checksums --clobber
           if ($LASTEXITCODE -ne 0) {
-            throw "failed to publish Windows MSI assets"
+            throw "failed to upload Windows package assets to the release draft"
           }
           $release = gh release view $env:RELEASE_TAG --json assets | ConvertFrom-Json
-          foreach ($architecture in @("amd64", "arm64")) {
-            $name = "cq_${version}_windows_${architecture}.msi"
-            if (@($release.assets | Where-Object { $_.name -eq $name }).Count -ne 1) {
-              throw "published release is missing $name"
+          if ($LASTEXITCODE -ne 0) { throw "failed to read staged Windows package assets" }
+          foreach ($path in $windowsAssets + @($checksums)) {
+            $name = [IO.Path]::GetFileName($path)
+            $asset = @($release.assets | Where-Object { $_.name -eq $name })
+            $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($asset.Count -ne 1 -or $asset[0].digest -ne "sha256:$digest") {
+              throw "staged release asset is absent or differs from $name"
             }
           }
 
@@ -527,7 +585,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: windows-msi-validation
-          path: ${{ runner.temp }}/cq-release/cq_*_windows_*.msi
+          path: |
+            ${{ runner.temp }}/cq-release/cq_*_windows_*.msi
+            ${{ runner.temp }}/cq-release/cq_0.53.5_windows_*_quiet-upgrade.msp
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
@@ -567,9 +627,16 @@ jobs:
             default { throw "unsupported Windows architecture $env:PROCESSOR_ARCHITECTURE" }
           }
           $root = Join-Path $env:RUNNER_TEMP "windows-msi-validation"
-          $previousMSI = Join-Path $root "cq_0.0.1_windows_${architecture}.msi"
           $currentMSI = Join-Path $root "cq_${version}_windows_${architecture}.msi"
-          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion $version
+          if ([version]$version -gt [version]"0.53.5") {
+            $previousMSI = Join-Path $root "cq_0.53.5_windows_${architecture}.msi"
+            $legacyPatch = Join-Path $root "cq_0.53.5_windows_${architecture}_quiet-upgrade.msp"
+            .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.53.5 -CurrentVersion $version -LegacyPatch $legacyPatch -VerifyLegacyRollback
+          }
+          else {
+            $previousMSI = Join-Path $root "cq_0.0.1_windows_${architecture}.msi"
+            .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion $version
+          }
 
   linux-install:
     needs: publish
@@ -662,6 +729,15 @@ jobs:
           scoop="$RUNNER_TEMP/scoop-manifest"
           mkdir -p "$scoop"
           gh release download "$RELEASE_TAG" --pattern checksums.txt --dir "$scoop" --clobber
+          IFS=. read -r major minor patch <<<"${RELEASE_TAG#v}"
+          if (( major > 0 || minor > 53 || (minor == 53 && patch > 5) )); then
+            for architecture in amd64 arm64; do
+              name="cq_0.53.5_windows_${architecture}_quiet-upgrade.msp"
+              digest=$(jq -er --arg name "$name" '[.assets[] | select(.name == $name)] | select(length == 1) | .[0].digest' <<<"$release")
+              [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+              test "$(awk -v name="$name" '$2 == name {print $1}' "$scoop/checksums.txt")" = "${digest#sha256:}"
+            done
+          fi
           bash .github/scripts/generate-scoop-manifest.sh "$RELEASE_TAG" "$RUNNER_TEMP/native-release.json" "$scoop/checksums.txt" >"$scoop/cq.json"
           draft="$(jq -r '.isDraft' <<<"$release")"
           case "$draft" in
@@ -744,7 +820,6 @@ jobs:
           path: ${{ runner.temp }}/winget-manifests
 
       - uses: actions/download-artifact@v8
-        if: ${{ !matrix.winget }}
         with:
           name: windows-msi-validation
           path: ${{ runner.temp }}/windows-msi-validation
@@ -776,6 +851,44 @@ jobs:
             throw "previous published stable release is absent or ambiguous"
           }
           "version=$($previousReleases[0].Version)" >> $env:GITHUB_OUTPUT
+
+      - name: Download and verify public Windows installer assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          CQ_WINDOWS_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          $architecture = $env:CQ_WINDOWS_ARCHITECTURE
+          $publicRoot = Join-Path $env:RUNNER_TEMP "public-windows-msi"
+          New-Item -ItemType Directory -Path $publicRoot -Force | Out-Null
+          $names = @("cq_${version}_windows_${architecture}.msi")
+          if ([version]$version -gt [version]"0.53.5") {
+            $names += "cq_0.53.5_windows_${architecture}_quiet-upgrade.msp"
+          }
+          $patterns = foreach ($name in $names + @("checksums.txt")) { "--pattern"; $name }
+          gh release download $env:RELEASE_TAG @patterns --dir $publicRoot
+          if ($LASTEXITCODE -ne 0) { throw "failed to download public Windows installer assets" }
+          $release = gh release view $env:RELEASE_TAG --json isDraft,isPrerelease,assets | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $release.isDraft -or $release.isPrerelease) {
+            throw "Windows installer release is not published and stable"
+          }
+          foreach ($name in $names + @("checksums.txt")) {
+            $path = Join-Path $publicRoot $name
+            $digest = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $assets = @($release.assets | Where-Object { $_.name -eq $name })
+            if ($assets.Count -ne 1 -or $assets[0].digest -ne "sha256:$digest") {
+              throw "published asset digest differs for $name"
+            }
+            if ($name -ne "checksums.txt") {
+              $expected = "$digest  $name"
+              if (@(Get-Content -LiteralPath (Join-Path $publicRoot "checksums.txt") | Where-Object { $_ -ceq $expected }).Count -ne 1) {
+                throw "published checksum differs for $name"
+              }
+            }
+          }
 
       - name: Validate deployed WinGet and Go runner lifecycle
         if: matrix.winget
@@ -837,10 +950,14 @@ jobs:
             }
             $validationArguments.PreviousManifestPath = $previousRoot
             $validationArguments.PreviousVersion = $previousVersion
+            if ($previousVersion -eq "0.53.5") {
+              $publicRoot = Join-Path $env:RUNNER_TEMP "public-windows-msi"
+              $validationArguments.PreviousLegacyPatch = Join-Path $publicRoot "cq_0.53.5_windows_amd64_quiet-upgrade.msp"
+            }
           }
           .\.github\scripts\validate-windows-install.ps1 @validationArguments
 
-      - name: Validate deployed ARM64 MSI and Go runner lifecycle
+      - name: Validate deployed ARM64 Go runner lifecycle
         if: ${{ !matrix.winget }}
         shell: pwsh
         env:
@@ -850,17 +967,29 @@ jobs:
           $ErrorActionPreference = "Stop"
           $version = $env:RELEASE_TAG.TrimStart("v")
           $previousGoVersion = "${{ steps.previous-release.outputs.version }}"
+          .\.github\scripts\validate-windows-install.ps1 -SkipWinGet -ExpectedVersion $version -PreviousGoVersion $previousGoVersion
+
+      - name: Validate deployed native MSI upgrade
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          CQ_WINDOWS_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = $env:RELEASE_TAG.TrimStart("v")
+          $architecture = $env:CQ_WINDOWS_ARCHITECTURE
           $validationRoot = Join-Path $env:RUNNER_TEMP "windows-msi-validation"
           $publicRoot = Join-Path $env:RUNNER_TEMP "public-windows-msi"
-          New-Item -ItemType Directory -Path $publicRoot -Force | Out-Null
-          gh release download $env:RELEASE_TAG --pattern "cq_${version}_windows_${{ matrix.architecture }}.msi" --dir $publicRoot
-          if ($LASTEXITCODE -ne 0) {
-            throw "failed to download public ARM64 MSI"
+          $currentMSI = Join-Path $publicRoot "cq_${version}_windows_${architecture}.msi"
+          if ([version]$version -gt [version]"0.53.5") {
+            $previousMSI = Join-Path $validationRoot "cq_0.53.5_windows_${architecture}.msi"
+            $legacyPatch = Join-Path $publicRoot "cq_0.53.5_windows_${architecture}_quiet-upgrade.msp"
+            .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.53.5 -CurrentVersion $version -LegacyPatch $legacyPatch
           }
-          $previousMSI = Join-Path $validationRoot "cq_0.0.1_windows_${{ matrix.architecture }}.msi"
-          $currentMSI = Join-Path $publicRoot "cq_${version}_windows_${{ matrix.architecture }}.msi"
-          .\.github\scripts\validate-windows-install.ps1 -SkipWinGet -ExpectedVersion $version -PreviousGoVersion $previousGoVersion
-          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion $version
+          else {
+            $previousMSI = Join-Path $validationRoot "cq_0.0.1_windows_${architecture}.msi"
+            .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion $version
+          }
 
   scoop-deployed:
     needs: publish

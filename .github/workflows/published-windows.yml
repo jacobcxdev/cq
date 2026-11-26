@@ -55,7 +55,13 @@ jobs:
             }
           } | Sort-Object Version -Descending | Select-Object -First 1)
           if ($previous.Count -ne 1) { throw "published predecessor is absent or ambiguous" }
-          foreach ($selected in @($tag, $previous[0].Tag)) {
+          $selectedTags = @($tag, $previous[0].Tag)
+          $migrationTag = "v0.53.6"
+          $needsLegacyPatch = $previous[0].Tag -eq "v0.53.5" -and $version -gt [version]"0.53.5"
+          if ($needsLegacyPatch -and $migrationTag -notin $selectedTags) {
+            $selectedTags += $migrationTag
+          }
+          foreach ($selected in $selectedTags) {
             $selectedVersion = $selected.TrimStart("v")
             $root = Join-Path $env:RUNNER_TEMP "public-$selectedVersion"
             New-Item -ItemType Directory -Path $root | Out-Null
@@ -67,7 +73,29 @@ jobs:
             $name = "cq_${selectedVersion}_windows_arm64.msi"
             gh release download $selected --repo jacobcxdev/cq --pattern $name --pattern checksums.txt --dir $root
             if ($LASTEXITCODE -ne 0) { throw "public package download failed" }
-            .\.github\scripts\verify-published-windows-package.ps1 -ReleaseFile $releaseFile -ChecksumsFile (Join-Path $root "checksums.txt") -PackageFile (Join-Path $root $name) -Tag $selected -Source $source
+            $checksumsFile = Join-Path $root "checksums.txt"
+            .\.github\scripts\verify-published-windows-package.ps1 -ReleaseFile $releaseFile -ChecksumsFile $checksumsFile -PackageFile (Join-Path $root $name) -Tag $selected -Source $source
+            if ($needsLegacyPatch -and $selected -eq $migrationTag) {
+              $patchName = "cq_0.53.5_windows_arm64_quiet-upgrade.msp"
+              $release = Get-Content -LiteralPath $releaseFile -Raw | ConvertFrom-Json
+              $assets = @($release.assets | Where-Object { $_.name -ceq $patchName })
+              if ($assets.Count -ne 1) { throw "published migration patch is absent or ambiguous" }
+              $asset = $assets[0]
+              $expectedURL = "https://github.com/jacobcxdev/cq/releases/download/$migrationTag/$patchName"
+              if ($asset.id -le 0 -or $asset.state -ne "uploaded" -or $asset.browser_download_url -cne $expectedURL -or
+                  $asset.digest -cnotmatch '^sha256:[0-9a-f]{64}$') {
+                throw "published migration patch identity differs"
+              }
+              gh release download $migrationTag --repo jacobcxdev/cq --pattern $patchName --dir $root
+              if ($LASTEXITCODE -ne 0) { throw "public migration patch download failed" }
+              $legacyPatch = Join-Path $root $patchName
+              $actual = (Get-FileHash -LiteralPath $legacyPatch -Algorithm SHA256).Hash.ToLowerInvariant()
+              $lines = @(Get-Content -LiteralPath $checksumsFile | Where-Object { $_ -cmatch ("^[0-9a-f]{64}  " + [regex]::Escape($patchName) + '$') })
+              if ($asset.digest -cne "sha256:$actual" -or $lines.Count -ne 1 -or $lines[0] -cne "$actual  $patchName") {
+                throw "published migration patch checksum differs"
+              }
+              "legacy_patch=$legacyPatch" >> $env:GITHUB_OUTPUT
+            }
           }
           "version=$($version.ToString())" >> $env:GITHUB_OUTPUT
           "previous=$($previous[0].Version.ToString())" >> $env:GITHUB_OUTPUT
@@ -77,11 +105,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CURRENT_VERSION: ${{ steps.packages.outputs.version }}
           PREVIOUS_VERSION: ${{ steps.packages.outputs.previous }}
+          LEGACY_PATCH: ${{ steps.packages.outputs.legacy_patch }}
         run: |
           $current = Join-Path $env:RUNNER_TEMP "public-$env:CURRENT_VERSION/cq_$($env:CURRENT_VERSION)_windows_arm64.msi"
           $previous = Join-Path $env:RUNNER_TEMP "public-$env:PREVIOUS_VERSION/cq_$($env:PREVIOUS_VERSION)_windows_arm64.msi"
           .\.github\scripts\validate-windows-install.ps1 -SkipWinGet -ExpectedVersion $env:CURRENT_VERSION -PreviousGoVersion $env:PREVIOUS_VERSION
-          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previous -CurrentMSI $current -PreviousVersion $env:PREVIOUS_VERSION -CurrentVersion $env:CURRENT_VERSION
+          $arguments = @{
+            PreviousMSI = $previous
+            CurrentMSI = $current
+            PreviousVersion = $env:PREVIOUS_VERSION
+            CurrentVersion = $env:CURRENT_VERSION
+          }
+          if ($env:LEGACY_PATCH) { $arguments.LegacyPatch = $env:LEGACY_PATCH }
+          .\.github\scripts\validate-windows-msi.ps1 @arguments
 
   winget-permissions:
     if: ${{ !inputs.scoop_preflight }}

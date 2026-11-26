@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -44,14 +45,19 @@ var (
 
 func init() {
 	serviceLifecycleFactory = defaultWindowsServiceLifecycle
+	legacyMSIServiceLifecycleFactory = newWindowsLegacyMSIServiceLifecycle
 }
 
 func defaultWindowsServiceLifecycle(stableExecutable string) (*serviceLifecycle, error) {
-	roots, err := userdirs.Default()
+	executable, err := resolveServiceExecutable(stableExecutable)
 	if err != nil {
 		return nil, err
 	}
-	executable, err := resolveServiceExecutable(stableExecutable)
+	return windowsServiceLifecycleForExecutable(executable)
+}
+
+func windowsServiceLifecycleForExecutable(executable string) (*serviceLifecycle, error) {
+	roots, err := userdirs.Default()
 	if err != nil {
 		return nil, err
 	}
@@ -67,6 +73,56 @@ func defaultWindowsServiceLifecycle(stableExecutable string) (*serviceLifecycle,
 		queryWindowsTaskState,
 		inspectWindowsProxyRuntime,
 	), nil
+}
+
+// The v0.53.5 patch runs CQ from Windows Installer's Binary table. Service
+// ownership and rollback still refer to the original, unchanged executable.
+func newWindowsLegacyMSIServiceLifecycle(path string) (*serviceLifecycle, error) {
+	anchors, err := userdirs.WindowsAppDataAnchors()
+	if err != nil {
+		return nil, err
+	}
+	programs := filepath.Join(anchors.LocalAppData, "Programs")
+	directory := filepath.Join(programs, "cq")
+	executable := filepath.Join(directory, "cq.exe")
+	if !equalWindowsPath(path, executable) {
+		return nil, fmt.Errorf("%w: legacy MSI executable is outside the current user's CQ installation", installstate.ErrOwnershipConflict)
+	}
+	for _, entry := range []string{programs, directory, executable} {
+		name, err := windows.UTF16PtrFromString(entry)
+		if err != nil {
+			return nil, err
+		}
+		attributes, err := windows.GetFileAttributes(name)
+		if err != nil {
+			return nil, fmt.Errorf("inspect legacy MSI path: %w", err)
+		}
+		if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+			return nil, fmt.Errorf("%w: legacy MSI path contains a reparse point", installstate.ErrOwnershipConflict)
+		}
+	}
+	var expected string
+	switch runtime.GOARCH {
+	case "amd64":
+		expected = "797fa89597c4010af2132356d79d46f8f4abe47021b0328377ce40ef67fc89bd"
+	case "arm64":
+		expected = "b4a50a379821b81fb07b4c1b79be141610badff27f7a72affc2b5875d0c75c0a"
+	default:
+		return nil, fmt.Errorf("unsupported legacy MSI architecture %s", runtime.GOARCH)
+	}
+	digest, err := installstate.DigestFile(executable)
+	if err != nil {
+		return nil, fmt.Errorf("verify legacy MSI executable: %w", err)
+	}
+	if digest != expected {
+		return nil, fmt.Errorf("%w: legacy MSI executable differs from the published CQ v0.53.5 binary", installstate.ErrOwnershipConflict)
+	}
+	lifecycle, err := windowsServiceLifecycleForExecutable(path)
+	if err != nil {
+		return nil, err
+	}
+	lifecycle.Version = "0.53.5"
+	return lifecycle, nil
 }
 
 func newWindowsServiceLifecycle(

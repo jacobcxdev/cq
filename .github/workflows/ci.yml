@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Run only the Windows package and service gates
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -14,9 +19,11 @@ concurrency:
 
 jobs:
   harness:
+    if: ${{ !inputs.windows_only }}
     uses: ./.github/workflows/harness.yml
 
   native-network:
+    if: ${{ !inputs.windows_only }}
     runs-on: macos-15
     timeout-minutes: 15
     permissions:
@@ -258,6 +265,7 @@ jobs:
             "$PWD/dist/homebrew/Casks/$(jq -r '.version | "CQNetwork_\(.)_universal.zip"' dist/homebrew/Casks/native-network-release.json)"
 
   linux:
+    if: ${{ !inputs.windows_only }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -318,7 +326,7 @@ jobs:
           - runner: windows-11-arm
             architecture: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 25
     defaults:
       run:
         shell: pwsh
@@ -364,18 +372,39 @@ jobs:
         run: go test -race -count=1 ./internal/proxy -run '^(TestConfig|TestSaveConfig|TestLoadExistingConfig|TestRescueBootstrap|TestGeneratedConfig|TestCodexEgressRescue|TestWireGuardConfigurationPersists)'
       - name: Validate per-user MSI install, upgrade, and uninstall
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CQ_WINDOWS_ARCHITECTURE: ${{ matrix.architecture }}
         run: |
+          $ErrorActionPreference = "Stop"
+          $architecture = $env:CQ_WINDOWS_ARCHITECTURE
+          $version = "0.53.6"
           $wixRoot = Join-Path $env:RUNNER_TEMP "wix"
           dotnet tool install --tool-path $wixRoot wix --version 5.0.2
+          if ($LASTEXITCODE -ne 0) { throw "failed to install WiX 5.0.2" }
           $wix = Join-Path $wixRoot "wix.exe"
           $packages = Join-Path $env:RUNNER_TEMP "cq-msi"
           $previousRoot = Join-Path $packages "previous"
           $currentRoot = Join-Path $packages "current"
           New-Item -ItemType Directory -Path $previousRoot, $currentRoot -Force | Out-Null
           go build -ldflags "-X main.version=0.0.1" -o (Join-Path $previousRoot "cq.exe") ./cmd/cq
-          go build -ldflags "-X main.version=0.0.2" -o (Join-Path $currentRoot "cq.exe") ./cmd/cq
-          $previousMSI = Join-Path $packages "cq_0.0.1_windows_${{ matrix.architecture }}.msi"
-          $currentMSI = Join-Path $packages "cq_0.0.2_windows_${{ matrix.architecture }}.msi"
-          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $previousRoot "cq.exe") -Version 0.0.1 -Architecture ${{ matrix.architecture }} -Output $previousMSI -Wix $wix
-          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $currentRoot "cq.exe") -Version 0.0.2 -Architecture ${{ matrix.architecture }} -Output $currentMSI -Wix $wix
-          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion 0.0.2
+          if ($LASTEXITCODE -ne 0) { throw "failed to build previous MSI fixture" }
+          $currentExecutable = Join-Path $currentRoot "cq.exe"
+          go build -ldflags "-X main.version=$version" -o $currentExecutable ./cmd/cq
+          if ($LASTEXITCODE -ne 0) { throw "failed to build current MSI fixture" }
+          $previousMSI = Join-Path $packages "cq_0.0.1_windows_${architecture}.msi"
+          $currentMSI = Join-Path $packages "cq_${version}_windows_${architecture}.msi"
+          .\.github\scripts\build-windows-msi.ps1 -Executable (Join-Path $previousRoot "cq.exe") -Version 0.0.1 -Architecture $architecture -Output $previousMSI -Wix $wix
+          .\.github\scripts\build-windows-msi.ps1 -Executable $currentExecutable -Version $version -Architecture $architecture -Output $currentMSI -Wix $wix
+          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $previousMSI -CurrentMSI $currentMSI -PreviousVersion 0.0.1 -CurrentVersion $version
+
+          $legacyName = "cq_0.53.5_windows_${architecture}.msi"
+          $legacyMSI = Join-Path $packages $legacyName
+          $legacyPatch = Join-Path $packages "cq_0.53.5_windows_${architecture}_quiet-upgrade.msp"
+          gh release download v0.53.5 --repo jacobcxdev/cq --pattern $legacyName --dir $packages
+          if ($LASTEXITCODE -ne 0) { throw "failed to download the published 0.53.5 MSI" }
+          $quietExecutable = Join-Path $currentRoot "cq-msi-service.exe"
+          go build -ldflags "-H=windowsgui -s -w -X main.version=$version" -o $quietExecutable ./cmd/cq
+          if ($LASTEXITCODE -ne 0) { throw "failed to build the quiet MSI service helper" }
+          .\.github\scripts\build-windows-legacy-patch.ps1 -PreviousMSI $legacyMSI -Executable $quietExecutable -Architecture $architecture -Output $legacyPatch -Wix $wix
+          .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $legacyMSI -CurrentMSI $currentMSI -PreviousVersion 0.53.5 -CurrentVersion $version -LegacyPatch $legacyPatch -VerifyLegacyRollback

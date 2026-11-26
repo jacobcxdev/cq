@@ -41,7 +41,12 @@ else {
     $componentGuid = "{47757F03-FE29-43EC-BADB-567FB0D93125}"
 }
 
-& $Wix build $source -arch $wixArchitecture `
+$wixExtension = "WixToolset.Util.wixext/5.0.2"
+& $Wix extension add $wixExtension
+if ($LASTEXITCODE -ne 0) {
+    throw "WiX utility extension installation failed with exit code $LASTEXITCODE"
+}
+& $Wix build $source -arch $wixArchitecture -ext $wixExtension `
     -d "CQVersion=$Version" `
     -d "CQExecutable=$Executable" `
     -d "CQComponentGuid=$componentGuid" `
