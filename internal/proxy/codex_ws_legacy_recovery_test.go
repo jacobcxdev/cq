@@ -17,15 +17,18 @@ import (
 
 func TestLegacyCodexWebSocketRecoversFromUpstreamDisconnect(t *testing.T) {
 	for _, tc := range []struct {
-		name         string
-		terminal     string
-		prewarm      bool
-		generateOff  bool
-		clientCloses bool
-		wantStatus   int
-		wantStage    string
+		name          string
+		terminal      string
+		prewarm       bool
+		generateOff   bool
+		clientCloses  bool
+		upstreamClose int
+		wantStatus    int
+		wantStage     string
 	}{
 		{name: "upstream closes before completion", wantStatus: http.StatusUpgradeRequired, wantStage: "upstream_read"},
+		{name: "upstream internal error before completion", upstreamClose: websocket.CloseInternalServerErr, wantStatus: http.StatusUpgradeRequired, wantStage: "upstream_read"},
+		{name: "upstream policy violation", upstreamClose: websocket.ClosePolicyViolation, wantStatus: http.StatusSwitchingProtocols, wantStage: "upstream_read"},
 		{name: "upstream closes during prewarm", prewarm: true, generateOff: true, wantStatus: http.StatusSwitchingProtocols, wantStage: "upstream_read"},
 		{name: "upstream closes during legacy generate false", generateOff: true, wantStatus: http.StatusSwitchingProtocols, wantStage: "upstream_read"},
 		{name: "upstream closes after completion", terminal: `{"type":"response.completed","response":{"id":"synthetic"}}`, wantStatus: http.StatusSwitchingProtocols, wantStage: "upstream_read"},
@@ -55,6 +58,11 @@ func TestLegacyCodexWebSocketRecoversFromUpstreamDisconnect(t *testing.T) {
 				}
 				if tc.clientCloses {
 					_, _, _ = conn.ReadMessage()
+				}
+				if tc.upstreamClose != 0 {
+					if err := conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(tc.upstreamClose, ""), time.Now().Add(5*time.Second)); err != nil {
+						t.Error(err)
+					}
 				}
 			}))
 			defer upstream.Close()
@@ -154,10 +162,14 @@ func TestLegacyCodexWebSocketRecoversFromUpstreamDisconnect(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			wantCloseCode := tc.upstreamClose
+			if wantCloseCode == 0 {
+				wantCloseCode = websocket.CloseAbnormalClosure
+			}
 			var sawRelayEnd bool
 			for _, line := range strings.Split(string(data), "\n") {
 				var event CodexTraceEvent
-				if json.Unmarshal([]byte(line), &event) == nil && event.Phase == "relay_terminal" && event.Stage == tc.wantStage && event.CloseCode == websocket.CloseAbnormalClosure {
+				if json.Unmarshal([]byte(line), &event) == nil && event.Phase == "relay_terminal" && event.Stage == tc.wantStage && event.CloseCode == wantCloseCode {
 					sawRelayEnd = true
 					if want := hashPrefix("codex-thread", "affected-thread"); event.ThreadKey != want {
 						t.Errorf("relay trace thread = %q, want %q", event.ThreadKey, want)
