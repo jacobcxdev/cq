@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 	"unicode/utf16"
 
@@ -35,7 +36,7 @@ var (
 		return config.Port, nil
 	}
 	runWindowsNetstat = func(ctx context.Context) ([]byte, error) {
-		return exec.CommandContext(ctx, "netstat.exe", "-ano", "-p", "tcp").Output()
+		return windowsServiceCommand(ctx, "netstat.exe", "-ano", "-p", "tcp").Output()
 	}
 	windowsProcessExecutable = queryWindowsProcessExecutable
 	checkWindowsProxyHealth  = checkWindowsProxyHTTPHealth
@@ -119,6 +120,12 @@ func resolveWindowsExecutable() (string, error) {
 	return resolveServiceExecutable("")
 }
 
+func windowsServiceCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	command := exec.CommandContext(ctx, name, args...)
+	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+	return command
+}
+
 func runWindowsSchtasks(ctx context.Context, args ...string) ([]byte, error) {
 	if len(args) >= 3 && strings.EqualFold(args[1], "/TN") {
 		switch strings.ToLower(args[0]) {
@@ -126,7 +133,7 @@ func runWindowsSchtasks(ctx context.Context, args ...string) ([]byte, error) {
 			return runWindowsTaskMutation(ctx, strings.ToLower(args[0]), args[2])
 		}
 	}
-	output, err := exec.CommandContext(ctx, "schtasks.exe", args...).CombinedOutput()
+	output, err := windowsServiceCommand(ctx, "schtasks.exe", args...).CombinedOutput()
 	if err == nil {
 		return output, nil
 	}
@@ -189,11 +196,11 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 	}
 	comTaskFolder := strings.TrimSuffix(taskFolder, `\`)
 	script := fmt.Sprintf(
-		`$ErrorActionPreference='Stop'; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); try { $registered=$service.GetFolder('%s').GetTask('%s'); $instances=$registered.GetInstances(0); $pids=@(); for($index=1;$index -le $instances.Count;$index++){ $pids += [uint32]$instances.Item($index).EnginePID }; [pscustomobject]@{Exists=$true;Code=[int64]0;Running=([int]$registered.State -eq 4);LastResult=[int64]$registered.LastTaskResult;EnginePIDs=@($pids);SecurityDescriptor=[string]$registered.GetSecurityDescriptor(4)} | ConvertTo-Json -Compress } catch { $code=[int64]$_.Exception.HResult; if($code -eq -2147024894){ [pscustomobject]@{Exists=$false;Code=$code;Running=$false;LastResult=[int64]0;EnginePIDs=@();SecurityDescriptor=''} | ConvertTo-Json -Compress } else { throw } }`,
+		`$ErrorActionPreference='Stop'; $service=New-Object -ComObject 'Schedule.Service'; $service.Connect(); try { $registered=$service.GetFolder('%s').GetTask('%s'); $instances=$registered.GetInstances(0); $pids=@(); for($index=1;$index -le $instances.Count;$index++){ $pids += [uint32]$instances.Item($index).EnginePID }; $state=[int]$registered.State; [pscustomobject]@{Exists=$true;Code=[int64]0;Running=($state -eq 4);Queued=($state -eq 2);LastResult=[int64]$registered.LastTaskResult;EnginePIDs=@($pids);SecurityDescriptor=[string]$registered.GetSecurityDescriptor(4)} | ConvertTo-Json -Compress } catch { $code=[int64]$_.Exception.HResult; if($code -eq -2147024894){ [pscustomobject]@{Exists=$false;Code=$code;Running=$false;LastResult=[int64]0;EnginePIDs=@();SecurityDescriptor=''} | ConvertTo-Json -Compress } else { throw } }`,
 		comTaskFolder,
 		taskName,
 	)
-	output, err := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	output, err := windowsServiceCommand(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
 	if err != nil {
 		message := strings.TrimSpace(string(output))
 		return windowsTaskRuntimeState{}, fmt.Errorf("query Windows task runtime: %w: %s", err, message)
@@ -205,6 +212,7 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 		Exists             bool     `json:"Exists"`
 		Code               int64    `json:"Code"`
 		Running            bool     `json:"Running"`
+		Queued             bool     `json:"Queued"`
 		LastResult         int64    `json:"LastResult"`
 		EnginePIDs         []uint32 `json:"EnginePIDs"`
 		SecurityDescriptor string   `json:"SecurityDescriptor"`
@@ -227,6 +235,7 @@ func queryWindowsTaskState(ctx context.Context, taskPath string) (windowsTaskRun
 	}
 	return windowsTaskRuntimeState{
 		Running:            state.Running,
+		Queued:             state.Queued,
 		LastResult:         lastResult,
 		HasLastResult:      true,
 		EnginePIDs:         append([]uint32(nil), state.EnginePIDs...),
@@ -278,7 +287,7 @@ func removeWindowsTaskFolderIfEmpty(ctx context.Context) error {
 }
 
 func runWindowsTaskPowerShell(ctx context.Context, script string) ([]byte, error) {
-	output, err := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	output, err := windowsServiceCommand(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
 	if len(output) > 64<<10 {
 		return nil, fmt.Errorf("Windows Task Scheduler output exceeds size limit")
 	}
@@ -443,11 +452,16 @@ func uninstallProxyAgent() error {
 	return lifecycle.Platform.RemoveProxy(context.Background())
 }
 
-func restartProxyAgent() error {
+func restartProxyAgent() (returnErr error) {
 	lifecycle, err := defaultWindowsServiceLifecycle("")
 	if err != nil {
 		return err
 	}
+	lock, err := lifecycle.MutationLocker.Acquire()
+	if err != nil {
+		return err
+	}
+	defer func() { returnErr = errors.Join(returnErr, lock.Close()) }()
 	return lifecycle.Platform.RestartProxy(context.Background())
 }
 

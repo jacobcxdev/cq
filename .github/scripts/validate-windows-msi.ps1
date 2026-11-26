@@ -312,6 +312,23 @@ try {
         throw "upgraded proxy has no manager PID"
     }
 
+    $previousProxyPID = $status.proxy.pid
+    $restart = [Diagnostics.Stopwatch]::StartNew()
+    & $installedCQ proxy restart
+    if ($LASTEXITCODE -ne 0) {
+        throw "installed CQ proxy restart failed"
+    }
+    $restart.Stop()
+    $listener = Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort $Port -State Listen
+    if ($listener.OwningProcess -eq $previousProxyPID -or (Invoke-WebRequest -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 5).StatusCode -ne 200) {
+        throw "installed CQ proxy restart returned before the replacement listener was healthy"
+    }
+    $status = Assert-Installed -Version $CurrentVersion
+    if ($status.proxy.pid -eq 0 -or $status.proxy.pid -eq $previousProxyPID) {
+        throw "installed CQ proxy restart did not replace the listener process"
+    }
+    Write-Host ("CQ proxy restart verified in {0:N2} seconds (PID {1} to {2})" -f $restart.Elapsed.TotalSeconds, $previousProxyPID, $status.proxy.pid)
+
     Start-ScheduledTask -TaskPath $taskPath -TaskName "Refresh"
     for ($attempt = 0; $attempt -lt 60; $attempt++) {
         $refreshInfo = Get-ScheduledTask -TaskPath $taskPath -TaskName "Refresh" | Get-ScheduledTaskInfo
