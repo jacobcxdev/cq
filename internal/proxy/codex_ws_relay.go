@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -125,31 +126,50 @@ func relayWebSocketPair(ctx context.Context, left, right websocketRelayConn) err
 }
 
 func relayWebSocketPairObserved(ctx context.Context, left, right websocketRelayConn, observe func(fromClient bool, messageType int, message []byte)) error {
-	return relayWebSocketPairGuarded(ctx, left, right, observe, nil)
+	return relayWebSocketPairGuarded(ctx, left, right, observe, nil, nil)
 }
 
-func relayWebSocketPairGuarded(ctx context.Context, left, right websocketRelayConn, observe func(bool, int, []byte), guard func(int, []byte) error) error {
+type codexWSRelayEnd struct {
+	stage string
+	err   error
+}
+
+func (end codexWSRelayEnd) upstreamDisconnected() bool {
+	if end.stage != "upstream_read" && end.stage != "upstream_write" {
+		return false
+	}
+	var networkError *net.OpError
+	return websocket.IsCloseError(end.err, websocket.CloseAbnormalClosure) ||
+		errors.Is(end.err, io.EOF) || errors.Is(end.err, io.ErrUnexpectedEOF) ||
+		errors.Is(end.err, net.ErrClosed) || errors.As(end.err, &networkError)
+}
+
+func relayWebSocketPairGuarded(ctx context.Context, left, right websocketRelayConn, observe func(bool, int, []byte), guard func(int, []byte) error, firstEnd func(codexWSRelayEnd)) error {
 	var downstreamWrite sync.Mutex
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	var generation websocketRelayGeneration
 	active := generation.value.Add(1)
-	errCh := make(chan error, 2)
+	ends := make(chan codexWSRelayEnd, 2)
 	pump := func(src, dst websocketRelayConn, fromClient bool) {
+		readStage, writeStage := "upstream_read", "downstream_write"
+		if fromClient {
+			readStage, writeStage = "downstream_read", "upstream_write"
+		}
 		defer func() {
 			if recovered := recover(); recovered != nil {
-				errCh <- fmt.Errorf("Codex WebSocket relay panic")
+				ends <- codexWSRelayEnd{"relay_panic", errors.New("Codex WebSocket relay panic")}
 			}
 		}()
 		for {
 			messageType, message, err := src.ReadMessage()
 			if err != nil {
-				errCh <- err
+				ends <- codexWSRelayEnd{readStage, err}
 				return
 			}
 			if generation.value.Load() != active {
-				errCh <- context.Canceled
+				ends <- codexWSRelayEnd{"context", context.Canceled}
 				return
 			}
 
@@ -158,7 +178,7 @@ func relayWebSocketPairGuarded(ctx context.Context, left, right websocketRelayCo
 					downstreamWrite.Lock()
 					_ = left.WriteMessage(websocket.TextMessage, codexReserveWSLimitFrame)
 					downstreamWrite.Unlock()
-					errCh <- err
+					ends <- codexWSRelayEnd{"dispatch_guard", err}
 					return
 				}
 			}
@@ -177,7 +197,7 @@ func relayWebSocketPairGuarded(ctx context.Context, left, right websocketRelayCo
 				downstreamWrite.Unlock()
 			}
 			if err := writeErr; err != nil {
-				errCh <- err
+				ends <- codexWSRelayEnd{writeStage, err}
 				return
 			}
 		}
@@ -185,13 +205,16 @@ func relayWebSocketPairGuarded(ctx context.Context, left, right websocketRelayCo
 	go pump(left, right, true)
 	go pump(right, left, false)
 
-	var first error
+	var first codexWSRelayEnd
 	select {
-	case first = <-errCh:
+	case first = <-ends:
 	case <-ctx.Done():
-		first = ctx.Err()
+		first = codexWSRelayEnd{"context", ctx.Err()}
 	}
 	generation.value.Add(1)
+	if firstEnd != nil {
+		firstEnd(first)
+	}
 	now := time.Now()
 	_ = left.SetReadDeadline(now)
 	_ = left.SetWriteDeadline(now)
@@ -199,8 +222,8 @@ func relayWebSocketPairGuarded(ctx context.Context, left, right websocketRelayCo
 	_ = right.SetWriteDeadline(now)
 	_ = left.Close()
 	_ = right.Close()
-	second := <-errCh
-	return errors.Join(first, second)
+	second := <-ends
+	return errors.Join(first.err, second.err)
 }
 
 func ioReadBounded(body io.Reader, limit int64) ([]byte, error) {
