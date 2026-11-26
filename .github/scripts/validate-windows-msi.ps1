@@ -461,7 +461,8 @@ try {
     Invoke-MSI -Action install -Path $CurrentMSI -Log $upgradeLog
     if ($legacyMigration) {
         Assert-PatchedLegacyUninstall -Log $upgradeLog
-        if ($null -ne (Get-ItemPropertyValue -LiteralPath "HKCU:\Software\jacobcxdev\CQ\Installer" -Name "LegacyQuietUpgrade" -ErrorAction SilentlyContinue)) {
+        $installerKey = Get-Item -LiteralPath "HKCU:\Software\jacobcxdev\CQ\Installer"
+        if ($installerKey.GetValueNames() -contains "LegacyQuietUpgrade") {
             throw "legacy migration patch marker remains after upgrade"
         }
     }
