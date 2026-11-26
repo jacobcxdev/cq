@@ -118,6 +118,20 @@ func TestCloudHarnessBackgroundReadDiscardsOlderModel(t *testing.T) {
 	}
 }
 
+func TestCloudHarnessBackgroundReadDiscardsSettingsNotification(t *testing.T) {
+	thread := &cloudHarnessThread{owned: true, model: "original-model", cwd: "/original"}
+	h := &cloudHarness{threads: map[string]*cloudHarnessThread{"chat": thread}}
+	read := cloudHarnessActivityRead{
+		thread: thread,
+		result: cloudHarnessObject(json.RawMessage(`{"thread":{"id":"chat","model":"original-model","cwd":"/original","status":{"type":"idle"}}}`)),
+	}
+	h.observe([]byte(`{"method":"thread/settings/updated","params":{"threadId":"chat","threadSettings":{"model":"selected-model","cwd":"/selected"}}}`))
+
+	if h.applyActivity("chat", read, true) || thread.model != "selected-model" || thread.cwd != "/selected" {
+		t.Fatalf("stale read replaced the settings notification with model %q and directory %q", thread.model, thread.cwd)
+	}
+}
+
 func newCloudHarnessFixture(t *testing.T) *cloudHarnessFixture {
 	f := &cloudHarnessFixture{cloudTestHarness: newCloudTestHarness(t), policy: harness.Policy{Version: 1, Enabled: true}, models: make(map[string]string), plugins: make(map[string][]string), configs: make(map[string]cloudMessage), activeTurns: make(map[string]string), globalModel: "glm-5.3"}
 	f.deps.readHarnessPolicy = func() (harness.Policy, error) { f.mu.Lock(); defer f.mu.Unlock(); return f.policy, nil }

@@ -501,11 +501,15 @@ func (h *cloudHarness) prepareFrom(source string, request cloudMessage, raw []by
 	defer h.op.Unlock()
 	params := cloudHarnessObject(request["params"])
 	id := cloudThreadID(request["params"])
-	h.mu.Lock()
-	if thread := h.threads[id]; thread != nil {
-		thread.activityRevision++
-	}
-	h.mu.Unlock()
+	defer func() {
+		// A background read can start while preparation is in progress.
+		// Invalidate it before releasing the operation lock.
+		h.mu.Lock()
+		if thread := h.threads[id]; thread != nil {
+			thread.activityRevision++
+		}
+		h.mu.Unlock()
+	}()
 	if method == "thread/goal/set" || method == "thread/goal/clear" {
 		h.mu.Lock()
 		thread := h.threads[id]
@@ -2121,6 +2125,7 @@ func (h *cloudHarness) observeFrom(source string, raw []byte) bool {
 		}
 		cloudHarnessObserved(thread, params, source)
 		if message.method() == "thread/settings/updated" {
+			thread.activityRevision++
 			cloudHarnessActual(thread, cloudHarnessObject(params["threadSettings"]))
 			cloudHarnessCaptureSettings(thread, cloudHarnessObject(params["threadSettings"]), true)
 			if plugin, ok := cloudHarnessObject(params["threadSettings"])["disabledPluginIds"]; ok && thread.profileManaged {
