@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"runtime"
 	"time"
 
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
@@ -15,6 +16,22 @@ type proxyCredentialAuthorityOperations struct {
 	owner func(*codexprov.CredentialControl) bool
 	close func(*codexprov.CredentialControl) error
 	wait  func(context.Context, time.Duration) error
+}
+
+func openProxyCredentialAuthority(worker bool, portOverride int, open func(context.Context) (*codexprov.CredentialControl, error)) (*codexprov.CredentialControl, error) {
+	if !worker && (runtime.GOOS != "windows" || portOverride != 0) {
+		return open(context.Background())
+	}
+	// At Windows logon Refresh can acquire the credential pipe first. The
+	// registered proxy uses the configured port and needs its own authority.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return acquireProxyWorkerCredentialAuthority(ctx, proxyCredentialAuthorityOperations{
+		open:  open,
+		owner: (*codexprov.CredentialControl).Owner,
+		close: (*codexprov.CredentialControl).Close,
+		wait:  waitProxyCredentialAuthority,
+	})
 }
 
 func acquireProxyWorkerCredentialAuthority(ctx context.Context, operations proxyCredentialAuthorityOperations) (*codexprov.CredentialControl, error) {

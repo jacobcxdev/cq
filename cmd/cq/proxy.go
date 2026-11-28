@@ -949,23 +949,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			codexprov.CredentialEndpointRecoveryRecorderFunc(codexCanaryEndpointRecoveryRecorder(activeCanary)),
 		)
 	}
-	var credentialControl *codexprov.CredentialControl
-	if workerRole == nil {
-		credentialControl, err = openCredentialControl(context.Background())
-	} else {
-		credentialAuthorityCtx, cancelCredentialAuthority := context.WithTimeout(context.Background(), 10*time.Second)
-		credentialControl, err = acquireProxyWorkerCredentialAuthority(credentialAuthorityCtx, proxyCredentialAuthorityOperations{
-			open: openCredentialControl,
-			owner: func(control *codexprov.CredentialControl) bool {
-				return control.Owner()
-			},
-			close: func(control *codexprov.CredentialControl) error {
-				return control.Close()
-			},
-			wait: waitProxyCredentialAuthority,
-		})
-		cancelCredentialAuthority()
-	}
+	credentialControl, err := openProxyCredentialAuthority(workerRole != nil, opts.Port, openCredentialControl)
 	if err != nil {
 		return fmt.Errorf("Codex credential coordinator: %w", err)
 	}
