@@ -4,6 +4,7 @@ package dots
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -29,9 +30,12 @@ var (
 	dotsOle32                    = windows.NewLazySystemDLL("ole32.dll")
 	dotsCoInitializeEx           = dotsOle32.NewProc("CoInitializeEx")
 	dotsCoUninitialize           = dotsOle32.NewProc("CoUninitialize")
+	dotsCoCreateInstance         = dotsOle32.NewProc("CoCreateInstance")
 	dotsPropVariantClear         = dotsOle32.NewProc("PropVariantClear")
 	dotsPropertyStoreIID         = windows.GUID{Data1: 0x886d8eeb, Data2: 0x8cf2, Data3: 0x4446, Data4: [8]byte{0x8d, 0x02, 0xcd, 0xba, 0x1d, 0xbd, 0xcf, 0x99}}
 	dotsAppModelPropertyFormat   = windows.GUID{Data1: 0x9f4c2855, Data2: 0x9f79, Data3: 0x4b39, Data4: [8]byte{0xa8, 0xd0, 0xe1, 0xd4, 0x2d, 0xe1, 0xd5, 0xf3}}
+	dotsShellLinkCLSID           = windows.GUID{Data1: 0x00021401, Data4: [8]byte{0xc0, 0, 0, 0, 0, 0, 0, 0x46}}
+	dotsPersistFileIID           = windows.GUID{Data1: 0x0000010b, Data4: [8]byte{0xc0, 0, 0, 0, 0, 0, 0, 0x46}}
 )
 
 type dotsPropertyKey struct {
@@ -50,6 +54,64 @@ type dotsPropertyStore struct {
 	vtable *struct {
 		queryInterface, addRef, release, getCount, getAt, getValue, setValue, commit uintptr
 	}
+}
+
+type dotsPersistFile struct {
+	vtable *struct {
+		queryInterface, addRef, release, getClassID, isDirty, load, save uintptr
+	}
+}
+
+func setWindowsDotsShortcutAppID(path string) error {
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	status, _, _ := dotsCoInitializeEx.Call(0, 2) // COINIT_APARTMENTTHREADED
+	if int32(status) < 0 {
+		return fmt.Errorf("initialise Windows shortcut COM apartment: %#x", uint32(status))
+	}
+	defer dotsCoUninitialize.Call()
+	var link *dotsPersistFile
+	status, _, _ = dotsCoCreateInstance.Call(uintptr(unsafe.Pointer(&dotsShellLinkCLSID)), 0, 1,
+		uintptr(unsafe.Pointer(&dotsPersistFileIID)), uintptr(unsafe.Pointer(&link))) // CLSCTX_INPROC_SERVER
+	if status != 0 || link == nil {
+		return fmt.Errorf("create Windows shortcut COM object: %#x", uint32(status))
+	}
+	defer syscall.SyscallN(link.vtable.release, uintptr(unsafe.Pointer(link)))
+	status, _, _ = syscall.SyscallN(link.vtable.load, uintptr(unsafe.Pointer(link)), uintptr(unsafe.Pointer(name)), 2) // STGM_READWRITE
+	if status != 0 {
+		return fmt.Errorf("load Windows Dots shortcut: %#x", uint32(status))
+	}
+	var store *dotsPropertyStore
+	status, _, _ = syscall.SyscallN(link.vtable.queryInterface, uintptr(unsafe.Pointer(link)),
+		uintptr(unsafe.Pointer(&dotsPropertyStoreIID)), uintptr(unsafe.Pointer(&store)))
+	if status != 0 || store == nil {
+		return fmt.Errorf("open Windows shortcut properties: %#x", uint32(status))
+	}
+	defer syscall.SyscallN(store.vtable.release, uintptr(unsafe.Pointer(store)))
+	const appUserModelID = 5
+	current, ok := store.value(appUserModelID)
+	if !ok || current != "" && current != windowsDotsAppID {
+		return errors.New("Windows Dots shortcut has a foreign taskbar identity")
+	}
+	if current == windowsDotsAppID {
+		return nil
+	}
+	if !store.set(appUserModelID, windowsDotsAppID) {
+		return errors.New("set Windows Dots shortcut taskbar identity")
+	}
+	status, _, _ = syscall.SyscallN(store.vtable.commit, uintptr(unsafe.Pointer(store)))
+	if status != 0 {
+		return fmt.Errorf("commit Windows Dots shortcut properties: %#x", uint32(status))
+	}
+	status, _, _ = syscall.SyscallN(link.vtable.save, uintptr(unsafe.Pointer(link)), uintptr(unsafe.Pointer(name)), 1)
+	if status != 0 {
+		return fmt.Errorf("save Windows Dots shortcut properties: %#x", uint32(status))
+	}
+	return nil
 }
 
 func (store *dotsPropertyStore) value(id uint32) (string, bool) {
