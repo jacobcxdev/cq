@@ -367,9 +367,9 @@ jobs:
           go test -race -count=1 ./internal/app -run '^TestWindowsCodexLogin'
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           go test -race -count=1 ./internal/provider/codex ./internal/provider/grok ./internal/provider/zai/zcode -run '^TestWindows'
-      - name: Validate isolated proxy configuration
+      - name: Validate isolated proxy configuration and Codex routing
         if: matrix.architecture == 'amd64'
-        run: go test -race -count=1 ./internal/proxy -run '^(TestConfig|TestSaveConfig|TestLoadExistingConfig|TestRescueBootstrap|TestGeneratedConfig|TestCodexEgressRescue|TestWireGuardConfigurationPersists)'
+        run: go test -race -count=1 ./internal/proxy -run '^(TestConfig|TestSaveConfig|TestLoadExistingConfig|TestRescueBootstrap|TestGeneratedConfig|TestCodexEgressRescue|TestWireGuardConfigurationPersists|TestCodexInstalledHTTPValidationRuntimeCore|TestCodexInstalledHTTPValidationExercise)'
       - name: Validate per-user MSI install, upgrade, and uninstall
         shell: pwsh
         env:

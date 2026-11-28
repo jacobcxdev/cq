@@ -3,11 +3,13 @@
 package dots
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,46 +28,22 @@ const windowsDotsShortcutName = "ChatGPT via CQ.lnk"
 const windowsDotsIconName = "ChatGPT.ico"
 const windowsDotsLaunchArguments = "codex dots launch --root "
 
-const windowsDotsShortcutScript = `$ErrorActionPreference = 'Stop'
+const windowsDotsShortcutStageScript = `$ErrorActionPreference = 'Stop'
 $shell = New-Object -ComObject WScript.Shell
-$path = $env:CQ_DOTS_SHORTCUT_PATH
+$path = $env:CQ_DOTS_SHORTCUT_STAGE
 $target = $env:CQ_DOTS_SHORTCUT_TARGET
 $arguments = '` + windowsDotsLaunchArguments + `"' + $env:CQ_DOTS_SHORTCUT_ROOT + '"'
-if (Test-Path -LiteralPath $path) {
-    $existing = $shell.CreateShortcut($path)
-    if (-not [string]::Equals($existing.TargetPath, $target, [StringComparison]::OrdinalIgnoreCase) -or $existing.Arguments -ne $arguments) { exit 43 }
-}
+if ((Test-Path -LiteralPath $path) -ne ($env:CQ_DOTS_SHORTCUT_REPAIR -eq '1')) { exit 45 }
 $shortcut = $shell.CreateShortcut($path)
+if ($env:CQ_DOTS_SHORTCUT_REPAIR -eq '1' -and
+    (-not [string]::Equals($shortcut.TargetPath, $target, [StringComparison]::OrdinalIgnoreCase) -or $shortcut.Arguments -cne $arguments)) { exit 43 }
 $shortcut.TargetPath = $target
 $shortcut.Arguments = $arguments
 $shortcut.WorkingDirectory = $env:CQ_DOTS_SHORTCUT_ROOT
 $shortcut.IconLocation = $env:CQ_DOTS_SHORTCUT_ICON
 $shortcut.Save()
 $check = $shell.CreateShortcut($path)
-if (-not [string]::Equals($check.TargetPath, $target, [StringComparison]::OrdinalIgnoreCase) -or $check.Arguments -ne $arguments -or $check.IconLocation -ine ($env:CQ_DOTS_SHORTCUT_ICON + ',0')) { exit 44 }
-`
-
-const windowsDotsShortcutStageScript = `$ErrorActionPreference = 'Stop'
-$shell = New-Object -ComObject WScript.Shell
-$path = $env:CQ_DOTS_SHORTCUT_STAGE
-$target = $env:CQ_DOTS_SHORTCUT_TARGET
-$arguments = '` + windowsDotsLaunchArguments + `"' + $env:CQ_DOTS_SHORTCUT_ROOT + '"'
-if (Test-Path -LiteralPath $path) { exit 45 }
-try {
-    $shortcut = $shell.CreateShortcut($path)
-    $shortcut.TargetPath = $target
-    $shortcut.Arguments = $arguments
-    $shortcut.WorkingDirectory = $env:CQ_DOTS_SHORTCUT_ROOT
-    $shortcut.IconLocation = $env:CQ_DOTS_SHORTCUT_ICON
-    $shortcut.Save()
-    $check = $shell.CreateShortcut($path)
-    if (-not [string]::Equals($check.TargetPath, $target, [StringComparison]::OrdinalIgnoreCase) -or $check.Arguments -ne $arguments -or $check.IconLocation -ine ($env:CQ_DOTS_SHORTCUT_ICON + ',0')) { exit 44 }
-    $staged = Get-Item -LiteralPath $path -Force
-    if ($staged.Length -lt 1 -or $staged.Length -gt 65536 -or ($staged.Attributes -band [IO.FileAttributes]::ReparsePoint)) { exit 46 }
-    [Console]::Out.Write([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)))
-} finally {
-    if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -ErrorAction Stop }
-}
+if (-not [string]::Equals($check.TargetPath, $target, [StringComparison]::OrdinalIgnoreCase) -or $check.Arguments -cne $arguments -or $check.IconLocation -ine ($env:CQ_DOTS_SHORTCUT_ICON + ',0')) { exit 44 }
 `
 
 func installWindowsDotsLauncher(root, app, executable string) (string, error) {
@@ -93,32 +71,46 @@ func installWindowsDotsLauncherAt(path, root, app, executable string) (string, e
 	if err := validateWindowsDotsLauncherFile(fsys, executable); err != nil {
 		return "", errors.New("Installed CQ executable is not owner controlled")
 	}
-	existing := false
-	if _, err := os.Lstat(path); err == nil {
-		if err := validateWindowsDotsLauncherFile(fsys, path); err != nil {
-			return "", errors.New("Existing Windows Dots launcher is unsafe")
-		}
-		existing = true
-	} else if !errors.Is(err, os.ErrNotExist) {
+	original, originalInfo, err := readWindowsDotsShortcut(fsys, path)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
+	stageFS, err := windowsStateFS(root)
+	if err != nil {
+		return "", err
+	}
+	if err := fsutil.ValidateSecureDirectory(stageFS, root); err != nil {
+		return "", err
+	}
+	stageDirectory, err := stageFS.OpenRetainedReadDirectory(root)
+	if err != nil {
+		return "", err
+	}
+	defer stageDirectory.Close()
 	icon, err := installWindowsDotsIcon(root, app)
 	if err != nil {
 		return "", err
 	}
-	script := windowsDotsShortcutScript
-	stage := ""
-	if !existing {
-		if err := windowsPrivateDirectory(root); err != nil {
-			return "", err
-		}
-		var nonce [16]byte
-		if _, err := rand.Read(nonce[:]); err != nil {
-			return "", err
-		}
-		stage = filepath.Join(root, ".cq-dots-shortcut-"+hex.EncodeToString(nonce[:])+".lnk")
-		script = windowsDotsShortcutStageScript
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
 	}
+	stageName := ".cq-dots-shortcut-" + hex.EncodeToString(nonce[:]) + ".lnk"
+	stage := filepath.Join(root, stageName)
+	repair := "0"
+	if originalInfo != nil {
+		file, err := os.OpenFile(stage, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err != nil {
+			return "", err
+		}
+		_, writeErr := file.Write(original)
+		if err := errors.Join(writeErr, file.Close()); err != nil {
+			_ = os.Remove(stage)
+			return "", err
+		}
+		repair = "1"
+	}
+	defer os.Remove(stage)
 	system32, err := windows.GetSystemDirectory()
 	if err != nil {
 		return "", err
@@ -126,14 +118,14 @@ func installWindowsDotsLauncherAt(path, root, app, executable string) (string, e
 	powershell := filepath.Join(system32, "WindowsPowerShell", "v1.0", "powershell.exe")
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
-	command.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	command := exec.CommandContext(ctx, powershell, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", windowsDotsShortcutStageScript)
+	command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 	reserved := map[string]string{
-		"CQ_DOTS_SHORTCUT_PATH":   path,
 		"CQ_DOTS_SHORTCUT_ROOT":   root,
 		"CQ_DOTS_SHORTCUT_TARGET": executable,
 		"CQ_DOTS_SHORTCUT_ICON":   icon,
 		"CQ_DOTS_SHORTCUT_STAGE":  stage,
+		"CQ_DOTS_SHORTCUT_REPAIR": repair,
 	}
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
@@ -150,35 +142,84 @@ func installWindowsDotsLauncherAt(path, root, app, executable string) (string, e
 	for key, value := range reserved {
 		command.Env = append(command.Env, key+"="+value)
 	}
-	output, err := command.Output()
-	if err != nil {
+	if err := command.Run(); err != nil {
 		if command.ProcessState != nil && command.ProcessState.ExitCode() == 43 {
 			return "", errors.New("Windows Dots launcher belongs to another installation")
 		}
 		return "", errors.New("Windows Dots Start Menu shortcut could not be saved")
 	}
-	if !existing {
-		if len(output) > 128<<10 {
-			return "", errors.New("Windows Dots shortcut exceeds size limit")
-		}
-		data, err := base64.StdEncoding.DecodeString(string(output))
-		if err != nil || len(data) == 0 || len(data) > 64<<10 {
-			return "", errors.New("Windows Dots shortcut could not be decoded")
-		}
-		directoryPath := filepath.Dir(path)
-		directory, err := fsutil.OpenOwnerControlledDirectory(fsys, directoryPath)
-		if err != nil {
-			return "", err
-		}
-		defer directory.Close()
-		if err := fsutil.SecureAtomicCreateInOwnerControlledDirectory(fsys, directory, directoryPath, filepath.Base(path), data); err != nil {
-			return "", err
-		}
+	// The elevated shell can stage a link owned by Administrators. Retain the
+	// private directory and accept only a mutation-safe, single-link file from it.
+	staged, err := stageDirectory.OpenNoFollow(stageName)
+	if err != nil {
+		return "", fmt.Errorf("open staged Windows Dots shortcut: %w", err)
 	}
-	if err := validateWindowsDotsLauncherFile(fsys, path); err != nil {
-		return "", errors.New("Windows Dots Start Menu shortcut is unsafe")
+	if err := staged.Close(); err != nil {
+		return "", err
+	}
+	if err := setWindowsDotsShortcutAppID(stage); err != nil {
+		return "", err
+	}
+	staged, err = stageDirectory.OpenNoFollow(stageName)
+	if err != nil {
+		return "", fmt.Errorf("open staged Windows Dots shortcut after updating its taskbar identity: %w", err)
+	}
+	data, readErr := readWindowsDotsShortcutData(staged)
+	if err := errors.Join(readErr, staged.Close()); err != nil {
+		return "", err
+	}
+	directoryPath := filepath.Dir(path)
+	directory, err := fsutil.OpenOwnerControlledDirectory(fsys, directoryPath)
+	if err != nil {
+		return "", err
+	}
+	defer directory.Close()
+	if originalInfo == nil {
+		err = fsutil.SecureAtomicCreateInOwnerControlledDirectory(fsys, directory, directoryPath, filepath.Base(path), data)
+	} else {
+		originalID, ok := fsys.FileIdentity(originalInfo)
+		if !ok {
+			return "", errors.New("Windows Dots shortcut identity unavailable")
+		}
+		err = fsutil.SecureAtomicWriteInOwnerControlledDirectoryChecked(fsys, directory, directoryPath, filepath.Base(path), data, func() error {
+			current, info, err := readWindowsDotsShortcut(fsys, path)
+			currentID, ok := fsys.FileIdentity(info)
+			if err != nil || !ok || currentID != originalID || !bytes.Equal(current, original) {
+				return errors.New("Windows Dots shortcut changed during installation")
+			}
+			return nil
+		})
+	}
+	if err != nil {
+		return "", err
 	}
 	return path, nil
+}
+
+func readWindowsDotsShortcut(fsys fsutil.OSFileSystem, path string) ([]byte, os.FileInfo, error) {
+	file, err := fsys.OpenNoFollow(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := fsutil.ValidateExternalCacheFile(fsys, info); err != nil {
+		return nil, nil, err
+	}
+	data, err := readWindowsDotsShortcutData(file)
+	return data, info, err
+}
+
+func readWindowsDotsShortcutData(file io.Reader) ([]byte, error) {
+	const maxShortcutBytes = 64 << 10
+	data, err := httputil.ReadBody(io.LimitReader(file, maxShortcutBytes+1))
+	if err != nil || len(data) < 1 || len(data) > maxShortcutBytes {
+		return nil, errors.New("Windows Dots shortcut could not be read within its size limit")
+	}
+	return data, nil
 }
 
 func installWindowsDotsIcon(root, app string) (string, error) {

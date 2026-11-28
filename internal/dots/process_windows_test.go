@@ -132,6 +132,35 @@ func TestWindowsProcessPredicatesRequireExactOwnedRuntime(t *testing.T) {
 	}
 }
 
+func TestWindowsNormalAppRunningIgnoresLingeringChromiumProcesses(t *testing.T) {
+	s := &Settings{AppPath: t.TempDir(), IntegrationMode: "native"}
+	app := nativeAppExecutable(s)
+	processes := [][]string{
+		{app, "--type=gpu-process"},
+		{app, "--type=utility"},
+		{app, "--type=renderer"},
+	}
+	ops := processOperations{
+		list: func(context.Context) ([]int, error) {
+			pids := make([]int, len(processes))
+			for i := range pids {
+				pids[i] = i + 1
+			}
+			return pids, nil
+		},
+		arguments: func(_ context.Context, pid int) (int, []string, error) {
+			return os.Getuid(), processes[pid-1], nil
+		},
+	}
+	if running, err := normalAppRunning(t.Context(), s, ops); err != nil || running {
+		t.Fatalf("lingering Chromium children block a cold Dots launch: running=%t, err=%v", running, err)
+	}
+	processes = append(processes, []string{app})
+	if running, err := normalAppRunning(t.Context(), s, ops); err != nil || !running {
+		t.Fatalf("the active Desktop process did not protect its session: running=%t, err=%v", running, err)
+	}
+}
+
 func TestWindowsNativeAppRoleRequiresBrokerStateAndBothPipeFlags(t *testing.T) {
 	anchor := t.TempDir()
 	privateWindowsDotsTestAnchor(t, anchor)

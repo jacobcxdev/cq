@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -186,11 +187,18 @@ func TestDesktopLaunchFailuresRecoverWithoutExposingBackendDetails(t *testing.T)
 			if phase := want[variant]; phase != "" && !strings.Contains(err.Error(), phase) {
 				t.Fatalf("startup failure did not identify %q: %v", phase, err)
 			}
-			if recovered != 1 {
+			wantRecoveries, wantOpens := 1, 0
+			if variant == "open" {
+				wantOpens = 1
+			}
+			if variant == "restart" && runtime.GOOS == "windows" {
+				wantRecoveries, wantOpens = 0, 1
+			}
+			if recovered != wantRecoveries {
 				t.Fatalf("recovery calls %d", recovered)
 			}
-			if variant != "open" && opens != 0 {
-				t.Fatal("invalid startup opened app before recovery")
+			if opens != wantOpens {
+				t.Fatalf("app activation calls %d, want %d", opens, wantOpens)
 			}
 			if variant != "stage" && variant != "spawn" && watchdog.kills != 1 {
 				t.Fatal("successful recovery left unnecessary watchdog")

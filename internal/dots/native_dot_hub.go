@@ -14,6 +14,7 @@ const (
 	dotHubArchive30607 = "e60f32facfaebf94310f18b95e4883799506541356204b9589ac373e192897e6"
 	dotHubArchive30866 = "c6488597167abbbeff5a2422cdbe63f7466143b9770a224c9bc6ac2168631f13"
 	dotHubArchive5083  = "7b5175d7932e26f8fca91fb0b25bc85e424304ce368c8ce21a68b1be2c174b28"
+	dotHubArchive6357  = "c524092e7df40f372081771fe2afe1b2fdf4920c6df014c5432b4517a5330ba0"
 )
 
 //go:embed native_dot_hub.js
@@ -22,8 +23,10 @@ var nativeDotHubJS string
 func teamDotHubSupported(s *Settings) bool {
 	return (s.AppBuild == "30607" && s.ASARSHA256 == dotHubArchive30607) ||
 		(s.AppBuild == "30866" && s.ASARSHA256 == dotHubArchive30866) ||
-		(runtime.GOOS == "windows" && s.AppVersion == "26.1120.5083.0" &&
-			s.AppBuild == "5083" && s.ModuleAsset == "348410.477a16d4d9.js" && s.ASARSHA256 == dotHubArchive5083)
+		(runtime.GOOS == "windows" && ((s.AppVersion == "26.1120.5083.0" &&
+			s.AppBuild == "5083" && s.ModuleAsset == "348410.477a16d4d9.js" && s.ASARSHA256 == dotHubArchive5083) ||
+			(s.AppVersion == "26.1120.6357.0" && s.AppBuild == "6357" &&
+				s.ModuleAsset == "348410.f0081c7d18.js" && s.ASARSHA256 == dotHubArchive6357)))
 }
 
 func nativeDotHubSupported(s *Settings) bool {

@@ -167,6 +167,15 @@ func runDesktopLaunch(ctx context.Context, s *Settings, c Controller, deps deskt
 		return failure("start the Dots adapter")
 	}
 	if result["restart_required"] == true {
+		if runtime.GOOS == "windows" {
+			// Closing the window can leave the browser process in the tray.
+			// Its normal activation restores the existing session in place.
+			stopWatchdog = ctx.Err() == nil && openCurrent() == nil
+			if !stopWatchdog {
+				stopWatchdog = recoverNow()
+			}
+			return errors.New("Quit ChatGPT from the system tray, then reopen ChatGPT via CQ to start Dots")
+		}
 		stopWatchdog = recoverNow()
 		return errors.New("Quit ChatGPT, then reopen ChatGPT via CQ. Active work has not been interrupted.")
 	}

@@ -12,11 +12,14 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jacobcxdev/cq/internal/fsutil"
 )
 
 func TestCodexInstalledHTTPValidationRuntimeCoreIsolatesAuthorityAndCleansUp(t *testing.T) {
 	canonicalHome := t.TempDir()
 	t.Setenv("HOME", canonicalHome)
+	t.Setenv("USERPROFILE", canonicalHome)
 	canonicalAuth := filepath.Join(canonicalHome, ".codex", "auth.json")
 	if err := os.MkdirAll(filepath.Dir(canonicalAuth), 0o700); err != nil {
 		t.Fatal(err)
@@ -332,7 +335,7 @@ func assertCodexInstalledValidationPrivateTree(t *testing.T, root string) {
 		if err != nil {
 			return err
 		}
-		info, err := entry.Info()
+		info, err := (fsutil.OSFileSystem{}).Lstat(path)
 		if err != nil {
 			return err
 		}

@@ -29,7 +29,10 @@ import (
 )
 
 var (
-	loadWindowsProxyPort = func() (int, error) {
+	errWindowsProxyListenerAbsent = errors.New("proxy listener is absent")
+	errWindowsProxyListenerPID    = errors.New("proxy listener PID is invalid")
+	errWindowsProxyListenerOwners = errors.New("proxy listener ownership is ambiguous")
+	loadWindowsProxyPort          = func() (int, error) {
 		config, err := proxy.LoadExistingConfig()
 		if err != nil {
 			return 0, err
@@ -412,15 +415,15 @@ func parseWindowsListeningPID(output []byte, port int) (uint32, error) {
 		}
 		pid, err := strconv.ParseUint(fields[4], 10, 32)
 		if err != nil || pid == 0 {
-			return 0, fmt.Errorf("proxy listener PID is invalid")
+			return 0, errWindowsProxyListenerPID
 		}
 		if found != 0 && found != uint32(pid) {
-			return 0, fmt.Errorf("proxy listener ownership is ambiguous")
+			return 0, errWindowsProxyListenerOwners
 		}
 		found = uint32(pid)
 	}
 	if found == 0 {
-		return 0, fmt.Errorf("proxy listener is absent")
+		return 0, errWindowsProxyListenerAbsent
 	}
 	return found, nil
 }

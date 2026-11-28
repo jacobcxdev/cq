@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -297,10 +299,52 @@ func TestWindowsDotsShortcutFirstRepeatAndForeignPreserved(t *testing.T) {
 	if err := PrivateDirectory(root); err != nil {
 		t.Fatal(err)
 	}
-	for range 2 {
+	system, err := windows.GetSystemDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	powerShell := func(script string, env ...string) string {
+		t.Helper()
+		command := exec.CommandContext(t.Context(), filepath.Join(system, "WindowsPowerShell", "v1.0", "powershell.exe"), "-NoProfile", "-NonInteractive", "-Command", script)
+		command.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
+		command.Env = append(os.Environ(), env...)
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("Windows shortcut fixture: %v: %s", err, output)
+		}
+		return string(output)
+	}
+	readAppID := func() string {
+		return powerShell(`
+$ErrorActionPreference = 'Stop'
+$shell = New-Object -ComObject Shell.Application
+$item = $shell.Namespace($env:CQ_TEST_SHORTCUT_DIRECTORY).ParseName('ChatGPT via CQ.lnk')
+[Console]::Write($item.ExtendedProperty('System.AppUserModel.ID'))`, "CQ_TEST_SHORTCUT_DIRECTORY="+programs)
+	}
+	iconPath := filepath.Join(root, windowsDotsIconName)
+	windowProperties := windowsDotsRelaunchProperties(executable, root, iconPath)
+	for _, phase := range []string{"first", "repeat", "legacy repair"} {
+		if phase == "legacy repair" {
+			legacy := filepath.Join(anchor, "legacy.lnk")
+			powerShell(windowsDotsShortcutStageScript, "CQ_DOTS_SHORTCUT_STAGE="+legacy, "CQ_DOTS_SHORTCUT_TARGET="+executable,
+				"CQ_DOTS_SHORTCUT_ROOT="+root, "CQ_DOTS_SHORTCUT_ICON="+iconPath, "CQ_DOTS_SHORTCUT_REPAIR=0")
+			data, err := os.ReadFile(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if id := readAppID(); id != "" {
+				t.Fatalf("old shortcut unexpectedly has AppUserModelID %q", id)
+			}
+		}
 		got, err := installWindowsDotsLauncherAt(path, root, app, executable)
 		if err != nil || got != path {
-			t.Fatalf("install Start Menu shortcut: %q, %v", got, err)
+			t.Fatalf("%s Start Menu shortcut install: %q, %v", phase, got, err)
+		}
+		if id := readAppID(); id != windowProperties[3] {
+			t.Fatalf("%s Start Menu shortcut AppUserModelID = %q, want %q", phase, id, windowProperties[3])
 		}
 	}
 	retained, err := fsutil.OpenOwnerControlledDirectory(fsutil.OSFileSystem{}, programs)
@@ -326,7 +370,11 @@ func TestWindowsDotsShortcutFirstRepeatAndForeignPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := installWindowsDotsLauncherAt(path, filepath.Join(anchor, "other"), app, executable); err == nil {
+	other := filepath.Join(anchor, "other")
+	if err := PrivateDirectory(other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installWindowsDotsLauncherAt(path, other, app, executable); err == nil || !strings.Contains(err.Error(), "belongs to another installation") {
 		t.Fatal("foreign installation replaced existing shortcut")
 	}
 	after, err := os.ReadFile(path)

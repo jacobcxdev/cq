@@ -17,6 +17,7 @@ func (evaluate dotHubTestEvaluator) EvaluateAll(_ context.Context, expression st
 
 func TestNativeDotHubPinsAndTeamModes(t *testing.T) {
 	const windowsHash = "7b5175d7932e26f8fca91fb0b25bc85e424304ce368c8ce21a68b1be2c174b28"
+	const windows6357Hash = "c524092e7df40f372081771fe2afe1b2fdf4920c6df014c5432b4517a5330ba0"
 	const mac30866Hash = "c6488597167abbbeff5a2422cdbe63f7466143b9770a224c9bc6ac2168631f13"
 	base := Settings{
 		IntegrationMode: "native",
@@ -27,12 +28,19 @@ func TestNativeDotHubPinsAndTeamModes(t *testing.T) {
 		NativeBindings: &NativeBindings{Rspack: &NativeRspackBindings{}},
 		AppVersion:     "26.1120.5083.0", AppBuild: "5083", ModuleAsset: "348410.477a16d4d9.js", ASARSHA256: windowsHash,
 	}
+	windows6357 := func(s *Settings) {
+		s.AppVersion, s.AppBuild = "26.1120.6357.0", "6357"
+		s.ModuleAsset, s.ASARSHA256 = "348410.f0081c7d18.js", windows6357Hash
+	}
 	for _, test := range []struct {
 		name            string
 		edit            func(*Settings)
 		supported, team bool
 	}{
 		{"qualified Windows", func(*Settings) {}, runtime.GOOS == "windows", true},
+		{"qualified Windows build 6357", windows6357, runtime.GOOS == "windows", true},
+		{"Windows build 6357 with old archive", func(s *Settings) { windows6357(s); s.ASARSHA256 = windowsHash }, false, false},
+		{"Windows build 6357 with old entry asset", func(s *Settings) { windows6357(s); s.ModuleAsset = base.ModuleAsset }, false, false},
 		{"unqualified Windows hash", func(s *Settings) { s.ASARSHA256 = strings.Repeat("0", 64) }, false, false},
 		{"unqualified Windows build", func(s *Settings) { s.AppBuild = "5084" }, false, false},
 		{"unqualified Windows version", func(s *Settings) { s.AppVersion = "26.1121.5083.0" }, false, false},

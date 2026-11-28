@@ -124,7 +124,7 @@ jobs:
       - name: Qualify Windows Dots and proxy runtime contracts
         if: matrix.architecture == 'x64'
         run: |
-          go test -race -count=1 -timeout 3m ./internal/dots -run '^TestWindows'
+          go test -race -count=1 -timeout 3m ./internal/dots -run '^(TestWindows|TestNativeDotHub)'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           go test -race -count=1 -timeout 2m ./internal/proxy ./internal/executil -run '^(TestWindowsRuntimeEgress|TestWindowsPipeCommandHasNoConsole)'
       - name: Fetch the official Windows Codex CLI baseline

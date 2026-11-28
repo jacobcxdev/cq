@@ -3,10 +3,70 @@
 package codex
 
 import (
+	"context"
+	"errors"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/Microsoft/go-winio"
 )
+
+func TestWindowsCredentialControlHandshakeHonoursCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credential.sock")
+	pipePath, sid, err := windowsCredentialPipePath(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := winio.ListenPipe(pipePath, &winio.PipeConfig{SecurityDescriptor: windowsCredentialPipeSDDL(sid)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn)
+	acceptErr := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			acceptErr <- err
+			return
+		}
+		select {
+		case accepted <- conn:
+		case <-ctx.Done():
+			_ = conn.Close()
+		}
+	}()
+	result := make(chan error, 1)
+	go func() {
+		client, err := dialWindowsCredentialOwner(ctx, pipePath, 5*time.Second)
+		if client != nil {
+			_ = client.Close()
+		}
+		result <- err
+	}()
+	select {
+	case conn := <-accepted:
+		defer conn.Close()
+	case err := <-acceptErr:
+		t.Fatal(err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("credential pipe did not accept a client")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("handshake error = %v, want cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("credential handshake stayed blocked after its context was cancelled")
+	}
+}
 
 func TestWindowsCredentialControlFirstOwnerSecondDelegates(t *testing.T) {
 	coordinator := &CredentialCoordinator{}

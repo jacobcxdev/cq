@@ -80,7 +80,9 @@ func normalAppArguments(s *Settings, uid int, args []string) bool {
 		return false
 	}
 	for _, arg := range args[1:] {
-		if strings.HasPrefix(arg, "--user-data-dir") {
+		// On Windows Chromium children reuse ChatGPT.exe and don't always
+		// inherit --user-data-dir. Only the browser process owns the profile.
+		if strings.HasPrefix(arg, "--user-data-dir") || (runtime.GOOS == "windows" && strings.HasPrefix(arg, "--type=")) {
 			return false
 		}
 	}
