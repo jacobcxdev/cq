@@ -114,3 +114,68 @@ func TestAdaptiveResetSpreadsRequiredSlowdownAfterFirstRedemption(t *testing.T) 
 		t.Fatalf("expected the slower pace to begin at the first redemption, got %+v", p)
 	}
 }
+
+func TestAdaptiveResetRoutesSpendToSecondCreditBeforeExpiry(t *testing.T) {
+	t.Run("without reserve", func(t *testing.T) { checkSecondCreditBeforeExpiry(t, 0, 6*time.Hour, true) })
+	t.Run("with reserve", func(t *testing.T) { checkSecondCreditBeforeExpiry(t, 5, 6*time.Hour, true) })
+	t.Run("reserve cannot be spent in time", func(t *testing.T) { checkSecondCreditBeforeExpiry(t, 5, 4*time.Hour+54*time.Minute, false) })
+}
+
+func checkSecondCreditBeforeExpiry(t *testing.T, reserve float64, expiresIn time.Duration, redeemSecond bool) {
+	t.Helper()
+	now := time.Date(2026, 11, 28, 7, 0, 0, 0, time.UTC)
+	first := now.Add(time.Hour)
+	expiry := now.Add(expiresIn)
+	natural := now.Add(5 * 24 * time.Hour)
+	account := scheduleTestAccount(now, "first-account", 20, 0, 25/time.Hour.Seconds(),
+		ResetScheduleCreditInput{ID: "first", Supported: true})
+	delete(account.Windows, quota.Window5Hour)
+	window := resetTestWindow(0, natural, 7*24*time.Hour, 25/time.Hour.Seconds())
+	window.ReservePct = reserve
+	account.Windows[quota.Window7Day] = window
+	account.Credits = append(account.Credits, ResetScheduleCreditInput{ID: "second", Supported: true, ExpiresAt: &expiry})
+	other := ResetScheduleAccountInput{
+		Key: "other-account", Multiplier: 20, Windows: map[quota.WindowName]ResetScheduleWindowInput{
+			quota.Window7Day: resetTestWindow(100, natural, 7*24*time.Hour, 0),
+		},
+	}
+	plan := RecommendResetSchedule(ResetScheduleInput{
+		Now: now, Accounts: []ResetScheduleAccountInput{account, other}, AdaptivePace: true,
+		Constraints: &ResetScheduleConstraints{
+			AllowedCredits: []ResetScheduleCreditRef{{AccountKey: account.Key, CreditID: "first"}, {AccountKey: account.Key, CreditID: "second"}},
+			FixedUses:      []ResetScheduleFixedUse{{AccountKey: account.Key, CreditID: "first", At: first}},
+		},
+	})
+	if !plan.Complete || plan.Objective.GapDurationSeconds != 0 || len(plan.Items) != 2 || !plan.Items[0].UseAt.Equal(first) {
+		t.Fatalf("expected the first reset and continuous quota: %+v", plan)
+	}
+	second := plan.Items[1]
+	if !redeemSecond {
+		if !second.UseAt.IsZero() {
+			t.Fatalf("credit with insufficient time was scheduled: %+v", plan)
+		}
+		return
+	}
+	if second.CreditID != "second" || second.UseAt.IsZero() || !second.UseAt.Before(expiry) || second.RestoredPct[quota.Window7Day] != 100 {
+		t.Fatalf("expected the second credit to follow full use of the first: %+v", plan)
+	}
+}
+
+func TestAdaptiveResetCreditDeadlineTiePreservesSystemAccount(t *testing.T) {
+	now := time.Date(2026, 11, 28, 7, 0, 0, 0, time.UTC)
+	expiry := now.Add(2 * 24 * time.Hour)
+	system := scheduleTestAccount(now, "a-system", 20, 90, 25/time.Hour.Seconds(),
+		ResetScheduleCreditInput{ID: "system-credit", Supported: true, ExpiresAt: &expiry})
+	system.SystemAccount = true
+	other := scheduleTestAccount(now, "b-other", 20, 90, 25/time.Hour.Seconds(),
+		ResetScheduleCreditInput{ID: "other-credit", Supported: true, ExpiresAt: &expiry})
+	for _, account := range []ResetScheduleAccountInput{system, other} {
+		window := account.Windows[quota.Window7Day]
+		window.ResetAt = now.Add(5 * 24 * time.Hour)
+		account.Windows[quota.Window7Day] = window
+	}
+	state, blockers := normaliseResetScheduleInput(ResetScheduleInput{Now: now, Accounts: []ResetScheduleAccountInput{system, other}, AdaptivePace: true})
+	if key, _ := simulationSpendAccount(state); len(blockers) != 0 || key != other.Key {
+		t.Fatalf("forecast targeted %q, wanted %q, blockers %+v", key, other.Key, blockers)
+	}
+}

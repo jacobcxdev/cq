@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
 
 const RuntimeCodexResetScheduleStatusPath = "/_cq/control/codex/resets/status"
@@ -24,14 +25,20 @@ type CodexResetSchedulerStatus struct {
 // CodexResetScheduler stays inert until the supervisor selects this worker.
 // Its heartbeat is process-local; an idle loop never fsyncs schedule state.
 type CodexResetScheduler struct {
-	mu      sync.Mutex
-	step    func(context.Context) error
-	now     func() time.Time
-	gate    *RuntimeUpgradeAdmission
-	cancel  context.CancelFunc
-	done    chan struct{}
-	stopped bool
-	status  CodexResetSchedulerStatus
+	// LoadSchedule is bound before activation. Only the scheduler reads it
+	// for routing; request handlers use the last successful snapshot.
+	LoadSchedule func() (codex.ResetAutomationState, error)
+
+	mu              sync.Mutex
+	step            func(context.Context) error
+	now             func() time.Time
+	gate            *RuntimeUpgradeAdmission
+	cancel          context.CancelFunc
+	done            chan struct{}
+	stopped         bool
+	status          CodexResetSchedulerStatus
+	creditExpiries  map[codex.AccountKey]time.Time
+	creditPlanUntil time.Time
 }
 
 func NewCodexResetScheduler(step func(context.Context) error, now func() time.Time) *CodexResetScheduler {
@@ -121,9 +128,18 @@ func (s *CodexResetScheduler) run(ctx context.Context) {
 				stepCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 				defer cancel()
 				stepErr := s.step(stepCtx)
+				now := s.now().UTC()
+				var expiries map[codex.AccountKey]time.Time
+				var validUntil time.Time
+				if stepErr == nil && s.LoadSchedule != nil {
+					if state, err := s.LoadSchedule(); err == nil && state.FreshAdaptivePlan(now) {
+						expiries, validUntil = state.AdaptiveCreditExpiries(now), *state.NextReplanAt
+					}
+				}
 				s.mu.Lock()
 				defer s.mu.Unlock()
-				s.status.CheckedAt = s.now().UTC()
+				s.status.CheckedAt = now
+				s.creditExpiries, s.creditPlanUntil = expiries, validUntil
 				if stepErr != nil {
 					s.status.LastError = "execution_failed"
 					if errors.Is(stepErr, fsutil.ErrExclusiveLockHeld) {
@@ -137,6 +153,22 @@ func (s *CodexResetScheduler) run(ctx context.Context) {
 		}
 		timer.Reset(5 * time.Second)
 	}
+}
+
+// CreditExpiry gives routing the earliest approved credit on one account.
+// An inactive executor or stale plan cannot steer requests.
+func (s *CodexResetScheduler) CreditExpiry(account codex.AccountKey, now time.Time) time.Time {
+	status := s.Status()
+	if !status.Running || status.LastError != "" {
+		return time.Time{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	expiry := s.creditExpiries[account]
+	if !s.creditPlanUntil.After(now) || !expiry.After(now) {
+		return time.Time{}
+	}
+	return expiry
 }
 func (s *CodexResetScheduler) Stop() {
 	if s == nil {

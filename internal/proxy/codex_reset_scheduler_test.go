@@ -8,7 +8,50 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+func TestResetSchedulerPublishesOnlyFreshAuthorisedCreditExpiries(t *testing.T) {
+	now := time.Now()
+	next := now.Add(time.Minute)
+	expiry, later := now.Add(time.Hour), now.Add(2*time.Hour)
+	s := NewCodexResetScheduler(func(context.Context) error { return nil }, func() time.Time { return now })
+	s.LoadSchedule = func() (codex.ResetAutomationState, error) {
+		return codex.ResetAutomationState{
+			Mode: codex.ResetAutomationAdaptive, Enabled: true, PlanValid: true,
+			LastReplanAt: &now, NextReplanAt: &next,
+			Entries: []codex.ResetAutomationEntry{
+				{AccountKey: "target", State: codex.ResetAutomationPending, ExpiresAt: &later},
+				{AccountKey: "target", State: codex.ResetAutomationPending, ExpiresAt: &expiry, LastError: "not_yet_useful"},
+				{AccountKey: "pinned", State: codex.ResetAutomationPending, ExpiresAt: &expiry, Pinned: true},
+				{AccountKey: "unavailable", State: codex.ResetAutomationPending, ExpiresAt: &expiry, LastError: "credit_unavailable"},
+			},
+		}, nil
+	}
+	gate := NewRuntimeUpgradeAdmission()
+	if err := s.Activate(t.Context(), gate); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	deadline := time.Now().Add(time.Second)
+	for !s.CreditExpiry("target", now).Equal(expiry) {
+		if time.Now().After(deadline) {
+			t.Fatal("authorised credit waiting for usage did not get priority")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if !s.CreditExpiry("pinned", now).IsZero() || !s.CreditExpiry("unavailable", now).IsZero() ||
+		!s.CreditExpiry("target", next).IsZero() {
+		t.Fatal("pin, unavailable credit, or expired plan could steer routing")
+	}
+	if err := gate.Pause(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if !s.CreditExpiry("target", now).IsZero() {
+		t.Fatal("paused scheduler could steer routing")
+	}
+}
 
 func TestResetSchedulerRequiresActivationAndCountsUpgradeWork(t *testing.T) {
 	var calls atomic.Int32

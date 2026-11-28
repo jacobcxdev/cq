@@ -105,8 +105,10 @@ type CodexCapacityLedger struct {
 	// Reserve is bound before serving requests.
 	Reserve      *CodexReserve
 	ExtraCredits *CodexExtraCreditsGuard
-	windows      map[codex.AccountKey]map[quota.WindowName]codexWindowFact
-	mu           sync.RWMutex
+	// ResetCreditExpiry is bound to the active reset scheduler before serving.
+	ResetCreditExpiry func(codex.AccountKey, time.Time) time.Time
+	windows           map[codex.AccountKey]map[quota.WindowName]codexWindowFact
+	mu                sync.RWMutex
 
 	now    func() time.Time
 	maxAge time.Duration
@@ -422,8 +424,6 @@ func (l *CodexCapacityLedger) IncludedCapacity(account codex.AccountKey, bucket 
 	return view
 }
 
-const codexWeeklyResetPriorityWindow = 24 * time.Hour
-
 // expiringWeeklyReset uses the weekly window for the model's exact bucket.
 // The aggregate capacity reset can refer to a shorter window.
 func (l *CodexCapacityLedger) expiringWeeklyReset(account codex.AccountKey, bucket CapacityBucket, now time.Time) time.Time {
@@ -444,14 +444,36 @@ func (l *CodexCapacityLedger) expiringWeeklyReset(account codex.AccountKey, buck
 		return time.Time{}
 	}
 	reset := time.Unix(window.ResetAtUnix, 0)
-	if !reset.After(now) || reset.Sub(now) > codexWeeklyResetPriorityWindow {
+	if !reset.After(now) || reset.Sub(now) > quota.WeeklyQuotaSpendPriorityWindow {
 		return time.Time{}
 	}
 	return reset
 }
 
-func codexWeeklyResetBefore(left, right time.Time) bool {
-	return !left.IsZero() && (right.IsZero() || left.Before(right))
+func (l *CodexCapacityLedger) quotaSpendDeadline(account codex.AccountKey, bucket CapacityBucket, now time.Time) (time.Time, bool) {
+	natural := l.expiringWeeklyReset(account, bucket, now)
+	if l == nil || bucket != CapacityBucketBase || l.ResetCreditExpiry == nil {
+		return natural, false
+	}
+	expiry := l.ResetCreditExpiry(account, now)
+	if !expiry.After(now) || !quota.SpendDeadlineBefore(expiry, natural) {
+		return natural, false
+	}
+	l.mu.RLock()
+	entry, ok := l.windows[account][quota.Window7Day]
+	if !ok {
+		entry, ok = l.windows[account][quota.Window5Hour]
+	}
+	l.mu.RUnlock()
+	observed := entry.fact.ObservedAt
+	if !ok || entry.fact.backfilledUsage || observed.IsZero() || observed.After(now) || now.Sub(observed) >= l.maxAge ||
+		entry.window.ResetAtUnix <= 0 || windowRemaining(entry.window) <= 0 {
+		return natural, false
+	}
+	if deadline := quota.ResetCreditSpendDeadline(now, time.Unix(entry.window.ResetAtUnix, 0), expiry); !deadline.IsZero() {
+		return deadline, true
+	}
+	return natural, false
 }
 
 func (l *CodexCapacityLedger) capacityLocked(account codex.AccountKey, bucket CapacityBucket) (CapacityView, bool) {

@@ -9,7 +9,69 @@ import (
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
+
+func TestProjectCodexRoutePolicyCandidatesPrioritisesExpiringResetCredit(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	expiry := now.Add(48 * time.Hour)
+	routed := projectionLogicalAccount("credit-account", "pro", true, projectionReadyCandidate("credit-account", "credit-candidate"))
+	routed.Active = true
+	other := projectionLogicalAccount("other", "pro", true, projectionReadyCandidate("other", "other-candidate"))
+	inventory := codex.Inventory{Accounts: []codex.LogicalAccount{other, routed}}
+	for _, tt := range []struct {
+		name          string
+		model         string
+		creditNatural time.Duration
+		otherNatural  time.Duration
+		otherCredit   bool
+		bound         codex.AccountKey
+		want          codex.AccountKey
+	}{
+		{"shared quota", codexFallbackModel, 120 * time.Hour, 120 * time.Hour, false, "", routed.Key},
+		{"earlier natural refill", codexFallbackModel, 120 * time.Hour, 12 * time.Hour, false, "", other.Key},
+		{"credit outlasts quota", codexFallbackModel, 36 * time.Hour, 120 * time.Hour, false, "", other.Key},
+		{"equal credit deadlines", codexFallbackModel, 120 * time.Hour, 120 * time.Hour, true, "", other.Key},
+		{"scoped quota", codexSparkModel, 120 * time.Hour, 120 * time.Hour, false, "", other.Key},
+		{"bound continuation", codexFallbackModel, 120 * time.Hour, 120 * time.Hour, false, other.Key, other.Key},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			capacity := NewCodexCapacityLedger(func() time.Time { return now }, time.Hour)
+			capacity.ResetCreditExpiry = func(key codex.AccountKey, _ time.Time) time.Time {
+				if key == routed.Key || tt.otherCredit {
+					return expiry
+				}
+				return time.Time{}
+			}
+			for _, account := range inventory.Accounts {
+				reset := now.Add(tt.otherNatural)
+				if account.Key == routed.Key {
+					reset = now.Add(tt.creditNatural)
+				}
+				capacity.ObserveQuotaSnapshot(account.Key, QuotaSnapshot{FetchedAt: now, Result: quota.Result{
+					Status: quota.StatusOK, Windows: map[quota.WindowName]quota.Window{
+						quota.Window7Day: {RemainingPct: 80, ResetAtUnix: reset.Unix()},
+						quota.Window7Day + ":" + quota.WindowName(codexSparkModel): {RemainingPct: 80, ResetAtUnix: reset.Unix()},
+					},
+				}})
+			}
+			candidates, err := ProjectCodexRoutePolicyCandidates(inventory, capacity, CodexRouteRequirements{RequestedModel: tt.model}, nil, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan, err := BuildCodexRoutePlan(t.Context(), candidates, CodexRoutePolicyHints{
+				DefaultAccountKey: other.Key, BoundAccountKey: tt.bound,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			choices := plan.Choices()
+			if len(choices) == 0 || choices[0].AccountKey != tt.want {
+				t.Fatalf("expected %s first, got %+v", tt.want, choices)
+			}
+		})
+	}
+}
 
 func TestProjectCodexRoutePolicyCandidatesProjectsEveryLogicalAccount(t *testing.T) {
 	t.Parallel()

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 // CodexDiscoverer abstracts Codex account discovery for testability.
@@ -174,14 +175,15 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 	}
 
 	type candidate struct {
-		choice      RouteChoice
-		system      bool
-		state       CapacityState
-		remaining   int
-		weeklyReset time.Time
-		native      bool
-		leases      int
-		index       int
+		choice             RouteChoice
+		system             bool
+		state              CapacityState
+		remaining          int
+		spendDeadline      time.Time
+		usesCreditDeadline bool
+		native             bool
+		leases             int
+		index              int
 	}
 	for pass := 0; ; pass++ {
 		now := s.capacity.now()
@@ -224,11 +226,12 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 			if state == CapacityUnknown {
 				unknownAccounts = append(unknownAccounts, key)
 			}
-			var weeklyReset time.Time
+			var spendDeadline time.Time
+			var usesCreditDeadline bool
 			if native && state == CapacityPositive {
-				weeklyReset = s.capacity.expiringWeeklyReset(key, buckets[0], now)
-				if !weeklyReset.IsZero() && s.capacity.IncludedCapacity(key, buckets[0]).State == CapacityZero {
-					weeklyReset = time.Time{}
+				spendDeadline, usesCreditDeadline = s.capacity.quotaSpendDeadline(key, buckets[0], now)
+				if !spendDeadline.IsZero() && s.capacity.IncludedCapacity(key, buckets[0]).State == CapacityZero {
+					spendDeadline, usesCreditDeadline = time.Time{}, false
 				}
 			}
 			current := candidate{
@@ -238,13 +241,14 @@ func (s *codexSelector) Choose(ctx context.Context, requirements CodexRouteRequi
 					EffectiveModel:  effectiveModel,
 					RequiredBuckets: buckets,
 				},
-				state:       state,
-				system:      account.system,
-				remaining:   remaining,
-				weeklyReset: weeklyReset,
-				native:      native,
-				leases:      s.capacity.ActiveLeases(key),
-				index:       i,
+				state:              state,
+				system:             account.system,
+				remaining:          remaining,
+				spendDeadline:      spendDeadline,
+				usesCreditDeadline: usesCreditDeadline,
+				native:             native,
+				leases:             s.capacity.ActiveLeases(key),
+				index:              i,
 			}
 			if best == nil || betterRoute(current, *best) {
 				copy := current
@@ -296,17 +300,24 @@ func (s *codexSelector) routeAccounts(ctx context.Context) ([]codexRouteAccount,
 }
 
 func betterRoute(candidate, current struct {
-	choice      RouteChoice
-	system      bool
-	state       CapacityState
-	remaining   int
-	weeklyReset time.Time
-	native      bool
-	leases      int
-	index       int
+	choice             RouteChoice
+	system             bool
+	state              CapacityState
+	remaining          int
+	spendDeadline      time.Time
+	usesCreditDeadline bool
+	native             bool
+	leases             int
+	index              int
 }) bool {
-	if !candidate.weeklyReset.Equal(current.weeklyReset) {
-		return codexWeeklyResetBefore(candidate.weeklyReset, current.weeklyReset)
+	if !candidate.spendDeadline.Equal(current.spendDeadline) {
+		return quota.SpendDeadlineBefore(candidate.spendDeadline, current.spendDeadline)
+	}
+	if candidate.usesCreditDeadline != current.usesCreditDeadline {
+		return !candidate.usesCreditDeadline
+	}
+	if candidate.usesCreditDeadline {
+		return quota.CreditSpendTieBefore(string(candidate.choice.AccountKey), string(current.choice.AccountKey), candidate.system, current.system)
 	}
 	if candidate.system != current.system {
 		return !candidate.system

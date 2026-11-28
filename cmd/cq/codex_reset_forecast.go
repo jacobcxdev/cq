@@ -51,7 +51,7 @@ func codexResetForecastFrom(
 	if !state.Enabled {
 		return forecasts
 	}
-	adaptiveReady := freshCodexAdaptivePlan(state, now)
+	adaptiveReady := state.FreshAdaptivePlan(now)
 	upcoming := make(map[string][]int64)
 	for _, entry := range state.Entries {
 		if entry.State != codex.ResetAutomationPending || entry.At == nil || entry.At.Before(now) ||
@@ -81,11 +81,4 @@ func codexResetForecastFrom(
 		forecasts[key] = forecast
 	}
 	return forecasts
-}
-
-func freshCodexAdaptivePlan(state codex.ResetAutomationState, now time.Time) bool {
-	return state.PlanValid && state.PlanError == "" &&
-		state.LastReplanAt != nil && !state.LastReplanAt.After(now) &&
-		state.NextReplanAt != nil && state.NextReplanAt.After(now) &&
-		now.Sub(*state.LastReplanAt) <= 5*time.Minute+45*time.Second
 }

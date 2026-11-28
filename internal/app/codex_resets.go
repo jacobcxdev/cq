@@ -550,8 +550,9 @@ func matchResetUsage(account codexprov.ResetAccount, results []quota.Result) (qu
 func resetScheduleAccountInput(account codexprov.ResetAccount, result quota.Result, credits []codexprov.ResetCredit, estimates history.RateEstimates) (aggregate.ResetScheduleAccountInput, bool) {
 	input := aggregate.ResetScheduleAccountInput{
 		Key: string(account.AccountKey), Email: account.Email, AccountID: account.AccountID,
-		Multiplier: quota.ExtractMultiplier(result.RateLimitTier),
-		Windows:    make(map[quota.WindowName]aggregate.ResetScheduleWindowInput),
+		SystemAccount: account.Active,
+		Multiplier:    quota.ExtractMultiplier(result.RateLimitTier),
+		Windows:       make(map[quota.WindowName]aggregate.ResetScheduleWindowInput),
 	}
 	accountKey := result.AccountID
 	if accountKey == "" {

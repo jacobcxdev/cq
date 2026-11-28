@@ -167,6 +167,12 @@ credit can be used yet, the plan includes a slower pace to bridge the gap.
 observed burn. Pace is guidance for your workload. Use an explicit pin to
 authorise a specific date.
 
+An approved adaptive credit that expires before its account's natural refill
+can give that account priority for new Codex requests that spend shared quota.
+The planner models the same expiry priority. Pool membership, capacity limits,
+and existing continuation bindings still apply. A reserve releases for the
+scheduled next reset under the usual reserve rule.
+
 Set `RESET_AT` to a future RFC3339 timestamp with a timezone, before the selected credit expires. Read `list` and the recommendation first; dates are not inferred from these examples.
 
 ```sh
