@@ -22,6 +22,8 @@ var icons = map[provider.ID]string{
 	provider.ZAI:    "\U000F0C36", // nf-md-alpha_z_box_outline
 }
 
+const windowNoteIndent = "           "
+
 // BuildTTYModel converts a Report into a structured TTYModel ready for rendering.
 // It is a pure function — no I/O. The returned model contains pre-styled strings.
 // Sections are built first, then separators are sized to the widest rendered line.
@@ -58,19 +60,19 @@ func BuildTTYModel(report app.Report, now time.Time) TTYModel {
 
 		if pr.Aggregate != nil {
 			section.AggHeader = buildAggHeader(pr.Aggregate)
-			section.AggRows = buildAggRows(pr.Aggregate.Windows)
+			section.AggRows = buildAggRows(pr.Aggregate.Windows, nowEpoch)
 		}
 		if pr.ProxyEligibility != nil && pr.ProxyEligibility.ExcludedCount > 0 {
 			section.ProxyHeader = buildProxyEligibilityHeader(pr.ID, pr.ProxyEligibility)
 			if pr.ProxyEligibility.Aggregate != nil {
-				section.ProxyRows = buildAggRows(pr.ProxyEligibility.Aggregate.Windows)
+				section.ProxyRows = buildAggRows(pr.ProxyEligibility.Aggregate.Windows, nowEpoch)
 			}
 		}
 		for i := range pr.ProxyPools {
 			pool := &pr.ProxyPools[i]
 			block := TTYProxyBlock{Header: buildProxyPoolHeader(pr.ID, pool)}
 			if pool.Aggregate != nil {
-				block.Rows = buildAggRows(pool.Aggregate.Windows)
+				block.Rows = buildAggRows(pool.Aggregate.Windows, nowEpoch)
 			}
 			section.ProxyPools = append(section.ProxyPools, block)
 		}
@@ -202,6 +204,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 	keys := orderedWindowKeys(r.Windows)
 	rows := make([]TTYWindowRow, 0, len(keys))
 	currentBucket := ""
+	showedSchedule := false
 	for _, winName := range keys {
 		bucket := quota.WindowBucket(winName)
 		if bucket == "" {
@@ -218,11 +221,30 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 		}
 
 		row := TTYWindowRow{Label: windowLabel(string(quota.BaseWindow(winName)))}
+		pacePeriod, paceReset, burnPeriod := periodS, w.ResetAtUnix, periodS
+		if id == provider.Codex && r.BankedResets != nil && (winName == quota.Window5Hour || winName == quota.Window7Day) {
+			start, next := r.BankedResets.WindowBounds(winName, w, nowEpoch)
+			if start <= nowEpoch && next > nowEpoch {
+				pacePeriod, paceReset = next-start, next
+				burnPeriod = w.ResetAtUnix - start
+			}
+			if scheduled := r.BankedResets.ScheduledAtUnix; !showedSchedule && len(scheduled) > 0 {
+				note := "Scheduled reset in " + fmtDuration(scheduled[0]-nowEpoch)
+				if len(scheduled) > 1 {
+					note += ", then " + fmtDuration(scheduled[1]-scheduled[0]) + " later"
+				}
+				if len(scheduled) > 2 {
+					note += fmt.Sprintf(" (+%d more)", len(scheduled)-2)
+				}
+				row.Note = dimStyle.Render(note)
+				showedSchedule = true
+			}
+		}
 
 		var pace int
 		hasPace := false
 		if periodS > 0 && w.ResetAtUnix > 0 {
-			pace = calcPace(periodS, w.ResetAtUnix, nowEpoch)
+			pace = calcPace(pacePeriod, paceReset, nowEpoch)
 			hasPace = true
 		}
 		pacePtr := -1
@@ -256,7 +278,7 @@ func buildResultBlock(r quota.Result, id provider.ID, nowEpoch int64) (string, [
 
 			burn := ""
 			if periodS > 0 && w.ResetAtUnix > 0 {
-				if b, ok := w.Burndown(periodS, nowEpoch); ok {
+				if b, ok := w.Burndown(burnPeriod, nowEpoch); ok && (paceReset == w.ResetAtUnix || b < paceReset-nowEpoch) {
 					burn = fmtDuration(b)
 				}
 			}
@@ -410,7 +432,7 @@ func buildProxyHeader(id provider.ID, label string, eligibility *app.ProxyEligib
 }
 
 // buildAggRows builds window rows for aggregate data.
-func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindowRow {
+func buildAggRows(windows map[quota.WindowName]quota.AggregateResult, nowEpoch int64) []TTYWindowRow {
 	orderedKeys := orderedAggWindowKeys(windows)
 	rows := make([]TTYWindowRow, 0, len(orderedKeys))
 	currentBucket := ""
@@ -482,10 +504,48 @@ func buildAggRows(windows map[quota.WindowName]quota.AggregateResult) []TTYWindo
 			row.PaceDiff = gc.Render(fmt.Sprintf("\U000F012C %7s", "\u2014"))
 			row.Burndown = gc.Render(fmt.Sprintf("\U000F0152 %7s", "\u2014"))
 		}
+		if a.ScheduledResetCount > 0 {
+			next := fmtDuration(a.NextScheduledResetAtUnix - nowEpoch)
+			if a.PaceAdvice != "" {
+				row.Note = dimStyle.Render(resetPaceNote(a, next))
+			} else {
+				resetLabel := "scheduled reset"
+				if a.ScheduledResetCount > 1 {
+					resetLabel += "s"
+				}
+				note := fmt.Sprintf("Forecast includes %d %s · next in %s", a.ScheduledResetCount, resetLabel, next)
+				if a.GapDurationS == 0 && a.GaugePos >= 3 {
+					note += " · no gap projected"
+				}
+				row.Note = dimStyle.Render(note)
+			}
+		}
 
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func resetPaceNote(a quota.AggregateResult, next string) string {
+	var pace string
+	switch a.PaceAdvice {
+	case quota.PaceBurnHarder:
+		pace = "Burn harder"
+	case quota.PaceSlowDown:
+		pace = "Slow down"
+	case quota.PaceNeedsRefill:
+		return "Refill needed · next in " + next
+	default:
+		pace = "Keep pace"
+	}
+	if a.PaceTargetPct != nil {
+		pace += fmt.Sprintf(" to %d%% of current burn", *a.PaceTargetPct)
+	}
+	note := pace + " until refill in " + next
+	if a.RemainingAtNextResetPct != nil && *a.RemainingAtNextResetPct > 0 {
+		note += fmt.Sprintf(" · %d%% otherwise unused", *a.RemainingAtNextResetPct)
+	}
+	return note
 }
 
 // buildSeparator returns a thick em-dash separator line.
@@ -551,6 +611,9 @@ func rowVisibleWidth(row TTYWindowRow) int {
 		2 + visibleWidth(row.Reset)
 	if row.PaceDiff != "" || row.Burndown != "" {
 		width += 2 + visibleWidth(row.PaceDiff) + 2 + visibleWidth(row.Burndown)
+	}
+	if row.Note != "" {
+		width = max(width, visibleWidth(windowNoteIndent+row.Note))
 	}
 	return width
 }

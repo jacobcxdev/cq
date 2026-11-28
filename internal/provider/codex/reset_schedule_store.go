@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 type ResetAutomationMode string
@@ -64,6 +65,7 @@ type ResetAutomationState struct {
 	PlanValid    bool                   `json:"plan_valid"`
 	PlanError    string                 `json:"plan_error,omitempty"`
 	NextReplanAt *time.Time             `json:"next_replan_at,omitempty"`
+	NextPace     *quota.ResetPacePhase  `json:"next_pace,omitempty"`
 }
 
 func (s *ResetAutomationState) Entry(id string) *ResetAutomationEntry {
@@ -186,6 +188,9 @@ func (s *ResetAutomationStore) AcquireExecutor() (fsutil.ExclusiveLock, error) {
 func validateResetAutomation(s ResetAutomationState) error {
 	if s.Version != 1 || (s.Mode != ResetAutomationFixed && s.Mode != ResetAutomationAdaptive) || len(s.Entries) > 1000 {
 		return errors.New("invalid reset schedule schema")
+	}
+	if p := s.NextPace; p != nil && (p.From.IsZero() || !p.Until.After(p.From) || p.Percent < 0 || p.Percent >= 100) {
+		return errors.New("invalid reset pace phase")
 	}
 	ids, active := map[string]bool{}, map[string]bool{}
 	for _, e := range s.Entries {

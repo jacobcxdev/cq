@@ -33,4 +33,5 @@ type TTYWindowRow struct {
 	Reset    string // "󰦖 4h 30m"
 	PaceDiff string // "󰓅   +3"
 	Burndown string // "󰅒 6h 12m"
+	Note     string // optional forecast on the following line
 }

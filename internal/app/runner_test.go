@@ -133,6 +133,72 @@ func TestRunnerRun(t *testing.T) {
 	}
 }
 
+func TestRunnerBankedResetForecastRespectsPoolMembershipAndObservedQuota(t *testing.T) {
+	now := time.Date(2026, 11, 28, 4, 0, 0, 0, time.UTC)
+	first := now.Add(4 * time.Hour).Unix()
+	var results []quota.Result
+	for _, key := range []string{"account-a", "account-b", "account-c"} {
+		results = append(results, quota.Result{
+			AccountKey: key, Status: quota.StatusOK, Plan: "pro", RateLimitTier: "codex_pro_20x",
+			Windows: map[quota.WindowName]quota.Window{
+				quota.Window7Day: {RemainingPct: 30, ResetAtUnix: now.Add(136 * time.Hour).Unix()},
+			},
+		})
+	}
+	hist := &captureHistory{}
+	runner := &Runner{
+		Clock: fixedClock(now), History: hist,
+		Services: map[provider.ID]provider.Services{provider.Codex: {Usage: &mockProvider{results: results}}},
+		CodexResetForecast: func(context.Context, time.Time) map[string]quota.BankedResetForecast {
+			return map[string]quota.BankedResetForecast{
+				"account-a": {ScheduledAtUnix: []int64{first}},
+				"unknown":   {ScheduledAtUnix: []int64{first}},
+			}
+		},
+	}
+	report, err := runner.BuildReport(context.Background(), RunRequest{Providers: []provider.ID{provider.Codex}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	AddProxyPool(&report, provider.Codex, "Cyber", func(r quota.Result) bool { return r.AccountKey != "account-a" })
+	AddProxyPool(&report, provider.Codex, "Work", func(r quota.Result) bool { return r.AccountKey != "account-c" })
+	got := report.Providers[0]
+	if got.Results[0].BankedResets == nil || got.Results[0].Windows[quota.Window7Day] != results[0].Windows[quota.Window7Day] ||
+		got.Results[0].Status != results[0].Status || got.Availability.MinRemainingPct != 30 ||
+		results[0].BankedResets != nil || hist.results["codex"][0].BankedResets != nil {
+		t.Fatalf("forecast changed observed usage or history: %+v", got)
+	}
+	if got.Aggregate.Windows[quota.Window7Day].ScheduledResetCount != 1 ||
+		got.ProxyPools[0].Aggregate.Windows[quota.Window7Day].ScheduledResetCount != 0 ||
+		got.ProxyPools[1].Aggregate.Windows[quota.Window7Day].ScheduledResetCount != 1 {
+		t.Fatalf("forecast reached the wrong pool: %+v", got.ProxyPools)
+	}
+}
+
+func TestRunnerBankedResetForecastSkipsBalanceCachedBeforeRedemption(t *testing.T) {
+	now := time.Date(2026, 11, 28, 4, 0, 0, 0, time.UTC)
+	runner := &Runner{
+		Clock: fixedClock(now),
+		Cache: &mockCache{
+			ageVal: 10 * time.Minute, ageOK: true,
+			data: map[string][]quota.Result{"codex": {{AccountKey: "account-a", Status: quota.StatusExhausted}}},
+		},
+		Services: map[provider.ID]provider.Services{provider.Codex: {Usage: &mockProvider{}}},
+		CodexResetForecast: func(context.Context, time.Time) map[string]quota.BankedResetForecast {
+			return map[string]quota.BankedResetForecast{
+				"account-a": {LastRedeemedAtUnix: now.Add(-5 * time.Minute).Unix(), ScheduledAtUnix: []int64{now.Add(time.Hour).Unix()}},
+			}
+		},
+	}
+	report, err := runner.BuildReport(context.Background(), RunRequest{Providers: []provider.ID{provider.Codex}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := report.Providers[0].Results[0]; result.Status != quota.StatusExhausted || result.BankedResets != nil {
+		t.Fatalf("forecast was built from a pre-redemption balance: %+v", result)
+	}
+}
+
 func TestRunnerReportsSharedBudgetAggregatesByDefault(t *testing.T) {
 	check := func(providerID string, windows ...quota.SharedBudgetWindow) SharedBudgetCheck {
 		return SharedBudgetCheck{

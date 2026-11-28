@@ -671,12 +671,13 @@ func runCheck(cli *CLI) (returnErr error) {
 	}
 
 	runner := &app.Runner{
-		Clock:         systemClock{},
-		Cache:         c,
-		History:       hist,
-		Services:      services,
-		Renderer:      renderer,
-		SharedBudgets: sharedBudget,
+		Clock:              systemClock{},
+		Cache:              c,
+		History:            hist,
+		Services:           services,
+		Renderer:           renderer,
+		SharedBudgets:      sharedBudget,
+		CodexResetForecast: loadCodexResetForecast,
 	}
 
 	ctx := context.Background()

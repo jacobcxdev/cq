@@ -146,11 +146,23 @@ The credential coordinator also renews explicitly declared CodexBar managed acco
 
 `cq codex resets use EMAIL` previews selected credit, current shared usage, and current recommendation, then asks for confirmation with default No. Omit `--credit` to resume a pending attempt or select eligible credit with next expiry. Supply `--yes` only when explicit non-interactive consumption is intended.
 
-An automated reset schedule is optional. Preview with `cq codex resets recommend`,
-then accept with `cq codex resets recommend --schedule`. Confirmation defaults to
-No. New schedules use **fixed** dates; `--mode adaptive` allows fresh portfolio
-forecasts to move dates for the exact accepted credits. It never enrols newly
-found credits. Use `--replace` to replace existing pending entries.
+An automated reset schedule is optional. Run `cq codex resets recommend` for
+a preview, then accept with `cq codex resets recommend --schedule`. Confirmation
+defaults to No. New schedules use **fixed** dates. With `--mode adaptive`, enabling
+the schedule authorises CQ to enrol and redeem eligible current and future
+credits across the visible portfolio. CQ checks for new credits when it replans,
+normally every five minutes, including when the queue is empty. Credits with
+no useful reset time stay visible while CQ waits for usage to change.
+Use `--replace` to replace existing pending entries.
+
+Adaptive mode plans dates and recommended burn together. A flexible reset
+waits for the account's weekly allowance to run out, using the session
+allowance when there is no weekly window. CQ rechecks that allowance before
+redeeming. If available quota would run out before the next refill and no
+credit can be used yet, the plan includes a slower pace to bridge the gap.
+`schedule status` shows the next planned pace change as a percentage of
+observed burn. Pace is guidance for your workload. Use an explicit pin to
+authorise a specific date.
 
 Set `RESET_AT` to a future RFC3339 timestamp with a timezone, before the selected credit expires. Read `list` and the recommendation first; dates are not inferred from these examples.
 
@@ -168,16 +180,34 @@ cq codex resets schedule cancel
 
 Manual additions create a disabled fixed schedule. Manual dates must not be in
 the past and pin entries in adaptive mode. Active edits and enabling require
-confirmation; non-interactive acceptance requires `--yes`. Disable pauses
-execution and replanning; cancel also cancels pending entries. A request already
-sent upstream may finish, and unknown
-outcomes remain visible with the same durable retry identity.
+confirmation. Non-interactive acceptance requires `--yes`. Disable pauses
+execution and replanning. Remove keeps that credit out of future adaptive plans
+unless you explicitly add it again. Cancel disables the schedule and cancels
+pending entries. A request already sent upstream may finish. Unknown outcomes
+remain visible with the same durable retry identity.
 
 Execution requires the CQ proxy runtime. Saved schedules survive restarts; fixed
 overdues catch up before expiry, while adaptive work first obtains a complete
 fresh plan. Unavailable forecast inputs block adaptive entries; explicit pins
-retain their fixed authority after fresh target validation. Status uses an
-authenticated live heartbeat rather than assuming an installed service is running.
+retain their fixed authority after fresh target validation. Status shows the
+executor heartbeat, upcoming resets, credit expiry, and redemption history.
+A routing refresh warning can accompany a successful redemption. Use `--json`
+for full credit IDs and machine-readable warning codes.
+
+The main quota report incorporates future resets from a running, enabled
+schedule. Codex and routing pool forecasts use scheduled redemption times and
+only include credits for their own accounts. The balance and natural reset
+column still show upstream quota. The pace marker targets the next replacement
+of the current allowance, and an observed redemption starts a new burn interval.
+Scheduled refills are conditional. The forecast can still show a gap before
+the next refill or unused quota when a later reset replaces the balance.
+
+Pace advice applies up to the next scheduled refill. **Burn harder** recommends
+a tested increase when it uses more of today's allowance without creating a
+gap before that refill. **Slow down** gives a percentage of the estimated
+current burn that reaches the refill without going dry. **Keep pace** covers
+cases where the model finds no benefit from the faster pace. The gauge can
+still show a later gap. Reassess pace once the next refill arrives.
 
 ### Gemini
 

@@ -3,6 +3,7 @@ package aggregate
 import (
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,12 +33,15 @@ const (
 
 	ResetRateEWMA         ResetRateSource = "ewma"
 	ResetRateCycleAverage ResetRateSource = "cycle_average"
+	ResetRateObserved     ResetRateSource = "observed"
 )
 
 type ResetScheduleInput struct {
-	Now         time.Time
-	Accounts    []ResetScheduleAccountInput
-	Constraints *ResetScheduleConstraints
+	Now          time.Time
+	Accounts     []ResetScheduleAccountInput
+	Constraints  *ResetScheduleConstraints
+	AdaptivePace bool
+	ContinuePace bool // Re-estimate a slowdown that has already begun.
 }
 
 type ResetScheduleCreditRef struct{ AccountKey, CreditID string }
@@ -104,6 +108,7 @@ type ResetSchedule struct {
 	Items          []ResetScheduleItem
 	Objective      ResetScheduleObjective
 	Blockers       []ResetScheduleBlocker
+	NextPace       *quota.ResetPacePhase
 }
 
 type ResetScheduleItem struct {
@@ -136,12 +141,13 @@ type simulationAccount struct {
 }
 
 type simulationCredit struct {
-	id         string
-	accountKey string
-	grantedAt  time.Time
-	expiresAt  *time.Time
-	supported  bool
-	fixedAt    *time.Time
+	id                string
+	accountKey        string
+	grantedAt         time.Time
+	expiresAt         *time.Time
+	supported         bool
+	fixedAt           *time.Time
+	expiryLeadChecked bool
 }
 
 type simulationState struct {
@@ -153,6 +159,10 @@ type simulationState struct {
 	confidence     ResetScheduleConfidence
 	objective      ResetScheduleObjective
 	nextAccountKey string
+	adaptivePace   bool
+	paceUntil      time.Time
+	pacePercent    int
+	paceAfterFirst *quota.ResetPacePhase
 }
 
 type simulationEventKind uint8
@@ -163,6 +173,8 @@ const (
 	simulationEventExhaustion
 	simulationEventConsumption
 	simulationEventReserveRelease
+	simulationEventExpiryLead
+	simulationEventPaceEnd
 )
 
 type simulationEvent struct {
@@ -177,7 +189,8 @@ func normaliseResetScheduleInput(input ResetScheduleInput) (simulationState, []R
 	state := simulationState{
 		now: input.Now.UTC(), accounts: make(map[string]simulationAccount),
 		credits: make(map[string]simulationCredit), totalDemand: make(map[quota.WindowName]float64),
-		confidence: ResetConfidenceHigh,
+		confidence:   ResetConfidenceHigh,
+		adaptivePace: input.AdaptivePace,
 	}
 	var blockers []ResetScheduleBlocker
 	allCredits := make([]ResetScheduleCreditInput, 0)
@@ -349,7 +362,7 @@ func resetWindowRate(window ResetScheduleWindowInput, now time.Time) (float64, b
 	if math.IsNaN(window.BurnPctPerS) || math.IsInf(window.BurnPctPerS, 0) || window.BurnPctPerS < 0 {
 		return 0, false
 	}
-	if window.RateSource == ResetRateEWMA && window.Samples >= 2 {
+	if window.RateSource == ResetRateObserved || (window.RateSource == ResetRateEWMA && window.Samples >= 2) {
 		return window.BurnPctPerS, finiteInRange(window.BurnPctPerS, 0, math.MaxFloat64)
 	}
 	used := 100 - window.RemainingPct
@@ -488,6 +501,9 @@ func nextSimulationEvent(state simulationState) (simulationEvent, bool) {
 			have = true
 		}
 	}
+	if !state.paceUntil.IsZero() {
+		consider(simulationEvent{at: state.paceUntil, kind: simulationEventPaceEnd})
+	}
 
 	accountKeys := sortedSimulationAccountKeys(state)
 	for _, key := range accountKeys {
@@ -510,7 +526,7 @@ func nextSimulationEvent(state simulationState) (simulationEvent, bool) {
 						multiplier += account.multiplier
 					}
 					if multiplier > 0 {
-						rate = state.totalDemand[name] / multiplier
+						rate = resetSimulationDemand(state, name) / multiplier
 					}
 				}
 				at := quota.ReserveReleaseAt(state.now, window.resetAt, window.remaining, window.reservePct, rate)
@@ -526,6 +542,13 @@ func nextSimulationEvent(state simulationState) (simulationEvent, bool) {
 		}
 		if credit.expiresAt != nil {
 			consider(simulationEvent{at: *credit.expiresAt, kind: simulationEventExpiry, accountKey: credit.accountKey, creditID: id})
+			if state.adaptivePace && credit.fixedAt == nil && !credit.expiryLeadChecked && credit.expiresAt.After(state.now) {
+				at := credit.expiresAt.Add(-5 * time.Minute)
+				if at.Before(state.now) {
+					at = state.now
+				}
+				consider(simulationEvent{at: at, kind: simulationEventExpiryLead, accountKey: credit.accountKey, creditID: id})
+			}
 		}
 	}
 
@@ -541,20 +564,25 @@ func nextSimulationEvent(state simulationState) (simulationEvent, bool) {
 				if !ok {
 					continue
 				}
-				rate := state.totalDemand[name] / activeMultiplier
-				if rate <= 0 {
-					continue
+				if at, ok := simulationExhaustionAt(state, name, window, activeMultiplier); ok {
+					consider(simulationEvent{at: at, kind: simulationEventExhaustion, accountKey: key, window: name})
 				}
-				seconds := max(0, window.remaining-simulationReserveFloor(window)) / rate
-				if !finiteInRange(seconds, 0, state.horizon.Sub(state.now).Seconds()) {
-					continue
-				}
-				at := state.now.Add(time.Duration(seconds * float64(time.Second)))
-				consider(simulationEvent{at: at, kind: simulationEventExhaustion, accountKey: key, window: name})
 			}
 		}
 	}
 	return next, have
+}
+
+func simulationExhaustionAt(state simulationState, name quota.WindowName, window simulationWindow, activeMultiplier float64) (time.Time, bool) {
+	rate := resetSimulationDemand(state, name) / activeMultiplier
+	if rate <= 0 {
+		return time.Time{}, false
+	}
+	seconds := max(0, window.remaining-simulationReserveFloor(window)) / rate
+	if !finiteInRange(seconds, 0, state.horizon.Sub(state.now).Seconds()) {
+		return time.Time{}, false
+	}
+	return state.now.Add(time.Duration(seconds * float64(time.Second))), true
 }
 
 func simulationEventLess(left, right simulationEvent) bool {
@@ -592,6 +620,9 @@ func advanceSimulationTo(state simulationState, target time.Time) simulationStat
 		state.now = target
 		return state
 	}
+	for _, name := range sharedResetWindows() {
+		state.objective.UnmetDemandPctSeconds += (state.totalDemand[name] - resetSimulationDemand(state, name)) * seconds
+	}
 	for key, account := range state.accounts {
 		if !simulationAccountAvailable(account) {
 			continue
@@ -601,7 +632,7 @@ func advanceSimulationTo(state simulationState, target time.Time) simulationStat
 			if !ok {
 				continue
 			}
-			window.remaining = max(simulationReserveFloor(window), clampPercentage(window.remaining-state.totalDemand[name]/activeMultiplier*seconds))
+			window.remaining = max(simulationReserveFloor(window), clampPercentage(window.remaining-resetSimulationDemand(state, name)/activeMultiplier*seconds))
 			account.windows[name] = window
 		}
 		state.accounts[key] = account
@@ -624,6 +655,10 @@ func processSimulationEvent(state simulationState, event simulationEvent) simula
 		state.accounts[event.accountKey] = account
 	case simulationEventExpiry:
 		delete(state.credits, event.creditID)
+	case simulationEventExpiryLead:
+		credit := state.credits[event.creditID]
+		credit.expiryLeadChecked = true
+		state.credits[event.creditID] = credit
 	case simulationEventExhaustion:
 		account, ok := state.accounts[event.accountKey]
 		if !ok {
@@ -642,6 +677,9 @@ func processSimulationEvent(state simulationState, event simulationEvent) simula
 		window.reserveReleased = true
 		account.windows[event.window] = window
 		state.accounts[event.accountKey] = account
+	case simulationEventPaceEnd:
+		state.paceUntil = time.Time{}
+		state.pacePercent = 0
 	}
 	return state
 }
@@ -665,6 +703,13 @@ func applySimulationCredit(state simulationState, accountKey, creditID string) (
 	state.accounts[accountKey] = account
 	delete(state.credits, creditID)
 	state.nextAccountKey = ""
+	if phase := state.paceAfterFirst; phase != nil {
+		if state.now.Before(phase.Until) {
+			state.paceUntil = phase.Until
+			state.pacePercent = phase.Percent
+		}
+		state.paceAfterFirst = nil
+	}
 	for _, amount := range restored {
 		state.objective.RestoredPct += amount
 	}
@@ -714,6 +759,7 @@ type resetSearchNode struct {
 	state        simulationState
 	consumptions []resetSearchConsumption
 	useful       map[string]bool
+	nextPace     *quota.ResetPacePhase
 }
 
 type resetCreditRecord struct {
@@ -763,13 +809,35 @@ func RecommendResetSchedule(input ResetScheduleInput) ResetSchedule {
 		result.Items = unfinishedResetScheduleItems(records, nil, nil, input.Now.UTC(), state.confidence)
 		return result
 	}
+	if input.AdaptivePace {
+		node, exact = smoothAdaptiveResetPace(state, node, exact, input.ContinuePace)
+	}
 	result.Exact = exact
 	result.Objective = node.state.objective
+	result.NextPace = node.nextPace
 	consumed := make(map[string]resetSearchConsumption, len(node.consumptions))
 	for _, consumption := range node.consumptions {
 		consumed[consumption.creditID] = consumption
 	}
 	result.Items = projectResetScheduleItems(records, consumed, node.useful, input.Now.UTC(), state.confidence)
+	if input.AdaptivePace {
+		for i := range result.Items {
+			item := &result.Items[i]
+			if item.UseAt.IsZero() {
+				continue
+			}
+			item.UseAt = item.UseBy
+			if consumed[item.CreditID].eventKind == simulationEventExpiryLead {
+				item.UseBy = *records[item.CreditID].credit.ExpiresAt
+			}
+			if item.UseAt.Equal(input.Now) {
+				item.Status = ResetDueNow
+			} else {
+				item.Status = ResetScheduled
+			}
+		}
+		sortResetScheduleItems(result.Items)
+	}
 	if input.Constraints != nil {
 		for _, pin := range input.Constraints.FixedUses {
 			for i := range result.Items {
@@ -822,7 +890,8 @@ func RecommendResetSchedule(input ResetScheduleInput) ResetSchedule {
 }
 
 func searchResetSchedule(initial simulationState) (resetSearchNode, bool, bool) {
-	seed := resetSearchNode{state: initial, useful: make(map[string]bool)}
+	seed := resetSearchNode{useful: make(map[string]bool)}
+	seed.recordStateAndPace(initial)
 	nodes := []resetSearchNode{seed}
 	if simulationActiveMultiplier(initial) == 0 && simulationHasDemand(initial) {
 		nodes = branchImmediateResetConsumptions(seed)
@@ -884,7 +953,7 @@ func branchImmediateResetConsumptions(node resetSearchNode) []resetSearchNode {
 		if !applied {
 			continue
 		}
-		branch.state = state
+		branch.recordStateAndPace(state)
 		branch.consumptions = append(branch.consumptions, resetSearchConsumption{
 			accountKey: credit.accountKey, creditID: credit.id, useBy: state.now,
 			eventKind: simulationEventConsumption, restored: restored, avoidedGap: avoidedGap,
@@ -902,9 +971,12 @@ func expandResetSearchEvent(node resetSearchNode, event simulationEvent) []reset
 		if !applied {
 			return nil
 		}
-		advanced.state = state
+		advanced.recordStateAndPace(state)
 		advanced.consumptions = append(advanced.consumptions, resetSearchConsumption{accountKey: event.accountKey, creditID: event.creditID, useBy: event.at, eventKind: event.kind, restored: restored})
 		return []resetSearchNode{advanced}
+	}
+	if node.state.adaptivePace {
+		advanced.state = finishAdaptiveExhaustions(node.state, advanced.state)
 	}
 	useful := usefulResetCredits(advanced.state)
 	for _, credit := range useful {
@@ -918,13 +990,35 @@ func expandResetSearchEvent(node resetSearchNode, event simulationEvent) []reset
 		}
 	}
 	wait.state = processSimulationEvent(wait.state, event)
+	poolDry := simulationActiveMultiplier(wait.state) == 0
+	gapStarts := poolDry && (event.kind == simulationEventExhaustion ||
+		(node.state.adaptivePace && simulationActiveMultiplier(node.state) > 0))
+	if node.state.adaptivePace {
+		switch {
+		case event.kind == simulationEventExpiryLead:
+			var expiring []simulationCredit
+			for _, credit := range useful {
+				if credit.id == event.creditID {
+					expiring = append(expiring, credit)
+					break
+				}
+			}
+			useful = expiring
+		case !poolDry:
+			useful = nil
+		}
+		if len(useful) == 0 && gapStarts {
+			if paced, ok := bridgeAdaptiveReset(node, wait.state); ok {
+				return []resetSearchNode{paced}
+			}
+		}
+	}
 	avoidedGap := int64(0)
-	if simulationActiveMultiplier(wait.state) == 0 && simulationHasDemand(wait.state) {
+	if poolDry && simulationHasDemand(wait.state) {
 		avoidedGap = projectedSimulationGap(wait.state)
 	}
 	branches := make([]resetSearchNode, 0, len(useful)+1)
-	avoidableGap := event.kind == simulationEventExhaustion && len(useful) > 0 &&
-		simulationActiveMultiplier(wait.state) == 0 && simulationHasDemand(wait.state)
+	avoidableGap := gapStarts && len(useful) > 0 && simulationHasDemand(wait.state)
 	if !avoidableGap {
 		branches = append(branches, wait)
 	}
@@ -934,7 +1028,7 @@ func expandResetSearchEvent(node resetSearchNode, event simulationEvent) []reset
 		if !applied {
 			continue
 		}
-		branch.state = state
+		branch.recordStateAndPace(state)
 		branch.consumptions = append(branch.consumptions, resetSearchConsumption{
 			accountKey: credit.accountKey, creditID: credit.id, useBy: event.at,
 			eventKind: event.kind, restored: restored, avoidedGap: avoidedGap,
@@ -960,11 +1054,28 @@ func projectedSimulationGap(state simulationState) int64 {
 
 func usefulResetCredits(state simulationState) []simulationCredit {
 	credits := make([]simulationCredit, 0)
+	firstByAccount := make(map[string]int)
 	for _, id := range sortedSimulationCreditIDs(state) {
 		credit := state.credits[id]
-		if credit.fixedAt == nil && resetCreditUseful(state, credit) {
-			credits = append(credits, credit)
+		if credit.fixedAt != nil || !resetCreditUseful(state, credit) {
+			continue
 		}
+		if state.adaptivePace {
+			if credit.expiresAt != nil && !credit.expiresAt.After(state.now) {
+				continue
+			}
+			// Flexible credits on one account restore the same quota.
+			// Spending the earliest expiry first preserves later options.
+			if index, found := firstByAccount[credit.accountKey]; found {
+				previous := credits[index]
+				if credit.expiresAt != nil && (previous.expiresAt == nil || credit.expiresAt.Before(*previous.expiresAt)) {
+					credits[index] = credit
+				}
+				continue
+			}
+			firstByAccount[credit.accountKey] = len(credits)
+		}
+		credits = append(credits, credit)
 	}
 	return credits
 }
@@ -979,6 +1090,12 @@ func resetCreditUseful(state simulationState, credit simulationCredit) bool {
 	account, ok := state.accounts[credit.accountKey]
 	if !ok {
 		return false
+	}
+	if state.adaptivePace {
+		if weekly, ok := account.windows[quota.Window7Day]; ok {
+			return weekly.remaining == 0
+		}
+		return account.windows[quota.Window5Hour].remaining == 0
 	}
 	for _, name := range sharedResetWindows() {
 		if window, ok := account.windows[name]; ok && 100-window.remaining >= 1 {
@@ -1023,7 +1140,8 @@ func pruneResetSearchNodes(nodes []resetSearchNode, width int) ([]resetSearchNod
 
 func dominatesResetSearchNode(left, right resetSearchNode) bool {
 	if !left.state.now.Equal(right.state.now) || resetCreditFingerprint(left.state) != resetCreditFingerprint(right.state) ||
-		resetUsefulFingerprint(left.useful) != resetUsefulFingerprint(right.useful) || left.state.nextAccountKey != right.state.nextAccountKey {
+		resetUsefulFingerprint(left.useful) != resetUsefulFingerprint(right.useful) || left.state.nextAccountKey != right.state.nextAccountKey ||
+		!left.state.paceUntil.Equal(right.state.paceUntil) || left.state.pacePercent != right.state.pacePercent {
 		return false
 	}
 	if betterResetObjective(right.state.objective, left.state.objective) {
@@ -1047,7 +1165,15 @@ func dominatesResetSearchNode(left, right resetSearchNode) bool {
 }
 
 func resetCreditFingerprint(state simulationState) string {
-	return strings.Join(sortedSimulationCreditIDs(state), "\x00")
+	ids := sortedSimulationCreditIDs(state)
+	if state.adaptivePace {
+		for i, id := range ids {
+			if state.credits[id].expiryLeadChecked {
+				ids[i] += "\x01"
+			}
+		}
+	}
+	return strings.Join(ids, "\x00")
 }
 
 func resetUsefulFingerprint(useful map[string]bool) string {
@@ -1120,6 +1246,9 @@ func resetConsumptionTimes(consumptions []resetSearchConsumption) []time.Time {
 
 func resetSearchFingerprint(node resetSearchNode) string {
 	parts := []string{node.state.now.Format(time.RFC3339Nano), resetCreditFingerprint(node.state), node.state.nextAccountKey}
+	if !node.state.paceUntil.IsZero() {
+		parts = append(parts, node.state.paceUntil.Format(time.RFC3339Nano), strconv.Itoa(node.state.pacePercent))
+	}
 	for _, consumption := range node.consumptions {
 		parts = append(parts, consumption.accountKey, consumption.creditID, consumption.useBy.Format(time.RFC3339Nano))
 	}
@@ -1215,14 +1344,15 @@ func unfinishedResetScheduleItems(
 func resetConsumptionReasons(record resetCreditRecord, consumption resetSearchConsumption, confidence ResetScheduleConfidence) []ResetScheduleReason {
 	reasons := make([]ResetScheduleReason, 0, 3)
 	switch consumption.eventKind {
-	case simulationEventExpiry:
+	case simulationEventExpiry, simulationEventExpiryLead:
 		reasons = append(reasons, ResetReasonExpiryPressure)
 	case simulationEventNaturalReset:
 		reasons = append(reasons, ResetReasonNaturalReset)
 	case simulationEventExhaustion, simulationEventConsumption:
 		reasons = append(reasons, ResetReasonGapAvoidance)
 	}
-	if record.credit.ExpiresAt != nil && consumption.useBy.Equal(record.credit.ExpiresAt.UTC()) && consumption.eventKind != simulationEventExpiry {
+	if record.credit.ExpiresAt != nil && consumption.useBy.Equal(record.credit.ExpiresAt.UTC()) &&
+		consumption.eventKind != simulationEventExpiry && consumption.eventKind != simulationEventExpiryLead {
 		reasons = append(reasons, ResetReasonExpiryPressure)
 	}
 	reasons = append(reasons, ResetReasonWasteReduction)

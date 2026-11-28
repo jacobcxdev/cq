@@ -154,9 +154,23 @@ func (a *CodexResetApp) recommend(ctx context.Context, updateHistory bool) (aggr
 
 func (a *CodexResetApp) recommendConstrained(ctx context.Context, updateHistory bool, constraints *aggregate.ResetScheduleConstraints) (aggregate.ResetSchedule, error) {
 	now := a.now()
+	inputs, err := a.readResetRecommendation(ctx, updateHistory, now, nil)
+	if err != nil {
+		return aggregate.ResetSchedule{GeneratedAt: now}, err
+	}
+	return inputs.recommend(constraints)
+}
+
+type codexResetRecommendationInputs struct {
+	portfolio aggregate.ResetScheduleInput
+	reserve   quota.ReservePolicy
+	blockers  []aggregate.ResetScheduleBlocker
+}
+
+func (a *CodexResetApp) readResetRecommendation(ctx context.Context, updateHistory bool, now time.Time, adaptive *codexprov.ResetAutomationState) (codexResetRecommendationInputs, error) {
 	snapshot, err := a.snapshot(ctx)
 	if err != nil {
-		return aggregate.ResetSchedule{GeneratedAt: now, Complete: false, Exact: false}, resetAppError("credential_unavailable", err)
+		return codexResetRecommendationInputs{}, resetAppError("credential_unavailable", err)
 	}
 	usage, usageErr, creditReads := a.readRecommendationInputs(ctx, snapshot.Accounts, now)
 
@@ -165,7 +179,18 @@ func (a *CodexResetApp) recommendConstrained(ctx context.Context, updateHistory 
 		_, estimates, _ = callResetHistory(ctx, a.History, usage, now)
 	}
 
-	input := aggregate.ResetScheduleInput{Now: now, Constraints: constraints}
+	input := aggregate.ResetScheduleInput{Now: now, AdaptivePace: adaptive != nil}
+	redeemed := make(map[codexprov.AccountKey]int64)
+	if adaptive != nil {
+		if phase := adaptive.NextPace; phase != nil {
+			input.ContinuePace = !now.Before(phase.From) && now.Before(phase.Until)
+		}
+		for _, entry := range adaptive.Entries {
+			if entry.State == codexprov.ResetAutomationCompleted && entry.Outcome == codexprov.ConsumeReset && !entry.UpdatedAt.After(now) {
+				redeemed[entry.AccountKey] = max(redeemed[entry.AccountKey], entry.UpdatedAt.Unix())
+			}
+		}
+	}
 	blockers := make([]aggregate.ResetScheduleBlocker, 0)
 	if usageErr != nil {
 		blockers = append(blockers, aggregate.ResetScheduleBlocker{Code: "usage_unavailable"})
@@ -187,6 +212,25 @@ func (a *CodexResetApp) recommendConstrained(ctx context.Context, updateHistory 
 			blockers = append(blockers, resetScheduleBlocker(account, "usage_windows_invalid"))
 			continue
 		}
+		if adaptive != nil {
+			forecast := quota.BankedResetForecast{LastRedeemedAtUnix: redeemed[account.AccountKey]}
+			reportKey := usageResult.AccountID
+			if reportKey == "" {
+				reportKey = usageResult.Email
+			}
+			for name, mapped := range accountInput.Windows {
+				window := usageResult.Windows[name]
+				if estimate, found := estimates.Get(history.BurnRateKey{ProviderID: string(provider.Codex), AccountKey: reportKey, Window: string(name)}); found {
+					window.RecentBurnRate = estimate.RecentRatePctPerS
+				}
+				start, _ := forecast.WindowBounds(name, window, now.Unix())
+				if rate := window.BurnRate(window.ResetAtUnix-start, now.Unix()); rate > 0 {
+					mapped.BurnPctPerS = rate
+					mapped.RateSource = aggregate.ResetRateObserved
+					accountInput.Windows[name] = mapped
+				}
+			}
+		}
 		input.Accounts = append(input.Accounts, accountInput)
 	}
 
@@ -197,9 +241,14 @@ func (a *CodexResetApp) recommendConstrained(ctx context.Context, updateHistory 
 			blockers = append(blockers, aggregate.ResetScheduleBlocker{Code: "reserve_unavailable"})
 		}
 	}
-	schedule := recommendResetReserve(input, policy)
-	if len(blockers) > 0 || !schedule.Complete {
-		schedule.Blockers = append(schedule.Blockers, blockers...)
+	return codexResetRecommendationInputs{portfolio: input, reserve: policy, blockers: blockers}, nil
+}
+
+func (inputs codexResetRecommendationInputs) recommend(constraints *aggregate.ResetScheduleConstraints) (aggregate.ResetSchedule, error) {
+	inputs.portfolio.Constraints = constraints
+	schedule := recommendResetReserve(inputs.portfolio, inputs.reserve)
+	if len(inputs.blockers) > 0 || !schedule.Complete {
+		schedule.Blockers = append(schedule.Blockers, inputs.blockers...)
 		sortResetScheduleBlockers(schedule.Blockers)
 		schedule.Complete = false
 		schedule.Exact = false

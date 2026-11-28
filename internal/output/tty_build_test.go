@@ -15,6 +15,54 @@ import (
 	"github.com/muesli/termenv"
 )
 
+func TestBuildTTYModelShowsScheduledRefillsWithObservedBalanceAndPace(t *testing.T) {
+	now := time.Date(2026, 11, 28, 4, 0, 0, 0, time.UTC)
+	at := now.Add(20 * time.Hour).Unix()
+	report := app.Report{
+		Providers: []app.ProviderReport{{
+			ID: provider.Codex,
+			Results: []quota.Result{{
+				Status: quota.StatusOK,
+				Windows: map[quota.WindowName]quota.Window{quota.Window7Day: {
+					RemainingPct: 60, ResetAtUnix: now.Add(5 * 24 * time.Hour).Unix(),
+				}},
+				BankedResets: &quota.BankedResetForecast{
+					LastRedeemedAtUnix: now.Add(-6 * time.Hour).Unix(),
+					ScheduledAtUnix:    []int64{at, now.Add(46 * time.Hour).Unix()},
+				},
+			}},
+			Aggregate: &app.AggregateReport{ProviderID: provider.Codex, Windows: map[quota.WindowName]quota.AggregateResult{
+				quota.Window7Day: {RemainingPct: 80, GaugePos: 4, ScheduledResetCount: 2, NextScheduledResetAtUnix: at},
+			}},
+		}},
+	}
+	model := BuildTTYModel(report, now)
+	row := model.Sections[0].WindowRows[0]
+	if !strings.Contains(stripANSI(row.Pct), "60%") || !strings.Contains(stripANSI(row.Reset), "5d") ||
+		!strings.Contains(stripANSI(row.PaceDiff), "-17") || !strings.Contains(stripANSI(row.Burndown), "9h") {
+		t.Fatalf("wrong observed or forecast fields: %+v", row)
+	}
+	if stripANSI(row.Note) != "Scheduled reset in 20h, then 1d 2h later" ||
+		stripANSI(model.Sections[0].AggRows[0].Note) != "Forecast includes 2 scheduled resets · next in 20h · no gap projected" {
+		t.Fatalf("missing forecast explanation: %+v", model.Sections[0])
+	}
+}
+
+func TestBuildAggRowsShowsAdviceThroughNextRefill(t *testing.T) {
+	target, leftover := 105, 9
+	rows := buildAggRows(map[quota.WindowName]quota.AggregateResult{
+		quota.Window7Day: {
+			RemainingPct: 15, GaugePos: 0, GapStartS: 24 * 3600, GapDurationS: 3600,
+			ScheduledResetCount: 2, NextScheduledResetAtUnix: 4 * 3600,
+			PaceAdvice: quota.PaceBurnHarder, PaceTargetPct: &target, RemainingAtNextResetPct: &leftover,
+		},
+	}, 0)
+	if note := stripANSI(rows[0].Note); note != "Burn harder to 105% of current burn until refill in 4h · 9% otherwise unused" ||
+		!strings.Contains(stripANSI(rows[0].Burndown), "1d") {
+		t.Fatalf("missing pre-refill advice or separate later gap: %+v", rows[0])
+	}
+}
+
 func TestBuildTTYModelCodexBusinessPremium(t *testing.T) {
 	result := codexprov.ParseUsageObservation([]byte(`{
 		"plan_type":"self_serve_business_prolite",
@@ -398,7 +446,7 @@ func TestBuildAggRows_UnderburnWithImminentOverrideKeepsUnderburn(t *testing.T) 
 			WastedPct:      42,
 			WasteDeadlineS: 7200, // 2h
 		},
-	})
+	}, 0)
 
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 aggregate row, got %d", len(rows))
@@ -437,7 +485,7 @@ func TestBuildAggRows_OverburnWithoutGapUsesEmDash(t *testing.T) {
 			ExpectedPct:  80,
 			GaugePos:     0,
 		},
-	})
+	}, 0)
 
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 aggregate row, got %d", len(rows))
@@ -469,7 +517,7 @@ func TestBuildAggRows_OverburnImmediateGapRendersNowAndDuration(t *testing.T) {
 			GapStartS:    0,
 			GapDurationS: 3600,
 		},
-	})
+	}, 0)
 
 	if len(rows) != 1 {
 		t.Fatalf("expected 1 aggregate row, got %d", len(rows))

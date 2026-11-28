@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 func TestResetAutomationStoreDefaultsAndRestart(t *testing.T) {
@@ -67,6 +68,22 @@ func TestResetAutomationStoreRejectsCorruptionAndInvalidMutations(t *testing.T) 
 	state, err := store.Load()
 	if err != nil || state.Revision != 0 || state.Enabled {
 		t.Fatalf("invalid mutation persisted: %+v, %v", state, err)
+	}
+}
+
+func TestResetAutomationStoreRejectsInvalidPacePhase(t *testing.T) {
+	store := NewResetAutomationStore(fsutil.OSFileSystem{}, filepath.Join(t.TempDir(), "state", "schedule.json"))
+	now := time.Date(2026, 11, 28, 4, 0, 0, 0, time.UTC)
+	_, err := store.Update(context.Background(), func(state *ResetAutomationState) error {
+		state.NextPace = &quota.ResetPacePhase{From: now, Until: now.Add(time.Hour), Percent: -1}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("stored negative pace target")
+	}
+	state, err := store.Load()
+	if err != nil || state.Revision != 0 || state.NextPace != nil {
+		t.Fatalf("invalid pace changed the saved schedule: %+v, %v", state, err)
 	}
 }
 

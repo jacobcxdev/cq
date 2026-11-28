@@ -168,8 +168,9 @@ Supply a unique email, CQ alias, or opaque AccountKey to inspect one account.
 Recommend timing across the whole visible portfolio. Without --schedule this
 command stays advisory-only and never consumes a credit.
 Accept --schedule to save automated execution after default-No confirmation.
-New schedules use fixed dates; --mode adaptive replans accepted credits as usage
-changes. --replace replaces pending entries and preserves running outcomes.
+New schedules use fixed dates. Enabled adaptive mode replans as usage changes,
+including newly available credits. --replace replaces pending entries and
+preserves running outcomes.
 Execution requires the CQ proxy runtime. Due entries may execute immediately.
 `,
 	"codex resets schedule": `Usage: cq codex resets schedule [command]
@@ -177,7 +178,7 @@ Execution requires the CQ proxy runtime. Due entries may execute immediately.
 Show schedule and fresh executor status, or manage automated resets.
 
 Commands:
-  schedule status            Show entries and executor availability
+  schedule status            Show upcoming resets, expiry, executor and history
   schedule add ACCOUNT --at RFC3339 [--credit ID] [--yes]
   schedule set ENTRY (--at RFC3339 | --follow-mode) [--yes]
   schedule mode fixed|adaptive [--yes]
@@ -186,16 +187,17 @@ Commands:
   schedule disable           Pause execution and adaptive replanning
   schedule cancel            Cancel all pending entries and disable execution
 
-Manual additions create a disabled fixed schedule. --at pins a date even in
-adaptive mode. --follow-mode removes that pin. Active edits require default-No
-confirmation. Fixed dates survive usage changes; adaptive dates can move earlier
-or later. Only accepted account/credit pairs can execute. CQ proxy must run;
-status reports a fresh authenticated executor heartbeat. Running or unresolved
-requests remain visible after cancellation; an upstream request cannot be undone.
+Fixed keeps the dates you set. Enabled adaptive mode checks for newly available
+credits and automatically schedules eligible credits as usage changes. --at pins
+a date. --follow-mode lets the date move. Manual additions create a disabled
+fixed schedule. Active edits require default-No confirmation. CQ proxy must run.
+Running and unresolved requests stay visible after cancellation.
 `,
 	"codex resets schedule status": `Usage: cq codex resets schedule [status]
 
-Show saved entries, mode, enabled state and fresh executor availability.
+Show upcoming resets in planned order, when each credit expires, and recent
+outcomes. Executor status comes from the running proxy. Use --json for full
+credit IDs, timestamps and machine-readable diagnostics.
 `,
 	"codex resets schedule add": `Usage: cq codex resets schedule add ACCOUNT --at RFC3339 [--credit ID] [--yes]
 
@@ -209,18 +211,20 @@ confirmation; changing an already running or unresolved entry is refused.
 `,
 	"codex resets schedule mode": `Usage: cq codex resets schedule mode fixed|adaptive [--yes]
 
-Fixed keeps accepted dates. Adaptive replans only accepted pending credits and
-respects manual pins. Switching to fixed freezes current actionable dates;
-entries without one need --at. Active mode changes require confirmation.
+Fixed keeps accepted dates. When enabled, adaptive mode enrols eligible current
+and future credits and respects manual pins. Switching to fixed freezes current
+planned dates. Entries without a date need --at. Active changes need confirmation.
 `,
 	"codex resets schedule remove": `Usage: cq codex resets schedule remove ENTRY
 
-Cancel one pending reset. An already running or unresolved request stays visible.
+Cancel one pending reset. Adaptive mode leaves the removed credit out of future
+plans. An already running or unresolved request stays visible.
 `,
 	"codex resets schedule enable": `Usage: cq codex resets schedule enable [--yes]
 
-Enable automatic execution after default-No confirmation. Overdue fixed dates
-may execute immediately if their exact credit remains eligible.
+Enable automatic execution after default-No confirmation. In adaptive mode,
+this authorises automatic enrolment and redemption of eligible current and future
+credits. Due entries may execute immediately.
 `,
 	"codex resets schedule disable": `Usage: cq codex resets schedule disable
 

@@ -257,7 +257,7 @@ func TestRunCodexResetsListRendersTTYAndJSON(t *testing.T) {
 	if err := runCodexResetsList(context.Background(), CodexResetsListCmd{}, false, fixture.deps); err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"user@example.com", "credit-1", "codex_rate_limits", "available", "Banked reset", "Restores shared Codex windows"} {
+	for _, text := range []string{"user@example.com", "credit-1", "Expires", "available", "Banked reset"} {
 		if !strings.Contains(fixture.out.String(), text) {
 			t.Fatalf("TTY output missing %q:\n%s", text, fixture.out.String())
 		}
@@ -271,7 +271,8 @@ func TestRunCodexResetsListRendersTTYAndJSON(t *testing.T) {
 	var decoded struct {
 		Accounts []app.CodexResetAccountCredits `json:"accounts"`
 	}
-	if err := json.Unmarshal(fixture.out.Bytes(), &decoded); err != nil || len(decoded.Accounts) != 1 {
+	if err := json.Unmarshal(fixture.out.Bytes(), &decoded); err != nil || len(decoded.Accounts) != 1 ||
+		len(decoded.Accounts[0].Credits) != 1 || decoded.Accounts[0].Credits[0].Description != "Restores shared Codex windows" {
 		t.Fatalf("JSON = %s, %v", fixture.out.String(), err)
 	}
 }
