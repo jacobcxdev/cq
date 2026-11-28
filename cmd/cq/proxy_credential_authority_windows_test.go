@@ -4,12 +4,69 @@ package main
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codexprov "github.com/jacobcxdev/cq/internal/provider/codex"
 )
+
+func TestWindowsStandaloneProxyWaitsForReservedCredentialPipe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "credential.sock")
+	reserved := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	releaseOwner := func() {
+		if !released {
+			close(release)
+			released = true
+		}
+	}
+	t.Cleanup(releaseOwner)
+	stopRefresh := errors.New("fixture refresh stopped during initialisation")
+	ownerDone := make(chan error, 1)
+	go func() {
+		control, err := codexprov.OpenCredentialControlPrepared(context.Background(), path, &codexprov.CredentialCoordinator{},
+			func(context.Context, *codexprov.CredentialCoordinator, codexprov.CredentialOwnerCapability) error {
+				close(reserved)
+				<-release
+				return stopRefresh
+			})
+		if control != nil {
+			_ = control.Close()
+		}
+		ownerDone <- err
+	}()
+	select {
+	case <-reserved:
+	case err := <-ownerDone:
+		t.Fatalf("refresh did not reserve the pipe: %v", err)
+	}
+
+	openCalls := 0
+	control, err := openProxyCredentialAuthority(false, 19280, 19280, func(ctx context.Context) (*codexprov.CredentialControl, error) {
+		openCalls++
+		control, err := codexprov.OpenCredentialControlPrepared(ctx, path, &codexprov.CredentialCoordinator{}, nil)
+		if openCalls == 1 {
+			if !errors.Is(err, codexprov.ErrCredentialOwnerStale) {
+				t.Errorf("open against reserved pipe = %v, want transient owner error", err)
+			}
+			releaseOwner()
+			if ownerErr := <-ownerDone; !errors.Is(ownerErr, stopRefresh) {
+				t.Errorf("fixture refresh exit = %v", ownerErr)
+			}
+		}
+		return control, err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	if !control.Owner() || openCalls != 2 {
+		t.Fatalf("proxy owner/open calls = %t/%d, want true/2", control.Owner(), openCalls)
+	}
+}
 
 func TestWindowsStandaloneProxyAcquiresCredentialAuthorityAfterRefresh(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credential.sock")
@@ -23,7 +80,7 @@ func TestWindowsStandaloneProxyAcquiresCredentialAuthorityAfterRefresh(t *testin
 	}
 
 	openCalls := 0
-	control, err := openProxyCredentialAuthority(false, 0, func(ctx context.Context) (*codexprov.CredentialControl, error) {
+	control, err := openProxyCredentialAuthority(false, 19280, 0, func(ctx context.Context) (*codexprov.CredentialControl, error) {
 		store := &codexprov.ManagedStore{FS: fsutil.NewMemFSWithHome(filepath.Dir(path))}
 		control, err := codexprov.OpenCredentialControlPrepared(ctx, path, &codexprov.CredentialCoordinator{Store: store}, nil)
 		if err != nil {
@@ -55,7 +112,7 @@ func TestWindowsStandaloneProxyAcquiresCredentialAuthorityAfterRefresh(t *testin
 func TestWindowsStandaloneProxyAcquiresUnownedCredentialAuthorityOnFirstOpen(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "credential.sock")
 	openCalls := 0
-	control, err := openProxyCredentialAuthority(false, 0, func(ctx context.Context) (*codexprov.CredentialControl, error) {
+	control, err := openProxyCredentialAuthority(false, 19280, 0, func(ctx context.Context) (*codexprov.CredentialControl, error) {
 		openCalls++
 		return codexprov.OpenCredentialControlPrepared(ctx, path, &codexprov.CredentialCoordinator{}, nil)
 	})
@@ -75,7 +132,7 @@ func TestWindowsAlternatePortProxyCanUseExistingCredentialAuthority(t *testing.T
 		t.Fatal(err)
 	}
 	defer owner.Close()
-	control, err := openProxyCredentialAuthority(false, 19281, func(ctx context.Context) (*codexprov.CredentialControl, error) {
+	control, err := openProxyCredentialAuthority(false, 19280, 19281, func(ctx context.Context) (*codexprov.CredentialControl, error) {
 		return codexprov.OpenCredentialControlPrepared(ctx, path, &codexprov.CredentialCoordinator{}, nil)
 	})
 	if err != nil {

@@ -859,6 +859,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	if err != nil {
 		return err
 	}
+	configuredPort := cfg.Port
 	if opts.Port != 0 {
 		cfg.Port = opts.Port
 	}
@@ -949,7 +950,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 			codexprov.CredentialEndpointRecoveryRecorderFunc(codexCanaryEndpointRecoveryRecorder(activeCanary)),
 		)
 	}
-	credentialControl, err := openProxyCredentialAuthority(workerRole != nil, opts.Port, openCredentialControl)
+	credentialControl, err := openProxyCredentialAuthority(workerRole != nil, configuredPort, opts.Port, openCredentialControl)
 	if err != nil {
 		return fmt.Errorf("Codex credential coordinator: %w", err)
 	}

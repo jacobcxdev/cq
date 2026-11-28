@@ -18,8 +18,8 @@ type proxyCredentialAuthorityOperations struct {
 	wait  func(context.Context, time.Duration) error
 }
 
-func openProxyCredentialAuthority(worker bool, portOverride int, open func(context.Context) (*codexprov.CredentialControl, error)) (*codexprov.CredentialControl, error) {
-	if !worker && (runtime.GOOS != "windows" || portOverride != 0) {
+func openProxyCredentialAuthority(worker bool, configuredPort, portOverride int, open func(context.Context) (*codexprov.CredentialControl, error)) (*codexprov.CredentialControl, error) {
+	if !worker && (runtime.GOOS != "windows" || (portOverride != 0 && portOverride != configuredPort)) {
 		return open(context.Background())
 	}
 	// At Windows logon Refresh can acquire the credential pipe first. The
@@ -43,23 +43,26 @@ func acquireProxyWorkerCredentialAuthority(ctx context.Context, operations proxy
 			return nil, errors.Join(codexprov.ErrCredentialAuthorityUnavailable, err)
 		}
 		control, err := operations.open(ctx)
-		if err != nil {
-			return nil, errors.Join(codexprov.ErrCredentialAuthorityUnavailable, err)
-		}
-		if control == nil {
+		switch {
+		case err != nil:
+			if runtime.GOOS != "windows" || !errors.Is(err, codexprov.ErrCredentialOwnerStale) {
+				return nil, errors.Join(codexprov.ErrCredentialAuthorityUnavailable, err)
+			}
+		case control == nil:
 			return nil, codexprov.ErrCredentialAuthorityUnavailable
+		default:
+			if err := ctx.Err(); err != nil {
+				return nil, errors.Join(codexprov.ErrCredentialAuthorityUnavailable, err, operations.close(control))
+			}
+			if operations.owner(control) {
+				return control, nil
+			}
+			if err := operations.close(control); err != nil {
+				return nil, errors.Join(codexprov.ErrCredentialAuthorityUnavailable, err)
+			}
 		}
-		if err := ctx.Err(); err != nil {
-			return nil, errors.Join(codexprov.ErrCredentialAuthorityUnavailable, err, operations.close(control))
-		}
-		if operations.owner(control) {
-			return control, nil
-		}
-		if err := operations.close(control); err != nil {
-			return nil, errors.Join(codexprov.ErrCredentialAuthorityUnavailable, err)
-		}
-		if err := operations.wait(ctx, proxyCredentialAuthorityRetryInterval); err != nil {
-			return nil, errors.Join(codexprov.ErrCredentialAuthorityUnavailable, err)
+		if waitErr := operations.wait(ctx, proxyCredentialAuthorityRetryInterval); waitErr != nil {
+			return nil, errors.Join(codexprov.ErrCredentialAuthorityUnavailable, err, waitErr)
 		}
 	}
 }

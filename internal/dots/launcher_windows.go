@@ -8,6 +8,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -73,9 +75,18 @@ func installWindowsDotsLauncherAt(path, root, app, executable string) (string, e
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	if err := windowsPrivateDirectory(root); err != nil {
+	stageFS, err := windowsStateFS(root)
+	if err != nil {
 		return "", err
 	}
+	if err := fsutil.ValidateSecureDirectory(stageFS, root); err != nil {
+		return "", err
+	}
+	stageDirectory, err := stageFS.OpenRetainedReadDirectory(root)
+	if err != nil {
+		return "", err
+	}
+	defer stageDirectory.Close()
 	icon, err := installWindowsDotsIcon(root, app)
 	if err != nil {
 		return "", err
@@ -84,7 +95,8 @@ func installWindowsDotsLauncherAt(path, root, app, executable string) (string, e
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", err
 	}
-	stage := filepath.Join(root, ".cq-dots-shortcut-"+hex.EncodeToString(nonce[:])+".lnk")
+	stageName := ".cq-dots-shortcut-" + hex.EncodeToString(nonce[:]) + ".lnk"
+	stage := filepath.Join(root, stageName)
 	repair := "0"
 	if originalInfo != nil {
 		file, err := os.OpenFile(stage, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -136,14 +148,24 @@ func installWindowsDotsLauncherAt(path, root, app, executable string) (string, e
 		}
 		return "", errors.New("Windows Dots Start Menu shortcut could not be saved")
 	}
-	if err := validateWindowsDotsLauncherFile(fsys, stage); err != nil {
+	// The elevated shell can stage a link owned by Administrators. Retain the
+	// private directory and accept only a mutation-safe, single-link file from it.
+	staged, err := stageDirectory.OpenNoFollow(stageName)
+	if err != nil {
+		return "", fmt.Errorf("open staged Windows Dots shortcut: %w", err)
+	}
+	if err := staged.Close(); err != nil {
 		return "", err
 	}
 	if err := setWindowsDotsShortcutAppID(stage); err != nil {
 		return "", err
 	}
-	data, _, err := readWindowsDotsShortcut(fsys, stage)
+	staged, err = stageDirectory.OpenNoFollow(stageName)
 	if err != nil {
+		return "", fmt.Errorf("open staged Windows Dots shortcut after updating its taskbar identity: %w", err)
+	}
+	data, readErr := readWindowsDotsShortcutData(staged)
+	if err := errors.Join(readErr, staged.Close()); err != nil {
 		return "", err
 	}
 	directoryPath := filepath.Dir(path)
@@ -187,11 +209,17 @@ func readWindowsDotsShortcut(fsys fsutil.OSFileSystem, path string) ([]byte, os.
 	if err := fsutil.ValidateExternalCacheFile(fsys, info); err != nil {
 		return nil, nil, err
 	}
-	data, err := httputil.ReadBody(file)
-	if err != nil || len(data) < 1 || len(data) > 64<<10 {
-		return nil, nil, errors.New("Windows Dots shortcut could not be read within its size limit")
+	data, err := readWindowsDotsShortcutData(file)
+	return data, info, err
+}
+
+func readWindowsDotsShortcutData(file io.Reader) ([]byte, error) {
+	const maxShortcutBytes = 64 << 10
+	data, err := httputil.ReadBody(io.LimitReader(file, maxShortcutBytes+1))
+	if err != nil || len(data) < 1 || len(data) > maxShortcutBytes {
+		return nil, errors.New("Windows Dots shortcut could not be read within its size limit")
 	}
-	return data, info, nil
+	return data, nil
 }
 
 func installWindowsDotsIcon(root, app string) (string, error) {

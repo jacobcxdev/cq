@@ -32,6 +32,7 @@ const (
 	windowsTaskStopInterval   = 100 * time.Millisecond
 	windowsProxyRestartBudget = 30 * time.Second
 	windowsProxyStopBudget    = windowsProxyRestartBudget / 2
+	windowsProxyCallBudget    = 3 * time.Second
 	windowsProxyRestartPoll   = 500 * time.Millisecond
 	windowsProxyLaunchLimit   = 3
 )
@@ -303,34 +304,45 @@ func (platform *windowsTaskServicePlatform) RestartProxy(ctx context.Context) er
 	// Once stopping starts, finish restoring service even if the caller leaves.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), windowsProxyRestartBudget)
 	defer cancel()
+	deadline, _ := ctx.Deadline()
+	// Leave time to read Scheduler state even when the last Run times out.
+	launchCtx, cancelLaunch := context.WithDeadline(ctx, deadline.Add(-windowsProxyCallBudget-windowsProxyRestartPoll))
+	defer cancelLaunch()
 	stopCtx, cancelStop := context.WithTimeout(ctx, windowsProxyStopBudget)
-	stopErr := platform.endAndWait(stopCtx, windowsProxyTaskPath)
+	stopErr := platform.endTask(stopCtx, windowsProxyTaskPath)
 	cancelStop()
-	launches := 0
-	var launchErr error
-	if stopErr == nil {
-		launchErr = platform.runTask(ctx, windowsProxyTaskPath)
-		launches++
-	} else {
+	if stopErr != nil {
 		// A timed-out Stop may have stopped the task. Revalidate its definition
-		// and permissions before using Scheduler state to decide whether to run it.
+		// before using the secured Scheduler state to decide whether to run it.
 		stopErr = fmt.Errorf("stop Windows task %s before restart: %w", windowsProxyTaskPath, stopErr)
-		status, _, err := platform.inspectTask(ctx, windowsProxyTask)
+		definition, exists, err := platform.queryDefinition(ctx, windowsProxyTask)
 		if err != nil {
 			return errors.Join(stopErr, err)
 		}
-		if !status.Registered {
+		if !exists {
 			return errors.Join(stopErr, fmt.Errorf("Windows proxy task %s is not registered", windowsProxyTaskPath))
 		}
+		if err := validateWindowsTaskDefinition(definition, windowsProxyTask, platform.sid, platform.executable, platform.interval()); err != nil {
+			return errors.Join(stopErr, err)
+		}
 	}
-	for {
-		if err := waitForServicePoll(ctx, windowsProxyRestartPoll); err != nil {
-			return fmt.Errorf("%w: wait for replacement Windows proxy after %d launch requests: %w", ErrServiceUnhealthy, launches, errors.Join(err, stopErr, launchErr))
+	launches := 0
+	var launchErr, stateErr error
+	for pollDelay := time.Duration(0); ; pollDelay = windowsProxyRestartPoll {
+		if err := waitForServicePoll(ctx, pollDelay); err != nil {
+			return fmt.Errorf("%w: wait for replacement Windows proxy after %d launch requests: %w", ErrServiceUnhealthy, launches, errors.Join(err, stopErr, launchErr, stateErr))
 		}
-		state, err := platform.queryState(ctx, windowsProxyTaskPath)
+		stateCtx, cancelState := context.WithTimeout(ctx, windowsProxyCallBudget)
+		state, err := platform.queryState(stateCtx, windowsProxyTaskPath)
+		cancelState()
 		if err != nil {
-			return errors.Join(stopErr, launchErr, fmt.Errorf("inspect replacement Windows proxy task: %w", err))
+			stateErr = fmt.Errorf("inspect replacement Windows proxy task: %w", err)
+			if isWindowsTaskNotFound(err) || errors.Is(err, installstate.ErrOwnershipConflict) {
+				return errors.Join(stopErr, launchErr, stateErr)
+			}
+			continue
 		}
+		stateErr = nil
 		if !validWindowsTaskSecurityDescriptor(state.SecurityDescriptor, platform.sid, false) {
 			return fmt.Errorf("%w: Windows task security descriptor differs", installstate.ErrOwnershipConflict)
 		}
@@ -342,17 +354,23 @@ func (platform *windowsTaskServicePlatform) RestartProxy(ctx context.Context) er
 				return nil
 			}
 		}
-		// A Run request can fail without starting an instance, or lose its
-		// acknowledgement after starting. Reissue it only when Scheduler is idle.
+		// Verify idle state before the first Run and before any retry after a
+		// missed acknowledgement. A queued launch can still become healthy.
 		if !state.Running && !state.Queued && len(state.EnginePIDs) == 0 {
-			if launches < windowsProxyLaunchLimit {
-				launchErr = platform.runTask(ctx, windowsProxyTaskPath)
+			if launches < windowsProxyLaunchLimit && launchCtx.Err() == nil {
+				launchErr = platform.launchProxyTask(launchCtx)
 				launches++
-			} else if launchErr != nil {
+			} else if launches == windowsProxyLaunchLimit && launchErr != nil {
 				return fmt.Errorf("%w: start replacement Windows proxy after %d launch requests: %w", ErrServiceUnhealthy, launches, errors.Join(stopErr, launchErr))
 			}
 		}
 	}
+}
+
+func (platform *windowsTaskServicePlatform) launchProxyTask(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, windowsProxyCallBudget)
+	defer cancel()
+	return platform.runTask(ctx, windowsProxyTaskPath)
 }
 
 func (platform *windowsTaskServicePlatform) RestartRefresh(ctx context.Context) error {
@@ -501,10 +519,17 @@ func (platform *windowsTaskServicePlatform) remove(ctx context.Context, taskPath
 }
 
 func (platform *windowsTaskServicePlatform) endAndWait(ctx context.Context, taskPath string) error {
+	if err := platform.endTask(ctx, taskPath); err != nil {
+		return err
+	}
+	return platform.waitTaskStopped(ctx, taskPath)
+}
+
+func (platform *windowsTaskServicePlatform) endTask(ctx context.Context, taskPath string) error {
 	if _, err := platform.run(ctx, "/End", "/TN", taskPath); err != nil && !isWindowsTaskNotFound(err) && !isWindowsTaskNotRunning(err) {
 		return fmt.Errorf("end Windows task %s: %w", taskPath, err)
 	}
-	return platform.waitTaskStopped(ctx, taskPath)
+	return nil
 }
 
 func (platform *windowsTaskServicePlatform) waitTaskStopped(ctx context.Context, taskPath string) error {

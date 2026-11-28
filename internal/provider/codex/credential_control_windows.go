@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net"
 	"net/rpc"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -86,8 +87,15 @@ func openWindowsCredentialControlPrepared(ctx context.Context, path string, coor
 	if err != nil {
 		return nil, err
 	}
-	if client, err := dialWindowsCredentialOwner(ctx, pipePath, windowsCredentialDialTimeout); err == nil {
+	client, dialErr := dialWindowsCredentialOwner(ctx, pipePath, windowsCredentialDialTimeout)
+	if dialErr == nil {
 		return &CredentialControl{client: client}, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !windowsCredentialOwnerUnavailable(dialErr) {
+		return nil, dialErr
 	}
 	listener, err := winio.ListenPipe(pipePath, &winio.PipeConfig{
 		SecurityDescriptor: windowsCredentialPipeSDDL(sid),
@@ -95,13 +103,26 @@ func openWindowsCredentialControlPrepared(ctx context.Context, path string, coor
 		OutputBufferSize:   64 << 10,
 	})
 	if err != nil {
+		if !errors.Is(err, os.ErrPermission) && !errors.Is(err, os.ErrExist) && !errors.Is(err, windows.ERROR_PIPE_BUSY) {
+			return nil, err
+		}
 		client, dialErr := dialWindowsCredentialOwner(ctx, pipePath, windowsCredentialRaceTimeout)
 		if dialErr == nil {
 			return &CredentialControl{client: client}, nil
 		}
-		return nil, ErrCredentialOwnerStale
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !windowsCredentialOwnerUnavailable(dialErr) {
+			return nil, dialErr
+		}
+		return nil, errors.Join(ErrCredentialOwnerStale, dialErr)
 	}
 	return serveWindowsCredentialOwner(ctx, listener, coordinator, initializer)
+}
+
+func windowsCredentialOwnerUnavailable(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrCredentialOwnerStale)
 }
 
 func serveWindowsCredentialOwner(ctx context.Context, listener net.Listener, coordinator *CredentialCoordinator, initializer CredentialOwnerInitializer) (*CredentialControl, error) {
@@ -196,9 +217,20 @@ func dialWindowsCredentialOwner(parent context.Context, pipePath string, timeout
 		return nil, err
 	}
 	client := rpc.NewClient(connection)
+	stop := context.AfterFunc(ctx, func() { _ = connection.Close() })
 	var reply CredentialEndpointPingReply
-	if err := client.Call("CredentialEndpoint.Ping", CredentialEndpointPingArgs{ProtocolVersion: credentialEndpointProtocolVersion}, &reply); err != nil {
+	err = client.Call("CredentialEndpoint.Ping", CredentialEndpointPingArgs{ProtocolVersion: credentialEndpointProtocolVersion}, &reply)
+	stop()
+	if ctxErr := ctx.Err(); ctxErr != nil {
 		_ = client.Close()
+		return nil, ctxErr
+	}
+	if err != nil {
+		_ = client.Close()
+		var serverErr rpc.ServerError
+		if errors.As(err, &serverErr) {
+			return nil, ErrCredentialEndpointIncompatible
+		}
 		return nil, ErrCredentialOwnerStale
 	}
 	if reply.ProtocolVersion != credentialEndpointProtocolVersion || reply.Generation == "" {
