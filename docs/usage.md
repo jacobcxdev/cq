@@ -154,6 +154,9 @@ credits across the visible portfolio. CQ checks for new credits when it replans,
 normally every five minutes, including when the queue is empty. Credits with
 no useful reset time stay visible while CQ waits for usage to change.
 Use `--replace` to replace existing pending entries.
+Adaptive schedules created before auto-enrolment keep their previously
+approved credits. To add new credits automatically, run
+`cq codex resets schedule mode adaptive` and confirm the expanded scope.
 
 Adaptive mode plans dates and recommended burn together. A flexible reset
 waits for the account's weekly allowance to run out, using the session

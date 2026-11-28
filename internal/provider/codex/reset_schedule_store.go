@@ -3,6 +3,8 @@ package codex
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,12 +62,21 @@ type ResetAutomationState struct {
 	Revision     uint64                 `json:"revision"`
 	Enabled      bool                   `json:"enabled"`
 	Mode         ResetAutomationMode    `json:"mode"`
+	AutoEnrol    bool                   `json:"-"`
 	Entries      []ResetAutomationEntry `json:"entries"`
 	LastReplanAt *time.Time             `json:"last_replan_at,omitempty"`
 	PlanValid    bool                   `json:"plan_valid"`
 	PlanError    string                 `json:"plan_error,omitempty"`
 	NextReplanAt *time.Time             `json:"next_replan_at,omitempty"`
-	NextPace     *quota.ResetPacePhase  `json:"next_pace,omitempty"`
+	NextPace     *quota.ResetPacePhase  `json:"-"`
+}
+
+// New metadata lives outside the v1 schedule read by retained executables.
+type resetAutomationMetadata struct {
+	Revision     uint64                `json:"revision"`
+	DocumentHash string                `json:"document_sha256"`
+	AutoEnrol    bool                  `json:"auto_enrol,omitempty"`
+	NextPace     *quota.ResetPacePhase `json:"next_pace,omitempty"`
 }
 
 func (s *ResetAutomationState) Entry(id string) *ResetAutomationEntry {
@@ -87,16 +98,21 @@ func NewResetAutomationStore(fs fsutil.DurableFileSystem, path string) *ResetAut
 }
 
 func (s *ResetAutomationStore) Load() (ResetAutomationState, error) {
+	state, _, err := s.load()
+	return state, err
+}
+
+func (s *ResetAutomationStore) load() (ResetAutomationState, string, error) {
 	state := ResetAutomationState{Version: 1, Mode: ResetAutomationFixed, Entries: []ResetAutomationEntry{}}
 	if s == nil || s.FS == nil || !filepath.IsAbs(s.Path) {
-		return state, errors.New("reset schedule storage unavailable")
+		return state, "", errors.New("reset schedule storage unavailable")
 	}
 	data, err := fsutil.ReadSecureFile(s.FS, s.Path, 1<<20)
 	if errors.Is(err, os.ErrNotExist) {
-		return state, nil
+		return state, "", nil
 	}
 	if err != nil {
-		return state, fmt.Errorf("read reset schedule: %w", err)
+		return state, "", fmt.Errorf("read reset schedule: %w", err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -104,15 +120,48 @@ func (s *ResetAutomationStore) Load() (ResetAutomationState, error) {
 	// never permission to silently activate defaults.
 	state = ResetAutomationState{}
 	if err := decoder.Decode(&state); err != nil {
-		return state, errors.New("invalid reset schedule JSON")
+		return state, "", errors.New("invalid reset schedule JSON")
 	}
 	if decoder.Decode(new(any)) != io.EOF {
-		return state, errors.New("trailing reset schedule JSON")
+		return state, "", errors.New("trailing reset schedule JSON")
 	}
 	if err := validateResetAutomation(state); err != nil {
-		return state, err
+		return state, "", err
 	}
-	return state, nil
+	hash := fmt.Sprintf("%x", sha256.Sum256(data))
+	metadata := s.loadMetadata(state.Revision, hash)
+	if (!metadata.AutoEnrol || state.Mode == ResetAutomationAdaptive) && validResetPacePhase(metadata.NextPace) {
+		state.AutoEnrol, state.NextPace = metadata.AutoEnrol, metadata.NextPace
+	}
+	return state, hash, nil
+}
+
+func (s *ResetAutomationStore) metadataPath() string {
+	return s.Path + ".metadata"
+}
+
+func (s *ResetAutomationStore) loadMetadata(revision uint64, hash string) resetAutomationMetadata {
+	var match resetAutomationMetadata
+	data, err := fsutil.ReadSecureFile(s.FS, s.metadataPath(), 4096)
+	if err != nil {
+		return match
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var records []resetAutomationMetadata
+	if decoder.Decode(&records) != nil || len(records) > 2 || decoder.Decode(new(any)) != io.EOF {
+		return match
+	}
+	for _, record := range records {
+		if record.Revision != revision || record.DocumentHash != hash {
+			continue
+		}
+		if match.DocumentHash != "" {
+			return resetAutomationMetadata{}
+		}
+		match = record
+	}
+	return match
 }
 
 func (s *ResetAutomationStore) Update(ctx context.Context, change func(*ResetAutomationState) error) (ResetAutomationState, error) {
@@ -144,9 +193,14 @@ func (s *ResetAutomationStore) Update(ctx context.Context, change func(*ResetAut
 		}
 	}
 	defer lock.Close()
-	state, err := s.Load()
+	state, hash, err := s.load()
 	if err != nil {
 		return state, err
+	}
+	previous := resetAutomationMetadata{Revision: state.Revision, DocumentHash: hash, AutoEnrol: state.AutoEnrol}
+	if state.NextPace != nil {
+		phase := *state.NextPace
+		previous.NextPace = &phase
 	}
 	if err := ctx.Err(); err != nil {
 		return state, err
@@ -162,8 +216,42 @@ func (s *ResetAutomationStore) Update(ctx context.Context, change func(*ResetAut
 	if err != nil {
 		return state, err
 	}
+	hasMetadata := state.AutoEnrol || state.NextPace != nil
+	if hasMetadata {
+		// Legacy writers emit compact JSON. Give a prepared document a
+		// unique identity using valid trailing JSON whitespace, so a legacy
+		// write cannot commit abandoned metadata for the same revision.
+		var nonce [16]byte
+		if _, err := rand.Read(nonce[:]); err != nil {
+			return state, err
+		}
+		for _, b := range nonce {
+			for bit := range 8 {
+				data = append(data, " \t"[(b>>bit)&1])
+			}
+		}
+	}
 	if len(data) > 1<<20 {
 		return state, errors.New("reset schedule exceeds size limit")
+	}
+	if hasMetadata {
+		records := make([]resetAutomationMetadata, 0, 2)
+		if previous.AutoEnrol || previous.NextPace != nil {
+			records = append(records, previous)
+		}
+		records = append(records, resetAutomationMetadata{
+			Revision: state.Revision, DocumentHash: fmt.Sprintf("%x", sha256.Sum256(data)),
+			AutoEnrol: state.AutoEnrol, NextPace: state.NextPace,
+		})
+		metadata, err := json.Marshal(records)
+		if err != nil {
+			return state, err
+		}
+		// Both possible committed identities remain readable. The core
+		// rename decides which metadata record applies.
+		if err := fsutil.SecureAtomicWrite(s.FS, s.metadataPath(), metadata); err != nil {
+			return state, err
+		}
 	}
 	if err := fsutil.SecureAtomicWrite(s.FS, s.Path, data); err != nil {
 		return state, err
@@ -186,10 +274,11 @@ func (s *ResetAutomationStore) AcquireExecutor() (fsutil.ExclusiveLock, error) {
 }
 
 func validateResetAutomation(s ResetAutomationState) error {
-	if s.Version != 1 || (s.Mode != ResetAutomationFixed && s.Mode != ResetAutomationAdaptive) || len(s.Entries) > 1000 {
+	if s.Version != 1 || (s.Mode != ResetAutomationFixed && s.Mode != ResetAutomationAdaptive) ||
+		(s.AutoEnrol && s.Mode != ResetAutomationAdaptive) || len(s.Entries) > 1000 {
 		return errors.New("invalid reset schedule schema")
 	}
-	if p := s.NextPace; p != nil && (p.From.IsZero() || !p.Until.After(p.From) || p.Percent < 0 || p.Percent >= 100) {
+	if !validResetPacePhase(s.NextPace) {
 		return errors.New("invalid reset pace phase")
 	}
 	ids, active := map[string]bool{}, map[string]bool{}
@@ -215,4 +304,8 @@ func validateResetAutomation(s ResetAutomationState) error {
 		}
 	}
 	return nil
+}
+
+func validResetPacePhase(p *quota.ResetPacePhase) bool {
+	return p == nil || (!p.From.IsZero() && p.Until.After(p.From) && p.Percent >= 0 && p.Percent < 100)
 }

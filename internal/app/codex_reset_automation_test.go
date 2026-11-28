@@ -586,6 +586,50 @@ func TestAdaptiveResetRechecksPaceAfterRedemption(t *testing.T) {
 	}
 }
 
+func TestResetAutomationLegacyAdaptiveRequiresFreshConsentForNewCredits(t *testing.T) {
+	a, backend, usage, _ := automationFixture(t)
+	now := a.now()
+	inventory := backend.credits["account-a"]
+	inventory.Credits = append(inventory.Credits, resetAppCredit("new-credit", now.Add(time.Hour)))
+	backend.credits["account-a"] = inventory
+	for _, result := range usage.results {
+		for name, window := range result.Windows {
+			window.RemainingPct = 100
+			result.Windows[name] = window
+		}
+	}
+	ctx := context.Background()
+	if _, err := a.Schedule.Update(ctx, func(state *codex.ResetAutomationState) error {
+		state.Enabled, state.Mode = true, codex.ResetAutomationAdaptive
+		state.Entries = []codex.ResetAutomationEntry{{
+			ID: "approved", AccountKey: "account-a", AccountID: "acct-a", Email: "a@example.com",
+			CreditID: "credit-account-a", State: codex.ResetAutomationPending,
+		}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StepSchedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, err := a.Schedule.Load()
+	if err != nil || !state.PlanValid || state.AutoEnrol || len(state.Entries) != 1 || backend.consumeCalls != 0 {
+		t.Fatalf("legacy adaptive schedule changed scope: %+v, %v", state, err)
+	}
+	plan, err := a.PrepareSchedule(ctx, CodexResetScheduleChange{Action: "mode", Mode: codex.ResetAutomationAdaptive})
+	if err != nil || !plan.ConfirmationRequired || !plan.State.AutoEnrol || len(plan.State.Entries) <= 1 {
+		t.Fatalf("expected preview to request expanded authority: %+v, %v", plan, err)
+	}
+	state, err = a.Schedule.Load()
+	if err != nil || state.AutoEnrol || len(state.Entries) != 1 {
+		t.Fatalf("preview changed scope: %+v, %v", state, err)
+	}
+	state, err = a.ApplySchedule(ctx, plan)
+	if err != nil || !state.AutoEnrol || len(state.Entries) <= 1 || backend.consumeCalls != 0 {
+		t.Fatalf("confirmation did not grant auto-enrolment: %+v, %v", state, err)
+	}
+}
+
 func TestResetAutomationDiscoversCreditsWithNoPendingEntries(t *testing.T) {
 	for _, mode := range []codex.ResetAutomationMode{codex.ResetAutomationAdaptive, codex.ResetAutomationFixed} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -612,6 +656,7 @@ func TestResetAutomationDiscoversCreditsWithNoPendingEntries(t *testing.T) {
 			}
 			_, err := a.Schedule.Update(context.Background(), func(state *codex.ResetAutomationState) error {
 				state.Enabled, state.Mode = true, mode
+				state.AutoEnrol = mode == codex.ResetAutomationAdaptive
 				state.Entries = []codex.ResetAutomationEntry{{
 					ID: "removed", AccountKey: "account-a", CreditID: "removed-credit",
 					State: codex.ResetAutomationCancelled, ExpiresAt: &expiry,

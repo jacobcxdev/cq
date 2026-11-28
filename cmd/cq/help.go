@@ -168,9 +168,9 @@ Supply a unique email, CQ alias, or opaque AccountKey to inspect one account.
 Recommend timing across the whole visible portfolio. Without --schedule this
 command stays advisory-only and never consumes a credit.
 Accept --schedule to save automated execution after default-No confirmation.
-New schedules use fixed dates. Enabled adaptive mode replans as usage changes,
-including newly available credits. --replace replaces pending entries and
-preserves running outcomes.
+New schedules use fixed dates. Confirming adaptive mode allows newly available
+credits into the plan. --replace replaces pending entries and preserves
+running outcomes.
 Execution requires the CQ proxy runtime. Due entries may execute immediately.
 `,
 	"codex resets schedule": `Usage: cq codex resets schedule [command]
@@ -187,10 +187,10 @@ Commands:
   schedule disable           Pause execution and adaptive replanning
   schedule cancel            Cancel all pending entries and disable execution
 
-Fixed keeps the dates you set. Enabled adaptive mode checks for newly available
-credits and automatically schedules eligible credits as usage changes. --at pins
-a date. --follow-mode lets the date move. Manual additions create a disabled
-fixed schedule. Active edits require default-No confirmation. CQ proxy must run.
+Fixed keeps the dates you set. Confirm adaptive mode to automatically enrol
+new credits as they become available. --at pins a date. --follow-mode lets
+the date move. Manual additions create a disabled fixed schedule. Active edits
+require default-No confirmation. CQ proxy must run.
 Running and unresolved requests stay visible after cancellation.
 `,
 	"codex resets schedule status": `Usage: cq codex resets schedule [status]

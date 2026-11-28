@@ -130,6 +130,7 @@ func (a *CodexResetApp) PrepareSchedule(ctx context.Context, change CodexResetSc
 		if change.Mode != "" {
 			state.Mode = change.Mode
 		}
+		state.AutoEnrol = state.Enabled && state.Mode == codex.ResetAutomationAdaptive
 		state.PlanValid = true
 		state.PlanError = ""
 		state.LastReplanAt = resetTimePointer(now)
@@ -236,10 +237,12 @@ func (a *CodexResetApp) PrepareSchedule(ctx context.Context, change CodexResetSc
 			}
 		}
 		state.Mode = change.Mode
+		state.AutoEnrol = state.Enabled && state.Mode == codex.ResetAutomationAdaptive
 		confirmation = state.Enabled
 		invalidate = true
 	case "enable":
 		state.Enabled = true
+		state.AutoEnrol = state.Mode == codex.ResetAutomationAdaptive
 		confirmation = true
 		invalidate = true
 	case "disable":
@@ -262,6 +265,7 @@ func (a *CodexResetApp) PrepareSchedule(ctx context.Context, change CodexResetSc
 		}
 		if change.Action == "cancel" {
 			state.Enabled = false
+			state.AutoEnrol = false
 		}
 		invalidate = true
 	default:
@@ -458,6 +462,9 @@ func adaptiveResetCredits(state codex.ResetAutomationState, inputs codexResetRec
 				continue
 			}
 			if !known {
+				if !state.AutoEnrol {
+					continue
+				}
 				identity := codex.ResetAccount{AccountKey: key, AccountID: account.AccountID, Email: account.Email}
 				entry, err := newResetAutomationEntry(identity, credit.ID, credit.ExpiresAt, now)
 				if err != nil {
@@ -498,7 +505,7 @@ func (a *CodexResetApp) StepSchedule(ctx context.Context) error {
 			break
 		}
 	}
-	if !hasWork && (state.Mode != codex.ResetAutomationAdaptive || (state.NextReplanAt != nil && state.NextReplanAt.After(a.now()))) {
+	if !hasWork && (!state.AutoEnrol || (state.NextReplanAt != nil && state.NextReplanAt.After(a.now()))) {
 		return nil
 	}
 

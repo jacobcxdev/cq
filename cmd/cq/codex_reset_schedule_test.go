@@ -26,6 +26,7 @@ func TestResetScheduleStatusShowsUpcomingBeforeHistory(t *testing.T) {
 	planned, expires, next := now.Add(time.Hour), now.Add(time.Hour+5*time.Minute), now.Add(5*time.Minute)
 	_, err := store.Update(context.Background(), func(state *codex.ResetAutomationState) error {
 		state.Enabled, state.Mode, state.PlanValid = true, codex.ResetAutomationAdaptive, true
+		state.AutoEnrol = true
 		state.LastReplanAt, state.NextReplanAt = &now, &next
 		state.Entries = []codex.ResetAutomationEntry{
 			{ID: "completed", AccountKey: "private-key", Email: "old@example.com", CreditID: "old-credit", At: &now,

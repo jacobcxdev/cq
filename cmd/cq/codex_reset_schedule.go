@@ -51,6 +51,7 @@ type codexAutomationJSON struct {
 	Revision     uint64                     `json:"revision"`
 	Enabled      bool                       `json:"enabled"`
 	Mode         codex.ResetAutomationMode  `json:"mode"`
+	AutoEnrol    bool                       `json:"auto_enrol"`
 	PlanValid    bool                       `json:"plan_valid"`
 	PlanError    string                     `json:"plan_error,omitempty"`
 	LastReplanAt *time.Time                 `json:"last_replan_at,omitempty"`
@@ -61,7 +62,7 @@ type codexAutomationJSON struct {
 }
 
 func publicCodexAutomation(state codex.ResetAutomationState) codexAutomationJSON {
-	result := codexAutomationJSON{Revision: state.Revision, Enabled: state.Enabled, Mode: state.Mode, PlanValid: state.PlanValid, PlanError: state.PlanError, LastReplanAt: state.LastReplanAt, NextReplanAt: state.NextReplanAt, Entries: []codexAutomationEntryJSON{}}
+	result := codexAutomationJSON{Revision: state.Revision, Enabled: state.Enabled, Mode: state.Mode, AutoEnrol: state.AutoEnrol, PlanValid: state.PlanValid, PlanError: state.PlanError, LastReplanAt: state.LastReplanAt, NextReplanAt: state.NextReplanAt, Entries: []codexAutomationEntryJSON{}}
 	if state.Enabled && state.PlanValid && state.Mode == codex.ResetAutomationAdaptive {
 		result.NextPace = state.NextPace
 	}
@@ -157,7 +158,7 @@ func runCodexResetScheduleChange(ctx context.Context, change app.CodexResetSched
 		}
 		authority := "The schedule will stay paused until enabled."
 		if plan.State.Enabled {
-			if plan.State.Mode == codex.ResetAutomationAdaptive {
+			if plan.State.AutoEnrol {
 				authority = "Saving authorises CQ to enrol and redeem eligible current and future credits while the proxy runs."
 			} else {
 				authority = "Saving authorises CQ to redeem the scheduled credits while the proxy runs."
@@ -249,7 +250,11 @@ func renderCodexAutomation(w io.Writer, state codex.ResetAutomationState, execut
 		}
 	}
 	if state.Enabled && state.Mode == codex.ResetAutomationAdaptive {
-		fmt.Fprintln(&out, "  New credits are picked up automatically.")
+		if state.AutoEnrol {
+			fmt.Fprintln(&out, "  New credits are picked up automatically.")
+		} else {
+			fmt.Fprintln(&out, "  New credits require approval. To allow auto-enrolment, run cq codex resets schedule mode adaptive.")
+		}
 		if state.LastReplanAt != nil {
 			fmt.Fprintf(&out, "  Last checked %s\n", formatCodexResetDisplayTime(*state.LastReplanAt))
 		}
