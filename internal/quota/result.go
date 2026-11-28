@@ -21,6 +21,32 @@ type ExtraCredits struct {
 	Available *bool `json:"available"`
 }
 
+// BankedResetForecast describes confirmed and planned Codex refills separately
+// from upstream quota. Scheduled timestamps are ordered and conditional.
+type BankedResetForecast struct {
+	LastRedeemedAtUnix int64   `json:"last_redeemed_at_unix,omitempty"`
+	ScheduledAtUnix    []int64 `json:"scheduled_at_unix,omitempty"`
+}
+
+// WindowBounds returns the observed allowance's start and its next replacement.
+// The provider's natural reset epoch stays the anchor for recurring cycles.
+func (f *BankedResetForecast) WindowBounds(name WindowName, w Window, now int64) (start, next int64) {
+	start = w.ResetAtUnix - int64(PeriodFor(name).Seconds())
+	next = w.ResetAtUnix
+	if f == nil || (name != Window5Hour && name != Window7Day) || next <= now || start > now {
+		return start, next
+	}
+	if f.LastRedeemedAtUnix > start && f.LastRedeemedAtUnix <= now {
+		start = f.LastRedeemedAtUnix
+	}
+	for _, at := range f.ScheduledAtUnix {
+		if at > now && at < next {
+			next = at
+		}
+	}
+	return start, next
+}
+
 type Result struct {
 	AccountKey    string                `json:"account_key,omitempty"`
 	ExtraCredits  *ExtraCredits         `json:"extra_credits,omitempty"`
@@ -34,6 +60,7 @@ type Result struct {
 	RateLimitTier string                `json:"rate_limit_tier,omitempty"`
 	Windows       map[WindowName]Window `json:"windows,omitempty"`
 	CacheAge      int64                 `json:"cache_age_s,omitempty"` // seconds; >0 means result is from cache
+	BankedResets  *BankedResetForecast  `json:"banked_resets,omitempty"`
 }
 
 func (r Result) IsUsable() bool {

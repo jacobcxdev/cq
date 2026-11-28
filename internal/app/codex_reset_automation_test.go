@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
+	"github.com/jacobcxdev/cq/internal/history"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/quota"
 )
@@ -140,6 +141,30 @@ func TestResetAutomationFullAndExpiredNeverConsume(t *testing.T) {
 				t.Fatalf("state %+v calls %d", s, b.consumeCalls)
 			}
 		})
+	}
+}
+
+func TestAdaptiveResetPreflightProtectsUsableWeeklyQuota(t *testing.T) {
+	a, backend, usage, _ := automationFixture(t)
+	now := a.now()
+	state := automationChange(t, a, CodexResetScheduleChange{Action: "add", Reference: "a@example.com", At: &now})
+	state, err := a.Schedule.Update(context.Background(), func(s *codex.ResetAutomationState) error {
+		s.Enabled, s.PlanValid, s.Mode = true, true, codex.ResetAutomationAdaptive
+		s.Entries[0].Pinned = false
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	window := usage.results[0].Windows[quota.Window5Hour]
+	window.RemainingPct = 0
+	usage.results[0].Windows[quota.Window5Hour] = window
+	if err := a.executeAutomationEntry(context.Background(), state, state.Entries[0]); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := a.Schedule.Load()
+	if err != nil || backend.consumeCalls != 0 || saved.Entries[0].At != nil || saved.Entries[0].LastError != "quota_remaining" {
+		t.Fatalf("adaptive preflight replaced live weekly quota: %+v, %v, consumes=%d", saved, err, backend.consumeCalls)
 	}
 }
 
@@ -422,6 +447,9 @@ func TestResetAutomationAdaptiveFailureBlocksFollowersButNotPins(t *testing.T) {
 				t.Fatal(err)
 			}
 			state, _ := a.Schedule.Load()
+			if len(state.Entries) != 1 {
+				t.Fatalf("incomplete portfolio enrolled credits: %+v", state)
+			}
 			if pinned {
 				if b.consumeCalls != 1 || state.Entries[0].State != codex.ResetAutomationCompleted {
 					t.Fatalf("pin blocked by unrelated forecast: %+v", state)
@@ -438,8 +466,10 @@ func TestResetAutomationAdaptiveFailureBlocksFollowersButNotPins(t *testing.T) {
 		})
 	}
 }
-func TestResetAutomationAdaptiveKeepsUndatedAuthorisationAndNeverEnrolsCredits(t *testing.T) {
+func TestResetAutomationAdaptiveKeepsUndatedEntriesAndEnrolsNewCredits(t *testing.T) {
 	a, b, u, _ := automationFixture(t)
+	delete(b.credits, "account-b")
+	delete(b.credits, "account-c")
 	at := a.now()
 	s := automationChange(t, a, CodexResetScheduleChange{Action: "add", Reference: "a@example.com", At: &at})
 	automationChange(t, a, CodexResetScheduleChange{Action: "mode", Mode: codex.ResetAutomationAdaptive})
@@ -462,15 +492,212 @@ func TestResetAutomationAdaptiveKeepsUndatedAuthorisationAndNeverEnrolsCredits(t
 	}
 	a.Clock = resetTestClock{a.now().Add(6 * time.Minute)}
 	u.results = resetAppUsage(a.now(), "a", "b", "c")
+	weekly := u.results[0].Windows[quota.Window7Day]
+	weekly.RemainingPct = 1
+	u.results[0].Windows[quota.Window7Day] = weekly
 	inventory := b.credits["account-a"]
-	inventory.Credits = append(inventory.Credits, resetAppCredit("new-unaccepted", a.now().Add(24*time.Hour)))
+	inventory.Credits = append(inventory.Credits, resetAppCredit("new-credit", a.now().Add(24*time.Hour)))
 	b.credits["account-a"] = inventory
 	if err := a.StepSchedule(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	state, _ = a.Schedule.Load()
-	if len(state.Entries) != 1 || state.Entries[0].CreditID != "credit-account-a" || state.Entries[0].At == nil {
+	if len(state.Entries) != 2 || state.Entries[0].CreditID != "credit-account-a" || state.Entries[0].At == nil ||
+		state.Entries[1].CreditID != "new-credit" || state.Entries[1].Source != "adaptive" || state.Entries[1].Pinned {
 		t.Fatalf("reconsideration failed %+v", state)
+	}
+}
+
+func TestAdaptiveResetPersistsJointDatesAndPace(t *testing.T) {
+	a, backend, usage, _ := automationFixture(t)
+	now := a.now()
+	backend.snapshot.Accounts = backend.snapshot.Accounts[:1]
+	usage.results = usage.results[:1]
+	usage.results[0].Windows = map[quota.WindowName]quota.Window{
+		quota.Window7Day: {RemainingPct: 50, ResetAtUnix: now.Add(8 * time.Hour).Unix()},
+	}
+	rate := 50 / time.Hour.Seconds()
+	a.History = &recordingResetHistory{estimates: history.RateEstimates{
+		history.BurnRateKey{ProviderID: "codex", AccountKey: "acct-a", Window: "7d"}: {RecentRatePctPerS: &rate},
+	}}
+	inventory := backend.credits["account-a"]
+	inventory.Credits = append(inventory.Credits, resetAppCredit("pinned", now.Add(12*time.Hour)))
+	backend.credits["account-a"] = inventory
+	pin := now.Add(5 * time.Hour)
+	automationChange(t, a, CodexResetScheduleChange{Action: "add", Reference: "a@example.com", CreditID: "pinned", At: &pin})
+	automationChange(t, a, CodexResetScheduleChange{Action: "mode", Mode: codex.ResetAutomationAdaptive})
+	automationChange(t, a, CodexResetScheduleChange{Action: "enable"})
+	state, err := a.Schedule.Load()
+	if err != nil || !state.PlanValid || len(state.Entries) != 2 || backend.consumeCalls != 0 {
+		t.Fatalf("invalid saved plan: %+v, %v", state, err)
+	}
+	first := now.Add(time.Hour)
+	if !state.Entries[0].At.Equal(pin) || state.Entries[1].At.Round(time.Second) != first {
+		t.Fatalf("invalid reset order: %+v", state.Entries)
+	}
+	if pace := state.NextPace; pace == nil || pace.Percent != 50 || pace.From.Round(time.Second) != first || !pace.Until.Equal(pin) {
+		t.Fatalf("missing saved pace to the next refill: %+v", pace)
+	}
+}
+
+func TestAdaptiveResetRechecksPaceAfterRedemption(t *testing.T) {
+	a, backend, usage, _ := automationFixture(t)
+	now := a.now()
+	natural := now.Add(7 * time.Hour)
+	backend.snapshot.Accounts = backend.snapshot.Accounts[:1]
+	usage.results = usage.results[:1]
+	windows := map[quota.WindowName]quota.Window{
+		quota.Window7Day: {RemainingPct: 40, ResetAtUnix: natural.Unix()},
+	}
+	usage.results[0].Windows = windows
+	rate := 40 / time.Hour.Seconds()
+	a.History = &recordingResetHistory{estimates: history.RateEstimates{
+		history.BurnRateKey{ProviderID: "codex", AccountKey: "acct-a", Window: "7d"}: {RecentRatePctPerS: &rate},
+	}}
+	backend.credits["account-a"] = codex.ResetCreditInventory{Credits: []codex.ResetCredit{
+		resetAppCredit("first", now.Add(6*time.Hour)),
+		resetAppCredit("second", now.Add(12*time.Hour)),
+	}}
+	automationChange(t, a, CodexResetScheduleChange{Action: "mode", Mode: codex.ResetAutomationAdaptive})
+	initial := automationChange(t, a, CodexResetScheduleChange{Action: "enable"})
+	first := now.Add(time.Hour)
+	if pace := initial.NextPace; pace == nil || pace.Percent != 83 || pace.From.Round(time.Second) != first {
+		t.Fatalf("missing initial slowdown: %+v", initial)
+	}
+	if entry := initial.Entries[0]; entry.CreditID != "first" || entry.At == nil || entry.At.Round(time.Second) != first {
+		t.Fatalf("expected the earlier-expiring credit at first depletion: %+v", initial.Entries)
+	}
+	a.Clock = resetTestClock{first}
+	windows[quota.Window7Day] = quota.Window{RemainingPct: 0, ResetAtUnix: natural.Unix()}
+	backend.consumeHook = func() {
+		windows[quota.Window7Day] = quota.Window{RemainingPct: 100, ResetAtUnix: natural.Unix()}
+	}
+	for range 2 {
+		if err := a.StepSchedule(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state, err := a.Schedule.Load()
+	if err != nil || !state.PlanValid || backend.consumeCalls != 1 {
+		t.Fatalf("expected a fresh plan after one redemption: %+v, %v", state, err)
+	}
+	if pace := state.NextPace; pace == nil || pace.Percent != 83 || !pace.From.Equal(first) || !pace.Until.Equal(natural) {
+		t.Fatalf("expected the replan to continue slowing down from now: %+v", state)
+	}
+}
+
+func TestResetAutomationLegacyAdaptiveRequiresFreshConsentForNewCredits(t *testing.T) {
+	a, backend, usage, _ := automationFixture(t)
+	now := a.now()
+	inventory := backend.credits["account-a"]
+	inventory.Credits = append(inventory.Credits, resetAppCredit("new-credit", now.Add(time.Hour)))
+	backend.credits["account-a"] = inventory
+	for _, result := range usage.results {
+		for name, window := range result.Windows {
+			window.RemainingPct = 100
+			result.Windows[name] = window
+		}
+	}
+	ctx := context.Background()
+	if _, err := a.Schedule.Update(ctx, func(state *codex.ResetAutomationState) error {
+		state.Enabled, state.Mode = true, codex.ResetAutomationAdaptive
+		state.Entries = []codex.ResetAutomationEntry{{
+			ID: "approved", AccountKey: "account-a", AccountID: "acct-a", Email: "a@example.com",
+			CreditID: "credit-account-a", State: codex.ResetAutomationPending,
+		}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.StepSchedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	state, err := a.Schedule.Load()
+	if err != nil || !state.PlanValid || state.AutoEnrol || len(state.Entries) != 1 || backend.consumeCalls != 0 {
+		t.Fatalf("legacy adaptive schedule changed scope: %+v, %v", state, err)
+	}
+	plan, err := a.PrepareSchedule(ctx, CodexResetScheduleChange{Action: "mode", Mode: codex.ResetAutomationAdaptive})
+	if err != nil || !plan.ConfirmationRequired || !plan.State.AutoEnrol || len(plan.State.Entries) <= 1 {
+		t.Fatalf("expected preview to request expanded authority: %+v, %v", plan, err)
+	}
+	state, err = a.Schedule.Load()
+	if err != nil || state.AutoEnrol || len(state.Entries) != 1 {
+		t.Fatalf("preview changed scope: %+v, %v", state, err)
+	}
+	state, err = a.ApplySchedule(ctx, plan)
+	if err != nil || !state.AutoEnrol || len(state.Entries) <= 1 || backend.consumeCalls != 0 {
+		t.Fatalf("confirmation did not grant auto-enrolment: %+v, %v", state, err)
+	}
+}
+
+func TestResetAutomationDiscoversCreditsWithNoPendingEntries(t *testing.T) {
+	for _, mode := range []codex.ResetAutomationMode{codex.ResetAutomationAdaptive, codex.ResetAutomationFixed} {
+		t.Run(string(mode), func(t *testing.T) {
+			a, backend, usage, attempts := automationFixture(t)
+			now := a.now()
+			expiry := now.Add(time.Hour)
+			backend.credits["account-a"] = codex.ResetCreditInventory{Credits: []codex.ResetCredit{
+				resetAppCredit("new-credit", expiry),
+				resetAppCredit("removed-credit", expiry),
+				resetAppCredit("expired-credit", now),
+			}}
+			// Credit on account-b must wait for an unresolved manual reset.
+			if _, err := attempts.Ensure("account-b", "uncertain-credit", now); err != nil {
+				t.Fatal(err)
+			}
+			unsupported := resetAppCredit("unsupported-credit", expiry)
+			unsupported.ResetType = "other"
+			backend.credits["account-c"] = codex.ResetCreditInventory{Credits: []codex.ResetCredit{unsupported}}
+			for _, result := range usage.results {
+				for name, window := range result.Windows {
+					window.RemainingPct = 100
+					result.Windows[name] = window
+				}
+			}
+			_, err := a.Schedule.Update(context.Background(), func(state *codex.ResetAutomationState) error {
+				state.Enabled, state.Mode = true, mode
+				state.AutoEnrol = mode == codex.ResetAutomationAdaptive
+				state.Entries = []codex.ResetAutomationEntry{{
+					ID: "removed", AccountKey: "account-a", CreditID: "removed-credit",
+					State: codex.ResetAutomationCancelled, ExpiresAt: &expiry,
+				}}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := a.StepSchedule(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			state, err := a.Schedule.Load()
+			if err != nil || backend.consumeCalls != 0 || state.Entries[0].State != codex.ResetAutomationCancelled {
+				t.Fatalf("invalid idle schedule %+v, %v", state, err)
+			}
+			if mode == codex.ResetAutomationFixed {
+				if len(state.Entries) != 1 {
+					t.Fatalf("fixed schedule enrolled credits %+v", state)
+				}
+				return
+			}
+			if !state.PlanValid || len(state.Entries) != 2 || state.Entries[1].CreditID != "new-credit" || state.Entries[1].At != nil {
+				t.Fatalf("adaptive schedule failed to track only the eligible credit %+v", state)
+			}
+			entryID := state.Entries[1].ID
+			a.Clock = resetTestClock{now.Add(6 * time.Minute)}
+			for _, result := range usage.results {
+				for name, window := range result.Windows {
+					window.RemainingPct = 0
+					result.Windows[name] = window
+				}
+			}
+			if err := a.StepSchedule(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			state, err = a.Schedule.Load()
+			if err != nil || backend.consumeCalls != 1 || len(state.Entries) != 2 || state.Entry(entryID).State != codex.ResetAutomationCompleted {
+				t.Fatalf("new credit failed to execute through the existing entry %+v, %v", state, err)
+			}
+		})
 	}
 }
 func TestResetAutomationAttemptSurvivesClaimSaveGap(t *testing.T) {

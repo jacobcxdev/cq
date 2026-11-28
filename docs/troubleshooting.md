@@ -78,7 +78,9 @@ For profiles, run `cq codex harness inventory --project /path/to/project --json`
 
 ## Reset schedules and uncertain operations
 
-Codex recommendations are advisory unless a schedule is explicitly accepted. Manual additions start disabled with fixed timing. Adaptive mode moves only accepted credits; it does not enrol new ones. The runtime must run, and schedule status reports a fresh authenticated executor heartbeat. A date must be future RFC3339 with a timezone and fall before credit expiry.
+Codex recommendations are advisory unless a schedule is explicitly accepted. Manual additions start disabled with fixed timing. An enabled adaptive schedule with confirmed auto-enrolment picks up eligible new credits at the next replan, normally within five minutes. Check upcoming dates, expiry, and the executor heartbeat with `cq codex resets schedule status`. A manually pinned date must be future RFC3339 with a timezone and fall before credit expiry.
+
+A successful reset can show a routing refresh warning. OpenAI recorded the redemption and CQ could not finish refreshing routing for eligible chats. The schedule keeps the redemption outcome and warning code available through `--json`.
 
 An enabled overdue fixed entry can execute immediately. Disable pauses future execution; cancellation cannot undo an upstream request already sent. Unknown reset/claim outcomes remain durable and are not an invitation to consume another card. Retry through the documented same-identity path after inspection. ZCode window-selected card use and exact-card Z.ai schedules have different contracts. Never substitute a new request identity solely to clear an uncertain result. See [reset usage](usage.md#codex) and the [ZCode protocol ledger](zcode-routing.md).
 

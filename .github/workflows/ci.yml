@@ -367,9 +367,9 @@ jobs:
           go test -race -count=1 ./internal/app -run '^TestWindowsCodexLogin'
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           go test -race -count=1 ./internal/provider/codex ./internal/provider/grok ./internal/provider/zai/zcode -run '^TestWindows'
-      - name: Validate isolated proxy configuration and Codex routing
+      - name: Validate isolated proxy configuration
         if: matrix.architecture == 'amd64'
-        run: go test -race -count=1 ./internal/proxy -run '^(TestConfig|TestSaveConfig|TestLoadExistingConfig|TestRescueBootstrap|TestGeneratedConfig|TestCodexEgressRescue|TestWireGuardConfigurationPersists|TestCodexInstalledHTTPValidationRuntimeCore|TestCodexInstalledHTTPValidationExercise)'
+        run: go test -race -count=1 ./internal/proxy -run '^(TestConfig|TestSaveConfig|TestLoadExistingConfig|TestRescueBootstrap|TestGeneratedConfig|TestCodexEgressRescue|TestWireGuardConfigurationPersists)'
       - name: Validate per-user MSI install, upgrade, and uninstall
         shell: pwsh
         env:
@@ -408,3 +408,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "failed to build the quiet MSI service helper" }
           .\.github\scripts\build-windows-legacy-patch.ps1 -PreviousMSI $legacyMSI -Executable $quietExecutable -Architecture $architecture -Output $legacyPatch -Wix $wix
           .\.github\scripts\validate-windows-msi.ps1 -PreviousMSI $legacyMSI -CurrentMSI $currentMSI -PreviousVersion 0.53.5 -CurrentVersion $version -LegacyPatch $legacyPatch -VerifyLegacyRollback
+      # These tests create the user-local CQ root, which the MSI preflight needs absent.
+      - name: Validate isolated Codex routing
+        if: matrix.architecture == 'amd64'
+        run: go test -race -count=1 ./internal/proxy -run '^(TestCodexInstalledHTTPValidationRuntimeCore|TestCodexInstalledHTTPValidationExercise)'

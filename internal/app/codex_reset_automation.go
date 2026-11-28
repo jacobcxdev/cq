@@ -11,6 +11,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/aggregate"
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 var errResetScheduleChanged = errors.New("reset schedule changed; preview again")
@@ -101,7 +102,7 @@ func (a *CodexResetApp) PrepareSchedule(ctx context.Context, change CodexResetSc
 			if err := validateAutomationTime(&item.UseAt, selection.Credit.ExpiresAt); err != nil {
 				return CodexResetSchedulePlan{}, err
 			}
-			entry, err := newResetAutomationEntry(account, selection.Credit, now)
+			entry, err := newResetAutomationEntry(account, selection.Credit.ID, selection.Credit.ExpiresAt, now)
 			if err != nil {
 				return CodexResetSchedulePlan{}, err
 			}
@@ -129,13 +130,13 @@ func (a *CodexResetApp) PrepareSchedule(ctx context.Context, change CodexResetSc
 		if change.Mode != "" {
 			state.Mode = change.Mode
 		}
+		state.AutoEnrol = state.Enabled && state.Mode == codex.ResetAutomationAdaptive
 		state.PlanValid = true
 		state.PlanError = ""
 		state.LastReplanAt = resetTimePointer(now)
 		state.NextReplanAt = resetTimePointer(now.Add(5 * time.Minute))
 		confirmation = true
-		// The accepted portfolio can differ from the advisory portfolio (for example,
-		// an unresolved credit was excluded). Adaptive plans must use its exact set.
+		// Preview adaptive enrolment and timing before saving the schedule.
 		invalidate = state.Mode == codex.ResetAutomationAdaptive
 	case "add":
 		snapshot, err := a.snapshot(ctx)
@@ -176,7 +177,7 @@ func (a *CodexResetApp) PrepareSchedule(ctx context.Context, change CodexResetSc
 		if err := validateManualAutomationTime(change.At, selection.Credit.ExpiresAt, now); err != nil {
 			return CodexResetSchedulePlan{}, err
 		}
-		entry, err := newResetAutomationEntry(account, selection.Credit, now)
+		entry, err := newResetAutomationEntry(account, selection.Credit.ID, selection.Credit.ExpiresAt, now)
 		if err != nil {
 			return CodexResetSchedulePlan{}, err
 		}
@@ -236,10 +237,12 @@ func (a *CodexResetApp) PrepareSchedule(ctx context.Context, change CodexResetSc
 			}
 		}
 		state.Mode = change.Mode
+		state.AutoEnrol = state.Enabled && state.Mode == codex.ResetAutomationAdaptive
 		confirmation = state.Enabled
 		invalidate = true
 	case "enable":
 		state.Enabled = true
+		state.AutoEnrol = state.Mode == codex.ResetAutomationAdaptive
 		confirmation = true
 		invalidate = true
 	case "disable":
@@ -262,6 +265,7 @@ func (a *CodexResetApp) PrepareSchedule(ctx context.Context, change CodexResetSc
 		}
 		if change.Action == "cancel" {
 			state.Enabled = false
+			state.AutoEnrol = false
 		}
 		invalidate = true
 	default:
@@ -273,6 +277,7 @@ func (a *CodexResetApp) PrepareSchedule(ctx context.Context, change CodexResetSc
 	if invalidate {
 		state.PlanValid = false
 		state.NextReplanAt = nil
+		state.NextPace = nil
 	}
 	if invalidate && state.Enabled && state.Mode == codex.ResetAutomationAdaptive && change.Action != "remove" && change.Action != "cancel" {
 		a.replanAutomationState(ctx, &state)
@@ -290,12 +295,12 @@ func (a *CodexResetApp) ApplySchedule(ctx context.Context, plan CodexResetSchedu
 	})
 }
 
-func newResetAutomationEntry(account codex.ResetAccount, credit codex.ResetCredit, now time.Time) (codex.ResetAutomationEntry, error) {
+func newResetAutomationEntry(account codex.ResetAccount, creditID string, expiresAt *time.Time, now time.Time) (codex.ResetAutomationEntry, error) {
 	var id [12]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return codex.ResetAutomationEntry{}, err
 	}
-	return codex.ResetAutomationEntry{ID: hex.EncodeToString(id[:]), AccountKey: account.AccountKey, AccountID: account.AccountID, Email: account.Email, CreditID: credit.ID, ExpiresAt: credit.ExpiresAt, State: codex.ResetAutomationPending, UpdatedAt: now}, nil
+	return codex.ResetAutomationEntry{ID: hex.EncodeToString(id[:]), AccountKey: account.AccountKey, AccountID: account.AccountID, Email: account.Email, CreditID: creditID, ExpiresAt: expiresAt, State: codex.ResetAutomationPending, UpdatedAt: now}, nil
 }
 func resetTimePointer(at time.Time) *time.Time {
 	if at.IsZero() {
@@ -324,68 +329,35 @@ func validateManualAutomationTime(at, expiry *time.Time, now time.Time) error {
 	return nil
 }
 
-// replanAutomationState changes only accepted, unresolved-free pending entries.
+// replanAutomationState discovers credits using the same inventory as the forecast.
 // The caller fences persistence against the revision that supplied these inputs.
 func (a *CodexResetApp) replanAutomationState(ctx context.Context, state *codex.ResetAutomationState) {
 	now := a.now()
-	unresolved := make(map[codex.AccountKey]bool)
-	for _, entry := range state.Entries {
-		if entry.State == codex.ResetAutomationRunning || entry.State == codex.ResetAutomationRetrying {
-			unresolved[entry.AccountKey] = true
+	inputs, err := a.readResetRecommendation(ctx, true, now, state)
+	unresolved, attemptsErr := a.unresolvedResetAccounts(*state, inputs.portfolio.Accounts)
+	var recommendation aggregate.ResetSchedule
+	var entries []codex.ResetAutomationEntry
+	planError := "recommendation_incomplete"
+	if attemptsErr != nil {
+		planError = "attempts_unavailable"
+	} else if err == nil && len(inputs.blockers) == 0 {
+		var constraints *aggregate.ResetScheduleConstraints
+		constraints, entries, err = adaptiveResetCredits(*state, inputs, unresolved)
+		if err == nil {
+			recommendation, err = inputs.recommend(constraints)
 		}
-		if entry.Terminal() || a.Attempts == nil {
-			continue
-		}
-		pending, err := a.Attempts.Pending(entry.AccountKey)
-		if err != nil {
-			state.PlanValid = false
-			state.PlanError = "attempts_unavailable"
-			state.LastReplanAt = resetTimePointer(now)
-			state.NextReplanAt = resetTimePointer(now.Add(5 * time.Minute))
-			for i := range state.Entries {
-				e := &state.Entries[i]
-				if !e.Terminal() && !e.Pinned && e.State != codex.ResetAutomationRunning && e.State != codex.ResetAutomationRetrying {
-					e.State = codex.ResetAutomationBlocked
-					e.LastError = state.PlanError
-				}
-			}
-			return
-		}
-		if len(pending) > 0 {
-			unresolved[entry.AccountKey] = true
+		if err == nil && recommendation.Complete {
+			planError = ""
+			state.Entries = append(state.Entries, entries...)
 		}
 	}
-
-	constraints := &aggregate.ResetScheduleConstraints{}
-	if a.Reserve != nil && state.PlanValid {
-		// Replanning refreshes a valid accepted order; expiry of its forecast
-		// must not silently change which account may spend reserve first.
-		accepted := *state
-		accepted.LastReplanAt = resetTimePointer(now)
-		accepted.NextReplanAt = resetTimePointer(now.Add(5 * time.Minute))
-		if next, ok := accepted.NextResetAccount(now); ok && !unresolved[next] {
-			constraints.NextAccountKey = string(next)
-		}
-	}
-	for _, entry := range state.Entries {
-		if unresolved[entry.AccountKey] || entry.Terminal() || entry.State == codex.ResetAutomationRunning || entry.State == codex.ResetAutomationRetrying {
-			continue
-		}
-		if entry.ExpiresAt != nil && !entry.ExpiresAt.After(now) {
-			continue
-		}
-		constraints.AllowedCredits = append(constraints.AllowedCredits, aggregate.ResetScheduleCreditRef{AccountKey: string(entry.AccountKey), CreditID: entry.CreditID})
-		if entry.Pinned && entry.At != nil {
-			constraints.FixedUses = append(constraints.FixedUses, aggregate.ResetScheduleFixedUse{AccountKey: string(entry.AccountKey), CreditID: entry.CreditID, At: *entry.At})
-		}
-	}
-	recommendation, err := a.recommendConstrained(ctx, true, constraints)
 	state.LastReplanAt = resetTimePointer(now)
 	state.NextReplanAt = resetTimePointer(now.Add(5 * time.Minute))
-	state.PlanValid = err == nil && recommendation.Complete
-	state.PlanError = ""
-	if !state.PlanValid {
-		state.PlanError = "recommendation_incomplete"
+	state.PlanValid = planError == ""
+	state.PlanError = planError
+	state.NextPace = nil
+	if state.PlanValid {
+		state.NextPace = recommendation.NextPace
 	}
 	for i := range state.Entries {
 		entry := &state.Entries[i]
@@ -400,9 +372,10 @@ func (a *CodexResetApp) replanAutomationState(ctx context.Context, state *codex.
 		entry.At = nil
 		entry.UseBy = nil
 		entry.State = codex.ResetAutomationPending
-		entry.LastError = "not_yet_useful"
+		entry.LastError = "credit_unavailable"
 		for _, item := range recommendation.Items {
 			if item.CreditID == entry.CreditID && ((entry.AccountID != "" && item.AccountID == entry.AccountID) || (entry.AccountID == "" && item.AccountEmail == entry.Email)) {
+				entry.LastError = "not_yet_useful"
 				entry.Confidence = string(item.Confidence)
 				if item.Status == aggregate.ResetScheduled || item.Status == aggregate.ResetDueNow {
 					entry.At = resetTimePointer(item.UseAt)
@@ -419,6 +392,7 @@ func (a *CodexResetApp) replanAutomationState(ctx context.Context, state *codex.
 		if !ok || string(next) != recommendation.NextAccountKey {
 			state.PlanValid = false
 			state.PlanError = "reserve_order_changed"
+			state.NextPace = nil
 			for i := range state.Entries {
 				entry := &state.Entries[i]
 				if !entry.Terminal() && !entry.Pinned && entry.State == codex.ResetAutomationPending {
@@ -428,6 +402,87 @@ func (a *CodexResetApp) replanAutomationState(ctx context.Context, state *codex.
 			}
 		}
 	}
+}
+
+func (a *CodexResetApp) unresolvedResetAccounts(state codex.ResetAutomationState, accounts []aggregate.ResetScheduleAccountInput) (map[codex.AccountKey]bool, error) {
+	unresolved := make(map[codex.AccountKey]bool)
+	if a.Attempts == nil {
+		return unresolved, errors.New("reset attempt storage unavailable")
+	}
+	for _, entry := range state.Entries {
+		if entry.State == codex.ResetAutomationRunning || entry.State == codex.ResetAutomationRetrying {
+			unresolved[entry.AccountKey] = true
+		}
+	}
+	for _, account := range accounts {
+		key := codex.AccountKey(account.Key)
+		if unresolved[key] {
+			continue
+		}
+		pending, err := a.Attempts.Pending(key)
+		if err != nil {
+			return unresolved, err
+		}
+		unresolved[key] = len(pending) > 0
+	}
+	return unresolved, nil
+}
+
+func adaptiveResetCredits(state codex.ResetAutomationState, inputs codexResetRecommendationInputs, unresolved map[codex.AccountKey]bool) (*aggregate.ResetScheduleConstraints, []codex.ResetAutomationEntry, error) {
+	now := inputs.portfolio.Now
+	tracked := make(map[aggregate.ResetScheduleCreditRef]codex.ResetAutomationEntry, len(state.Entries))
+	for _, entry := range state.Entries {
+		ref := aggregate.ResetScheduleCreditRef{AccountKey: string(entry.AccountKey), CreditID: entry.CreditID}
+		if _, exists := tracked[ref]; !exists || !entry.Terminal() {
+			tracked[ref] = entry
+		}
+	}
+
+	var nextAccount codex.AccountKey
+	if inputs.reserve.Window != "" && state.PlanValid {
+		// Refresh the previous reserve order before preserving it in this plan.
+		state.LastReplanAt = resetTimePointer(now)
+		state.NextReplanAt = resetTimePointer(now.Add(5 * time.Minute))
+		nextAccount, _ = state.NextResetAccount(now)
+	}
+	constraints := &aggregate.ResetScheduleConstraints{}
+	var added []codex.ResetAutomationEntry
+	for _, account := range inputs.portfolio.Accounts {
+		key := codex.AccountKey(account.Key)
+		if unresolved[key] {
+			continue
+		}
+		for _, credit := range account.Credits {
+			if credit.ID == "" || !credit.Supported || credit.GrantedAt.After(now) || (credit.ExpiresAt != nil && !credit.ExpiresAt.After(now)) {
+				continue
+			}
+			ref := aggregate.ResetScheduleCreditRef{AccountKey: account.Key, CreditID: credit.ID}
+			entry, known := tracked[ref]
+			if known && entry.Terminal() {
+				continue
+			}
+			if !known {
+				if !state.AutoEnrol {
+					continue
+				}
+				identity := codex.ResetAccount{AccountKey: key, AccountID: account.AccountID, Email: account.Email}
+				entry, err := newResetAutomationEntry(identity, credit.ID, credit.ExpiresAt, now)
+				if err != nil {
+					return nil, nil, err
+				}
+				entry.Source = "adaptive"
+				added = append(added, entry)
+			}
+			constraints.AllowedCredits = append(constraints.AllowedCredits, ref)
+			if entry.Pinned && entry.At != nil {
+				constraints.FixedUses = append(constraints.FixedUses, aggregate.ResetScheduleFixedUse{AccountKey: account.Key, CreditID: credit.ID, At: *entry.At})
+			}
+			if key == nextAccount {
+				constraints.NextAccountKey = account.Key
+			}
+		}
+	}
+	return constraints, added, nil
 }
 
 // StepSchedule performs at most one reset. Its cross-process lock also protects
@@ -450,8 +505,8 @@ func (a *CodexResetApp) StepSchedule(ctx context.Context) error {
 			break
 		}
 	}
-	if !hasWork {
-		return a.cleanupScheduleAttempts(state)
+	if !hasWork && (!state.AutoEnrol || (state.NextReplanAt != nil && state.NextReplanAt.After(a.now()))) {
+		return nil
 	}
 
 	lock, err := a.Schedule.AcquireExecutor()
@@ -616,25 +671,34 @@ func (a *CodexResetApp) executeAutomationEntry(ctx context.Context, state codex.
 				full = false
 			}
 		}
-		if full && !plan.selection.Resume {
+		if !plan.selection.Resume {
 			if state.Mode == codex.ResetAutomationAdaptive && !entry.Pinned {
-				_, err := a.Schedule.Update(ctx, func(current *codex.ResetAutomationState) error {
-					e := current.Entry(entry.ID)
-					if current.Revision != state.Revision || e == nil {
-						return errResetScheduleChanged
-					}
-					e.At = nil
-					e.LastError = "not_yet_useful"
-					current.PlanValid = false
-					current.NextReplanAt = resetTimePointer(a.now().Add(5 * time.Minute))
-					return nil
-				})
-				if errors.Is(err, errResetScheduleChanged) {
-					return nil
+				window, weekly := plan.CurrentWindows[quota.Window7Day]
+				if !weekly {
+					window = plan.CurrentWindows[quota.Window5Hour]
 				}
-				return err
+				if window.RemainingPercent() > 0 {
+					_, err := a.Schedule.Update(ctx, func(current *codex.ResetAutomationState) error {
+						e := current.Entry(entry.ID)
+						if current.Revision != state.Revision || e == nil {
+							return errResetScheduleChanged
+						}
+						e.At = nil
+						e.UseBy = nil
+						e.LastError = "quota_remaining"
+						current.PlanValid = false
+						current.NextPace = nil
+						current.NextReplanAt = resetTimePointer(a.now().Add(5 * time.Minute))
+						return nil
+					})
+					if errors.Is(err, errResetScheduleChanged) {
+						return nil
+					}
+					return err
+				}
+			} else if full {
+				return a.finishAutomationEntry(ctx, state.Revision, entry.ID, codex.ResetAutomationSkipped, "nothing_to_reset")
 			}
-			return a.finishAutomationEntry(ctx, state.Revision, entry.ID, codex.ResetAutomationSkipped, "nothing_to_reset")
 		}
 	}
 	// The claim and durable attempt precede the POST. Cancellation before this
@@ -735,6 +799,12 @@ func applyAutomationUseResult(state *codex.ResetAutomationState, entry *codex.Re
 	}
 	state.PlanValid = false
 	state.NextReplanAt = nil
+	// Keep an active phase as a hint for the fresh plan. An invalid plan
+	// remains hidden until new balances and inventory confirm the guidance.
+	if phase := state.NextPace; phase != nil &&
+		(result.Outcome != codex.ConsumeReset || now.Before(phase.From) || !now.Before(phase.Until)) {
+		state.NextPace = nil
+	}
 }
 
 func finiteResetRemaining(value float64) bool { return value >= 0 && value <= 100 }
@@ -782,6 +852,7 @@ func (a *CodexResetApp) finishAutomationEntry(ctx context.Context, revision uint
 		e.UpdatedAt = a.now()
 		state.PlanValid = false
 		state.NextReplanAt = nil
+		state.NextPace = nil
 		return nil
 	})
 	if errors.Is(err, errResetScheduleChanged) {

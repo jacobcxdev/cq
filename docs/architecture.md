@@ -220,6 +220,13 @@ refresh remains with its eligible coordinator owner, rather than becoming an
 unrestricted refresh path. Keep tokens, credential revisions and journal internals
 out of public results and diagnostic filenames.
 
+The quota report reads the accepted schedule and authenticated executor heartbeat
+without changing either. Its Codex account, provider, and pool forecasts use
+confirmed redemption times as burn anchors and accepted dates as conditional
+refills. Report annotations do not affect provider availability, observed
+balances, history inputs, routing permissions, or the legacy JSON
+`sustainability` scalar. Model-scoped windows retain their own limits.
+
 ## Platform installation and runtime
 
 Complete installations manage a proxy plus periodic credential refresh in the

@@ -288,51 +288,52 @@ func publicCodexResetSchedule(schedule aggregate.ResetSchedule) codexResetSchedu
 }
 
 func renderCodexResetList(w io.Writer, result app.CodexResetListResult) error {
-	for accountIndex, account := range result.Accounts {
-		if accountIndex > 0 {
-			if _, err := fmt.Fprintln(w); err != nil {
-				return err
-			}
-		}
-		if _, err := fmt.Fprintln(w, codexResetAccountLabel(account.Email, account.AccountID)); err != nil {
-			return err
-		}
+	var out strings.Builder
+	fmt.Fprintln(&out, "Codex banked reset credits")
+	for _, account := range result.Accounts {
+		fmt.Fprintf(&out, "\n%s\n", codexResetAccountLabel(account.Email, account.AccountID))
 		if account.Error != nil {
-			if _, err := fmt.Fprintf(w, "  error: %s\n", account.Error.Code); err != nil {
-				return err
-			}
-			continue
+			fmt.Fprintf(&out, "  Credit inventory unavailable (%s).\n", account.Error.Code)
 		}
 		if len(account.Credits) == 0 {
-			if _, err := fmt.Fprintln(w, "  no reset credits"); err != nil {
-				return err
+			if account.Error == nil {
+				fmt.Fprintln(&out, "  No banked credits.")
 			}
 			continue
 		}
-		for _, credit := range account.Credits {
-			if _, err := fmt.Fprintf(w, "  %s\n    type: %s\n    status: %s\n    granted: %s\n    expires: %s\n",
-				credit.ID, credit.ResetType, credit.Status, formatCodexResetTime(credit.GrantedAt), formatCodexResetExpiry(credit.ExpiresAt)); err != nil {
-				return err
+		credits := append([]codexprov.ResetCredit(nil), account.Credits...)
+		sort.SliceStable(credits, func(i, j int) bool {
+			left, right := credits[i].ExpiresAt, credits[j].ExpiresAt
+			return left != nil && (right == nil || left.Before(*right))
+		})
+		for _, credit := range credits {
+			expiry := "No expiry"
+			if credit.ExpiresAt != nil {
+				expiry = "Expires " + formatCodexResetDisplayTime(*credit.ExpiresAt)
 			}
-			if credit.Title != "" {
-				if _, err := fmt.Fprintf(w, "    title: %s\n", credit.Title); err != nil {
-					return err
-				}
+			kind := credit.Title
+			if kind == "" {
+				kind = string(credit.ResetType)
 			}
-			if credit.Description != "" {
-				if _, err := fmt.Fprintf(w, "    description: %s\n", credit.Description); err != nil {
-					return err
-				}
-			}
+			fmt.Fprintf(&out, "  %s · %s · %s\n    %s\n", kind, credit.Status, expiry, credit.ID)
 		}
 	}
-	return nil
+	_, err := io.WriteString(w, out.String())
+	return err
 }
 
 func renderCodexResetSchedule(w io.Writer, schedule aggregate.ResetSchedule) error {
-	if _, err := fmt.Fprintf(w, "Codex banked reset schedule\n  exact: %t\n  complete: %t\n  confidence: %s\n",
-		schedule.Exact, schedule.Complete, schedule.Confidence); err != nil {
-		return err
+	var out strings.Builder
+	fmt.Fprintln(&out, "Codex reset recommendation · Advisory")
+	if !schedule.Complete {
+		fmt.Fprintln(&out, "  Timing unavailable. CQ needs fresh quota and credit inventory for every account.")
+	} else {
+		if schedule.Confidence != "" {
+			fmt.Fprintf(&out, "  Forecast confidence %s\n", schedule.Confidence)
+		}
+		if !schedule.Exact {
+			fmt.Fprintln(&out, "  Approximate plan. Timing can change as usage changes.")
+		}
 	}
 	items := append([]aggregate.ResetScheduleItem(nil), schedule.Items...)
 	sort.SliceStable(items, func(left, right int) bool {
@@ -348,20 +349,39 @@ func renderCodexResetSchedule(w io.Writer, schedule aggregate.ResetSchedule) err
 		}
 		return items[left].CreditID < items[right].CreditID
 	})
+	if len(items) == 0 && schedule.Complete {
+		fmt.Fprintln(&out, "  No banked credits available.")
+	}
 	for _, item := range items {
-		if _, err := fmt.Fprintf(w, "\n%s — %s\n  status: %s\n  use at: %s\n  use by: %s\n  restored: %s\n  reason: %s\n  confidence: %s\n",
-			codexResetAccountLabel(item.AccountEmail, item.AccountID), item.CreditID, item.Status,
-			formatCodexResetTime(item.UseAt), formatCodexResetTime(item.UseBy), formatCodexRestoredPct(item.RestoredPct),
-			primaryCodexResetReason(item.ReasonCodes), item.Confidence); err != nil {
-			return err
+		fmt.Fprintf(&out, "\n%s · %s\n", codexResetAccountLabel(item.AccountEmail, item.AccountID), codexResetRecommendationStatus(item.Status))
+		if !item.UseAt.IsZero() {
+			fmt.Fprintf(&out, "  Use %s · Forecast deadline %s\n", formatCodexResetDisplayTime(item.UseAt), formatCodexResetDisplayTime(item.UseBy))
+			fmt.Fprintf(&out, "  Estimated recovery %s · %s\n", formatCodexRestoredPct(item.RestoredPct), primaryCodexResetReason(item.ReasonCodes))
 		}
+		fmt.Fprintf(&out, "  Credit %s\n", item.CreditID)
 	}
 	for _, blocker := range schedule.Blockers {
-		if _, err := fmt.Fprintf(w, "\nblocker: %s (%s)\n", blocker.Code, codexResetAccountLabel(blocker.AccountEmail, blocker.AccountID)); err != nil {
-			return err
-		}
+		fmt.Fprintf(&out, "\n  %s · %s\n", codexResetAccountLabel(blocker.AccountEmail, blocker.AccountID), strings.ReplaceAll(blocker.Code, "_", " "))
 	}
-	return nil
+	_, err := io.WriteString(w, out.String())
+	return err
+}
+
+func codexResetRecommendationStatus(status aggregate.ResetScheduleStatus) string {
+	switch status {
+	case aggregate.ResetDueNow:
+		return "Due now"
+	case aggregate.ResetScheduled:
+		return "Planned"
+	case aggregate.ResetDeferred:
+		return "Deferred"
+	case aggregate.ResetNotUseful:
+		return "Waiting for useful recovery"
+	case aggregate.ResetUnsupported:
+		return "Unsupported credit"
+	default:
+		return string(status)
+	}
 }
 
 func renderCodexResetUsePreview(w io.Writer, plan app.CodexResetUsePlan) error {
@@ -386,8 +406,8 @@ func renderCodexResetUsePreview(w io.Writer, plan app.CodexResetUsePlan) error {
 		if item.CreditID != plan.Credit.ID || (plan.AccountID != "" && item.AccountID != plan.AccountID) {
 			continue
 		}
-		_, err := fmt.Fprintf(w, "Recommendation: %s; use at %s; use by %s; reason %s\n",
-			item.Status, formatCodexResetTime(item.UseAt), formatCodexResetTime(item.UseBy), primaryCodexResetReason(item.ReasonCodes))
+		_, err := fmt.Fprintf(w, "Recommendation: %s; use at %s; forecast deadline %s; %s\n",
+			codexResetRecommendationStatus(item.Status), formatCodexResetTime(item.UseAt), formatCodexResetTime(item.UseBy), primaryCodexResetReason(item.ReasonCodes))
 		return err
 	}
 	_, err := fmt.Fprintf(w, "Recommendation: complete=%t, no actionable time for selected credit\n", plan.Recommendation.Complete)
@@ -409,11 +429,30 @@ func renderCodexResetUseResult(w io.Writer, result app.CodexResetUseResult) erro
 		}
 	}
 	for _, warning := range result.Warnings {
-		if _, err := fmt.Fprintf(w, "  warning: %s\n", warning.Code); err != nil {
+		if _, err := fmt.Fprintf(w, "  %s\n", codexResetWarningMessage(warning.Code)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func codexResetWarningMessage(code string) string {
+	switch code {
+	case "redistribution_failed":
+		return "Quota reset recorded. CQ could not complete the routing refresh."
+	case "usage_refetch_failed", "usage_match_failed":
+		return "CQ could not verify quota after the reset."
+	case "cache_invalidate_failed":
+		return "CQ could not clear cached quota."
+	case "history_update_failed":
+		return "CQ could not update quota history."
+	case "attempt_cleanup_failed":
+		return "CQ could not clear the saved attempt."
+	case "schedule_update_failed":
+		return "CQ could not record the result in the schedule."
+	default:
+		return "Warning: " + code
+	}
 }
 
 func confirmCodexResetUse(input io.Reader, output io.Writer) bool {
@@ -475,6 +514,13 @@ func formatCodexResetTime(value time.Time) string {
 	return value.UTC().Format(time.RFC3339)
 }
 
+func formatCodexResetDisplayTime(value time.Time) string {
+	if value.IsZero() {
+		return "—"
+	}
+	return value.UTC().Format("2 Jan 2006 15:04 UTC")
+}
+
 func formatCodexRemainingPct(window quota.Window) string {
 	if window.RemainingPctExact != nil {
 		return fmt.Sprintf("%.2f", *window.RemainingPctExact)
@@ -499,5 +545,18 @@ func primaryCodexResetReason(reasons []aggregate.ResetScheduleReason) string {
 	if len(reasons) == 0 {
 		return "—"
 	}
-	return string(reasons[0])
+	switch reasons[0] {
+	case aggregate.ResetReasonGapAvoidance:
+		return "Avoids running out of quota"
+	case aggregate.ResetReasonExpiryPressure:
+		return "Uses credit before expiry"
+	case aggregate.ResetReasonNaturalReset:
+		return "Accounts for a natural reset"
+	case aggregate.ResetReasonWasteReduction:
+		return "Preserves existing quota"
+	case aggregate.ResetReasonRateFallback:
+		return "Uses estimated usage rate"
+	default:
+		return string(reasons[0])
+	}
 }

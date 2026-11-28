@@ -337,7 +337,7 @@ A portable export envelope is `{"version":1,"name":"review","definition":{"descr
 | Encrypted ZCode session store and device identity | Browser-login material and stable device registration. Keep its private key material with the configuration during an authorised migration. PATs/signing material remain in memory. |
 | Configuration `models.json` | User overlays managed by `models overlay`; registry provider IDs are `anthropic`, `codex`, `zai`, `grok`, distinct from quota ID `claude`. |
 | Codex managed account registry / credential journal | Coordinator-owned account identity and refresh/removal records. Do not edit to bypass uncertain outcomes or change ownership. |
-| Reset schedule/journal state | Exact accepted credits, confirmations and durable uncertain outcomes. Use schedule/list/status commands, not manual file changes. |
+| Reset schedule/journal state | Confirmed schedule mode, enrolled credits, and durable uncertain outcomes. Use the schedule/list/status commands to inspect and manage it. |
 | Dots private installation | Defaults to `~/.local/share/cq/dots`, outside source checkouts. Use `dots --root` for a deliberate separate installation; see [Dots](dots.md). |
 | Native usage certificate/settings | Under CQ state `native-usage`; `prepare` prints the authoritative public certificate path. Certificate preparation, Keychain trust and enablement are separate. |
 

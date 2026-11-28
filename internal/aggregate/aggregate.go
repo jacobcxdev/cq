@@ -129,6 +129,7 @@ func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo,
 		}
 
 		elapsed := windowElapsed(w, periodS, nowEpoch)
+		burnPeriod := periodS
 		var expected float64
 		if weeklyGated {
 			expected = 0
@@ -137,12 +138,19 @@ func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo,
 		} else {
 			expected = pct
 		}
+		if providerID == string(provider.Codex) && a.result.BankedResets != nil && !weeklyGated && w.ResetAtUnix > nowEpoch {
+			start, next := a.result.BankedResets.WindowBounds(winName, w, nowEpoch)
+			if start <= nowEpoch && next > nowEpoch {
+				expected = 100 * float64(next-nowEpoch) / float64(next-start)
+				burnPeriod = w.ResetAtUnix - start
+			}
+		}
 
 		sumRemaining += pct * weight
 		sumExpected += expected * weight
 		sumWeight += weight
 
-		rate := w.BurnRate(periodS, nowEpoch)
+		rate := w.BurnRate(burnPeriod, nowEpoch)
 		if !weeklyGated && w.RemainingPercent() > 0 && rate > 0 {
 			burnNum += w.RemainingPercent() * weight
 			burnDen += rate * weight
@@ -185,6 +193,9 @@ func computeWindow(winName quota.WindowName, periodS int64, accounts []acctInfo,
 	}
 	if gi.WasteDeadline >= 0 {
 		result.WasteDeadlineS = int64(math.Round(gi.WasteDeadline))
+	}
+	if providerID == string(provider.Codex) {
+		applyBankedResetForecast(&result, accounts, winName, periodS, nowEpoch)
 	}
 
 	return result, true

@@ -115,4 +115,9 @@ func writeWindowRow(ew *errWriter, row TTYWindowRow) {
 		ew.write(row.Burndown)
 	}
 	ew.write("\n")
+	if row.Note != "" {
+		ew.write(windowNoteIndent)
+		ew.write(row.Note)
+		ew.write("\n")
+	}
 }

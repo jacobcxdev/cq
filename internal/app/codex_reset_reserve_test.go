@@ -123,8 +123,11 @@ func TestReserveAdaptiveReplanKeepsAcceptedFirstAccount(t *testing.T) {
 	}
 }
 
-func TestReserveAdaptiveBootstrapStaysWithinAcceptedCredits(t *testing.T) {
+func TestReserveAdaptiveBootstrapUsesOnlyEligibleAccount(t *testing.T) {
 	a := reserveResetFixture(t)
+	backend := a.Backend.(*recordingResetBackend)
+	delete(backend.credits, "account-a")
+	delete(backend.credits, "account-c")
 	expires := a.now().Add(24 * time.Hour)
 	s := codex.ResetAutomationState{Version: 1, Enabled: true, Mode: codex.ResetAutomationAdaptive,
 		Entries: []codex.ResetAutomationEntry{{ID: "accepted", AccountKey: "account-b", AccountID: "acct-b", Email: "b@example.com", CreditID: "credit-account-b", ExpiresAt: &expires, State: codex.ResetAutomationPending}}}

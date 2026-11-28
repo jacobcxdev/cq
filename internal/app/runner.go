@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"runtime/debug"
+	"slices"
 	"sync"
 	"time"
 
@@ -14,12 +15,13 @@ import (
 )
 
 type Runner struct {
-	Clock         Clock
-	Cache         Cache   // nil = no caching
-	History       History // nil = cold-start, no burn-rate smoothing
-	Services      map[provider.ID]provider.Services
-	Renderer      Renderer
-	SharedBudgets []SharedBudgetCheck
+	Clock              Clock
+	Cache              Cache   // nil = no caching
+	History            History // nil = cold-start, no burn-rate smoothing
+	Services           map[provider.ID]provider.Services
+	Renderer           Renderer
+	SharedBudgets      []SharedBudgetCheck
+	CodexResetForecast func(context.Context, time.Time) map[string]quota.BankedResetForecast
 }
 
 type SharedBudgetCheck struct {
@@ -101,6 +103,23 @@ func (r *Runner) BuildReport(ctx context.Context, req RunRequest) (Report, error
 	}
 
 	attachRecentBurnRates(fetched, estimates)
+	if results := fetched[provider.Codex]; r.CodexResetForecast != nil && len(results) > 0 {
+		forecasts := r.CodexResetForecast(ctx, now)
+		if len(forecasts) > 0 {
+			results = slices.Clone(results)
+			for i := range results {
+				result := &results[i]
+				forecast, found := forecasts[result.AccountKey]
+				// A cached balance from before a confirmed refill is not a
+				// valid starting point for projecting the new allowance.
+				if found && result.IsUsable() &&
+					(result.CacheAge == 0 || forecast.LastRedeemedAtUnix < now.Unix()-result.CacheAge) {
+					result.BankedResets = &forecast
+				}
+			}
+			fetched[provider.Codex] = results
+		}
+	}
 	report := buildReport(now, req.Providers, fetched, burnRates)
 	report.SharedBudgetSubscriptions = sharedBudgets
 	report.SharedBudgetAggregates = aggregateSharedBudgets(sharedBudgets, now.Unix())

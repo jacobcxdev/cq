@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
 	"github.com/jacobcxdev/cq/internal/proxy"
+	"github.com/jacobcxdev/cq/internal/quota"
 	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
@@ -49,16 +51,21 @@ type codexAutomationJSON struct {
 	Revision     uint64                     `json:"revision"`
 	Enabled      bool                       `json:"enabled"`
 	Mode         codex.ResetAutomationMode  `json:"mode"`
+	AutoEnrol    bool                       `json:"auto_enrol"`
 	PlanValid    bool                       `json:"plan_valid"`
 	PlanError    string                     `json:"plan_error,omitempty"`
 	LastReplanAt *time.Time                 `json:"last_replan_at,omitempty"`
 	NextReplanAt *time.Time                 `json:"next_replan_at,omitempty"`
+	NextPace     *quota.ResetPacePhase      `json:"next_pace,omitempty"`
 	Entries      []codexAutomationEntryJSON `json:"entries"`
 	Executor     any                        `json:"executor,omitempty"`
 }
 
 func publicCodexAutomation(state codex.ResetAutomationState) codexAutomationJSON {
-	result := codexAutomationJSON{Revision: state.Revision, Enabled: state.Enabled, Mode: state.Mode, PlanValid: state.PlanValid, PlanError: state.PlanError, LastReplanAt: state.LastReplanAt, NextReplanAt: state.NextReplanAt, Entries: []codexAutomationEntryJSON{}}
+	result := codexAutomationJSON{Revision: state.Revision, Enabled: state.Enabled, Mode: state.Mode, AutoEnrol: state.AutoEnrol, PlanValid: state.PlanValid, PlanError: state.PlanError, LastReplanAt: state.LastReplanAt, NextReplanAt: state.NextReplanAt, Entries: []codexAutomationEntryJSON{}}
+	if state.Enabled && state.PlanValid && state.Mode == codex.ResetAutomationAdaptive {
+		result.NextPace = state.NextPace
+	}
 	for _, entry := range state.Entries {
 		result.Entries = append(result.Entries, codexAutomationEntryJSON{ID: entry.ID, AccountID: entry.AccountID, Email: entry.Email, CreditID: entry.CreditID, At: entry.At, ExpiresAt: entry.ExpiresAt, UseBy: entry.UseBy, Pinned: entry.Pinned, Source: entry.Source, Confidence: entry.Confidence, State: entry.State, Outcome: entry.Outcome, LastError: entry.LastError, Warnings: entry.Warnings, NextAttemptAt: entry.NextAttemptAt})
 	}
@@ -143,10 +150,22 @@ func runCodexResetScheduleChange(ctx context.Context, change app.CodexResetSched
 		if jsonOutput {
 			preview = deps.ErrOut
 		}
-		if err := renderCodexAutomation(preview, plan.State); err != nil {
+		if _, err := fmt.Fprintln(preview, "Schedule preview"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintln(preview, "Saving authorises automatic execution while CQ proxy runs. Due entries may execute immediately."); err != nil {
+		if err := renderCodexAutomation(preview, plan.State, nil); err != nil {
+			return err
+		}
+		authority := "The schedule will stay paused until enabled."
+		if plan.State.Enabled {
+			if plan.State.AutoEnrol {
+				authority = "Saving authorises CQ to enrol and redeem eligible current and future credits while the proxy runs."
+			} else {
+				authority = "Saving authorises CQ to redeem the scheduled credits while the proxy runs."
+			}
+			authority += " Due entries may execute immediately."
+		}
+		if _, err := fmt.Fprintln(preview, "\n"+authority); err != nil {
 			return err
 		}
 		if !yes {
@@ -180,7 +199,7 @@ func runCodexResetScheduleChange(ctx context.Context, change app.CodexResetSched
 	if jsonOutput {
 		return encodeCodexResetJSON(deps.Out, publicCodexAutomation(state))
 	}
-	return renderCodexAutomation(deps.Out, state)
+	return renderCodexAutomation(deps.Out, state, nil)
 }
 func runCodexResetScheduleStatus(ctx context.Context, jsonOutput bool, deps codexResetsDependencies) error {
 	if err := validateCodexResetsDependencies(deps); err != nil {
@@ -194,52 +213,194 @@ func runCodexResetScheduleStatus(ctx context.Context, jsonOutput bool, deps code
 	if deps.ExecutorStatus != nil {
 		executor = deps.ExecutorStatus(ctx)
 	}
+	if state.NextPace != nil {
+		now := time.Now()
+		if deps.App.Clock != nil {
+			now = deps.App.Clock.Now()
+		}
+		if !executor.Running || executor.LastError != "" || !freshCodexAdaptivePlan(state, now) || !state.NextPace.Until.After(now) {
+			state.NextPace = nil
+		}
+	}
 	if jsonOutput {
 		result := publicCodexAutomation(state)
 		result.Executor = executor
 		return encodeCodexResetJSON(deps.Out, result)
 	}
-	if err := renderCodexAutomation(deps.Out, state); err != nil {
-		return err
-	}
-	_, err = fmt.Fprintf(deps.Out, "\nExecutor: %s\n", executor.State)
-	return err
+	return renderCodexAutomation(deps.Out, state, &executor)
 }
-func renderCodexAutomation(w io.Writer, state codex.ResetAutomationState) error {
-	if _, err := fmt.Fprintf(w, "Codex automated reset schedule\n  enabled: %t\n  mode: %s\n  revision: %d\n", state.Enabled, state.Mode, state.Revision); err != nil {
-		return err
+
+func renderCodexAutomation(w io.Writer, state codex.ResetAutomationState, executor *proxy.CodexResetSchedulerStatus) error {
+	var out strings.Builder
+	mode := "Fixed"
+	if state.Mode == codex.ResetAutomationAdaptive {
+		mode = "Adaptive"
+	}
+	status := "Paused"
+	if state.Enabled {
+		status = "Enabled"
+	} else if state.Revision == 0 {
+		status = "Off"
+	}
+	fmt.Fprintf(&out, "Codex reset schedule · %s · %s\n", mode, status)
+	if executor != nil {
+		fmt.Fprintf(&out, "  Executor %s\n", strings.ReplaceAll(executor.State, "_", " "))
+		if executor.LastError != "" {
+			fmt.Fprintf(&out, "  Executor reported %s.\n", strings.ReplaceAll(executor.LastError, "_", " "))
+		}
+	}
+	if state.Enabled && state.Mode == codex.ResetAutomationAdaptive {
+		if state.AutoEnrol {
+			fmt.Fprintln(&out, "  New credits are picked up automatically.")
+		} else {
+			fmt.Fprintln(&out, "  New credits require approval. To allow auto-enrolment, run cq codex resets schedule mode adaptive.")
+		}
+		if state.LastReplanAt != nil {
+			fmt.Fprintf(&out, "  Last checked %s\n", formatCodexResetDisplayTime(*state.LastReplanAt))
+		}
+		if state.NextReplanAt != nil {
+			fmt.Fprintf(&out, "  Next check %s\n", formatCodexResetDisplayTime(*state.NextReplanAt))
+		}
+		if pace := state.NextPace; pace != nil && state.PlanValid && (executor == nil || executor.Running) {
+			fmt.Fprintf(&out, "  Slow down to %d%% of observed burn\n    From %s until %s\n",
+				pace.Percent, formatCodexResetDisplayTime(pace.From), formatCodexResetDisplayTime(pace.Until))
+		}
 	}
 	if state.PlanError != "" {
-		if _, err := fmt.Fprintf(w, "  plan: %s\n", state.PlanError); err != nil {
-			return err
-		}
+		fmt.Fprintf(&out, "  %s\n", codexResetScheduleExplanation(state.PlanError))
 	}
+
+	var upcoming, history []codex.ResetAutomationEntry
 	for _, entry := range state.Entries {
-		pin := ""
+		if entry.Terminal() {
+			history = append(history, entry)
+		} else {
+			upcoming = append(upcoming, entry)
+		}
+	}
+	sort.SliceStable(upcoming, func(i, j int) bool {
+		left, right := upcoming[i], upcoming[j]
+		leftInFlight := left.State == codex.ResetAutomationRunning || left.State == codex.ResetAutomationRetrying
+		rightInFlight := right.State == codex.ResetAutomationRunning || right.State == codex.ResetAutomationRetrying
+		if leftInFlight != rightInFlight {
+			return leftInFlight
+		}
+		if left.At != nil {
+			return right.At == nil || left.At.Before(*right.At)
+		}
+		return right.At == nil && left.ExpiresAt != nil && (right.ExpiresAt == nil || left.ExpiresAt.Before(*right.ExpiresAt))
+	})
+	sort.SliceStable(history, func(i, j int) bool { return history[i].UpdatedAt.After(history[j].UpdatedAt) })
+
+	fmt.Fprintf(&out, "\nUpcoming (%d)\n", len(upcoming))
+	if len(upcoming) == 0 {
+		fmt.Fprintln(&out, "  No pending resets.")
+	}
+	for _, entry := range upcoming {
+		details := []string{codexResetEntryStatus(entry)}
 		if entry.Pinned {
-			pin = " pinned"
+			details = append(details, "Pinned")
 		}
-		at := "not scheduled"
-		if entry.At != nil {
-			at = formatCodexResetTime(*entry.At)
+		if entry.Source == "adaptive" {
+			details = append(details, "Auto-enrolled")
 		}
-		if _, err := fmt.Fprintf(w, "\n%s  %s  %s\n  credit: %s\n  at: %s%s\n  expires: %s\n  confidence: %s\n", entry.ID, codexResetAccountLabel(entry.Email, entry.AccountID), entry.State, entry.CreditID, at, pin, formatCodexResetExpiry(entry.ExpiresAt), entry.Confidence); err != nil {
-			return err
+		if entry.Confidence == "low" && entry.At != nil && !entry.Pinned && entry.State == codex.ResetAutomationPending {
+			details = append(details, "Low confidence")
 		}
-		if entry.LastError != "" {
-			if _, err := fmt.Fprintf(w, "  reason: %s\n", entry.LastError); err != nil {
-				return err
+		fmt.Fprintf(&out, "  %s · %s\n", codexResetAccountLabel(entry.Email, entry.AccountID), strings.Join(details, " · "))
+		var timing []string
+		if entry.NextAttemptAt != nil {
+			timing = append(timing, "Retry "+formatCodexResetDisplayTime(*entry.NextAttemptAt))
+		} else if entry.At != nil {
+			timing = append(timing, "Planned "+formatCodexResetDisplayTime(*entry.At))
+		}
+		if entry.ExpiresAt != nil {
+			expires := "Expires " + formatCodexResetDisplayTime(*entry.ExpiresAt)
+			if entry.At != nil && entry.State == codex.ResetAutomationPending {
+				margin := entry.ExpiresAt.Sub(*entry.At)
+				if margin > 0 && margin <= 5*time.Minute {
+					if margin%time.Minute == 0 {
+						expires += fmt.Sprintf(" (%dm before expiry)", margin/time.Minute)
+					} else {
+						expires += fmt.Sprintf(" (%ds before expiry)", margin/time.Second)
+					}
+				}
 			}
+			timing = append(timing, expires)
 		}
+		if len(timing) != 0 {
+			fmt.Fprintf(&out, "    %s\n", strings.Join(timing, " · "))
+		}
+		fmt.Fprintf(&out, "    Entry %s\n", entry.ID)
+	}
+	if len(history) != 0 {
+		fmt.Fprintf(&out, "\nHistory (%d)\n", len(history))
+	}
+	for _, entry := range history {
+		at := entry.UpdatedAt
+		if at.IsZero() && entry.At != nil {
+			at = *entry.At
+		}
+		fmt.Fprintf(&out, "  %s · %s · %s\n", formatCodexResetDisplayTime(at), codexResetAccountLabel(entry.Email, entry.AccountID), codexResetEntryStatus(entry))
 		for _, warning := range entry.Warnings {
-			if _, err := fmt.Fprintf(w, "  warning: %s\n", warning); err != nil {
-				return err
-			}
+			fmt.Fprintf(&out, "    %s\n", codexResetWarningMessage(warning))
 		}
 	}
-	if len(state.Entries) == 0 {
-		_, err := fmt.Fprintln(w, "  no scheduled resets")
-		return err
+	_, err := io.WriteString(w, out.String())
+	return err
+}
+
+func codexResetEntryStatus(entry codex.ResetAutomationEntry) string {
+	switch entry.State {
+	case codex.ResetAutomationPending:
+		if entry.LastError == "credit_unavailable" {
+			return "Credit unavailable"
+		}
+		if entry.LastError == "quota_remaining" {
+			return "Waiting for existing quota to be spent"
+		}
+		if entry.At == nil {
+			return "Waiting for usage"
+		}
+		return "Scheduled"
+	case codex.ResetAutomationRunning:
+		return "Redeeming"
+	case codex.ResetAutomationRetrying:
+		return "Confirming previous attempt"
+	case codex.ResetAutomationBlocked:
+		return codexResetScheduleExplanation(entry.LastError)
+	case codex.ResetAutomationCompleted:
+		if entry.Outcome == codex.ConsumeAlreadyRedeemed {
+			return "Already redeemed"
+		}
+		return "Reset succeeded"
+	case codex.ResetAutomationSkipped:
+		return "Skipped because quota was full"
+	case codex.ResetAutomationMissed:
+		if entry.LastError == "credit_expired" {
+			return "Expired unused"
+		}
+		return "Credit unavailable"
+	case codex.ResetAutomationCancelled:
+		return "Cancelled"
+	default:
+		return string(entry.State)
 	}
-	return nil
+}
+
+func codexResetScheduleExplanation(code string) string {
+	switch code {
+	case "recommendation_incomplete":
+		return "Waiting for fresh quota and credit inventory"
+	case "attempts_unavailable":
+		return "Waiting for reset attempt storage"
+	case "reserve_order_changed":
+		return "Waiting for a plan that preserves the quota reserve"
+	case "time_required":
+		return "Needs a scheduled time"
+	case "":
+		return "Blocked"
+	default:
+		return "Blocked · " + strings.ReplaceAll(code, "_", " ")
+	}
 }
