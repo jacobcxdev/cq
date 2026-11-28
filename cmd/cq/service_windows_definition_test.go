@@ -557,6 +557,49 @@ func TestWindowsTaskDefinitionServiceRestartProxyReconcilesTimedOutLaunch(t *tes
 	}
 }
 
+func TestWindowsTaskDefinitionServiceRestartProxyAcceptsSchedulerStartedReplacement(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	ctx := context.Background()
+	if err := platform.InstallProxy(ctx, platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Run(ctx, "/End", "/TN", windowsProxyTaskPath); err != nil {
+		t.Fatal(err)
+	}
+
+	stopped := false
+	platform.run = func(ctx context.Context, args ...string) ([]byte, error) {
+		if args[0] == "/Run" {
+			t.Fatal("restart sent a Run request after Scheduler started a replacement")
+		}
+		output, err := runner.Run(ctx, args...)
+		if args[0] == "/End" {
+			stopped = true
+		}
+		return output, err
+	}
+	observedReplacement := false
+	platform.queryState = func(ctx context.Context, taskPath string) (windowsTaskRuntimeState, error) {
+		if stopped {
+			if observedReplacement {
+				t.Fatal("restart did not accept a healthy Scheduler-started replacement")
+			}
+			if _, err := runner.Run(ctx, "/Run", "/TN", taskPath); err != nil {
+				return windowsTaskRuntimeState{}, err
+			}
+			observedReplacement = true
+		}
+		return runner.State(ctx, taskPath)
+	}
+
+	if err := platform.RestartProxy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !observedReplacement || !runner.running[windowsProxyTaskPath] {
+		t.Fatal("restart finished without observing a running replacement")
+	}
+}
+
 func TestWindowsTaskDefinitionServiceRestartProxyRetriesStateReadAfterStop(t *testing.T) {
 	for _, test := range []struct {
 		name         string

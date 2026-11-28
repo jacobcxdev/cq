@@ -350,7 +350,7 @@ func (platform *windowsTaskServicePlatform) RestartProxy(ctx context.Context) er
 			status := platform.inspectProxyInstance(ctx, componentStatus{
 				Running: true, ConfiguredExecutable: previous.ConfiguredExecutable,
 			}, state)
-			if status.Healthy && status.PID != previous.PID && (previous.PID != 0 || launches > 0) {
+			if status.Healthy && status.PID != previous.PID && (!previous.Running || previous.PID != 0 || launches > 0) {
 				return nil
 			}
 		}
