@@ -549,6 +549,10 @@ cq proxy status --instance-state-root PATH
 
 `GET /health` proves runtime reachability only; strict status checks broader ownership and runtime facts.
 
+On Windows, reconciled status checks the registered proxy task, its listener,
+and local health. A healthy local proxy still reports a degraded result in
+strict mode without separate proof that Codex traffic passes through it.
+
 ### Client routing
 
 Point Claude Code-compatible traffic at `http://127.0.0.1:19280` with `ANTHROPIC_BASE_URL`. cq accepts its generated local bearer token and known Claude OAuth tokens, routes Anthropic models to Claude, and translates supported GPT/o-series Anthropic Messages requests to Codex Responses. Native Codex clients use Codex HTTP/WebSocket routes without Anthropic translation.

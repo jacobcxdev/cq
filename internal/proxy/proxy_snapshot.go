@@ -230,11 +230,11 @@ func validFactCode(code string) bool {
 }
 
 func validDesiredProxyState(value DesiredProxyState) bool {
-	return value.Manager == "" || value.Manager == "launchagent" || value.Manager == "homebrew" || value.Manager == "systemd-user" || value.Manager == "manual"
+	return value.Manager == "" || validProxyServiceManager(value.Manager)
 }
 
 func validServiceState(value ServiceState) bool {
-	if value.Manager != "launchagent" && value.Manager != "homebrew" && value.Manager != "systemd-user" && value.Manager != "manual" {
+	if !validProxyServiceManager(value.Manager) {
 		return false
 	}
 	switch value.State {
@@ -242,6 +242,15 @@ func validServiceState(value ServiceState) bool {
 		return value.PID > 0 && value.Executable != ""
 	case "stopped", "crash_looping", "absent":
 		return value.PID == 0 && value.Executable == ""
+	default:
+		return false
+	}
+}
+
+func validProxyServiceManager(manager string) bool {
+	switch manager {
+	case "launchagent", "homebrew", "systemd-user", "task-scheduler", "manual":
+		return true
 	default:
 		return false
 	}

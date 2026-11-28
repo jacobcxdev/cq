@@ -353,6 +353,159 @@ func TestWindowsTaskDefinitionServiceRestartProxyReplacesInstance(t *testing.T) 
 	}
 }
 
+func TestWindowsTaskDefinitionServiceRestartProxyHonoursCancellationBeforeStop(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	inspect := platform.inspectProxy
+	platform.inspectProxy = func(ctx context.Context, executable string) componentStatus {
+		status := inspect(ctx, executable)
+		cancel()
+		return status
+	}
+	before := runner.proxyPID
+
+	if err := platform.RestartProxy(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("restart = %v, want cancellation", err)
+	}
+	if runner.proxyPID != before || !runner.running[windowsProxyTaskPath] || hasWindowsTaskCall(runner.calls, []string{"/End", "/TN", windowsProxyTaskPath}) {
+		t.Fatal("cancelled restart stopped the running proxy")
+	}
+}
+
+func TestWindowsTaskDefinitionServiceRestartProxyCompletesAfterStopCancellation(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	if err := platform.InstallProxy(context.Background(), platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	platform.run = func(ctx context.Context, args ...string) ([]byte, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		out, err := runner.Run(ctx, args...)
+		if args[0] == "/End" {
+			cancel()
+		}
+		return out, err
+	}
+	before := runner.proxyPID
+
+	if err := platform.RestartProxy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if runner.proxyPID == before || !runner.running[windowsProxyTaskPath] {
+		t.Fatal("proxy was not restored after cancellation")
+	}
+}
+
+func TestWindowsTaskDefinitionServiceRestartProxyRecoversFromAmbiguousStop(t *testing.T) {
+	platform, runner := newWindowsTaskServiceHarness(t)
+	ctx := context.Background()
+	if err := platform.InstallProxy(ctx, platform.executable); err != nil {
+		t.Fatal(err)
+	}
+	before := runner.proxyPID
+	stops, stopPolls := 0, 0
+	var stopDeadline time.Time
+	platform.run = func(ctx context.Context, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "/End":
+			stops++
+			stopDeadline, _ = ctx.Deadline()
+			return nil, context.DeadlineExceeded
+		case "/Run":
+			if runner.running[windowsProxyTaskPath] {
+				t.Fatal("replacement launched before the predecessor stopped")
+			}
+			deadline, _ := ctx.Deadline()
+			if stopDeadline.IsZero() || !deadline.After(stopDeadline) {
+				t.Fatal("stop consumed the whole replacement budget")
+			}
+		}
+		return runner.Run(ctx, args...)
+	}
+	platform.queryState = func(ctx context.Context, taskPath string) (windowsTaskRuntimeState, error) {
+		if stops > 0 {
+			stopPolls++
+			if stopPolls == 2 {
+				runner.running[windowsProxyTaskPath] = false
+				delete(runner.enginePIDs, windowsProxyTaskPath)
+			}
+		}
+		return runner.State(ctx, taskPath)
+	}
+
+	if err := platform.RestartProxy(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if stops != 1 || runner.proxyPID == before || !runner.running[windowsProxyTaskPath] {
+		t.Fatalf("restart made %d stop requests, PID = %d, running = %t", stops, runner.proxyPID, runner.running[windowsProxyTaskPath])
+	}
+}
+
+func TestWindowsTaskDefinitionServiceRestartProxyRecoversFromLaunchError(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		firstLaunchSucceeded bool
+		allLaunchesFail      bool
+		wantLaunches         int
+	}{
+		{name: "task stayed idle", wantLaunches: 2},
+		{name: "task started before the error", firstLaunchSucceeded: true, wantLaunches: 1},
+		{name: "attempts exhausted", allLaunchesFail: true, wantLaunches: windowsProxyLaunchLimit},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			platform, runner := newWindowsTaskServiceHarness(t)
+			ctx := context.Background()
+			if err := platform.InstallProxy(ctx, platform.executable); err != nil {
+				t.Fatal(err)
+			}
+			before := runner.proxyPID
+			launches := 0
+			launchErr := errors.New("Task Scheduler launch acknowledgement lost")
+			platform.run = func(ctx context.Context, args ...string) ([]byte, error) {
+				if args[0] == "/Run" {
+					launches++
+					if test.allLaunchesFail {
+						return nil, launchErr
+					}
+					if launches == 1 {
+						if test.firstLaunchSucceeded {
+							if _, err := runner.Run(ctx, args...); err != nil {
+								return nil, err
+							}
+						}
+						return nil, launchErr
+					}
+				}
+				return runner.Run(ctx, args...)
+			}
+
+			err := platform.RestartProxy(ctx)
+			if launches != test.wantLaunches {
+				t.Fatalf("restart made %d launch requests, want %d", launches, test.wantLaunches)
+			}
+			if test.allLaunchesFail {
+				if !errors.Is(err, ErrServiceUnhealthy) || !errors.Is(err, launchErr) {
+					t.Fatalf("restart = %v, want unhealthy service and launch error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if runner.proxyPID == before || !runner.running[windowsProxyTaskPath] {
+				t.Fatalf("replacement PID = %d, running=%t", runner.proxyPID, runner.running[windowsProxyTaskPath])
+			}
+		})
+	}
+}
+
 func TestWindowsTaskDefinitionServiceRestartProxyRetriesIgnoredLaunch(t *testing.T) {
 	platform, runner := newWindowsTaskServiceHarness(t)
 	ctx := context.Background()
