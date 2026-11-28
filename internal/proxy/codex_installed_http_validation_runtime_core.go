@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +21,7 @@ import (
 
 	"github.com/jacobcxdev/cq/internal/fsutil"
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/userdirs"
 )
 
 const codexInstalledHTTPValidationTempPrefix = "cq-codex-v2-"
@@ -68,33 +71,24 @@ func newCodexInstalledHTTPValidationRuntimeCore(ctx context.Context) (core *code
 		return nil, err
 	}
 	core = &codexInstalledHTTPValidationRuntimeCore{}
+	ownedCore := core
 	defer func() {
 		if recover() != nil {
-			_ = core.close()
 			core = nil
 			returnErr = errors.New("Codex installed HTTP validation runtime panicked")
-			return
 		}
 		if returnErr != nil {
-			_ = core.close()
+			returnErr = errors.Join(returnErr, ownedCore.close())
 			core = nil
 		}
 	}()
 
-	shortTempRoot, err := filepath.EvalSymlinks("/tmp")
-	if err != nil {
-		return nil, errors.New("resolve Codex installed HTTP validation isolation parent")
-	}
-	root, err := os.MkdirTemp(shortTempRoot, codexInstalledHTTPValidationTempPrefix)
-	if err != nil {
-		return nil, errors.New("create Codex installed HTTP validation isolation")
-	}
+	root, err := newCodexInstalledHTTPValidationTempRoot()
 	core.tempRoot = root
-	if err := os.Chmod(root, 0o700); err != nil {
-		return nil, errors.New("secure Codex installed HTTP validation isolation")
+	if err != nil {
+		return nil, err
 	}
-	info, err := os.Stat(root)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+	if err := fsutil.ValidateSecureDirectory(fsutil.OSFileSystem{}, root); err != nil {
 		return nil, errors.New("validate Codex installed HTTP validation isolation")
 	}
 	fsys := codexInstalledHTTPValidationFileSystem{home: root}
@@ -192,6 +186,52 @@ func newCodexInstalledHTTPValidationRuntimeCore(ctx context.Context) (core *code
 		return nil, err
 	}
 	return core, nil
+}
+
+func newCodexInstalledHTTPValidationTempRoot() (string, error) {
+	if runtime.GOOS != "windows" {
+		parent, err := filepath.EvalSymlinks("/tmp")
+		if err != nil {
+			return "", errors.New("resolve Codex installed HTTP validation isolation parent")
+		}
+		root, err := os.MkdirTemp(parent, codexInstalledHTTPValidationTempPrefix)
+		if err != nil {
+			return "", errors.New("create Codex installed HTTP validation isolation")
+		}
+		if err := os.Chmod(root, 0o700); err != nil {
+			return root, errors.New("secure Codex installed HTTP validation isolation")
+		}
+		return root, nil
+	}
+	roots, err := userdirs.Default()
+	if err != nil {
+		return "", errors.New("resolve Codex installed HTTP validation isolation parent")
+	}
+	filesystem := fsutil.OSFileSystem{}
+	if err := fsutil.EnsureSecureDirectory(filesystem, roots.Runtime); err != nil {
+		return "", fmt.Errorf("prepare Codex installed HTTP validation isolation parent: %w", err)
+	}
+	parent, err := filesystem.OpenSecureDirectory(roots.Runtime)
+	if err != nil {
+		return "", fmt.Errorf("open Codex installed HTTP validation isolation parent: %w", err)
+	}
+	defer parent.Close()
+	if err := fsutil.ValidateSecureDirectoryHandle(filesystem, parent, roots.Runtime); err != nil {
+		return "", fmt.Errorf("verify Codex installed HTTP validation isolation parent: %w", err)
+	}
+	durable, ok := parent.(fsutil.DurableDirectory)
+	if !ok {
+		return "", fsutil.ErrSecureCapabilityUnavailable
+	}
+	name := codexInstalledHTTPValidationTempPrefix + rand.Text()
+	if err := durable.Mkdir(name, 0o700); err != nil {
+		return "", fmt.Errorf("create Codex installed HTTP validation isolation: %w", err)
+	}
+	root := filepath.Join(roots.Runtime, name)
+	if err := parent.Sync(); err != nil {
+		return root, fmt.Errorf("sync Codex installed HTTP validation isolation parent: %w", err)
+	}
+	return root, nil
 }
 
 func (core *codexInstalledHTTPValidationRuntimeCore) nativeHTTPAdmissionSnapshot() codexInstalledNativeHTTPAdmissionSnapshot {
@@ -308,6 +348,12 @@ func removeCodexInstalledHTTPValidationTempRoot(root string) error {
 	if !filepath.IsAbs(clean) || filepath.Dir(clean) == clean || filepath.Dir(clean) == string(filepath.Separator) ||
 		!strings.HasPrefix(filepath.Base(clean), codexInstalledHTTPValidationTempPrefix) {
 		return errors.New("refuse unsafe Codex installed HTTP validation cleanup")
+	}
+	if runtime.GOOS == "windows" {
+		roots, err := userdirs.Default()
+		if err != nil || filepath.Dir(clean) != roots.Runtime || fsutil.ValidateSecureDirectory(fsutil.OSFileSystem{}, clean) != nil {
+			return errors.New("refuse unsafe Codex installed HTTP validation cleanup")
+		}
 	}
 	if err := os.RemoveAll(clean); err != nil {
 		return errors.New("remove Codex installed HTTP validation isolation")
