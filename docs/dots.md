@@ -26,6 +26,9 @@ session through the adapter. The launcher uses the existing ChatGPT profile.
 On Windows, pin **ChatGPT via CQ** from the Start Menu to group its windows
 under that shortcut. If you pinned an older CQ shortcut, replace that pin
 with the current Start Menu shortcut after you reinstall Dots.
+If ChatGPT stays in the system tray after you close its window, the shortcut
+reopens that session. To start a fresh session with Dots, quit ChatGPT from the
+tray before you open **ChatGPT via CQ**.
 
 The launcher sets `OPENAI_BASE_URL` to CQ's configured local proxy, normally
 `http://127.0.0.1:19280`. The app and its child Codex app-server inherit this
