@@ -7,6 +7,7 @@ import (
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 // CodexRoutePolicyCandidate is a secret-free account/model route considered by policy.
@@ -16,7 +17,8 @@ type CodexRoutePolicyCandidate struct {
 	SystemAccount bool
 	// IncludedQuotaExhausted preserves ordinary admission as a paid fallback.
 	IncludedQuotaExhausted bool
-	ExpiringWeeklyReset    time.Time
+	QuotaSpendDeadline     time.Time
+	UsesCreditDeadline     bool
 	// RequiredCapacity aligns one-to-one with Choice.RequiredBuckets.
 	RequiredCapacity  []CapacityView
 	Compatible        bool
@@ -372,8 +374,14 @@ func codexRoutePolicyCandidateLess(left, right CodexRoutePolicyCandidate, affini
 	if left.IncludedQuotaExhausted != right.IncludedQuotaExhausted {
 		return !left.IncludedQuotaExhausted
 	}
-	if !left.ExpiringWeeklyReset.Equal(right.ExpiringWeeklyReset) {
-		return codexWeeklyResetBefore(left.ExpiringWeeklyReset, right.ExpiringWeeklyReset)
+	if !left.QuotaSpendDeadline.Equal(right.QuotaSpendDeadline) {
+		return quota.SpendDeadlineBefore(left.QuotaSpendDeadline, right.QuotaSpendDeadline)
+	}
+	if left.UsesCreditDeadline != right.UsesCreditDeadline {
+		return !left.UsesCreditDeadline
+	}
+	if left.UsesCreditDeadline {
+		return quota.CreditSpendTieBefore(string(left.Choice.AccountKey), string(right.Choice.AccountKey), left.SystemAccount, right.SystemAccount)
 	}
 	// Preserve the system account for clients and hosts outside CQ when quota
 	// expiry has equal priority. Hard continuation binding is handled first.

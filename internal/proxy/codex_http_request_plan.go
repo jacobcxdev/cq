@@ -14,6 +14,7 @@ import (
 	"time"
 
 	codex "github.com/jacobcxdev/cq/internal/provider/codex"
+	"github.com/jacobcxdev/cq/internal/quota"
 )
 
 // CodexHTTPRequestRouteSnapshotter supplies all durable route state in one
@@ -445,7 +446,7 @@ func (factory *CodexHTTPRequestPlanFactory) ShouldResetCyberOff(ctx context.Cont
 	for _, candidate := range candidates {
 		if candidate.Choice.AccountKey == active {
 			activeCandidate.SystemAccount = candidate.SystemAccount
-			activeCandidate.ExpiringWeeklyReset = candidate.ExpiringWeeklyReset
+			activeCandidate.QuotaSpendDeadline = candidate.QuotaSpendDeadline
 			break
 		}
 	}
@@ -454,7 +455,7 @@ func (factory *CodexHTTPRequestPlanFactory) ShouldResetCyberOff(ctx context.Cont
 		candidate.Value = decision.AccountValues[account]
 		if account != active && candidate.Routable && candidate.Compatible && codexRoutePolicyCapacity(candidate).State == CapacityPositive &&
 			containsCodexHTTPRequestAccountKey(decision.Allowed, account) &&
-			!codexWeeklyResetBefore(activeCandidate.ExpiringWeeklyReset, candidate.ExpiringWeeklyReset) &&
+			!quota.SpendDeadlineBefore(activeCandidate.QuotaSpendDeadline, candidate.QuotaSpendDeadline) &&
 			codexRoutePolicyAccountValueLess(candidate, activeCandidate) {
 			return true
 		}

@@ -1079,6 +1079,9 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 	codexReserve.Schedule = func() (codexprov.ResetAutomationState, error) {
 		return readCodexReserveSchedule(resetService.Schedule.Load, resetService.Attempts.Pending)
 	}
+	resetScheduler := proxy.NewCodexResetScheduler(resetService.StepSchedule, time.Now)
+	resetScheduler.LoadSchedule = codexReserve.Schedule
+	codexCapacity.ResetCreditExpiry = resetScheduler.CreditExpiry
 	codexReserve.DrainRate = reserveForecast.DrainRate
 	resetService.Reserve = func(context.Context, codexprov.ResetAccountSnapshot, []quota.Result, time.Time) (quota.ReservePolicy, error) {
 		return codexReserve.Policy(), nil
@@ -1544,7 +1547,7 @@ func runProxyStart(opts proxyCommandOptions) (returnErr error) {
 		_, err := srv.CodexLeaseRedistributor.RedistributeTaskAffinitiesForReset(ctx, account, eventID)
 		return err
 	}
-	srv.CodexResetScheduler = proxy.NewCodexResetScheduler(resetService.StepSchedule, time.Now)
+	srv.CodexResetScheduler = resetScheduler
 	resetService.ScheduleClaim = srv.CodexResetScheduler.Claim
 	defer srv.CodexResetScheduler.Stop()
 

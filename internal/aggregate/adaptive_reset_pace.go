@@ -15,14 +15,106 @@ func resetSimulationDemand(state simulationState, name quota.WindowName) float64
 	return demand
 }
 
+// Apply the same expiry preference as routing while a credit needs the
+// current allowance spent. With no such deadline, keep the pooled forecast.
+func simulationSpendAccount(state simulationState) (string, float64) {
+	key := ""
+	var earliest time.Time
+	creditDeadline := false
+	if state.adaptivePace {
+		choose := func(account simulationAccount, deadline time.Time, credit bool) {
+			if deadline.IsZero() {
+				return
+			}
+			if deadline.Equal(earliest) {
+				if credit == creditDeadline && !quota.CreditSpendTieBefore(account.key, key, account.systemAccount, state.accounts[key].systemAccount) {
+					return
+				}
+				if credit && !creditDeadline {
+					return
+				}
+			} else if !quota.SpendDeadlineBefore(deadline, earliest) {
+				return
+			}
+			key, earliest, creditDeadline = account.key, deadline, credit
+		}
+		for _, credit := range state.credits {
+			if !credit.supported || credit.fixedAt != nil || credit.expiresAt == nil || credit.grantedAt.After(state.now) {
+				continue
+			}
+			account := state.accounts[credit.accountKey]
+			if !simulationAccountAvailable(account) {
+				continue
+			}
+			window, weekly := account.windows[quota.Window7Day]
+			if !weekly {
+				window = account.windows[quota.Window5Hour]
+			}
+			choose(account, quota.ResetCreditSpendDeadline(state.now, window.resetAt, *credit.expiresAt), true)
+		}
+		if key != "" {
+			for _, account := range state.accounts {
+				reset := account.windows[quota.Window7Day].resetAt
+				if simulationAccountAvailable(account) && reset.After(state.now) && reset.Sub(state.now) <= quota.WeeklyQuotaSpendPriorityWindow {
+					choose(account, reset, false)
+				}
+			}
+			return key, state.accounts[key].multiplier
+		}
+	}
+	return "", simulationActiveMultiplier(state)
+}
+
+// Forecast a later schedule-authorised reserve release only on a branch
+// that commits to the corresponding next redemption.
+func branchAdaptiveReserveSpend(node resetSearchNode, event simulationEvent) (resetSearchNode, bool) {
+	state := node.state
+	if event.kind != simulationEventExhaustion || state.nextAccountKey != "" {
+		return node, false
+	}
+	account := state.accounts[event.accountKey]
+	window := account.windows[event.window]
+	_, weekly := account.windows[quota.Window7Day]
+	if window.reservePct <= 0 || window.reserveReleased || window.remaining != window.reservePct ||
+		(weekly && event.window != quota.Window7Day) {
+		return node, false
+	}
+	var next simulationCredit
+	for _, credit := range state.credits {
+		if credit.accountKey != account.key || !credit.supported || credit.fixedAt != nil ||
+			credit.grantedAt.After(state.now) || credit.expiresAt == nil ||
+			quota.ResetCreditSpendDeadline(state.now, window.resetAt, *credit.expiresAt).IsZero() {
+			continue
+		}
+		if next.expiresAt == nil || credit.expiresAt.Before(*next.expiresAt) ||
+			(credit.expiresAt.Equal(*next.expiresAt) && credit.id < next.id) {
+			next = credit
+		}
+	}
+	if next.id == "" {
+		return node, false
+	}
+	account = cloneSimulationAccount(account)
+	window.reserveReleased = true
+	account.windows[event.window] = window
+	if !simulationAccountAvailable(account) {
+		return node, false
+	}
+	branch := cloneResetSearchNode(node)
+	branch.state.accounts[account.key] = account
+	branch.state.nextAccountKey = account.key
+	branch.state.reserveCredit = next.id
+	return branch, true
+}
+
 // Settle all windows due to run out at this instant. Rounded event times
 // can leave a fractional remainder, hiding a gap until another event at
 // the same instant, when there is no time left to model a slowdown.
 func finishAdaptiveExhaustions(previous, state simulationState) simulationState {
-	active := simulationActiveMultiplier(previous)
+	spendAccount, active := simulationSpendAccount(previous)
 	cloned := false
 	for key, account := range previous.accounts {
-		if !simulationAccountAvailable(account) {
+		if (spendAccount != "" && key != spendAccount) || !simulationAccountAvailable(account) {
 			continue
 		}
 		for name, before := range account.windows {

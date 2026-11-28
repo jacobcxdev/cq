@@ -62,9 +62,10 @@ func ProjectCodexRoutePolicyCandidates(
 				includedQuotaExhausted = true
 			}
 		}
-		var expiringWeeklyReset time.Time
+		var spendDeadline time.Time
+		var usesCreditDeadline bool
 		if effectiveModel == requirements.RequestedModel && knownPositive && !includedQuotaExhausted {
-			expiringWeeklyReset = capacity.expiringWeeklyReset(account.Key, buckets[0], now)
+			spendDeadline, usesCreditDeadline = capacity.quotaSpendDeadline(account.Key, buckets[0], now)
 		}
 		candidates = append(candidates, CodexRoutePolicyCandidate{
 			Choice: RouteChoice{
@@ -75,7 +76,8 @@ func ProjectCodexRoutePolicyCandidates(
 			},
 			RequiredCapacity:       views,
 			IncludedQuotaExhausted: includedQuotaExhausted,
-			ExpiringWeeklyReset:    expiringWeeklyReset,
+			QuotaSpendDeadline:     spendDeadline,
+			UsesCreditDeadline:     usesCreditDeadline,
 			SystemAccount:          account.Active,
 			Compatible:             compatible,
 			Routable:               codexRouteProjectionAccountRoutable(account, now),

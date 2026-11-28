@@ -218,7 +218,7 @@ func runCodexResetScheduleStatus(ctx context.Context, jsonOutput bool, deps code
 		if deps.App.Clock != nil {
 			now = deps.App.Clock.Now()
 		}
-		if !executor.Running || executor.LastError != "" || !freshCodexAdaptivePlan(state, now) || !state.NextPace.Until.After(now) {
+		if !executor.Running || executor.LastError != "" || !state.FreshAdaptivePlan(now) || !state.NextPace.Until.After(now) {
 			state.NextPace = nil
 		}
 	}
